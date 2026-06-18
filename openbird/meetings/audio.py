@@ -104,9 +104,10 @@ class AudioFrame:
     def __post_init__(self) -> None:
         # Coerce any input sequence (tuple/list/array) to a float32 ``array('f')``
         # so storage is compact and equality between two frames is array-vs-array
-        # (by value). Frozen dataclass => assign through object.__setattr__.
-        if not (isinstance(self.samples, array) and self.samples.typecode == "f"):
-            object.__setattr__(self, "samples", array("f", self.samples))
+        # (by value). Always COPY — even an existing array('f') is duplicated so a
+        # caller mutating their original buffer after construction cannot silently
+        # change this frozen frame's PCM/equality. Frozen => object.__setattr__.
+        object.__setattr__(self, "samples", array("f", self.samples))
 
     def __repr__(self) -> str:
         """Metadata-only repr — never dumps raw PCM samples [R4/R5].
