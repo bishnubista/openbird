@@ -218,12 +218,36 @@ private func anyMatch(_ bundleId: String, _ entries: Set<String>) -> Bool {
     return false
 }
 
-// Hardcoded backstop: bundle-id substrings whose content is never captured even
-// if (mis)allowlisted — mirrors `redact._DANGEROUS_BUNDLE_SUBSTRINGS`.
-private let dangerousBundleSubstrings = [
-    "1password", "keychain", "bitwarden", "lastpass", "dashlane",
-    "keeper", "nordpass", "enpass", "protonpass",
+// Hardcoded backstop FALLBACK: bundle-id substrings whose content is never
+// captured even if (mis)allowlisted. This MUST mirror
+// `redact._DANGEROUS_BUNDLE_SUBSTRINGS` (Python) and the committed
+// `dangerous_apps.json` resource — the parity unit test in
+// tests/unit/test_capture.py fails if these three drift. Edit ALL THREE
+// together. This baked constant is the FALLBACK; the effective list is this
+// fallback UNION the JSON resource, so the backstop can only ever grow, never
+// shrink to empty/partial (fail-closed). See `dangerousBundleSubstrings`.
+private let dangerousBundleSubstringsFallback: [String] = [
+    "1password", "onepassword", "lastpass", "bitwarden", "dashlane",
+    "keepass", "keychain", "keychainaccess", "keeper", "nordpass",
+    "enpass", "protonpass",
 ]
+
+/// The effective dangerous-bundle substrings: the baked fallback UNION the
+/// committed `dangerous_apps.json` resource (loaded via `Bundle.module`). On a
+/// missing, unreadable, malformed, or empty JSON resource we fall back to the
+/// full baked list — the backstop is fail-closed and never empty or partial.
+private let dangerousBundleSubstrings: [String] = {
+    var set = Set(dangerousBundleSubstringsFallback.map { $0.lowercased() })
+    if let url = Bundle.module.url(forResource: "dangerous_apps", withExtension: "json"),
+       let data = try? Data(contentsOf: url),
+       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+       let list = obj["dangerous_bundle_substrings"] as? [String] {
+        for entry in list { set.insert(entry.lowercased()) }
+    } else {
+        diag("capture: dangerous_list_fallback")  // non-content diagnostic only
+    }
+    return Array(set)
+}()
 
 // Window-title markers that signal a private/incognito window.
 private let incognitoTitleMarkers = [
@@ -272,6 +296,16 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>) {
         return
     }
 
+    // Dangerous-app backstop runs BEFORE any AX access (no AX element is even
+    // created for a password manager): mirrors `redact.decide`'s dangerous gate
+    // and ensures a vault's title/text is never read, even if (mis)allowlisted.
+    if isDangerousBundle(bundleId) {
+        diag("capture: skipped_dangerous_app")
+        emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
+                          ts: Date().timeIntervalSince1970, incognito: false))
+        return
+    }
+
     let appElement = AXUIElementCreateApplication(pid)
 
     // Resolve the focused window (fall back to the first window).
@@ -292,16 +326,6 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>) {
 
     guard let window = windowElement else {
         diag("capture: no_window pid=\(pid)")
-        return
-    }
-
-    // Dangerous-app backstop runs BEFORE we even read the window title (the title
-    // of a password manager can itself be sensitive): never captured, even if
-    // allowlisted.
-    if isDangerousBundle(bundleId) {
-        diag("capture: skipped_dangerous_app")
-        emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
-                          ts: Date().timeIntervalSince1970, incognito: false))
         return
     }
 

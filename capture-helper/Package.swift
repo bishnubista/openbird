@@ -20,7 +20,14 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "CaptureHelper",
-            path: "Sources/CaptureHelper"
+            path: "Sources/CaptureHelper",
+            // Canonical dangerous-app list (single source of truth, mirrored by
+            // openbird/capture/redact.py and the baked Swift fallback). Bundling
+            // it as a resource lets the helper read one committed list via
+            // `Bundle.module`; a parity unit test keeps all three copies in sync.
+            resources: [
+                .process("dangerous_apps.json")
+            ]
         )
     ]
 )
