@@ -273,6 +273,14 @@ def _render_preflight(report: dict) -> None:
         comp_detail += f" probe_ok={comp.get('ok')}"
     table.add_row("chat-model", "info", comp_detail)
 
+    bk = report.get("backend", {})
+    bk_supported = bk.get("supported", True)
+    table.add_row(
+        "backend",
+        "ok" if bk_supported else "unsupported",
+        f"{bk.get('name')}" + ("" if bk_supported else " (not wired; reserved)"),
+    )
+
     sq = report["sqlite"]
     sq_ok = sq.get("vec_available") and sq.get("fts5_available")
     table.add_row(

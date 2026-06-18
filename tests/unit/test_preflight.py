@@ -680,6 +680,35 @@ def test_preflight_required_models_derived_from_settings(tmp_path):
     assert report["runtime_ok"] is True
 
 
+def test_mlx_backend_not_runtime_ready(tmp_path):
+    # The mlx backend is reserved (factory raises NotImplementedError), so even a
+    # local mlx route with sqlite available must NOT report READY.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_backend="mlx",
+        llm_model="mlx/Qwen",
+        embed_model="mlx/embed",
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(raise_exc=ConnectionRefusedError()),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["backend"]["supported"] is False
+    assert report["cloud"]["active"] is False
+    assert report["runtime_ok"] is False
+
+
+def test_litellm_backend_supported(tmp_path):
+    s = Settings(data_dir=tmp_path, embed_dim=768)  # default litellm
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["backend"]["supported"] is True
+    assert report["runtime_ok"] is True
+
+
 def test_cloud_only_route_reports_no_ollama_requirements(tmp_path):
     # A cloud-only route must not report default Ollama models as required/missing.
     s = Settings(

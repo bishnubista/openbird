@@ -619,6 +619,13 @@ def run_preflight(
             "ocr_enabled": bool(settings.ocr_enabled),
         },
         "macos": macos,
+        # Provider backend readiness: only ``litellm`` is wired today; ``mlx`` is
+        # reserved (the factory raises NotImplementedError). Preflight must not
+        # report READY for an unwired backend even if sqlite is fine.
+        "backend": {
+            "name": (settings.llm_backend or "").strip().lower(),
+            "supported": (settings.llm_backend or "").strip().lower() == "litellm",
+        },
         # Cloud route status [H3]: which configured models are remote, whether
         # cloud is opted into, and whether captured memory would actually leave
         # this machine on the current config. "blocked" = remote model set but
@@ -653,11 +660,12 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
             (``embedding.dim_ok``);
           - a remote CHAT role: not blocked, and a completion probe succeeded
             (``completion.ok``) — a successful embedding probe does NOT prove the
-            chat endpoint/credentials work;
-          - a purely local non-ollama (mlx) role needs neither probe.
+            chat endpoint/credentials work.
         For a remote role, "no probe run" means UNVERIFIED, which is NOT READY:
         sqlite/Ollama alone must never report READY when a missing/invalid cloud
-        key would fail the first call.
+        key would fail the first call. The configured provider BACKEND must also
+        be wired (``backend.supported``) — the reserved ``mlx`` backend is never
+        runtime-OK because the factory raises for it.
 
     It deliberately does NOT gate on encryption or macOS capture grants — the
     product runs without capture and runs plaintext-with-0600 if SQLCipher is
@@ -668,9 +676,15 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
     cloud = report.get("cloud", {})
     embedding = report.get("embedding", {})
     completion = report.get("completion", {})
+    backend = report.get("backend", {})
     remote_models = cloud.get("remote_models", {}) or {}
 
     sqlite_ok = bool(sqlite_info.get("vec_available")) and bool(sqlite_info.get("fts5_available"))
+
+    # The configured provider backend must be wired (only litellm today; mlx is
+    # reserved and the factory raises). An unwired backend can never run.
+    if not backend.get("supported", True):
+        return False
 
     # A remote model configured without opt-in cannot run (factory refuses).
     if cloud.get("blocked"):
