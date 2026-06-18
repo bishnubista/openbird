@@ -44,6 +44,40 @@ def test_data_purge_not_gated_by_cloud(monkeypatch):
     assert "Deleted" in res.output
 
 
+def test_purge_works_after_embed_model_switch(monkeypatch, tmp_path):
+    # Regression: a populated store + a switched embed model/dim must still purge
+    # (the maintenance path must not hit the cohort-mismatch guard).
+    from openbird.config import Settings
+    from openbird.memory.store import MemoryStore
+
+    class _FakeP:
+        def __init__(self, dim=768, tag="a"):
+            self.embed_dim = dim
+            self.tag = tag
+
+        def embed(self, texts):
+            return [[0.1] * self.embed_dim for _ in texts]
+
+        def cohort_key(self):
+            return f"fake:{self.tag}:{self.embed_dim}:x"
+
+    # Populate under cohort "a" / dim 768.
+    s = Settings(data_dir=tmp_path, embed_dim=768)
+    st = MemoryStore(settings=s, provider=_FakeP(768, "a"))
+    st.add_observation("switch test", source="ingest", window="t")
+    st.close()
+
+    # Now the configured model is a different cohort/dim.
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("OPENBIRD_EMBED_DIM", "1536")
+    reset_settings_cache()
+
+    res = CliRunner().invoke(cli.app, ["data", "purge", "--all", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "Deleted 1" in res.output
+
+
 def test_data_stats_not_gated_by_cloud(monkeypatch):
     # Stats only counts rows — also gate-free (and no banner).
     monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "text-embedding-3-small")

@@ -128,21 +128,73 @@ def _store(*, provider=None):
     return MemoryStore(settings=get_settings(), provider=provider)
 
 
+class _MaintenanceProvider:
+    """A non-embedding provider stub for delete-only maintenance (purge/stats).
+
+    Reports the EXACT cohort already recorded in the store so
+    ``MemoryStore._record_cohort`` sees a match and never raises — even after the
+    user switched ``OPENBIRD_EMBED_MODEL``/dimension (the very state that would
+    otherwise block the privacy/cleanup path). It never embeds: purge and stats
+    do not call ``embed``, and if anything ever did it fails loudly rather than
+    silently sending captured content anywhere.
+    """
+
+    def __init__(self, cohort: str | None, embed_dim: int) -> None:
+        self._cohort = cohort
+        self.embed_dim = embed_dim
+        self.normalized = False
+
+    def cohort_key(self) -> str:
+        # No stored cohort yet (fresh DB) -> a sentinel; _record_cohort will just
+        # insert it, and there are no vectors to mix.
+        return self._cohort or "maintenance:none:0:0"
+
+    def embed(self, texts):  # pragma: no cover - must never run on these paths
+        raise RuntimeError("maintenance provider must not embed")
+
+    def complete(self, messages, *, json_schema=None):  # pragma: no cover
+        raise RuntimeError("maintenance provider must not complete")
+
+
+def _peek_cohort(settings) -> str | None:
+    """Read the recorded cohort_key from the DB without constructing MemoryStore.
+
+    Opens the raw (cloud-gate-free) connection so we can mirror the stored cohort
+    into :class:`_MaintenanceProvider`, sidestepping the cohort-mismatch guard for
+    delete-only ops. Returns None on a missing table / fresh DB.
+    """
+    from openbird.storage.crypto import open_encrypted_db
+
+    conn = open_encrypted_db(settings.db_path, settings=settings)
+    try:
+        row = conn.execute(
+            "SELECT value FROM embedding_meta WHERE key = 'cohort_key'"
+        ).fetchone()
+        if row is None:
+            return None
+        # row may be a tuple or a mapping depending on row_factory (default tuple).
+        return row[0] if not hasattr(row, "keys") else row["value"]
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def _store_maintenance():
     """Open the store for delete-only ops (purge/stats) WITHOUT a cloud gate [H3].
 
-    Purge and stats never embed or send captured content to a model, so requiring
-    ``OPENBIRD_ALLOW_CLOUD`` just to delete local data — on a privacy tool — would
-    be backwards. We still build the configured provider (so its ``cohort_key``
-    matches the stored cohort and the mismatch guard works), but with
-    ``allow_cloud=True`` to skip the opt-in/banner: nothing leaves the machine on
-    these paths.
+    Purge and stats never embed or send captured content to a model, so:
+      * they must NOT require ``OPENBIRD_ALLOW_CLOUD`` (deleting local data on a
+        privacy tool can't depend on cloud opt-in), AND
+      * they must NOT be blocked by an embedding-cohort mismatch after the user
+        switched embed models (the cleanup path has to keep working).
+    Both are achieved with :class:`_MaintenanceProvider`, which reports the
+    already-stored cohort (so ``_record_cohort`` matches) and never embeds.
     """
-    from openbird.llm.provider import create_llm_provider
     from openbird.memory.store import MemoryStore
 
     settings = get_settings()
-    provider = create_llm_provider(settings, allow_cloud=True)
+    provider = _MaintenanceProvider(_peek_cohort(settings), settings.embed_dim)
     return MemoryStore(settings=settings, provider=provider)
 
 
