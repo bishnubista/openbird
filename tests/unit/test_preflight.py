@@ -612,9 +612,11 @@ def test_probe_uses_overridden_ollama_host(monkeypatch, tmp_path):
         def __init__(self):
             self.embedding_api_base = None
 
-        def embedding(self, *, model, input, **kw):
+        def embedding(self, *, model, **kw):
+            # `input` arrives via **kw to avoid shadowing the builtin (Ruff A006).
             self.embedding_api_base = kw.get("api_base")
-            return {"data": [{"embedding": [0.0] * 768} for _ in input]}
+            texts = kw.get("input", [])
+            return {"data": [{"embedding": [0.0] * 768} for _ in texts]}
 
         def completion(self, *, model, messages, **kw):
             return {"choices": [{"message": {"content": "ok"}}]}
