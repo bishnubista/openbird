@@ -1,0 +1,17 @@
+{
+  "_comment": "SINGLE SOURCE OF TRUTH for the password-manager / dangerous-app capture backstop. Bundle-id SUBSTRINGS (case-insensitive) whose content is never captured even if (mis)allowlisted. Mirrored by openbird/capture/redact.py (_DANGEROUS_BUNDLE_SUBSTRINGS) and capture-helper/Sources/CaptureHelper/main.swift (dangerousBundleSubstrings). tests/unit/test_capture.py asserts all three stay in lockstep (parity test). Edit this list AND both baked copies together; the parity test fails otherwise.",
+  "dangerous_bundle_substrings": [
+    "1password",
+    "onepassword",
+    "lastpass",
+    "bitwarden",
+    "dashlane",
+    "keepass",
+    "keychain",
+    "keychainaccess",
+    "keeper",
+    "nordpass",
+    "enpass",
+    "protonpass"
+  ]
+}
