@@ -49,6 +49,19 @@ def test_local_default_has_no_cloud_banner():
     assert "CLOUD MODEL CONFIGURED" not in res.output
 
 
+def test_capture_refuses_cloud_without_opt_in(monkeypatch):
+    # Regression: capture sends screen text to the embed model, so it must go
+    # through the cloud opt-in gate + banner like every other store command.
+    monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("OPENBIRD_EMBED_DIM", "1536")
+    reset_settings_cache()
+    res = CliRunner().invoke(
+        cli.app, ["capture", "--helper", "echo noop", "--allow-unsigned"]
+    )
+    assert res.exit_code == 2
+    assert "CLOUD MODEL CONFIGURED" in res.output
+
+
 def test_preflight_shows_cloud_blocked_row(monkeypatch):
     monkeypatch.setenv("OPENBIRD_LLM_MODEL", "claude-3-5-sonnet")
     reset_settings_cache()

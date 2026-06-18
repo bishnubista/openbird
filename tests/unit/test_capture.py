@@ -764,8 +764,9 @@ def test_capture_cli_registers_top_level_command(monkeypatch, allow_settings):
     captured: dict[str, object] = {}
 
     class FakeCliStore:
-        def __init__(self, *, settings):
+        def __init__(self, *, settings, provider=None):
             captured["store_settings"] = settings
+            captured["store_provider"] = provider
 
         def close(self) -> None:
             captured["store_closed"] = True
@@ -784,6 +785,8 @@ def test_capture_cli_registers_top_level_command(monkeypatch, allow_settings):
     monkeypatch.setattr(capture_cli, "get_settings", lambda: allow_settings)
     monkeypatch.setattr(store_mod, "MemoryStore", FakeCliStore)
     monkeypatch.setattr(daemon_mod, "CaptureDaemon", FakeDaemon)
+    # Capture now routes through the cloud-checked provider [H3]; stub it.
+    monkeypatch.setattr(root_cli, "_provider", lambda: object())
 
     result = CliRunner().invoke(
         root_cli.app,

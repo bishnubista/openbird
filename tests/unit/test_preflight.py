@@ -596,3 +596,28 @@ def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
     LLMProvider(s).embed(["x"])
     assert preflight_host == "http://customhost:4242"
     assert fake.embedding_kwargs["api_base"] == preflight_host
+
+
+def test_preflight_preserves_ollama_model_tag(tmp_path):
+    # A configured tag (llama3.2:3b) must be checked EXACTLY: a server that only
+    # has llama3.2:latest must NOT satisfy it (preflight green != runtime works).
+    s = Settings(data_dir=tmp_path, embed_dim=768, llm_model="ollama/llama3.2:3b")
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("llama3.2:latest", "nomic-embed-text:latest")),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert "llama3.2:3b" in report["ollama"]["required_models"]
+    assert "llama3.2:3b" in report["ollama"]["missing_models"]
+    assert report["runtime_ok"] is False
+
+
+def test_preflight_tagged_model_present_is_ok(tmp_path):
+    s = Settings(data_dir=tmp_path, embed_dim=768, llm_model="ollama/llama3.2:3b")
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("llama3.2:3b", "nomic-embed-text:latest")),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["missing_models"] == []
+    assert report["runtime_ok"] is True

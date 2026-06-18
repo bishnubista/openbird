@@ -77,15 +77,17 @@ def _ollama_host(settings: Settings | None = None) -> str:
 def _ollama_required_models(settings: Settings) -> tuple[str, ...]:
     """Derive the local Ollama models the active route actually needs.
 
-    Strips the ``ollama/`` prefix (and any ``:tag``) from the configured chat /
-    embed models so preflight checks the models the user really runs, not the
-    hard-coded defaults. Non-ollama (cloud/mlx) models contribute nothing here.
+    Strips only the ``ollama/`` provider prefix, KEEPING any ``:tag`` (e.g.
+    ``ollama/llama3.2:3b`` -> ``llama3.2:3b``) so preflight checks the exact model
+    the runtime will request — otherwise a green preflight could accept a
+    different tag (``llama3.2:latest``) than the provider pulls. Non-ollama
+    (cloud/mlx) models contribute nothing here.
     """
     wanted: list[str] = []
     for model in (settings.llm_model, settings.embed_model):
         name = (model or "").strip()
         if name.lower().startswith("ollama/"):
-            bare = name.split("/", 1)[1].split(":", 1)[0]
+            bare = name.split("/", 1)[1]
             if bare and bare not in wanted:
                 wanted.append(bare)
     return tuple(wanted) if wanted else _REQUIRED_MODELS

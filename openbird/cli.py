@@ -577,6 +577,8 @@ def reindex(
     refuses to construct on a populated cohort mismatch — which is exactly the
     state ``reindex`` exists to repair.
     """
+    from pathlib import Path
+
     from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
 
     settings = get_settings()
@@ -587,6 +589,15 @@ def reindex(
     conn = open_encrypted_db(settings.db_path, settings=settings)
     conn.row_factory = mapping_row_factory
     conn.execute("PRAGMA foreign_keys = ON")
+    # open_encrypted_db does NOT apply the schema (only MemoryStore does), so on a
+    # fresh/uninitialized DB the embedding_meta/chunks tables would not exist yet.
+    # Apply the base schema so reindex degrades to a clean "0 chunk(s)" rather than
+    # raising "no such table". The vec table is (re)created below at the new dim.
+    _schema = (Path(__file__).resolve().parent / "memory" / "schema.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(_schema)
+    conn.commit()
     try:
         cohort_row = conn.execute(
             "SELECT value FROM embedding_meta WHERE key = 'cohort_key'"

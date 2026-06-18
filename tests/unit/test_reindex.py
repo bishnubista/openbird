@@ -173,3 +173,15 @@ def test_reindex_empty_db_succeeds(env, monkeypatch):
     res = CliRunner().invoke(cli.app, ["reindex", "--yes"])
     assert res.exit_code == 0, res.output
     assert "Reindexed 0" in res.output
+
+
+def test_reindex_fresh_uninitialized_db_succeeds(env, monkeypatch):
+    # Regression: reindex on a data dir whose DB was NEVER opened by MemoryStore
+    # (no schema applied) must NOT crash with "no such table: embedding_meta".
+    new_provider = _FakeProvider(embed_dim=768, tag="new")
+    monkeypatch.setattr(cli, "_provider", lambda: new_provider)
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(data_dir=env, embed_dim=768))
+
+    res = CliRunner().invoke(cli.app, ["reindex", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "Reindexed 0" in res.output

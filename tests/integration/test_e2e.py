@@ -253,7 +253,7 @@ def test_cli_capture_then_chat_roundtrip_with_fake_helper(tmp_path, monkeypatch)
     monkeypatch.setattr(
         store_mod,
         "MemoryStore",
-        lambda *, settings: MemoryStore(
+        lambda *, settings, provider=provider: MemoryStore(
             db_path=db_path,
             settings=settings,
             provider=provider,
