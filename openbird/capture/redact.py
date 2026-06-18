@@ -52,13 +52,15 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
             # H6 fix: do NOT rely on Python's Unicode-aware ``\b``. A key abutting
             # non-ASCII text (e.g. ``keyσsk-...``) has no word boundary because the
             # Greek letter is itself a word char, so the real key would survive.
-            # Use an explicit ASCII-class negative lookbehind/lookahead instead.
-            # The LEADING boundary class deliberately EXCLUDES ``_`` so that a key
-            # glued behind an underscore (``_sk-...``) still redacts; the TRAILING
-            # class keeps ``_`` so a trailing ``_`` does not split the value. The
-            # lookarounds wrap the WHOLE alternation (never per-branch) so ordered
-            # alternation precedence is preserved.
-            r"(?<![A-Za-z0-9-])(?:"
+            # Use explicit ASCII negative lookbehind/lookahead that reject ONLY the
+            # identifier chars ``[A-Za-z0-9]``. ``_`` and ``-`` are therefore
+            # treated as token BOUNDARIES (matching the old ``\b`` for ``-`` and
+            # additionally catching underscore-glued keys): ``_sk-...``, ``-sk-...``
+            # and dash/underscore-SUFFIXED keys (``ghp_...-``, ``sk-...-``) all
+            # still redact, while an alnum-glued key (``xsk-...``) is left as part
+            # of an identifier. The lookarounds wrap the WHOLE alternation (never
+            # per-branch) so ordered alternation precedence is preserved.
+            r"(?<![A-Za-z0-9])(?:"
             # Stripe-style underscore keys must come before the bare ``sk-`` so
             # ``sk_live_...`` is matched as a unit (alternation is ordered).
             r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}"
@@ -69,7 +71,7 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
             r"|gh[pousr]_[A-Za-z0-9]{20,}"
             r"|xox[baprs]-[A-Za-z0-9-]{10,}"
             r"|AKIA[0-9A-Z]{12,}"
-            r"|AIza[0-9A-Za-z_\-]{20,})(?![A-Za-z0-9_-])"
+            r"|AIza[0-9A-Za-z_\-]{20,})(?![A-Za-z0-9])"
         ),
         "[REDACTED:token]",
     ),
@@ -84,13 +86,13 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     # specific) rather than a bare assignment — both mask the value either way.
     (
         "jwt",
-        # H6 fix: same ASCII-class boundaries as ``token_prefixed`` (see above) so
-        # a JWT abutting non-ASCII text is still caught. Leading class excludes
-        # ``_`` so ``_eyJ...`` redacts; the dotted base64url body keeps ``\b``-free.
+        # H6 fix: same ASCII boundaries as ``token_prefixed`` (reject only
+        # ``[A-Za-z0-9]``) so a JWT abutting non-ASCII text is caught and a JWT
+        # preceded/followed by ``_``/``-`` still redacts.
         re.compile(
-            r"(?<![A-Za-z0-9-])"
+            r"(?<![A-Za-z0-9])"
             r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"
-            r"(?![A-Za-z0-9_-])"
+            r"(?![A-Za-z0-9])"
         ),
         "[REDACTED:jwt]",
     ),

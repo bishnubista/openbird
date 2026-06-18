@@ -321,6 +321,33 @@ def test_scrub_token_after_underscore_redacts():
     assert key not in scrubbed
 
 
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        "-sk-abcdefghijklmnop1234567890",          # leading dash boundary
+        "sk-abcdefghijklmnop1234567890-",          # trailing dash boundary
+        "ghp_0123456789abcdefghijABCDEFGHIJ-",     # trailing dash, no-dash body
+        "(ghp_0123456789abcdefghijABCDEFGHIJ)",    # punctuation boundaries
+        "AKIAIOSFODNN7EXAMPLE-",                   # trailing dash, AWS key
+        "x-sk-abcdefghijklmnop1234567890-y",       # dash-delimited within text
+    ],
+)
+def test_scrub_token_dash_punctuated_redacts(wrapped):
+    # Regression: the H6 ASCII lookarounds must treat ``-`` (and ``_``) as token
+    # boundaries, so a dash-prefixed/suffixed key is still redacted (the old
+    # ``\b`` caught these; a lookahead that rejected ``-`` would leak them).
+    scrubbed, matched = redact.scrub(f"see {wrapped} end")
+    assert "token_prefixed" in matched
+    assert "[REDACTED:token]" in scrubbed
+
+
+def test_scrub_jwt_dash_suffixed_redacts():
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQabcdef"
+    scrubbed, matched = redact.scrub(f"-{jwt}-")
+    assert "jwt" in matched
+    assert jwt not in scrubbed
+
+
 def test_scrub_jwt_abutting_non_ascii_redacts():
     jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQabcdef"
     scrubbed, matched = redact.scrub(f"令牌{jwt}結尾")
