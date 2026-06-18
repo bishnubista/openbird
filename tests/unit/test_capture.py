@@ -18,6 +18,8 @@ from openbird.capture import adapters, redact
 from openbird.capture.daemon import (
     CaptureDaemon,
     CaptureStats,
+    CaptureSupervisorError,
+    HelperExitError,
     HelperUnavailableError,
     default_helper_cmd,
     parse_event,
@@ -908,10 +910,10 @@ def test_run_forever_circuit_breaker_trips_on_repeated_failure(
         raise RuntimeError("transient helper failure")
 
     monkeypatch.setattr(daemon, "run", _boom)
-    stats = daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
+    with pytest.raises(CaptureSupervisorError):
+        daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
     assert calls["n"] == 3  # stopped exactly at the breaker threshold
     assert daemon.error_count == 3
-    assert stats.received == 0
 
 
 def test_run_forever_propagates_helper_unavailable(allow_settings):
@@ -969,9 +971,9 @@ def test_run_forever_nonzero_helper_exit_trips_breaker(allow_settings, monkeypat
         helper_cmd=[sys.executable, "-c", "import sys; sys.exit(2)"],
         require_signed_helper=False,
     )
-    stats = daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
+    with pytest.raises(CaptureSupervisorError):
+        daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
     assert daemon.error_count == 3  # each non-zero exit counted, breaker tripped
-    assert stats.received == 0
 
 
 def test_run_clean_exit_zero_is_not_a_failure(allow_settings):
@@ -1032,3 +1034,17 @@ def test_run_stop_initiated_exit_not_misclassified_as_failure(allow_settings):
     # Must return cleanly (no HelperExitError) even though the child exits 7.
     stats = daemon.run(stop_event=stop)
     assert isinstance(stats, CaptureStats)
+
+
+def test_run_signal_killed_helper_is_a_failure(allow_settings):
+    # [B1/P1] A helper that dies by signal (negative returncode, e.g. SIGKILL=-9)
+    # during normal operation is a genuine failure, not a clean exit.
+    code = "import os,signal; os.kill(os.getpid(), signal.SIGKILL)"
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", code],
+        require_signed_helper=False,
+    )
+    with pytest.raises(HelperExitError):
+        daemon.run()

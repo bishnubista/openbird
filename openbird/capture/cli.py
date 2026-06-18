@@ -52,6 +52,7 @@ def capture(
     """
     from openbird.capture.daemon import (
         CaptureDaemon,
+        CaptureSupervisorError,
         HelperUnavailableError,
     )
     from openbird.memory.store import MemoryStore
@@ -97,6 +98,11 @@ def capture(
         except HelperUnavailableError as exc:
             _err_console.print(f"[red]Capture helper unavailable:[/] {exc}")
             raise typer.Exit(code=3) from None
+        except CaptureSupervisorError as exc:
+            # Sustained helper failure tripped the circuit breaker — exit nonzero
+            # so this is not mistaken for a clean session.
+            _err_console.print(f"[red]Capture supervisor aborted:[/] {exc}")
+            raise typer.Exit(code=4) from None
     finally:
         store.close()
 

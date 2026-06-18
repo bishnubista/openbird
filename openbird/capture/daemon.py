@@ -77,6 +77,14 @@ class HelperExitError(RuntimeError):
     """
 
 
+class CaptureSupervisorError(RuntimeError):
+    """Raised when the supervised loop aborts (circuit breaker tripped).
+
+    Surfaces sustained helper failure so the CLI exits non-zero instead of
+    reporting success. Message carries only the failure count, never content.
+    """
+
+
 def default_helper_cmd() -> tuple[str, ...]:
     """Resolve the default capture-helper command (signed bundle, fail-closed).
 
@@ -566,7 +574,10 @@ class CaptureDaemon:
         we_stopped = stopped_by_us or (stop_event is not None and stop_event.is_set())
         if not we_stopped:
             rc = proc.returncode
-            if rc is not None and rc > 0:
+            # Any non-zero code is a helper-side failure: positive = explicit
+            # exit (Accessibility denied=2, privacy refusal=3), negative = death
+            # by signal (e.g. SIGSEGV=-11). Both must reach the supervisor.
+            if rc is not None and rc != 0:
                 raise HelperExitError(f"capture helper exited with code {rc}")
         return stats
 
@@ -630,7 +641,11 @@ class CaptureDaemon:
                         "consecutive failures; stopping",
                         failures,
                     )
-                    break
+                    # Surface sustained failure to the caller (CLI -> nonzero exit)
+                    # rather than returning as if the session ended normally.
+                    raise CaptureSupervisorError(
+                        f"capture helper failed {failures} consecutive times"
+                    )
                 delay = min(_BACKOFF_MAX, _BACKOFF_BASE * (2 ** (failures - 1)))
                 if stop.wait(delay):
                     break
@@ -669,6 +684,7 @@ __all__ = [
     "IngestSink",
     "HelperUnavailableError",
     "HelperExitError",
+    "CaptureSupervisorError",
     "parse_event",
     "default_helper_cmd",
     "DEFAULT_HELPER_CMD",
