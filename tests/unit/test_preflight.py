@@ -575,6 +575,49 @@ def test_cloud_route_ready_when_embedding_probe_succeeds(tmp_path):
     assert report["runtime_ok"] is True
 
 
+def test_mixed_local_chat_cloud_embed_needs_embed_probe(tmp_path):
+    # MIXED route: local Ollama chat + cloud embed, opted in. Ollama is reachable
+    # with the chat model, but the remote embed role is unverified without a probe
+    # -> runtime_ok must stay False (the embed call would fail on a bad API key).
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="ollama/llama3.2",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("llama3.2:latest",)),
+        db_opener=plaintext_handle_opener(),
+        probe_embedding=False,
+    )
+    assert report["cloud"]["active"] is True
+    assert report["cloud"]["uses_local_ollama"] is True
+    assert report["ollama"]["reachable"] is True
+    assert report["runtime_ok"] is False  # remote embed role not probe-verified
+
+
+def test_mixed_route_ready_when_both_ollama_and_embed_probe_ok(tmp_path):
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="ollama/llama3.2",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("llama3.2:latest",)),
+        db_opener=plaintext_handle_opener(),
+        provider_factory=lambda settings: FakeEmbedProvider(settings, dim=768),
+        probe_embedding=True,
+    )
+    assert report["ollama"]["reachable"] is True
+    assert report["embedding"]["dim_ok"] is True
+    assert report["runtime_ok"] is True
+
+
 def test_preflight_required_models_derived_from_settings(tmp_path):
     # Custom Ollama models -> preflight must check THOSE, not the hard defaults.
     s = Settings(
