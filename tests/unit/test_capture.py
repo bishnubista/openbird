@@ -288,6 +288,16 @@ def test_scrub_card_not_torn_from_alnum_token():
     assert scrubbed == text
 
 
+def test_scrub_card_ignores_non_ascii_digits():
+    # Fullwidth/Unicode decimal digits match Python's \d and str.isdigit(), but
+    # the Luhn helper assumes ASCII. The candidate regex uses re.ASCII so these
+    # are never treated as card candidates (no false [REDACTED:card]).
+    text = "１２３４ ５６７８ ９０１２ ３４５６"  # fullwidth digits
+    scrubbed, matched = redact.scrub(text)
+    assert "card_number" not in matched
+    assert scrubbed == text
+
+
 # ---------------------------------------------------------------------------
 # H6 — token/JWT boundaries must not rely on Unicode-aware \b.
 # ---------------------------------------------------------------------------

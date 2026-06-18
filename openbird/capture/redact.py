@@ -358,7 +358,12 @@ def decide(
 #          never a mid-group split — so no dangling number fragment is produced.
 # ---------------------------------------------------------------------------
 
-_CARD_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:\d[ -]?){12,18}\d(?![A-Za-z0-9_-])")
+# ``re.ASCII`` so ``\d`` matches ONLY 0-9 (not Unicode decimal digits such as
+# fullwidth ``１２３``); ``_luhn_valid`` assumes ASCII digits via ``ord(ch)-48``,
+# and non-ASCII "digits" are never card numbers.
+_CARD_CANDIDATE_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:\d[ -]?){12,18}\d(?![A-Za-z0-9_-])", re.ASCII
+)
 
 
 def _luhn_valid(digits: str) -> bool:
