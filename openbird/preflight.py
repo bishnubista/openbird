@@ -199,6 +199,40 @@ def check_embedding(
     return result
 
 
+def check_completion(
+    settings: Settings,
+    *,
+    provider_factory: ProviderFactory | None = None,
+    probe: bool = False,
+) -> dict[str, Any]:
+    """Report the configured chat model, optionally probing a tiny completion.
+
+    Without ``probe`` (the default, network-free) this only echoes the configured
+    ``llm_model`` with ``probed=False`` / ``ok=None``. With ``probe=True`` a
+    minimal completion is requested so a REMOTE chat model's endpoint/credentials
+    are validated before preflight reports READY (a successful *embedding* probe
+    does not prove the chat endpoint works). Failures are captured, never raised.
+    """
+    result: dict[str, Any] = {
+        "model": settings.llm_model,
+        "probed": False,
+        "ok": None,
+        "error": None,
+    }
+    if not probe:
+        return result
+
+    try:
+        factory = provider_factory or _default_provider_factory
+        provider = factory(settings)
+        text = provider.complete([{"role": "user", "content": "ping"}])
+        result["probed"] = True
+        result["ok"] = isinstance(text, (str, dict))
+    except Exception as exc:
+        result["error"] = type(exc).__name__
+    return result
+
+
 def _default_provider_factory(settings: Settings) -> _EmbedProvider:
     """Construct the configured provider (imported lazily)."""
     from openbird.llm.provider import create_llm_provider
@@ -538,6 +572,11 @@ def run_preflight(
     embedding = check_embedding(
         settings, provider_factory=provider_factory, probe=probe_embedding
     )
+    # Probe the chat model under the SAME flag so a remote chat endpoint is
+    # validated (an embedding probe does not exercise the completion endpoint).
+    completion = check_completion(
+        settings, provider_factory=provider_factory, probe=probe_embedding
+    )
     sqlite_vec_info = check_sqlite_vec()
 
     if probe_encryption:
@@ -560,6 +599,7 @@ def run_preflight(
     report: dict[str, Any] = {
         "ollama": ollama,
         "embedding": embedding,
+        "completion": completion,
         "sqlite": sqlite_vec_info,
         "encryption": encryption,
         "privacy": {
@@ -594,16 +634,19 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
 
     Runtime-OK means the parts OpenBird cannot run without are present:
       * sqlite-vec + FTS5 usable, AND
-      * EVERY active model role is usable. The roles are checked independently so
-        a MIXED route (e.g. local Ollama chat + cloud embed) validates both:
-          - if the route uses local Ollama: Ollama reachable with no missing
+      * EVERY active model role is usable, checked PER ROLE so any route
+        (local-only, cloud-only, or mixed) validates each half:
+          - local Ollama (if either role uses it): reachable with no missing
             required models;
-          - if ANY role is remote (cloud): a remote model with no opt-in is
-            *blocked* (the factory refuses) so not OK; even WITH opt-in the remote
-            endpoint is only OK once an embedding PROBE succeeds
-            (``embedding.dim_ok``) — sqlite/Ollama alone must not report READY
-            when a missing/invalid API key would fail the first call;
-          - a purely local non-ollama (mlx) route needs neither.
+          - a remote EMBED role: not blocked, and an embedding probe succeeded
+            (``embedding.dim_ok``);
+          - a remote CHAT role: not blocked, and a completion probe succeeded
+            (``completion.ok``) — a successful embedding probe does NOT prove the
+            chat endpoint/credentials work;
+          - a purely local non-ollama (mlx) role needs neither probe.
+        For a remote role, "no probe run" means UNVERIFIED, which is NOT READY:
+        sqlite/Ollama alone must never report READY when a missing/invalid cloud
+        key would fail the first call.
 
     It deliberately does NOT gate on encryption or macOS capture grants — the
     product runs without capture and runs plaintext-with-0600 if SQLCipher is
@@ -613,6 +656,8 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
     sqlite_info = report["sqlite"]
     cloud = report.get("cloud", {})
     embedding = report.get("embedding", {})
+    completion = report.get("completion", {})
+    remote_models = cloud.get("remote_models", {}) or {}
 
     sqlite_ok = bool(sqlite_info.get("vec_available")) and bool(sqlite_info.get("fts5_available"))
 
@@ -625,9 +670,11 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
         if not (ollama.get("reachable") is True and not ollama.get("missing_models")):
             return False
 
-    # Remote half of the route (if ANY role is remote) must be probe-verified —
-    # this also covers MIXED routes where the Ollama check above passed.
-    if cloud.get("active") and embedding.get("dim_ok") is not True:
+    # Each remote role must be verified by ITS OWN probe (covers cloud-only,
+    # cloud-embed-only, cloud-chat-only, and mixed routes).
+    if "embed" in remote_models and embedding.get("dim_ok") is not True:
+        return False
+    if "llm" in remote_models and completion.get("ok") is not True:
         return False
 
     return bool(sqlite_ok)
@@ -663,6 +710,7 @@ __all__ = [
     "run_preflight",
     "check_ollama",
     "check_embedding",
+    "check_completion",
     "check_sqlite_vec",
     "check_encryption",
     "check_macos_capabilities",

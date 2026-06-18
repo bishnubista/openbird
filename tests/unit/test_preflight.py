@@ -46,6 +46,10 @@ class FakeEmbedProvider:
     def embed(self, texts):
         return [[0.0] * self._dim for _ in texts]
 
+    def complete(self, messages, *, json_schema=None):
+        # Successful completion probe (the chat endpoint "works").
+        return "pong"
+
 
 class _CipherConn:
     """A sqlite3 connection wrapper that answers ``PRAGMA cipher_version``.
@@ -615,6 +619,46 @@ def test_mixed_route_ready_when_both_ollama_and_embed_probe_ok(tmp_path):
     )
     assert report["ollama"]["reachable"] is True
     assert report["embedding"]["dim_ok"] is True
+    assert report["runtime_ok"] is True
+
+
+def test_cloud_chat_local_embed_needs_completion_probe(tmp_path):
+    # Remote CHAT + local Ollama embed, opted in. A successful EMBED probe must
+    # NOT satisfy the remote chat role; without a completion probe -> not READY.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="gpt-4o-mini",
+        embed_model="ollama/nomic-embed-text",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("nomic-embed-text:latest",)),
+        db_opener=plaintext_handle_opener(),
+        provider_factory=lambda settings: FakeEmbedProvider(settings, dim=768),
+        probe_embedding=False,  # no probes run at all
+    )
+    assert report["cloud"]["remote_models"] == {"llm": "gpt-4o-mini"}
+    assert report["runtime_ok"] is False
+
+
+def test_cloud_chat_ready_when_completion_probe_ok(tmp_path):
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="gpt-4o-mini",
+        embed_model="ollama/nomic-embed-text",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("nomic-embed-text:latest",)),
+        db_opener=plaintext_handle_opener(),
+        provider_factory=lambda settings: FakeEmbedProvider(settings, dim=768),
+        probe_embedding=True,  # runs both embed + completion probes
+    )
+    assert report["completion"]["ok"] is True
     assert report["runtime_ok"] is True
 
 

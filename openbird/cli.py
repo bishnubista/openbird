@@ -195,6 +195,12 @@ def _render_preflight(report: dict) -> None:
         emb_detail += f" probed={emb.get('probed_dim')} ok={emb.get('dim_ok')}"
     table.add_row("embedding", "info", emb_detail)
 
+    comp = report.get("completion", {})
+    comp_detail = str(comp.get("model"))
+    if comp.get("probed"):
+        comp_detail += f" probe_ok={comp.get('ok')}"
+    table.add_row("chat-model", "info", comp_detail)
+
     sq = report["sqlite"]
     sq_ok = sq.get("vec_available") and sq.get("fts5_available")
     table.add_row(
