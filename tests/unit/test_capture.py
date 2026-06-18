@@ -955,3 +955,56 @@ def test_run_forever_resets_failure_count_after_success(allow_settings, monkeypa
     # 2 fails, 1 success (resets), 1 fail, then clean cycles. Breaker=3 never trips.
     stats = daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3, max_cycles=3)
     assert stats.received >= 1  # at least the successful + subsequent cycles ran
+
+
+def test_run_forever_nonzero_helper_exit_trips_breaker(allow_settings, monkeypatch):
+    # [B1/P1a] A helper exiting non-zero ON ITS OWN (e.g. Accessibility denied=2)
+    # must count as a failure so the breaker trips — not be re-spawned forever.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", "import sys; sys.exit(2)"],
+        require_signed_helper=False,
+    )
+    stats = daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
+    assert daemon.error_count == 3  # each non-zero exit counted, breaker tripped
+    assert stats.received == 0
+
+
+def test_run_clean_exit_zero_is_not_a_failure(allow_settings):
+    # [B1/P1a] A helper that exits 0 after emitting is a success, not a failure.
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(1),
+        require_signed_helper=False,
+    )
+    stats = daemon.run()  # must not raise HelperExitError
+    assert stats.received == 1
+
+
+def test_run_terminates_helper_when_stop_set(allow_settings):
+    # [B1/P1b] With stop set, an active/hung helper is terminated promptly so a
+    # clean shutdown isn't blocked on the stdout iterator (no hang, no raise).
+    import threading
+
+    code = (
+        "import json,sys,time\n"
+        "sys.stdout.write(json.dumps({'app':'com.apple.mail','window':'w',"
+        "'text':'x','ts':1.0})+'\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(3600)\n"  # hang forever unless terminated
+    )
+    stop = threading.Event()
+    stop.set()
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", code],
+        require_signed_helper=False,
+    )
+    stats = daemon.run(stop_event=stop)  # returns promptly; does not hang/raise
+    assert isinstance(stats, CaptureStats)

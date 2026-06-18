@@ -67,6 +67,16 @@ class HelperUnavailableError(RuntimeError):
     """
 
 
+class HelperExitError(RuntimeError):
+    """Raised when the helper exits non-zero *on its own* (not terminated by us).
+
+    A non-zero exit signals a real helper-side failure — e.g. an Accessibility
+    denial or a privacy-boundary refusal — so the supervisor's backoff/circuit
+    breaker must apply rather than silently re-spawning forever. The message
+    carries only the integer exit code, never captured content.
+    """
+
+
 def default_helper_cmd() -> tuple[str, ...]:
     """Resolve the default capture-helper command (signed bundle, fail-closed).
 
@@ -479,21 +489,60 @@ class CaptureDaemon:
         assert proc.stdout is not None
         yield from proc.stdout
 
-    def run(self, *, max_events: int | None = None) -> CaptureStats:
+    def _terminate_on_stop(
+        self, proc: subprocess.Popen[str], stop_event: "threading.Event"
+    ) -> None:
+        """Watcher: terminate the helper promptly when ``stop_event`` is set.
+
+        Without this, a clean shutdown could block until a hung/long-lived helper
+        closed its stdout. We poll so we also exit when the helper ends on its own.
+        """
+        while proc.poll() is None:
+            if stop_event.wait(0.1):
+                if proc.poll() is None:
+                    proc.terminate()
+                return
+
+    def run(
+        self,
+        *,
+        max_events: int | None = None,
+        stop_event: "threading.Event | None" = None,
+    ) -> CaptureStats:
         """Spawn the helper and process its event stream until it exits.
 
         Args:
             max_events: If set, stop after this many *received* events and
                 terminate the helper (useful for bounded runs/tests against a
                 long-lived emitter).
+            stop_event: If set, a watcher terminates the helper when the event
+                fires so a clean shutdown isn't blocked by a hung helper [B1].
 
         Returns:
             Aggregate :class:`CaptureStats` for the run.
+
+        Raises:
+            HelperExitError: If the helper exits non-zero *on its own* (i.e. we
+                did not terminate it via max_events/stop), so the supervisor can
+                back off rather than hot-loop a failing helper.
         """
         proc = self._spawn()
         stats = CaptureStats()
+        stopped_by_us = False
+        watcher: threading.Thread | None = None
+        if stop_event is not None:
+            watcher = threading.Thread(
+                target=self._terminate_on_stop,
+                args=(proc, stop_event),
+                name="capture-stop-watch",
+                daemon=True,
+            )
+            watcher.start()
         try:
             for line in self._iter_stdout(proc):
+                if stop_event is not None and stop_event.is_set():
+                    stopped_by_us = True
+                    break
                 event = parse_event(line)
                 if event is None:
                     if line.strip():
@@ -501,9 +550,19 @@ class CaptureDaemon:
                     continue
                 stats = self.handle_event(event, stats)
                 if max_events is not None and stats.received >= max_events:
+                    stopped_by_us = True
                     break
         finally:
             self._shutdown(proc)
+            if watcher is not None:
+                watcher.join(timeout=1.0)
+        # A non-zero code only counts as a helper-side failure when the helper
+        # exited on its OWN — if we terminated it (max_events/stop), the negative
+        # signal code is expected and not a failure.
+        if not stopped_by_us:
+            rc = proc.returncode
+            if rc is not None and rc > 0:
+                raise HelperExitError(f"capture helper exited with code {rc}")
         return stats
 
     def run_forever(
@@ -547,7 +606,7 @@ class CaptureDaemon:
         logger.info("capture supervisor: starting (poll_interval=%.1fs)", poll_interval)
         while not stop.is_set():
             try:
-                total = total._add(self.run())
+                total = total._add(self.run(stop_event=stop))
             except HelperUnavailableError:
                 # Missing signed bundle is permanent, not transient: don't retry.
                 raise
@@ -604,6 +663,7 @@ __all__ = [
     "CaptureStats",
     "IngestSink",
     "HelperUnavailableError",
+    "HelperExitError",
     "parse_event",
     "default_helper_cmd",
     "DEFAULT_HELPER_CMD",
