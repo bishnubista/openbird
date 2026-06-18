@@ -680,6 +680,23 @@ def test_preflight_required_models_derived_from_settings(tmp_path):
     assert report["runtime_ok"] is True
 
 
+def test_cloud_only_route_reports_no_ollama_requirements(tmp_path):
+    # A cloud-only route must not report default Ollama models as required/missing.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=1536,
+        llm_model="gpt-4o-mini",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["cloud"]["uses_local_ollama"] is False
+    assert report["ollama"]["required_models"] == []
+    assert report["ollama"]["missing_models"] == []
+
+
 def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
     # M1 regression: preflight host == runtime provider api_base host. Use a
     # loopback custom host so the default ollama/* route stays local (the host is

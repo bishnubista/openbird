@@ -19,27 +19,39 @@ def _isolate(tmp_path, monkeypatch):
     reset_settings_cache()
 
 
-def test_data_stats_refuses_cloud_without_opt_in(monkeypatch):
-    # A cloud-configured route with no opt-in must refuse non-interactively.
+def test_ingest_refuses_cloud_without_opt_in(monkeypatch, tmp_path):
+    # ingest EMBEDS, so a cloud route with no opt-in must refuse non-interactively.
+    f = tmp_path / "doc.txt"
+    f.write_text("hello world")
     monkeypatch.setenv("OPENBIRD_LLM_MODEL", "gpt-4o-mini")
     reset_settings_cache()
-    res = CliRunner().invoke(cli.app, ["data", "stats"])
+    res = CliRunner().invoke(cli.app, ["ingest", str(f)])
     assert res.exit_code == 2
     assert "CLOUD MODEL CONFIGURED" in res.output
     assert "gpt-4o-mini" in res.output
     assert "OPENBIRD_ALLOW_CLOUD=1" in res.output
 
 
-def test_data_stats_proceeds_with_opt_in(monkeypatch):
-    # With OPENBIRD_ALLOW_CLOUD=1 the factory builds the provider; the CLI prints
-    # the CLOUD ACTIVE banner and the command runs.
+def test_data_purge_not_gated_by_cloud(monkeypatch):
+    # Purge never embeds — it must NOT be blocked behind cloud opt-in (privacy
+    # path). A cloud model configured without opt-in still allows deletion.
     monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "text-embedding-3-small")
     monkeypatch.setenv("OPENBIRD_EMBED_DIM", "1536")
-    monkeypatch.setenv("OPENBIRD_ALLOW_CLOUD", "1")
+    reset_settings_cache()
+    res = CliRunner().invoke(cli.app, ["data", "purge", "--all", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "CLOUD MODEL CONFIGURED" not in res.output
+    assert "Deleted" in res.output
+
+
+def test_data_stats_not_gated_by_cloud(monkeypatch):
+    # Stats only counts rows — also gate-free (and no banner).
+    monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("OPENBIRD_EMBED_DIM", "1536")
     reset_settings_cache()
     res = CliRunner().invoke(cli.app, ["data", "stats"])
     assert res.exit_code == 0, res.output
-    assert "CLOUD ACTIVE" in res.output
+    assert "CLOUD MODEL CONFIGURED" not in res.output
 
 
 def test_local_default_has_no_cloud_banner():

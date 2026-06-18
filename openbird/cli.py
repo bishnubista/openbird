@@ -115,15 +115,35 @@ def _store(*, provider=None):
     """Open the on-disk :class:`MemoryStore` with the cloud-checked provider.
 
     Always builds the provider through :func:`_provider` (unless one is passed
-    in) so the cloud opt-in policy + banner apply on every store-opening command
-    (ingest, data stats, reindex), not just chat/routine. MemoryStore would
-    otherwise construct a provider internally and bypass the CLI's confirm/banner.
+    in) so the cloud opt-in policy + banner apply on every command that may
+    EMBED (ingest, chat, capture, reindex). MemoryStore would otherwise construct
+    a provider internally and bypass the CLI's confirm/banner. For delete-only
+    maintenance (purge/stats) use :func:`_store_maintenance`, which does not gate
+    on cloud opt-in since no captured content is sent anywhere.
     """
     from openbird.memory.store import MemoryStore
 
     if provider is None:
         provider = _provider()
     return MemoryStore(settings=get_settings(), provider=provider)
+
+
+def _store_maintenance():
+    """Open the store for delete-only ops (purge/stats) WITHOUT a cloud gate [H3].
+
+    Purge and stats never embed or send captured content to a model, so requiring
+    ``OPENBIRD_ALLOW_CLOUD`` just to delete local data — on a privacy tool — would
+    be backwards. We still build the configured provider (so its ``cohort_key``
+    matches the stored cohort and the mismatch guard works), but with
+    ``allow_cloud=True`` to skip the opt-in/banner: nothing leaves the machine on
+    these paths.
+    """
+    from openbird.llm.provider import create_llm_provider
+    from openbird.memory.store import MemoryStore
+
+    settings = get_settings()
+    provider = create_llm_provider(settings, allow_cloud=True)
+    return MemoryStore(settings=settings, provider=provider)
 
 
 # --------------------------------------------------------------------------- #
@@ -523,7 +543,7 @@ def data_purge(
             _console.print("[yellow]Aborted.[/]")
             raise typer.Exit(code=1)
 
-    store = _store()
+    store = _store_maintenance()
     try:
         deleted = store.delete(all=all_, since_ts=since_ts)
     finally:
@@ -534,7 +554,7 @@ def data_purge(
 @data_app.command("stats")
 def data_stats() -> None:
     """Print memory-store row counts and the active embedding cohort."""
-    store = _store()
+    store = _store_maintenance()
     try:
         stats = store.stats()
     finally:

@@ -79,18 +79,30 @@ def _ollama_host(settings: Settings | None = None) -> str:
 def _ollama_required_models(settings: Settings) -> tuple[str, ...]:
     """Derive the local Ollama models the active route actually needs.
 
-    Strips only the ``ollama/`` provider prefix, KEEPING any ``:tag`` (e.g.
+    Strips only the Ollama provider prefix, KEEPING any ``:tag`` (e.g.
     ``ollama/llama3.2:3b`` -> ``llama3.2:3b``) so preflight checks the exact model
     the runtime will request — otherwise a green preflight could accept a
-    different tag (``llama3.2:latest``) than the provider pulls. Non-ollama
-    (cloud/mlx) models contribute nothing here.
+    different tag (``llama3.2:latest``) than the provider pulls.
+
+    For a route that uses NO Ollama models at all (cloud-only / mlx-only) this
+    returns an EMPTY tuple — preflight must not report the default ``llama3.2`` /
+    ``nomic-embed-text`` as required/missing for a route that never touches
+    Ollama. The defaults are used only as the unconfigured-but-Ollama fallback.
     """
     wanted: list[str] = []
     for model in (settings.llm_model, settings.embed_model):
         bare = ollama_bare_model(model)
         if bare and bare not in wanted:
             wanted.append(bare)
-    return tuple(wanted) if wanted else _REQUIRED_MODELS
+    if wanted:
+        return tuple(wanted)
+    # No ollama models configured: only fall back to defaults if neither model is
+    # set to something (preserves the bare-defaults case); a cloud/mlx route gets
+    # an empty required set.
+    any_model_configured = bool(
+        (settings.llm_model or "").strip() or (settings.embed_model or "").strip()
+    )
+    return () if any_model_configured else _REQUIRED_MODELS
 
 
 def _http_get(url: str, timeout: float) -> tuple[int, bytes]:
