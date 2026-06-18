@@ -1,0 +1,521 @@
+"""Capture orchestration: run the helper, redact, normalize, then ingest.
+
+The actual screen reading is done by a separate **Swift capture helper** (built
+later) that emits one JSON object per capture event on stdout:
+
+    {"app": "...", "window": "...", "url": "...", "text": "...", "ts": 1700000000.0,
+     "incognito": false}
+
+``app`` is the frontmost app's bundle id, ``window`` its title, ``url`` the
+browser URL (if any), ``text`` the AX-extracted active-window text, ``ts`` an
+epoch seconds timestamp, and an optional ``incognito`` flag. This daemon:
+
+  1. spawns the helper (an injectable command, so tests use a fake emitter),
+  2. parses each JSON line,
+  3. runs the redaction policy (allowlist-first + secret scrubbing),
+  4. applies per-app normalization,
+  5. and ingests accepted events via :class:`MemoryStore.add_observation`.
+
+Privacy by prevention [R4/R5]: captured text is NEVER written to logs, exception
+messages, argv, or env. On any parse/handle error we log a metadata-only
+diagnostic (``reason`` codes, byte counts) and move on — the raw text never
+leaves memory except into the (encrypted-at-rest) store.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import shutil
+import subprocess
+import threading
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+from openbird.capture import adapters, redact
+from openbird.config import Settings, get_settings
+from openbird.types import Observation
+
+logger = logging.getLogger("openbird.capture")
+
+#: Environment variable pointing at the **packaged, signed** capture helper
+#: binary inside the app/LaunchAgent bundle. TCC grants are per signed path, so
+#: the dev build path (``capture-helper/.build/release/...``) must never be the
+#: default — it has no stable Accessibility/Screen-Recording grant (PLAN.md
+#: signed-bundle/TCC gate). Operators/preflight set this to the bundled artifact.
+HELPER_PATH_ENV = "OPENBIRD_CAPTURE_HELPER"
+
+#: Conventional install location of the signed helper inside the packaged app
+#: bundle. Used only when the env override is unset. There is intentionally NO
+#: dev-build fallback: if neither resolves to a real binary, capture fails
+#: closed rather than running an unsigned binary that will lose TCC grants.
+DEFAULT_SIGNED_HELPER_PATH = (
+    "/Applications/OpenBird.app/Contents/MacOS/capture-helper"
+)
+
+
+class HelperUnavailableError(RuntimeError):
+    """Raised when no usable signed capture helper binary can be resolved.
+
+    The daemon fails closed (raises this) rather than silently falling back to a
+    dev/unsigned binary, because TCC Accessibility/Screen-Recording grants are
+    bound to a specific signed path. The message contains only a path/metadata,
+    never captured content.
+    """
+
+
+def default_helper_cmd() -> tuple[str, ...]:
+    """Resolve the default capture-helper command (signed bundle, fail-closed).
+
+    Resolution order:
+
+      1. ``$OPENBIRD_CAPTURE_HELPER`` if set.
+      2. The conventional signed-bundle path :data:`DEFAULT_SIGNED_HELPER_PATH`.
+
+    The returned tuple is a *candidate*; whether the binary actually exists and
+    looks executable is enforced at spawn time by :func:`_resolve_helper`, which
+    raises :class:`HelperUnavailableError` when it does not. This keeps the
+    constructor cheap and tests able to inject a fake command.
+    """
+    configured = os.environ.get(HELPER_PATH_ENV)
+    if configured:
+        return (configured,)
+    return (DEFAULT_SIGNED_HELPER_PATH,)
+
+
+#: Back-compat module-level default (now points at the signed bundle path, never
+#: the dev build). Prefer :func:`default_helper_cmd` so env overrides apply.
+DEFAULT_HELPER_CMD: tuple[str, ...] = (DEFAULT_SIGNED_HELPER_PATH,)
+
+# Cap on a single event's text to bound memory and ingest cost. Oversized
+# payloads are truncated (a metadata diagnostic is logged, not the text).
+_MAX_TEXT_BYTES = 1_000_000
+
+# Hard cap on how many bytes of helper stderr we will drain/buffer. stderr must
+# carry only non-content diagnostics; we drain it on a separate thread so a
+# chatty helper can't deadlock capture by filling the pipe (PLAN subprocess
+# hygiene). We never log its contents — only a byte count.
+_MAX_STDERR_BYTES = 64 * 1024
+
+
+class IngestSink(Protocol):
+    """Minimal structural type the daemon needs from a memory store.
+
+    Matches :class:`openbird.memory.store.MemoryStore.add_observation`, so the
+    real store satisfies it and tests can pass a lightweight fake.
+    """
+
+    def add_observation(
+        self,
+        text: str,
+        *,
+        app: str | None = ...,
+        window: str | None = ...,
+        url: str | None = ...,
+        session_id: str | None = ...,
+        source: str,
+        ts: float | None = ...,
+    ) -> Observation: ...
+
+
+@dataclass(frozen=True)
+class CaptureStats:
+    """Counters for a capture run (metadata only — never contains text)."""
+
+    received: int = 0
+    ingested: int = 0
+    rejected: int = 0
+    errors: int = 0
+
+    def _with(self, **delta: int) -> "CaptureStats":
+        return CaptureStats(
+            received=self.received + delta.get("received", 0),
+            ingested=self.ingested + delta.get("ingested", 0),
+            rejected=self.rejected + delta.get("rejected", 0),
+            errors=self.errors + delta.get("errors", 0),
+        )
+
+
+def _truncate(text: str) -> str:
+    """Truncate text to the byte cap on a UTF-8 boundary (no logging of text)."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= _MAX_TEXT_BYTES:
+        return text
+    return encoded[:_MAX_TEXT_BYTES].decode("utf-8", errors="ignore")
+
+
+def parse_event(line: str) -> dict | None:
+    """Parse one helper JSON line into a normalized event dict.
+
+    Returns ``None`` for blank lines or malformed JSON (a metadata-only warning
+    is logged — never the offending text). On success returns a dict with keys
+    ``app, window, url, text, ts, incognito`` (missing optionals defaulted).
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError:
+        # Do NOT log the line contents (it may contain captured text).
+        logger.warning("capture: dropping unparseable helper line (%d bytes)", len(line))
+        return None
+    if not isinstance(raw, dict):
+        logger.warning("capture: helper line was not a JSON object; dropping")
+        return None
+
+    ts = raw.get("ts")
+    try:
+        ts_val = float(ts) if ts is not None else None
+    except (TypeError, ValueError):
+        ts_val = None
+
+    def _str_or_none(value: object) -> str | None:
+        """Accept only strings for free-text fields; coerce anything else to None."""
+        return value if isinstance(value, str) else None
+
+    # ``text`` drives redaction (string ops), so a non-string value would crash
+    # downstream — normalize it to "" rather than trusting the helper's types.
+    text = raw.get("text")
+    text_val = text if isinstance(text, str) else ""
+
+    return {
+        "app": _str_or_none(raw.get("app")),
+        "window": _str_or_none(raw.get("window")),
+        "url": _str_or_none(raw.get("url")),
+        "text": text_val,
+        "ts": ts_val,
+        "incognito": bool(raw.get("incognito", False)),
+    }
+
+
+class CaptureDaemon:
+    """Orchestrates the capture helper -> redact -> normalize -> ingest flow."""
+
+    def __init__(
+        self,
+        store: IngestSink,
+        *,
+        settings: Settings | None = None,
+        helper_cmd: Iterable[str] | None = None,
+        source: str = "capture",
+        require_signed_helper: bool = True,
+    ) -> None:
+        """Construct the daemon.
+
+        Args:
+            store: A memory store exposing ``add_observation`` (the ingest sink).
+            settings: Settings providing allow/blocklists; defaults to
+                :func:`get_settings`.
+            helper_cmd: Command to launch the capture helper. Defaults to the
+                resolved **signed bundle** path (see :func:`default_helper_cmd`);
+                tests inject a fake emitter command. The error counter and stats
+                are unaffected by the choice.
+            source: ``source`` tag stamped on every ingested observation.
+            require_signed_helper: When True (default) the daemon fails closed
+                with :class:`HelperUnavailableError` at spawn time if the helper
+                binary is missing/non-executable, so an unsigned/dev binary can
+                never be launched (TCC grants are per signed path). Tests that
+                inject an explicit ``helper_cmd`` (e.g. a python emitter) pass
+                ``False`` to opt out of the bundle-path requirement.
+        """
+        self.store = store
+        self.settings = settings or get_settings()
+        if helper_cmd is not None:
+            self.helper_cmd = tuple(helper_cmd)
+        else:
+            self.helper_cmd = default_helper_cmd()
+        self.source = source
+        self.require_signed_helper = require_signed_helper
+        self._stderr_thread: threading.Thread | None = None
+        # Safe, content-free error counter for the whole-data-path privacy gate:
+        # store/embed failures bump this instead of emitting tracebacks that
+        # might embed captured text.
+        self.error_count = 0
+
+    def _pause_file(self) -> Path:
+        """Path written by the macOS trust controller to pause ingestion."""
+        return Path(self.settings.data_dir) / "capture.paused"
+
+    def is_paused(self) -> bool:
+        """Whether capture ingestion is currently paused by the trust surface."""
+        return self._pause_file().exists()
+
+    # -- per-event handling ---------------------------------------------------
+
+    def handle_event(self, event: dict, stats: CaptureStats) -> CaptureStats:
+        """Apply policy + normalization to one parsed event and maybe ingest.
+
+        Returns the updated :class:`CaptureStats`. Never raises on policy
+        rejection; rejections increment ``rejected`` and are logged with their
+        metadata-only ``reason`` code.
+        """
+        stats = stats._with(received=1)
+        if self.is_paused():
+            logger.debug("capture: rejected event reason=paused")
+            return stats._with(rejected=1)
+
+        app = event.get("app")
+        window = event.get("window")
+        url = event.get("url")
+        text = event.get("text")
+        ts = event.get("ts")
+        incognito = bool(event.get("incognito", False))
+
+        decision, scrubbed = redact.apply(
+            app=app,
+            window=window,
+            text=text,
+            incognito=incognito,
+            settings=self.settings,
+        )
+        if not decision.capture or scrubbed is None:
+            logger.debug("capture: rejected event app=%s reason=%s", app, decision.reason)
+            return stats._with(rejected=1)
+
+        normalized = adapters.normalize_for_app(scrubbed, app)
+        if not normalized.strip():
+            # Everything was chrome/boilerplate -> nothing worth storing.
+            logger.debug("capture: event reduced to empty after normalization app=%s", app)
+            return stats._with(rejected=1)
+
+        normalized = _truncate(normalized)
+
+        # [R4 fix] Scrub metadata too: URLs embed auth codes/tokens/emails/doc
+        # ids in their query/fragment, and window titles can carry full message
+        # content. Body text alone going through scrub() is insufficient.
+        safe_window, safe_url, title_rules = redact.scrub_metadata(
+            window=window, url=url
+        )
+
+        try:
+            self.store.add_observation(
+                normalized,
+                app=app,
+                window=safe_window,
+                url=safe_url,
+                session_id=None,
+                source=self.source,
+                ts=ts,
+            )
+        except Exception as exc:  # noqa: BLE001 - isolate one bad event from the loop
+            # [Privacy fix] Some store/embed layers raise exceptions whose
+            # message embeds the input text. NEVER log the exception message or
+            # a traceback at default level (exc_info=False, and we log only the
+            # exception *type* + safe app metadata). Full tracebacks are gated
+            # behind an explicit, opt-in non-content debug path below.
+            self.error_count += 1
+            logger.error(
+                "capture: add_observation failed app=%s error_type=%s",
+                app,
+                type(exc).__name__,
+                exc_info=False,
+            )
+            # Opt-in deep debugging only. ``exc_info`` is still suppressed so the
+            # exception's (potentially content-bearing) message/traceback is not
+            # emitted; we surface only the type and a stable error counter.
+            logger.debug(
+                "capture: add_observation failure detail app=%s error_type=%s count=%d",
+                app,
+                type(exc).__name__,
+                self.error_count,
+                exc_info=False,
+            )
+            return stats._with(errors=1)
+
+        matched = tuple(decision.matched_rules) + tuple(title_rules)
+        if matched:
+            logger.debug(
+                "capture: scrubbed secrets app=%s rules=%s",
+                app,
+                ",".join(matched),
+            )
+        return stats._with(ingested=1)
+
+    # -- stream drivers -------------------------------------------------------
+
+    def run_lines(self, lines: Iterable[str]) -> CaptureStats:
+        """Process an iterable of raw JSON lines (the testable core).
+
+        Each line is parsed, policy-checked, normalized, and (if accepted)
+        ingested. Unparseable lines are counted as errors. Returns aggregate
+        :class:`CaptureStats`.
+        """
+        stats = CaptureStats()
+        for line in lines:
+            event = parse_event(line)
+            if event is None:
+                if line.strip():  # blank lines are not errors
+                    stats = stats._with(errors=1)
+                continue
+            stats = self.handle_event(event, stats)
+        return stats
+
+    def _resolve_helper(self) -> list[str]:
+        """Return the launch argv, failing closed if the signed helper is absent.
+
+        Enforces the signed-bundle / TCC requirement: when
+        ``require_signed_helper`` is set, the first argv element must resolve to
+        an existing, executable file (either an absolute/relative path or a name
+        on ``PATH``). Otherwise we raise :class:`HelperUnavailableError` rather
+        than launch an unsigned/dev binary that would not carry stable TCC
+        grants. The error carries only the path, never captured content.
+        """
+        argv = list(self.helper_cmd)
+        if not argv:
+            raise HelperUnavailableError("capture: empty helper command")
+        argv = self._with_policy_args(argv)
+        if not self.require_signed_helper:
+            return argv
+
+        binary = argv[0]
+        resolved = binary if os.path.isabs(binary) else shutil.which(binary)
+        if resolved is None:
+            # Allow a relative/explicit path that exists on disk.
+            candidate = Path(binary)
+            resolved = str(candidate) if candidate.exists() else None
+
+        if resolved is None or not Path(resolved).is_file():
+            raise HelperUnavailableError(
+                f"capture: signed helper not found at {binary!r}; refusing to "
+                "launch an unsigned/dev binary (TCC grants are per signed path). "
+                f"Set ${HELPER_PATH_ENV} to the packaged signed helper."
+            )
+        if not os.access(resolved, os.X_OK):
+            raise HelperUnavailableError(
+                f"capture: helper at {resolved!r} is not executable; refusing to launch."
+            )
+        argv[0] = resolved
+        return argv
+
+    def _with_policy_args(self, argv: list[str]) -> list[str]:
+        """Append the allow/block policy so the helper gates content AT THE SOURCE.
+
+        The capture helper enforces the allowlist-only policy before reading any AX
+        text, so disallowed app content is never read or sent over IPC. The Python
+        redaction pass (`redact.decide`) still runs as authoritative defense-in-depth.
+        """
+        allow = list(getattr(self.settings, "allowlist", None) or [])
+        block = list(getattr(self.settings, "blocklist", None) or [])
+        extra: list[str] = []
+        if allow:
+            extra += ["--allow", ",".join(allow)]
+        if block:
+            extra += ["--block", ",".join(block)]
+        return argv + extra
+
+    def _spawn(self) -> subprocess.Popen[str]:
+        """Launch the helper as a text-mode subprocess yielding stdout lines.
+
+        stdout carries the JSON event stream. stderr is **drained on a separate
+        bounded thread** (:meth:`_drain_stderr`) so a helper that writes a lot to
+        stderr cannot fill the pipe buffer and deadlock capture; its contents are
+        never logged (only a capped byte count), honoring subprocess hygiene.
+        """
+        argv = self._resolve_helper()
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # line-buffered
+        )
+        self._start_stderr_drain(proc)
+        return proc
+
+    def _start_stderr_drain(self, proc: subprocess.Popen[str]) -> None:
+        """Spawn a daemon thread that drains (and discards) helper stderr."""
+        if proc.stderr is None:
+            return
+        thread = threading.Thread(
+            target=self._drain_stderr,
+            args=(proc.stderr,),
+            name="capture-stderr-drain",
+            daemon=True,
+        )
+        thread.start()
+        self._stderr_thread = thread
+
+    @staticmethod
+    def _drain_stderr(stderr) -> None:
+        """Continuously read helper stderr to prevent pipe-buffer deadlock.
+
+        We never log stderr content (it could echo captured text); we only track
+        a capped byte count so the buffer can always drain. Stops on EOF.
+        """
+        drained = 0
+        try:
+            for chunk in iter(lambda: stderr.read(4096), ""):
+                if not chunk:
+                    break
+                if drained < _MAX_STDERR_BYTES:
+                    drained += len(chunk)
+                # Past the cap we keep reading to avoid deadlock but discard.
+        except (OSError, ValueError):
+            # Stream closed during shutdown — nothing to do.
+            return
+
+    def _iter_stdout(self, proc: subprocess.Popen[str]) -> Iterator[str]:
+        """Yield decoded stdout lines from a running helper process."""
+        assert proc.stdout is not None
+        yield from proc.stdout
+
+    def run(self, *, max_events: int | None = None) -> CaptureStats:
+        """Spawn the helper and process its event stream until it exits.
+
+        Args:
+            max_events: If set, stop after this many *received* events and
+                terminate the helper (useful for bounded runs/tests against a
+                long-lived emitter).
+
+        Returns:
+            Aggregate :class:`CaptureStats` for the run.
+        """
+        proc = self._spawn()
+        stats = CaptureStats()
+        try:
+            for line in self._iter_stdout(proc):
+                event = parse_event(line)
+                if event is None:
+                    if line.strip():
+                        stats = stats._with(errors=1)
+                    continue
+                stats = self.handle_event(event, stats)
+                if max_events is not None and stats.received >= max_events:
+                    break
+        finally:
+            self._shutdown(proc)
+        return stats
+
+    @staticmethod
+    def _shutdown(proc: subprocess.Popen[str]) -> None:
+        """Terminate the helper process, escalating to kill if needed."""
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+
+__all__ = [
+    "CaptureDaemon",
+    "CaptureStats",
+    "IngestSink",
+    "HelperUnavailableError",
+    "parse_event",
+    "default_helper_cmd",
+    "DEFAULT_HELPER_CMD",
+    "HELPER_PATH_ENV",
+    "DEFAULT_SIGNED_HELPER_PATH",
+]

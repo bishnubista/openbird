@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Swift
+.build/
+*/.build/
+*.xcodeproj
+
+# OpenBird local data (never commit a user's captured memory)
+.openbird/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets
+.env
+.env.*
