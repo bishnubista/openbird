@@ -29,12 +29,21 @@ import urllib.request
 from typing import Any, Callable, Protocol
 from urllib.parse import urljoin
 
-from openbird.config import Settings, get_settings
+from openbird.config import (
+    DEFAULT_OLLAMA_HOST as _DEFAULT_OLLAMA_HOST,
+)
+from openbird.config import (
+    Settings,
+    get_settings,
+    is_ollama_model,
+    ollama_bare_model,
+    resolved_ollama_host,
+)
 
-# Models OpenBird depends on by default; preflight checks they are pulled.
+# Models OpenBird depends on by default; preflight checks they are pulled. Used
+# as a fallback when settings do not name ollama/* models (route-aware path
+# below derives the real required set from settings.llm_model/embed_model).
 _REQUIRED_MODELS: tuple[str, ...] = ("llama3.2", "nomic-embed-text")
-
-_DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
 
 # --------------------------------------------------------------------------- #
@@ -56,9 +65,56 @@ DbOpener = Callable[..., sqlite3.Connection]
 ProviderFactory = Callable[[Settings], _EmbedProvider]
 
 
-def _ollama_host() -> str:
-    """Resolve the Ollama base URL from the environment, with a default."""
-    return os.environ.get("OLLAMA_HOST") or os.environ.get("OPENBIRD_OLLAMA_HOST") or _DEFAULT_OLLAMA_HOST
+def _ollama_host(settings: Settings | None = None) -> str:
+    """Resolve the Ollama base URL via the shared resolver [M1].
+
+    Delegates to :func:`openbird.config.resolved_ollama_host` so preflight and
+    the runtime provider always agree on the host (same precedence:
+    ``OLLAMA_HOST`` > ``settings.ollama_host`` / ``OPENBIRD_OLLAMA_HOST`` >
+    default).
+    """
+    return resolved_ollama_host(settings)
+
+
+def _ollama_required_models(settings: Settings) -> tuple[str, ...]:
+    """Derive the local Ollama models the active route actually needs.
+
+    Strips only the Ollama provider prefix, KEEPING any ``:tag`` (e.g.
+    ``ollama/llama3.2:3b`` -> ``llama3.2:3b``) so preflight checks the exact model
+    the runtime will request — otherwise a green preflight could accept a
+    different tag (``llama3.2:latest``) than the provider pulls.
+
+    For a route that uses NO Ollama models at all (cloud-only / mlx-only) this
+    returns an EMPTY tuple — preflight must not report the default ``llama3.2`` /
+    ``nomic-embed-text`` as required/missing for a route that never touches
+    Ollama. The defaults are used only as the unconfigured-but-Ollama fallback.
+    """
+    wanted: list[str] = []
+    for model in (settings.llm_model, settings.embed_model):
+        bare = ollama_bare_model(model)
+        if bare and bare not in wanted:
+            wanted.append(bare)
+    if wanted:
+        return tuple(wanted)
+    # No ollama models configured: only fall back to defaults if neither model is
+    # set to something (preserves the bare-defaults case); a cloud/mlx route gets
+    # an empty required set.
+    any_model_configured = bool(
+        (settings.llm_model or "").strip() or (settings.embed_model or "").strip()
+    )
+    return () if any_model_configured else _REQUIRED_MODELS
+
+
+def _has_mlx_model(settings: Settings) -> bool:
+    """True if either configured model is an ``mlx*`` string (unwired today).
+
+    The MLX runtime is reserved/not wired, and litellm cannot serve ``mlx/*``
+    model strings, so a route naming one is not runnable regardless of backend.
+    """
+    return any(
+        (m or "").strip().lower().startswith("mlx")
+        for m in (settings.llm_model, settings.embed_model)
+    )
 
 
 def _http_get(url: str, timeout: float) -> tuple[int, bytes]:
@@ -162,6 +218,40 @@ def check_embedding(
         result["probed"] = True
         result["probed_dim"] = dim
         result["dim_ok"] = dim == settings.embed_dim
+    except Exception as exc:
+        result["error"] = type(exc).__name__
+    return result
+
+
+def check_completion(
+    settings: Settings,
+    *,
+    provider_factory: ProviderFactory | None = None,
+    probe: bool = False,
+) -> dict[str, Any]:
+    """Report the configured chat model, optionally probing a tiny completion.
+
+    Without ``probe`` (the default, network-free) this only echoes the configured
+    ``llm_model`` with ``probed=False`` / ``ok=None``. With ``probe=True`` a
+    minimal completion is requested so a REMOTE chat model's endpoint/credentials
+    are validated before preflight reports READY (a successful *embedding* probe
+    does not prove the chat endpoint works). Failures are captured, never raised.
+    """
+    result: dict[str, Any] = {
+        "model": settings.llm_model,
+        "probed": False,
+        "ok": None,
+        "error": None,
+    }
+    if not probe:
+        return result
+
+    try:
+        factory = provider_factory or _default_provider_factory
+        provider = factory(settings)
+        text = provider.complete([{"role": "user", "content": "ping"}])
+        result["probed"] = True
+        result["ok"] = isinstance(text, (str, dict))
     except Exception as exc:
         result["error"] = type(exc).__name__
     return result
@@ -472,21 +562,69 @@ def run_preflight(
     """
     settings = settings or get_settings()
 
-    if probe_ollama:
-        ollama = check_ollama(host=ollama_host, http_get=http_get, timeout=ollama_timeout)
+    # Route-aware [H3/M1]: classify the configured models and derive the local
+    # models the active route actually needs, instead of hard-coding defaults.
+    from openbird.llm.provider import classify_models
+
+    # Resolve the host FIRST and classify against it, so an explicit (possibly
+    # non-loopback) ``ollama_host`` override is reflected in cloud classification
+    # — not just in the probe — preventing a remote host from looking local.
+    resolved_host = ollama_host or _ollama_host(settings)
+    remote_models = classify_models(settings, ollama_host=resolved_host)
+    required_models = _ollama_required_models(settings)
+    # Does the active route depend on local Ollama at all (either model ollama*)?
+    uses_ollama = any(
+        is_ollama_model(m) for m in (settings.llm_model, settings.embed_model)
+    )
+
+    if not uses_ollama:
+        # Cloud-only / mlx-only route never touches local Ollama: skip the probe
+        # (no point reporting localhost "down" or spending the network call for a
+        # service the active route does not use). Reported as not-applicable.
+        ollama = {
+            "reachable": "n/a",
+            "host": resolved_host,
+            "models_present": [],
+            "required_models": [],
+            "models": {},
+            "missing_models": [],
+            "error": None,
+        }
+    elif probe_ollama:
+        ollama = check_ollama(
+            host=resolved_host,
+            required_models=required_models,
+            http_get=http_get,
+            timeout=ollama_timeout,
+        )
     else:
         ollama = {
             "reachable": "unknown",
-            "host": ollama_host or _ollama_host(),
+            "host": resolved_host,
             "models_present": [],
-            "required_models": list(_REQUIRED_MODELS),
-            "models": {m: "unknown" for m in _REQUIRED_MODELS},
+            "required_models": list(required_models),
+            "models": {m: "unknown" for m in required_models},
             "missing_models": "unknown",
             "error": None,
         }
 
+    # Probe against the SAME resolved host the report shows. When an explicit
+    # ollama_host override is given, carry it in the settings used to build the
+    # probe provider so LiteLLM's api_base targets that host (not env/default) —
+    # otherwise a probe could succeed on localhost while the checked host differs.
+    probe_settings = settings
+    if ollama_host is not None and provider_factory is None:
+        import dataclasses
+
+        probe_settings = dataclasses.replace(settings, ollama_host=resolved_host)
+
     embedding = check_embedding(
-        settings, provider_factory=provider_factory, probe=probe_embedding
+        probe_settings, provider_factory=provider_factory, probe=probe_embedding
+    )
+    # Probe the chat model under the SAME flag so a remote chat endpoint is
+    # validated (an embedding probe does not exercise the completion endpoint).
+    completion = check_completion(
+        probe_settings, provider_factory=provider_factory, probe=probe_embedding
     )
     sqlite_vec_info = check_sqlite_vec()
 
@@ -510,6 +648,7 @@ def run_preflight(
     report: dict[str, Any] = {
         "ollama": ollama,
         "embedding": embedding,
+        "completion": completion,
         "sqlite": sqlite_vec_info,
         "encryption": encryption,
         "privacy": {
@@ -518,6 +657,30 @@ def run_preflight(
             "ocr_enabled": bool(settings.ocr_enabled),
         },
         "macos": macos,
+        # Provider backend readiness. Two unwired-MLX cases must NOT report READY:
+        #   * the reserved ``mlx`` *backend* (factory raises NotImplementedError);
+        #   * ``mlx/*`` *model strings* under the default litellm backend — litellm
+        #     cannot serve them, so the first runtime call would fail.
+        "backend": {
+            "name": (settings.llm_backend or "").strip().lower(),
+            "supported": (
+                (settings.llm_backend or "").strip().lower() == "litellm"
+                and not _has_mlx_model(settings)
+            ),
+        },
+        # Cloud route status [H3]: which configured models are remote, whether
+        # cloud is opted into, and whether captured memory would actually leave
+        # this machine on the current config. "blocked" = remote model set but
+        # no opt-in (the factory would refuse).
+        "cloud": {
+            "remote_models": remote_models,
+            "active": bool(remote_models),
+            "allow_cloud": bool(settings.allow_cloud),
+            "blocked": bool(remote_models) and not settings.allow_cloud,
+            "llm_model": settings.llm_model,
+            "embed_model": settings.embed_model,
+            "uses_local_ollama": uses_ollama,
+        },
     }
     report["runtime_ok"] = _runtime_ok(report)
     report["release_gate_ok"] = _release_gate_ok(report)
@@ -529,18 +692,59 @@ def run_preflight(
 def _runtime_ok(report: dict[str, Any]) -> bool:
     """Whether the *hard runtime* requirements are satisfied.
 
-    Runtime-OK means the parts OpenBird cannot run without are present: Ollama
-    reachable with no missing required models, and sqlite-vec + FTS5 usable. It
-    deliberately does NOT gate on encryption or macOS capture grants — the
+    Runtime-OK means the parts OpenBird cannot run without are present:
+      * sqlite-vec + FTS5 usable, AND
+      * EVERY active model role is usable, checked PER ROLE so any route
+        (local-only, cloud-only, or mixed) validates each half:
+          - local Ollama (if either role uses it): reachable with no missing
+            required models;
+          - a remote EMBED role: not blocked, and an embedding probe succeeded
+            (``embedding.dim_ok``);
+          - a remote CHAT role: not blocked, and a completion probe succeeded
+            (``completion.ok``) — a successful embedding probe does NOT prove the
+            chat endpoint/credentials work.
+        For a remote role, "no probe run" means UNVERIFIED, which is NOT READY:
+        sqlite/Ollama alone must never report READY when a missing/invalid cloud
+        key would fail the first call. The configured provider BACKEND must also
+        be wired (``backend.supported``) — the reserved ``mlx`` backend is never
+        runtime-OK because the factory raises for it.
+
+    It deliberately does NOT gate on encryption or macOS capture grants — the
     product runs without capture and runs plaintext-with-0600 if SQLCipher is
     absent. ``"unknown"`` Ollama (probe skipped) does not count as OK.
     """
     ollama = report["ollama"]
     sqlite_info = report["sqlite"]
+    cloud = report.get("cloud", {})
+    embedding = report.get("embedding", {})
+    completion = report.get("completion", {})
+    backend = report.get("backend", {})
+    remote_models = cloud.get("remote_models", {}) or {}
 
-    ollama_ok = ollama.get("reachable") is True and not ollama.get("missing_models")
     sqlite_ok = bool(sqlite_info.get("vec_available")) and bool(sqlite_info.get("fts5_available"))
-    return bool(ollama_ok and sqlite_ok)
+
+    # The configured provider backend must be wired (only litellm today; mlx is
+    # reserved and the factory raises). An unwired backend can never run.
+    if not backend.get("supported", True):
+        return False
+
+    # A remote model configured without opt-in cannot run (factory refuses).
+    if cloud.get("blocked"):
+        return False
+
+    # Local Ollama half of the route (if used) must be reachable with its models.
+    if cloud.get("uses_local_ollama", True):
+        if not (ollama.get("reachable") is True and not ollama.get("missing_models")):
+            return False
+
+    # Each remote role must be verified by ITS OWN probe (covers cloud-only,
+    # cloud-embed-only, cloud-chat-only, and mixed routes).
+    if "embed" in remote_models and embedding.get("dim_ok") is not True:
+        return False
+    if "llm" in remote_models and completion.get("ok") is not True:
+        return False
+
+    return bool(sqlite_ok)
 
 
 def _release_gate_ok(report: dict[str, Any]) -> bool:
@@ -573,6 +777,7 @@ __all__ = [
     "run_preflight",
     "check_ollama",
     "check_embedding",
+    "check_completion",
     "check_sqlite_vec",
     "check_encryption",
     "check_macos_capabilities",

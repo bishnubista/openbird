@@ -177,6 +177,12 @@ def test_cli_ingest_chat_purge_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "get_settings", fake_get_settings)
     monkeypatch.setattr(cli, "_provider", fake_provider)
     monkeypatch.setattr(cli, "_store", fake_store)
+    # purge/stats use the maintenance store (no cloud gate); same fake DB here.
+    monkeypatch.setattr(
+        cli, "_store_maintenance",
+        lambda: MemoryStore(db_path=db_path, settings=settings,
+                            provider=FakeProvider(embed_dim=768)),
+    )
 
     sample = tmp_path / "sample.txt"
     sample.write_text(SAMPLE_TEXT, encoding="utf-8")
@@ -235,6 +241,9 @@ def test_cli_prune_and_vacuum_roundtrip(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
     monkeypatch.setattr(cli, "_store", fake_store)
+    # prune + stats are maintenance ops that go through _store_maintenance (no
+    # cloud gate); point it at the same test DB so the roundtrip is observable.
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: fake_store())
 
     now = time.time()
     seed = fake_store()
@@ -301,7 +310,7 @@ def test_cli_capture_then_chat_roundtrip_with_fake_helper(tmp_path, monkeypatch)
     monkeypatch.setattr(
         store_mod,
         "MemoryStore",
-        lambda *, settings: MemoryStore(
+        lambda *, settings, provider=provider: MemoryStore(
             db_path=db_path,
             settings=settings,
             provider=provider,
@@ -310,6 +319,12 @@ def test_cli_capture_then_chat_roundtrip_with_fake_helper(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "get_settings", fake_get_settings)
     monkeypatch.setattr(cli, "_provider", fake_provider)
     monkeypatch.setattr(cli, "_store", fake_store)
+    # purge/stats use the maintenance store (no cloud gate); use the fake here too
+    # so its cohort matches the FakeProvider-built store.
+    monkeypatch.setattr(
+        cli, "_store_maintenance",
+        lambda: MemoryStore(db_path=db_path, settings=settings, provider=provider),
+    )
 
     events = [
         {

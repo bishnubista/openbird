@@ -55,6 +55,7 @@ def capture(
         CaptureSupervisorError,
         HelperUnavailableError,
     )
+    from openbird.cli import _provider
     from openbird.memory.store import MemoryStore
 
     import logging
@@ -63,7 +64,11 @@ def capture(
 
     helper_cmd = _parse_helper_cmd(helper)
     settings = get_settings()
-    store = MemoryStore(settings=settings)
+    # Build the cloud-checked provider [H3]: capture sends screen text to the
+    # embedding model, so it must go through the same opt-in confirm + CLOUD
+    # ACTIVE banner path as every other store-opening command — never silently.
+    provider = _provider()
+    store = MemoryStore(settings=settings, provider=provider)
     try:
         daemon = CaptureDaemon(
             store,

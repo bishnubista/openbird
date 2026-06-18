@@ -46,6 +46,10 @@ class FakeEmbedProvider:
     def embed(self, texts):
         return [[0.0] * self._dim for _ in texts]
 
+    def complete(self, messages, *, json_schema=None):
+        # Successful completion probe (the chat endpoint "works").
+        return "pong"
+
 
 class _CipherConn:
     """A sqlite3 connection wrapper that answers ``PRAGMA cipher_version``.
@@ -380,7 +384,7 @@ def test_run_preflight_runtime_ok_but_release_gate_blocked_when_grants_unknown(s
         http_get=make_http_get(),
         db_opener=encrypted_handle_opener(),
         system="Darwin",
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     # Runtime readiness ignores capture grants / encryption.
     assert report["runtime_ok"] is True
@@ -401,7 +405,7 @@ def test_run_preflight_release_gate_green_when_all_proven(settings):
         db_opener=encrypted_handle_opener(),
         system="Darwin",
         helper_probe=all_passed_probe,
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     assert report["runtime_ok"] is True
     assert report["encryption"]["enabled"] is True
@@ -416,7 +420,7 @@ def test_run_preflight_release_gate_blocked_when_encryption_plaintext(settings):
         db_opener=plaintext_handle_opener(),
         system="Darwin",
         helper_probe=all_passed_probe,
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     assert report["runtime_ok"] is True
     assert report["encryption"]["enabled"] is False
@@ -432,7 +436,7 @@ def test_run_preflight_release_gate_blocked_when_flag_lies(settings):
         db_opener=lying_flag_opener(),
         system="Darwin",
         helper_probe=all_passed_probe,
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     assert report["encryption"]["enabled"] is False
     assert report["release_gate_ok"] is False
@@ -444,7 +448,7 @@ def test_run_preflight_off_mac_release_gate_ignores_tcc(settings):
         http_get=make_http_get(),
         db_opener=encrypted_handle_opener(),
         system="Linux",
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     assert report["macos"]["is_macos"] is False
     # Off-mac TCC/audio gates are N/A; encryption proven -> release gate green.
@@ -503,3 +507,346 @@ def test_run_preflight_reflects_privacy_config(tmp_path):
     assert report["privacy"]["allowlist"] == ["com.apple.Safari"]
     assert report["privacy"]["blocklist"] == ["com.apple.Terminal"]
     assert report["privacy"]["ocr_enabled"] is True
+
+
+# --------------------------------------------------------------------------- #
+# cloud section + route-aware runtime_ok (H3) / host agreement (M1)            #
+# --------------------------------------------------------------------------- #
+
+
+def test_cloud_section_local_default(settings):
+    report = run_preflight(
+        settings, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["cloud"]["active"] is False
+    assert report["cloud"]["blocked"] is False
+    assert report["cloud"]["remote_models"] == {}
+
+
+def test_cloud_section_blocked_without_opt_in(tmp_path):
+    s = Settings(data_dir=tmp_path, embed_dim=768, llm_model="gpt-4o-mini")
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["cloud"]["active"] is True
+    assert report["cloud"]["blocked"] is True
+    assert report["cloud"]["remote_models"] == {"llm": "gpt-4o-mini"}
+    # A remote model without opt-in cannot run -> not runtime-OK.
+    assert report["runtime_ok"] is False
+
+
+def test_cloud_route_with_opt_in_not_ready_without_probe(tmp_path):
+    # Cloud route, opted in but NOT probed: Ollama is irrelevant, but the remote
+    # endpoint is unverified, so runtime_ok must stay False (a missing API key
+    # would fail the first call — sqlite alone must not report READY).
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="gpt-4o-mini",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(raise_exc=ConnectionRefusedError()),
+        db_opener=plaintext_handle_opener(),
+        probe_embedding=False,
+    )
+    assert report["cloud"]["active"] is True
+    assert report["cloud"]["blocked"] is False
+    assert report["cloud"]["uses_local_ollama"] is False
+    assert report["runtime_ok"] is False
+
+
+def test_cloud_route_ready_when_embedding_probe_succeeds(tmp_path):
+    # Same cloud route, but a successful embedding probe confirms the endpoint
+    # works -> runtime_ok True without any Ollama dependency.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="gpt-4o-mini",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(raise_exc=ConnectionRefusedError()),
+        db_opener=plaintext_handle_opener(),
+        provider_factory=lambda settings: FakeEmbedProvider(settings, dim=768),
+        probe_embedding=True,
+    )
+    assert report["embedding"]["dim_ok"] is True
+    assert report["runtime_ok"] is True
+
+
+def test_mixed_local_chat_cloud_embed_needs_embed_probe(tmp_path):
+    # MIXED route: local Ollama chat + cloud embed, opted in. Ollama is reachable
+    # with the chat model, but the remote embed role is unverified without a probe
+    # -> runtime_ok must stay False (the embed call would fail on a bad API key).
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="ollama/llama3.2",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("llama3.2:latest",)),
+        db_opener=plaintext_handle_opener(),
+        probe_embedding=False,
+    )
+    assert report["cloud"]["active"] is True
+    assert report["cloud"]["uses_local_ollama"] is True
+    assert report["ollama"]["reachable"] is True
+    assert report["runtime_ok"] is False  # remote embed role not probe-verified
+
+
+def test_probe_uses_overridden_ollama_host(monkeypatch, tmp_path):
+    # Regression: with an ollama_host override + probe, the embedding/completion
+    # provider must target that host (api_base), not env/default localhost.
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.delenv("OPENBIRD_OLLAMA_HOST", raising=False)
+
+    class _FakeLiteLLM:
+        def __init__(self):
+            self.embedding_api_base = None
+
+        def embedding(self, *, model, **kw):
+            # `input` arrives via **kw to avoid shadowing the builtin (Ruff A006).
+            self.embedding_api_base = kw.get("api_base")
+            texts = kw.get("input", [])
+            return {"data": [{"embedding": [0.0] * 768} for _ in texts]}
+
+        def completion(self, *, model, messages, **kw):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    fake = _FakeLiteLLM()
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+
+    s = Settings(data_dir=tmp_path, embed_dim=768)  # default ollama models
+    # 127.0.0.1 stays loopback (no cloud opt-in needed) but is an explicit override.
+    run_preflight(
+        s,
+        ollama_host="http://127.0.0.1:9988",
+        probe_ollama=False,
+        probe_encryption=False,
+        probe_embedding=True,  # uses the real default provider factory
+    )
+    assert fake.embedding_api_base == "http://127.0.0.1:9988"
+
+
+def test_mixed_route_ready_when_both_ollama_and_embed_probe_ok(tmp_path):
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="ollama/llama3.2",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("llama3.2:latest",)),
+        db_opener=plaintext_handle_opener(),
+        provider_factory=lambda settings: FakeEmbedProvider(settings, dim=768),
+        probe_embedding=True,
+    )
+    assert report["ollama"]["reachable"] is True
+    assert report["embedding"]["dim_ok"] is True
+    assert report["runtime_ok"] is True
+
+
+def test_cloud_chat_local_embed_needs_completion_probe(tmp_path):
+    # Remote CHAT + local Ollama embed, opted in. A successful EMBED probe must
+    # NOT satisfy the remote chat role; without a completion probe -> not READY.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="gpt-4o-mini",
+        embed_model="ollama/nomic-embed-text",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("nomic-embed-text:latest",)),
+        db_opener=plaintext_handle_opener(),
+        provider_factory=lambda settings: FakeEmbedProvider(settings, dim=768),
+        probe_embedding=False,  # no probes run at all
+    )
+    assert report["cloud"]["remote_models"] == {"llm": "gpt-4o-mini"}
+    assert report["runtime_ok"] is False
+
+
+def test_cloud_chat_ready_when_completion_probe_ok(tmp_path):
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="gpt-4o-mini",
+        embed_model="ollama/nomic-embed-text",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("nomic-embed-text:latest",)),
+        db_opener=plaintext_handle_opener(),
+        provider_factory=lambda settings: FakeEmbedProvider(settings, dim=768),
+        probe_embedding=True,  # runs both embed + completion probes
+    )
+    assert report["completion"]["ok"] is True
+    assert report["runtime_ok"] is True
+
+
+def test_preflight_required_models_derived_from_settings(tmp_path):
+    # Custom Ollama models -> preflight must check THOSE, not the hard defaults.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="ollama/mistral",
+        embed_model="ollama/mxbai-embed-large",
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("mistral:latest", "mxbai-embed-large:latest")),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert set(report["ollama"]["required_models"]) == {"mistral", "mxbai-embed-large"}
+    assert report["ollama"]["missing_models"] == []
+    assert report["runtime_ok"] is True
+
+
+def test_ollama_host_override_classified_as_remote(tmp_path):
+    # Regression: an explicit non-loopback ollama_host override must be reflected
+    # in cloud classification (not just the probe), or it could look local.
+    s = Settings(data_dir=tmp_path, embed_dim=768)  # default ollama models
+    report = run_preflight(
+        s,
+        ollama_host="http://10.0.0.5:11434",
+        http_get=make_http_get(),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["host"] == "http://10.0.0.5:11434"
+    assert report["cloud"]["active"] is True
+    assert report["cloud"]["blocked"] is True  # no OPENBIRD_ALLOW_CLOUD
+    assert report["runtime_ok"] is False
+
+
+def test_mlx_backend_not_runtime_ready(tmp_path):
+    # The mlx backend is reserved (factory raises NotImplementedError), so even a
+    # local mlx route with sqlite available must NOT report READY.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_backend="mlx",
+        llm_model="mlx/Qwen",
+        embed_model="mlx/embed",
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(raise_exc=ConnectionRefusedError()),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["backend"]["supported"] is False
+    assert report["cloud"]["active"] is False
+    assert report["runtime_ok"] is False
+
+
+def test_mlx_model_strings_under_litellm_not_ready(tmp_path):
+    # mlx/* model strings with the default litellm backend are unrunnable (litellm
+    # cannot serve them); preflight must not report READY.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="mlx/Qwen",
+        embed_model="mlx/embed",
+    )
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["backend"]["supported"] is False
+    assert report["runtime_ok"] is False
+
+
+def test_litellm_backend_supported(tmp_path):
+    s = Settings(data_dir=tmp_path, embed_dim=768)  # default litellm
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["backend"]["supported"] is True
+    assert report["runtime_ok"] is True
+
+
+def test_cloud_only_route_reports_no_ollama_requirements(tmp_path):
+    # A cloud-only route must not report default Ollama models as required/missing.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=1536,
+        llm_model="gpt-4o-mini",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["cloud"]["uses_local_ollama"] is False
+    assert report["ollama"]["required_models"] == []
+    assert report["ollama"]["missing_models"] == []
+    # Cloud-only route: the Ollama probe is skipped and reported not-applicable
+    # (no misleading "down" for a service the route never uses).
+    assert report["ollama"]["reachable"] == "n/a"
+
+
+def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
+    # M1 regression: preflight host == runtime provider api_base host. Use a
+    # loopback custom host so the default ollama/* route stays local (the host is
+    # threaded the same way regardless of loopback/remote).
+    monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://127.0.0.1:4242")
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    s = Settings(data_dir=tmp_path, embed_dim=768)
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    preflight_host = report["ollama"]["host"]
+
+    # Build the runtime provider and capture the api_base it would use.
+    from openbird.llm.provider import LLMProvider
+
+    def _fake_embedding(self, *, model, **kw):
+        # Pop the texts out of **kw (rather than an `input=` param) so we don't
+        # shadow the `input` builtin (Ruff A006) while keeping embedding_kwargs
+        # to the remaining kwargs only (e.g. api_base) — matching the assertion.
+        texts = kw.pop("input")
+        self.embedding_kwargs = kw
+        return {"data": [{"embedding": [0.0] * 768} for _ in texts]}
+
+    fake = type(
+        "F", (), {"embedding_kwargs": None, "embedding": _fake_embedding}
+    )()
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    LLMProvider(s).embed(["x"])
+    assert preflight_host == "http://127.0.0.1:4242"
+    assert fake.embedding_kwargs["api_base"] == preflight_host
+
+
+def test_preflight_preserves_ollama_model_tag(tmp_path):
+    # A configured tag (llama3.2:3b) must be checked EXACTLY: a server that only
+    # has llama3.2:latest must NOT satisfy it (preflight green != runtime works).
+    s = Settings(data_dir=tmp_path, embed_dim=768, llm_model="ollama/llama3.2:3b")
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("llama3.2:latest", "nomic-embed-text:latest")),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert "llama3.2:3b" in report["ollama"]["required_models"]
+    assert "llama3.2:3b" in report["ollama"]["missing_models"]
+    assert report["runtime_ok"] is False
+
+
+def test_preflight_tagged_model_present_is_ok(tmp_path):
+    s = Settings(data_dir=tmp_path, embed_dim=768, llm_model="ollama/llama3.2:3b")
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("llama3.2:3b", "nomic-embed-text:latest")),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["missing_models"] == []
+    assert report["runtime_ok"] is True
