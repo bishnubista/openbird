@@ -22,11 +22,15 @@ from openbird.config import Settings, get_settings
 from openbird.llm.base import LLMProviderProtocol
 from openbird.llm.provider import create_llm_provider
 from openbird.memory import ingest
+from openbird.memory.migrations import ensure_schema_version
 from openbird.memory.search import mmr, rrf
 from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
 from openbird.types import Observation, SearchHit
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+# Wait up to this long on a busy lock for the :memory: branch too (B3); on-disk
+# connections get this from storage.crypto.
+_BUSY_TIMEOUT_MS = 5000
 
 
 def _serialize_f32(vector: list[float]) -> bytes:
@@ -64,10 +68,24 @@ class MemoryStore:
             self.conn.enable_load_extension(True)
             sqlite_vec.load(self.conn)
             self.conn.enable_load_extension(False)
+            # Queue on a busy lock instead of erroring immediately (B3). Harmless
+            # for a single-connection in-memory DB; keeps behavior uniform.
+            self.conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
         else:
             self.conn = open_encrypted_db(resolved, settings=self.settings)
 
         self.conn.row_factory = mapping_row_factory
+        # Take explicit control of transaction boundaries (B3/H8): we use
+        # BEGIN IMMEDIATE / COMMIT / ROLLBACK ourselves so the embedding network
+        # call happens OUTSIDE the write lock and multi-statement deletes are
+        # atomic. autocommit (isolation_level=None) disables sqlite3's implicit
+        # BEGIN-before-DML so a stray write can't silently open a long txn.
+        try:
+            self.conn.isolation_level = None
+        except AttributeError:
+            # sqlcipher3's dbapi2 connection also exposes isolation_level; if a
+            # backend doesn't, fall back to manual COMMIT (still correct).
+            pass
         self.conn.execute("PRAGMA foreign_keys = ON")
         try:
             self._apply_schema()
@@ -81,14 +99,34 @@ class MemoryStore:
     # -- setup ----------------------------------------------------------------
 
     def _apply_schema(self) -> None:
-        """Apply schema.sql and create the dimension-specific vec table."""
+        """Apply schema.sql, create the vec table, and reconcile the version (H1).
+
+        ``schema.sql`` is idempotent (CREATE ... IF NOT EXISTS), so applying it on
+        every open is safe for both fresh and existing DBs. After the baseline
+        shape exists we run :func:`ensure_schema_version`, which stamps
+        ``PRAGMA user_version`` and runs any pending forward migrations — and
+        refuses to open a DB written by a newer build.
+        """
         sql = _SCHEMA_PATH.read_text(encoding="utf-8")
+        # executescript runs in autocommit (it issues its own COMMIT); fine since
+        # we manage explicit transactions elsewhere.
         self.conn.executescript(sql)
         self.conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0("
             f"chunk_rowid INTEGER PRIMARY KEY, embedding FLOAT[{self.embed_dim}])"
         )
-        self.conn.commit()
+        ensure_schema_version(self.conn)
+
+    def _begin(self) -> None:
+        """Open a write transaction, grabbing the writer lock up front (B3).
+
+        ``BEGIN IMMEDIATE`` acquires the RESERVED lock immediately rather than
+        lazily on first write, so the writer never has to upgrade a read lock
+        mid-transaction (which is the classic SQLite deadlock/`database is
+        locked` source). Combined with ``isolation_level = None`` this gives us
+        precise, short write windows.
+        """
+        self.conn.execute("BEGIN IMMEDIATE")
 
     def _record_cohort(self) -> None:
         """Persist the embedding cohort key; refuse mixing incompatible cohorts."""
@@ -101,7 +139,6 @@ class MemoryStore:
                 "INSERT INTO embedding_meta(key, value) VALUES ('cohort_key', ?)",
                 (cohort,),
             )
-            self.conn.commit()
         elif row["value"] != cohort:
             # Tolerate a cohort change ONLY when the store holds no vectors (e.g.
             # after a full purge): there is nothing to mix, so adopt the new
@@ -123,7 +160,6 @@ class MemoryStore:
                     "UPDATE embedding_meta SET value = ? WHERE key = 'cohort_key'",
                     (cohort,),
                 )
-                self.conn.commit()
             else:
                 raise ValueError(
                     f"Embedding cohort mismatch: store was built with {row['value']!r} "
@@ -155,24 +191,53 @@ class MemoryStore:
         norm = ingest.normalize(text)
         chunks = ingest.chunk(text)
 
-        cur = self.conn
+        # -- Phase 1: embed OUTSIDE any write transaction (B3) -------------------
+        # Previously provider.embed() ran INSIDE the write txn, so a slow/wedged
+        # Ollama held the single WAL writer slot across a network round-trip and a
+        # concurrent reader/writer hit `database is locked`. We now (a) read which
+        # chunk_hashes are already present (no lock held), then (b) embed only the
+        # genuinely-new chunk texts with NO write lock held, and finally (c) open a
+        # short INSERT-only transaction.
+        chunk_hashes = [ingest.content_hash(ctext) for _span, ctext in chunks]
+        # Map each unique new chunk_hash -> its text (dedup within THIS document).
+        unique_new: dict[str, str] = {}
+        for (_span, ctext), chash in zip(chunks, chunk_hashes):
+            if chash in unique_new:
+                continue
+            existing = self.conn.execute(
+                "SELECT 1 FROM chunks WHERE chunk_hash = ? LIMIT 1", (chash,)
+            ).fetchone()
+            if existing is None:
+                unique_new[chash] = ctext
+
+        embeddings: dict[str, bytes] = {}
+        if unique_new:
+            new_hashes = list(unique_new)
+            vectors = self.provider.embed([unique_new[h] for h in new_hashes])
+            embeddings = {h: _serialize_f32(v) for h, v in zip(new_hashes, vectors)}
+
+        # -- Phase 2: short INSERT-only write transaction -----------------------
         try:
-            return self._add_observation_txn(
-                blob_hash, norm, chunks, ts,
+            self._begin()
+            obs = self._write_observation(
+                blob_hash, norm, chunks, chunk_hashes, embeddings, ts,
                 app=app, window=window, url=url, session_id=session_id, source=source,
             )
+            self.conn.commit()
+            return obs
         except Exception:
-            # Atomicity: embeddings are generated mid-transaction; if provider.embed
-            # (or any insert) raises, roll back so we never leave blobs/observations/
-            # chunks/FTS rows without their vectors (or a dangling open transaction).
-            cur.rollback()
+            # Roll back so we never leave blobs/observations/chunks/FTS rows
+            # without their vectors (or a dangling open transaction).
+            self.conn.rollback()
             raise
 
-    def _add_observation_txn(
+    def _write_observation(
         self,
         blob_hash: str,
         norm: str,
         chunks: list,
+        chunk_hashes: list[str],
+        embeddings: dict[str, bytes],
         ts: float,
         *,
         app: str | None,
@@ -181,7 +246,14 @@ class MemoryStore:
         session_id: str | None,
         source: str,
     ) -> Observation:
-        """Body of :meth:`add_observation`, run inside a rollback-guarded txn."""
+        """Insert blob/observation/chunks/index rows. Runs inside an open txn.
+
+        ``embeddings`` maps chunk_hash -> packed vector for chunks that did NOT
+        exist at probe time. A concurrent writer may have created a chunk between
+        the probe and this transaction (TOCTOU); ``INSERT OR IGNORE`` + a rowcount
+        check makes us insert the FTS/vec rows ONLY for chunks we actually create,
+        so a chunk is never double-embedded or double-indexed.
+        """
         cur = self.conn
 
         # 1) Blob (deduped).
@@ -201,41 +273,40 @@ class MemoryStore:
         # 3) Chunks: deduped GLOBALLY by chunk_hash (normalized chunk text), so an
         #    identical chunk recurring across different windows is stored, embedded,
         #    and indexed exactly once. blob_chunks records the occurrence + span.
-        new_chunk_texts: list[str] = []
-        new_chunk_rowids: list[int] = []
-        for (start, end), ctext in chunks:
-            chunk_hash = ingest.content_hash(ctext)
-            # Ensure the (deduped) chunk row exists BEFORE the mapping that FKs it.
-            existing = cur.execute(
-                "SELECT rowid_int FROM chunks WHERE chunk_hash = ?", (chunk_hash,)
-            ).fetchone()
-            if existing is None:
+        for ((start, end), ctext), chunk_hash in zip(chunks, chunk_hashes):
+            # Atomically create-or-skip the chunk row. rowcount tells us whether
+            # WE inserted it (1) or it already existed / a concurrent writer won (0).
+            ins = cur.execute(
+                "INSERT OR IGNORE INTO chunks(chunk_hash, text) VALUES (?, ?)",
+                (chunk_hash, ctext),
+            )
+            if ins.rowcount == 1:
+                # We created it: assign the stable integer key and index it.
                 rowid_int = cur.execute(
-                    "INSERT INTO chunks(chunk_hash, text) VALUES (?, ?)", (chunk_hash, ctext)
-                ).lastrowid
+                    "SELECT rowid FROM chunks WHERE chunk_hash = ?", (chunk_hash,)
+                ).fetchone()["rowid"]
                 cur.execute(
-                    "UPDATE chunks SET rowid_int = ? WHERE chunk_hash = ?", (rowid_int, chunk_hash)
+                    "UPDATE chunks SET rowid_int = ? WHERE chunk_hash = ?",
+                    (rowid_int, chunk_hash),
                 )
                 cur.execute(
                     "INSERT INTO fts_chunks(rowid, text) VALUES (?, ?)", (rowid_int, ctext)
                 )
-                new_chunk_texts.append(ctext)
-                new_chunk_rowids.append(int(rowid_int))
+                vector = embeddings.get(chunk_hash)
+                if vector is None:
+                    # Defensive: a chunk we created but didn't pre-embed (e.g. it
+                    # appeared to exist at probe time then vanished). Embed it now;
+                    # this is the rare slow path, not the common one.
+                    vector = _serialize_f32(self.provider.embed([ctext])[0])
+                cur.execute(
+                    "INSERT INTO vec_chunks(chunk_rowid, embedding) VALUES (?, ?)",
+                    (int(rowid_int), vector),
+                )
             cur.execute(
                 "INSERT OR IGNORE INTO blob_chunks(content_hash, chunk_hash, span_start, span_end)"
                 " VALUES (?, ?, ?, ?)",
                 (blob_hash, chunk_hash, start, end),
             )
-
-        if new_chunk_texts:
-            vectors = self.provider.embed(new_chunk_texts)
-            for rowid_int, vector in zip(new_chunk_rowids, vectors):
-                cur.execute(
-                    "INSERT INTO vec_chunks(chunk_rowid, embedding) VALUES (?, ?)",
-                    (int(rowid_int), _serialize_f32(vector)),
-                )
-
-        cur.commit()
 
         return Observation(
             id=obs_id,
@@ -394,68 +465,170 @@ class MemoryStore:
 
     # -- delete ---------------------------------------------------------------
 
-    def delete(self, *, since_ts: float | None = None, all: bool = False) -> int:
-        """Delete observations and cascade-clean orphaned content.
+    def delete(
+        self,
+        *,
+        since_ts: float | None = None,
+        before_ts: float | None = None,
+        all: bool = False,
+    ) -> int:
+        """Delete observations and cascade-clean orphaned content (H8).
 
-        With ``all=True`` removes everything. With ``since_ts`` removes
-        observations at/after that timestamp. After removing observations, any
-        blob with no remaining observations is deleted along with its chunks,
-        FTS entries, and vectors. Returns the number of observations deleted.
+        Selectors (give exactly one):
+          * ``all=True``        — remove everything.
+          * ``since_ts``        — remove observations at/after that timestamp.
+          * ``before_ts``       — remove observations strictly before that
+            timestamp (retention pruning; see :meth:`prune`).
 
-        Exactly one of ``all`` / ``since_ts`` should be given.
+        After removing observations, any blob with no remaining observations is
+        deleted along with its chunks, FTS entries, and vectors. The whole
+        operation runs inside a single ``BEGIN IMMEDIATE`` transaction with
+        rollback-on-error, so a crash or mid-delete failure cannot leave orphaned
+        chunks/fts_chunks/vec_chunks (previously it issued many DELETEs + one
+        commit with no rollback guard). Returns the number of observations
+        deleted.
         """
+        selectors = [all, since_ts is not None, before_ts is not None]
+        if sum(1 for s in selectors if s) != 1:
+            raise ValueError(
+                "delete() requires exactly one of all=True, since_ts, or before_ts"
+            )
+
         cur = self.conn
-        if all:
-            count = cur.execute("SELECT COUNT(*) AS c FROM observations").fetchone()["c"]
-            cur.execute("DELETE FROM observations")
-            cur.execute("DELETE FROM blob_chunks")
-            cur.execute("DELETE FROM chunks")
-            cur.execute("DELETE FROM content_blobs")
-            cur.execute("DELETE FROM fts_chunks")
-            cur.execute("DELETE FROM vec_chunks")
-            # NOTE: we deliberately KEEP embedding_meta. With vec_chunks now empty,
-            # a reopen under a different provider is detected as a cohort mismatch
-            # on an empty store, which _record_cohort tolerates by rebuilding the
-            # vector table at the new dimension and adopting the new cohort. Clearing
-            # it here would instead look like a fresh store and skip that rebuild.
+        try:
+            self._begin()
+            if all:
+                count = cur.execute(
+                    "SELECT COUNT(*) AS c FROM observations"
+                ).fetchone()["c"]
+                cur.execute("DELETE FROM observations")
+                cur.execute("DELETE FROM blob_chunks")
+                cur.execute("DELETE FROM chunks")
+                cur.execute("DELETE FROM content_blobs")
+                cur.execute("DELETE FROM fts_chunks")
+                cur.execute("DELETE FROM vec_chunks")
+                # NOTE: we deliberately KEEP embedding_meta. With vec_chunks now
+                # empty, a reopen under a different provider is detected as a
+                # cohort mismatch on an empty store, which _record_cohort tolerates
+                # by rebuilding the vector table at the new dimension and adopting
+                # the new cohort. Clearing it here would look like a fresh store
+                # and skip that rebuild.
+                cur.commit()
+                return int(count)
+
+            if since_ts is not None:
+                where, param = "ts >= ?", since_ts
+            else:
+                where, param = "ts < ?", before_ts
+
+            victims = cur.execute(
+                f"SELECT id, content_hash FROM observations WHERE {where}", (param,)
+            ).fetchall()
+            count = len(victims)
+            affected_hashes = {r["content_hash"] for r in victims}
+            cur.execute(f"DELETE FROM observations WHERE {where}", (param,))
+
+            # Drop blobs now orphaned (no remaining observations). FK ON DELETE
+            # CASCADE removes their blob_chunks mappings.
+            for h in affected_hashes:
+                remaining = cur.execute(
+                    "SELECT 1 FROM observations WHERE content_hash = ? LIMIT 1", (h,)
+                ).fetchone()
+                if remaining is not None:
+                    continue
+                cur.execute("DELETE FROM content_blobs WHERE content_hash = ?", (h,))
+
+            # Reclaim chunks no blob references any more, plus their fts/vec entries.
+            orphans = cur.execute(
+                "SELECT rowid_int FROM chunks WHERE rowid_int IS NOT NULL "
+                "AND chunk_hash NOT IN (SELECT chunk_hash FROM blob_chunks)"
+            ).fetchall()
+            for r in orphans:
+                rid = r["rowid_int"]
+                cur.execute("DELETE FROM fts_chunks WHERE rowid = ?", (rid,))
+                cur.execute("DELETE FROM vec_chunks WHERE chunk_rowid = ?", (rid,))
+            cur.execute(
+                "DELETE FROM chunks WHERE chunk_hash NOT IN "
+                "(SELECT chunk_hash FROM blob_chunks)"
+            )
+
             cur.commit()
-            return int(count)
+            return count
+        except Exception:
+            cur.rollback()
+            raise
 
-        if since_ts is None:
-            raise ValueError("delete() requires either all=True or since_ts")
+    # -- retention / maintenance (H10) ----------------------------------------
 
-        victims = cur.execute(
-            "SELECT id, content_hash FROM observations WHERE ts >= ?", (since_ts,)
-        ).fetchall()
-        count = len(victims)
-        affected_hashes = {r["content_hash"] for r in victims}
-        cur.execute("DELETE FROM observations WHERE ts >= ?", (since_ts,))
+    def prune(
+        self, *, older_than_ts: float | None = None, older_than_days: float | None = None
+    ) -> int:
+        """Delete observations older than a cutoff (retention) and cascade-clean.
 
-        # Drop blobs now orphaned (no remaining observations). FK ON DELETE CASCADE
-        # removes their blob_chunks mappings.
-        for h in affected_hashes:
-            remaining = cur.execute(
-                "SELECT 1 FROM observations WHERE content_hash = ? LIMIT 1", (h,)
-            ).fetchone()
-            if remaining is not None:
-                continue
-            cur.execute("DELETE FROM content_blobs WHERE content_hash = ?", (h,))
+        Provide either an absolute ``older_than_ts`` (delete observations with
+        ``ts < older_than_ts``) or ``older_than_days`` (cutoff = now - N days).
+        Falls back to ``settings.retention_days`` when neither is given and that
+        setting is > 0. Returns the number of observations deleted. Storage space
+        is only reclaimed to the OS after :meth:`vacuum`.
+        """
+        if older_than_ts is None:
+            days = older_than_days
+            if days is None:
+                days = self.settings.retention_days
+            if not days or days <= 0:
+                raise ValueError(
+                    "prune() needs older_than_ts, older_than_days, or a positive "
+                    "settings.retention_days"
+                )
+            older_than_ts = time.time() - float(days) * 86400.0
+        return self.delete(before_ts=older_than_ts)
 
-        # Reclaim chunks no blob references any more, plus their fts/vec entries.
-        orphans = cur.execute(
-            "SELECT rowid_int FROM chunks WHERE rowid_int IS NOT NULL "
-            "AND chunk_hash NOT IN (SELECT chunk_hash FROM blob_chunks)"
-        ).fetchall()
-        for r in orphans:
-            rid = r["rowid_int"]
-            cur.execute("DELETE FROM fts_chunks WHERE rowid = ?", (rid,))
-            cur.execute("DELETE FROM vec_chunks WHERE chunk_rowid = ?", (rid,))
-        cur.execute(
-            "DELETE FROM chunks WHERE chunk_hash NOT IN (SELECT chunk_hash FROM blob_chunks)"
-        )
+    def vacuum(self) -> dict:
+        """Reclaim space: checkpoint the WAL and run VACUUM. Returns reclaim stats.
 
-        cur.commit()
-        return count
+        Deletes only mark pages free in the SQLite file; the file does not shrink
+        until ``VACUUM`` rewrites it (this DB uses ``auto_vacuum=NONE``). We first
+        ``wal_checkpoint(TRUNCATE)`` to fold the WAL back and truncate it, then
+        ``VACUUM`` to compact the main file. Returns page/freelist counts before
+        and after so callers can show the reclaim. No-op-safe on ``:memory:``.
+
+        VACUUM cannot run inside a transaction; this method must not be called
+        with an open txn (it manages its own autocommit statements).
+        """
+        def _pragma_int(name: str) -> int:
+            row = self.conn.execute(f"PRAGMA {name}").fetchone()
+            if row is None:
+                return 0
+            # row_factory yields a dict; the pragma's column name varies across
+            # SQLite builds, so read the single value regardless of its key.
+            value = next(iter(row.values())) if isinstance(row, dict) else row[0]
+            return int(value) if value is not None else 0
+
+        page_size = _pragma_int("page_size")
+
+        def _gauge() -> tuple[int, int]:
+            return _pragma_int("page_count"), _pragma_int("freelist_count")
+
+        before_pages, before_free = _gauge()
+        # Best-effort WAL checkpoint+truncate (no-op on non-WAL / :memory:).
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
+        # VACUUM requires autocommit (no open transaction). isolation_level is
+        # None for this store, so a bare execute runs outside any txn.
+        self.conn.execute("VACUUM")
+        after_pages, after_free = _gauge()
+        return {
+            "page_size": page_size,
+            "pages_before": before_pages,
+            "pages_after": after_pages,
+            "freelist_before": before_free,
+            "freelist_after": after_free,
+            "bytes_before": before_pages * page_size,
+            "bytes_after": after_pages * page_size,
+            "bytes_reclaimed": (before_pages - after_pages) * page_size,
+        }
 
     # -- stats ----------------------------------------------------------------
 
