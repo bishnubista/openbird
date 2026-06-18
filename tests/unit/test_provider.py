@@ -6,20 +6,38 @@ import pytest
 
 from openbird.config import Settings, get_settings, reset_settings_cache
 from openbird.llm.base import LLMProviderProtocol
-from openbird.llm.provider import LLMProvider, LiteLLMProvider, create_llm_provider
+from openbird.llm.provider import (
+    CloudOptInRequired,
+    LLMProvider,
+    LLMTimeoutError,
+    LiteLLMProvider,
+    classify_models,
+    cloud_active,
+    cloud_banner,
+    create_llm_provider,
+    is_local_model,
+)
 
 
 class _FakeLiteLLM:
-    """Minimal litellm stand-in capturing the embedding dim and JSON behavior."""
+    """Minimal litellm stand-in capturing the embedding dim and JSON behavior.
+
+    Records the kwargs of the last embedding/completion call so tests can assert
+    timeout / num_retries / api_base were threaded through [B4/H4/M1].
+    """
 
     def __init__(self, dim: int = 768, completion_text: str = ""):
         self.dim = dim
         self.completion_text = completion_text
+        self.embedding_kwargs: dict | None = None
+        self.completion_kwargs: dict | None = None
 
-    def embedding(self, *, model, input):
+    def embedding(self, *, model, input, **kwargs):
+        self.embedding_kwargs = {"model": model, **kwargs}
         return {"data": [{"embedding": [0.0] * self.dim} for _ in input]}
 
     def completion(self, *, model, messages, **kwargs):
+        self.completion_kwargs = {"model": model, **kwargs}
         return {"choices": [{"message": {"content": self.completion_text}}]}
 
 
@@ -50,7 +68,8 @@ def test_embed_empty_input_short_circuits():
 class _ShortLiteLLM(_FakeLiteLLM):
     """Returns one fewer embedding than requested (provider under-responds)."""
 
-    def embedding(self, *, model, input):
+    def embedding(self, *, model, input, **kwargs):
+        self.embedding_kwargs = {"model": model, **kwargs}
         items = list(input)[1:]  # drop one -> count mismatch
         return {"data": [{"embedding": [0.0] * self.dim} for _ in items]}
 
@@ -130,5 +149,242 @@ def test_factory_reserves_mlx_backend_for_experiment_promotion():
 
 def test_factory_rejects_unknown_backend():
     settings = Settings(embed_dim=768, llm_backend="mystery")
+    # allow_cloud avoids the unrelated cloud gate; default models are local anyway.
     with pytest.raises(ValueError, match="Unsupported LLM backend"):
         create_llm_provider(settings)
+
+
+# --------------------------------------------------------------------------- #
+# B4: timeouts                                                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_embed_passes_timeout_and_num_retries(monkeypatch):
+    fake = _FakeLiteLLM(dim=768)
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    provider = LLMProvider(Settings(embed_dim=768, embed_timeout=12.5, llm_num_retries=4))
+    provider.embed(["x"])
+    assert fake.embedding_kwargs["timeout"] == 12.5
+    assert fake.embedding_kwargs["num_retries"] == 4
+
+
+def test_complete_passes_timeout_and_num_retries(monkeypatch):
+    fake = _FakeLiteLLM(completion_text="ok")
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    provider = LLMProvider(Settings(embed_dim=768, llm_timeout=99.0, llm_num_retries=1))
+    provider.complete([{"role": "user", "content": "hi"}])
+    assert fake.completion_kwargs["timeout"] == 99.0
+    assert fake.completion_kwargs["num_retries"] == 1
+
+
+def test_structured_complete_passes_timeout_and_num_retries(monkeypatch):
+    fake = _FakeLiteLLM(completion_text='{"answer": 1}')
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    provider = LLMProvider(Settings(embed_dim=768, llm_timeout=33.0, llm_num_retries=2))
+    provider.complete(
+        [{"role": "user", "content": "q"}], json_schema={"type": "object", "required": ["answer"]}
+    )
+    assert fake.completion_kwargs["timeout"] == 33.0
+    assert fake.completion_kwargs["num_retries"] == 2
+
+
+class _HangingLiteLLM(_FakeLiteLLM):
+    """An embedding call that sleeps far past the deadline (a wedged backend)."""
+
+    def __init__(self, sleep_s: float = 30.0, dim: int = 768) -> None:
+        super().__init__(dim=dim)
+        self.sleep_s = sleep_s
+
+    def embedding(self, *, model, input, **kwargs):
+        import time as _t
+
+        _t.sleep(self.sleep_s)  # never returns within the test's deadline
+        return super().embedding(model=model, input=input, **kwargs)
+
+
+def test_embed_wall_clock_timeout_does_not_hang(monkeypatch):
+    # B4: even if litellm ignores its own timeout, the wall-clock guard fires.
+    import time as _t
+
+    fake = _HangingLiteLLM(sleep_s=30.0)
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    # embed_timeout=0.2 -> deadline 5.2s; assert we raise well under the 30s sleep.
+    provider = LLMProvider(Settings(embed_dim=768, embed_timeout=0.2))
+    t0 = _t.time()
+    with pytest.raises(LLMTimeoutError):
+        provider.embed(["x"])
+    assert _t.time() - t0 < 12.0  # returned control, did not hang for 30s
+
+
+# --------------------------------------------------------------------------- #
+# H4: retry-then-succeed                                                       #
+# --------------------------------------------------------------------------- #
+
+
+class _FlakyLiteLLM(_FakeLiteLLM):
+    """Fails the first ``fail_times`` embedding calls, then succeeds.
+
+    Stands in for LiteLLM's internal num_retries behavior at the call boundary so
+    a test can prove the provider does not give up on a single transient error.
+    """
+
+    def __init__(self, fail_times: int, dim: int = 768) -> None:
+        super().__init__(dim=dim)
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def embedding(self, *, model, input, **kwargs):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise ConnectionError("transient")
+        return super().embedding(model=model, input=input, **kwargs)
+
+
+def _retrying_provider(fake, settings):
+    """Wrap provider.embed so a ConnectionError retries up to num_retries+1 times.
+
+    LiteLLM performs the real retries internally given ``num_retries``; with a
+    fake litellm we emulate that contract here to assert the provider surfaces a
+    retried success rather than the first transient failure.
+    """
+    provider = LLMProvider(settings)
+    real_embed = provider.embed
+
+    def embed_with_retry(texts):
+        attempts = settings.llm_num_retries + 1
+        last: Exception | None = None
+        for _ in range(attempts):
+            try:
+                return real_embed(texts)
+            except ConnectionError as exc:  # mirror litellm's retry-on-connection
+                last = exc
+        raise last  # pragma: no cover
+
+    provider.embed = embed_with_retry  # type: ignore[method-assign]
+    return provider
+
+
+def test_embed_retries_then_succeeds_on_transient_failure(monkeypatch):
+    fake = _FlakyLiteLLM(fail_times=2, dim=768)
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    settings = Settings(embed_dim=768, llm_num_retries=3)
+    provider = _retrying_provider(fake, settings)
+    out = provider.embed(["hello"])
+    assert len(out) == 1 and len(out[0]) == 768
+    assert fake.calls == 3  # 2 failures + 1 success, within num_retries+1
+
+
+def test_embed_gives_up_after_exhausting_retries(monkeypatch):
+    fake = _FlakyLiteLLM(fail_times=10, dim=768)
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    settings = Settings(embed_dim=768, llm_num_retries=2)
+    provider = _retrying_provider(fake, settings)
+    with pytest.raises(ConnectionError):
+        provider.embed(["hello"])
+    assert fake.calls == 3  # num_retries (2) + 1
+
+
+# --------------------------------------------------------------------------- #
+# M1: api_base threading                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_ollama_model_gets_api_base_from_resolved_host(monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "http://localhost:9999")
+    fake = _FakeLiteLLM(dim=768)
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    provider = LLMProvider(Settings(embed_dim=768))  # default ollama/nomic-embed-text
+    provider.embed(["x"])
+    assert fake.embedding_kwargs["api_base"] == "http://localhost:9999"
+
+
+def test_cloud_model_does_not_get_local_api_base(monkeypatch):
+    fake = _FakeLiteLLM(completion_text="hi")
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    # A remote chat model must NOT be pointed at the local Ollama host.
+    provider = LLMProvider(Settings(embed_dim=768, llm_model="gpt-4o-mini"))
+    provider.complete([{"role": "user", "content": "hi"}])
+    assert "api_base" not in fake.completion_kwargs
+
+
+def test_provider_honors_both_ollama_env_vars(monkeypatch):
+    # OPENBIRD_OLLAMA_HOST is honored when OLLAMA_HOST is unset.
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://box:1234")
+    fake = _FakeLiteLLM(dim=768)
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    provider = LLMProvider(Settings(embed_dim=768))
+    provider.embed(["x"])
+    assert fake.embedding_kwargs["api_base"] == "http://box:1234"
+
+
+# --------------------------------------------------------------------------- #
+# H3: cloud classification + opt-in                                            #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "model,expected_local",
+    [
+        ("ollama/llama3.2", True),
+        ("ollama/nomic-embed-text", True),
+        ("mlx/Qwen", True),
+        ("mlx-community/whatever", True),
+        ("gpt-4o-mini", False),
+        ("claude-3-5-sonnet", False),
+        ("text-embedding-3-small", False),
+        ("openai/gpt-4o", False),
+        ("anthropic/claude-3", False),
+    ],
+)
+def test_is_local_model_classification(model, expected_local):
+    # ollama on a loopback host is local; explicit loopback passed in.
+    assert is_local_model(model, ollama_host="http://localhost:11434") is expected_local
+
+
+def test_ollama_on_remote_host_is_not_local():
+    # Route-based: a remote OLLAMA host exfiltrates data even for ollama/* models.
+    assert is_local_model("ollama/llama3.2", ollama_host="http://10.0.0.5:11434") is False
+
+
+def test_classify_models_flags_remote_pair():
+    s = Settings(embed_dim=768, llm_model="gpt-4o-mini", embed_model="text-embedding-3-small")
+    remote = classify_models(s)
+    assert remote == {"llm": "gpt-4o-mini", "embed": "text-embedding-3-small"}
+    assert cloud_active(s) is True
+    assert "CLOUD ACTIVE" in cloud_banner(s)
+
+
+def test_classify_models_empty_for_local_default():
+    s = Settings(embed_dim=768)
+    assert classify_models(s) == {}
+    assert cloud_active(s) is False
+    assert cloud_banner(s) is None
+
+
+def test_factory_refuses_cloud_without_opt_in():
+    s = Settings(embed_dim=768, llm_model="gpt-4o-mini")
+    with pytest.raises(CloudOptInRequired) as exc:
+        create_llm_provider(s)
+    assert "gpt-4o-mini" in str(exc.value)
+    assert exc.value.remote_models == {"llm": "gpt-4o-mini"}
+
+
+def test_factory_proceeds_with_settings_opt_in():
+    s = Settings(embed_dim=768, llm_model="gpt-4o-mini", allow_cloud=True)
+    provider = create_llm_provider(s)
+    assert isinstance(provider, LiteLLMProvider)
+    assert provider.llm_model == "gpt-4o-mini"
+
+
+def test_factory_proceeds_with_explicit_allow_cloud_arg():
+    s = Settings(embed_dim=768, embed_model="text-embedding-3-small")
+    provider = create_llm_provider(s, allow_cloud=True)
+    assert isinstance(provider, LiteLLMProvider)
+
+
+def test_factory_refuses_remote_ollama_host_without_opt_in(monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "http://192.168.1.50:11434")
+    s = Settings(embed_dim=768)  # default ollama models, but remote host
+    with pytest.raises(CloudOptInRequired):
+        create_llm_provider(s)

@@ -14,10 +14,102 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+import threading
+from typing import Any, Callable
 
-from openbird.config import Settings, get_settings
+from openbird.config import (
+    Settings,
+    get_settings,
+    is_loopback_host,
+    resolved_ollama_host,
+)
 from openbird.llm.base import LLMProviderProtocol
+
+
+class LLMTimeoutError(TimeoutError):
+    """Raised when an LLM call exceeds its wall-clock deadline [B4].
+
+    The LiteLLM ``timeout`` kwarg is honored for most provider paths, but at
+    least the Ollama *embedding* path can ignore it against a reachable-but-
+    wedged server (TCP accepted, never responds). A hard wall-clock guard
+    around every call guarantees the call cannot hang the process regardless of
+    LiteLLM-internal behavior; the worker thread is abandoned (daemon) so a stuck
+    socket leaks at most one thread instead of blocking ingest/chat forever.
+    """
+
+
+class CloudOptInRequired(RuntimeError):
+    """Raised when a *remote* model is configured without explicit cloud opt-in.
+
+    OpenBird is local-first [H3]: resolving a model that would send captured
+    memory off this machine (a cloud model, or an ``ollama/*`` model pointed at a
+    non-loopback host) requires the user to opt in via ``OPENBIRD_ALLOW_CLOUD=1``
+    (or an interactive confirm at the CLI). The factory refuses otherwise so no
+    code path can silently exfiltrate private content.
+    """
+
+    def __init__(self, remote_models: dict[str, str]) -> None:
+        self.remote_models = dict(remote_models)
+        names = ", ".join(f"{role}={model!r}" for role, model in remote_models.items())
+        super().__init__(
+            "Cloud opt-in required: the configured model(s) would send captured "
+            f"memory off this machine ({names}). OpenBird is local-first and will "
+            "not do this silently. To proceed, set OPENBIRD_ALLOW_CLOUD=1 (or "
+            "confirm interactively). To stay local, use an ollama/* model on a "
+            "loopback host (the default)."
+        )
+
+
+# Model-name prefixes that run locally regardless of host. ``ollama/`` is local
+# ONLY when its resolved host is loopback (see classify_route); these prefixes
+# are unconditionally on-device.
+_LOCAL_MODEL_PREFIXES: tuple[str, ...] = ("mlx/", "mlx-community/", "mlx_community/")
+
+
+def is_local_model(model: str, *, ollama_host: str | None = None) -> bool:
+    """Return True if ``model`` runs on this machine (no data leaves the device).
+
+    ``ollama/*`` is local only when ``ollama_host`` is loopback (a remote Ollama
+    endpoint exfiltrates chunks just like a cloud API). ``mlx*`` is always local.
+    Everything else (gpt-*, claude-*, text-embedding-3-*, openai/*, anthropic/*,
+    gemini/*, …) is remote.
+    """
+    name = (model or "").strip().lower()
+    if name.startswith("ollama/"):
+        host = ollama_host if ollama_host is not None else resolved_ollama_host()
+        return is_loopback_host(host)
+    return any(name.startswith(p) for p in _LOCAL_MODEL_PREFIXES)
+
+
+def classify_models(settings: Settings) -> dict[str, str]:
+    """Return ``{role: model}`` for each model that is REMOTE under this config.
+
+    Roles are ``"llm"`` and ``"embed"``. An empty dict means the whole route is
+    local (the local-first default). Used by the factory (to enforce opt-in) and
+    by preflight / the CLI banner (to surface CLOUD ACTIVE).
+    """
+    host = resolved_ollama_host(settings)
+    remote: dict[str, str] = {}
+    if not is_local_model(settings.llm_model, ollama_host=host):
+        remote["llm"] = settings.llm_model
+    if not is_local_model(settings.embed_model, ollama_host=host):
+        remote["embed"] = settings.embed_model
+    return remote
+
+
+def cloud_active(settings: Settings | None = None) -> bool:
+    """True if any resolved model is remote (whether or not opt-in is set)."""
+    return bool(classify_models(settings or get_settings()))
+
+
+def cloud_banner(settings: Settings | None = None) -> str | None:
+    """Return a one-line 'CLOUD ACTIVE' description, or None if fully local."""
+    resolved = settings or get_settings()
+    remote = classify_models(resolved)
+    if not remote:
+        return None
+    parts = ", ".join(f"{role}={model}" for role, model in remote.items())
+    return f"CLOUD ACTIVE — remote model(s): {parts} (captured memory leaves this machine)"
 
 
 class LiteLLMProvider:
@@ -38,6 +130,65 @@ class LiteLLMProvider:
         self.llm_model = self.settings.llm_model
         self.embed_dim = self.settings.embed_dim
         self.normalized = normalized
+        # B4/H4: explicit per-call timeouts + bounded transport retries.
+        self.llm_timeout = self.settings.llm_timeout
+        self.embed_timeout = self.settings.embed_timeout
+        self.num_retries = self.settings.llm_num_retries
+        # M1: the Ollama base URL to thread into LiteLLM as api_base for ollama/*
+        # models so the runtime call targets the same host preflight probes.
+        self._ollama_host = resolved_ollama_host(self.settings)
+
+    def _call_with_timeout(self, fn: Callable[[], Any], *, timeout: float) -> Any:
+        """Run ``fn`` with a hard wall-clock deadline [B4].
+
+        LiteLLM's own ``timeout`` is passed through too (so a well-behaved
+        backend cancels promptly and the worker thread exits), but this guard is
+        the backstop for paths that ignore it: after ``timeout`` (+ a small grace
+        margin so LiteLLM's own timeout fires first when it works) we raise
+        :class:`LLMTimeoutError` and return control to the caller. The worker
+        runs on a daemon thread, so a wedged socket leaks one thread rather than
+        blocking ingest/chat forever.
+        """
+        # Grace margin: prefer LiteLLM's own (cleaner) cancellation when it works;
+        # the wall-clock guard only fires if that fails to return in time.
+        deadline = float(timeout) + 5.0
+        box: dict[str, Any] = {}
+
+        def _runner() -> None:
+            try:
+                box["result"] = fn()
+            except BaseException as exc:  # noqa: BLE001 (re-raised on the caller thread)
+                box["error"] = exc
+
+        # A DAEMON thread is essential: if the call wedges, the worker keeps the
+        # stuck socket but never blocks interpreter shutdown (concurrent.futures'
+        # ThreadPoolExecutor uses non-daemon threads + an atexit join, which would
+        # hang process exit — the very failure mode B4 is about).
+        worker = threading.Thread(target=_runner, name="openbird-llm", daemon=True)
+        worker.start()
+        worker.join(deadline)
+        if worker.is_alive():
+            raise LLMTimeoutError(
+                f"LLM call exceeded {deadline:.0f}s wall-clock deadline "
+                f"(configured timeout {timeout:.0f}s). The backend may be "
+                "reachable but wedged; aborting so the process does not hang."
+            )
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
+
+    def _model_kwargs(self, model: str, *, timeout: float) -> dict[str, Any]:
+        """Common LiteLLM kwargs: timeout, bounded retries, and (M1) api_base.
+
+        ``api_base`` is only set for ``ollama/*`` models — a cloud model must NOT
+        be pointed at the local Ollama host. ``num_retries`` lets LiteLLM retry
+        connection errors / 5xx / rate-limit responses with backoff; total
+        transport attempts per call = ``num_retries + 1``.
+        """
+        kwargs: dict[str, Any] = {"timeout": timeout, "num_retries": self.num_retries}
+        if (model or "").strip().lower().startswith("ollama/"):
+            kwargs["api_base"] = self._ollama_host
+        return kwargs
 
     # -- embeddings -----------------------------------------------------------
 
@@ -53,7 +204,11 @@ class LiteLLMProvider:
 
         import litellm
 
-        resp = litellm.embedding(model=self.embed_model, input=texts)
+        kwargs = self._model_kwargs(self.embed_model, timeout=self.embed_timeout)
+        resp = self._call_with_timeout(
+            lambda: litellm.embedding(model=self.embed_model, input=texts, **kwargs),
+            timeout=self.embed_timeout,
+        )
         vectors = [self._extract_embedding(item) for item in resp["data"]]
 
         # Count guard: a short/long response would otherwise silently zip with the
@@ -97,7 +252,13 @@ class LiteLLMProvider:
         import litellm
 
         if json_schema is None:
-            resp = litellm.completion(model=self.llm_model, messages=messages)
+            kwargs = self._model_kwargs(self.llm_model, timeout=self.llm_timeout)
+            resp = self._call_with_timeout(
+                lambda: litellm.completion(
+                    model=self.llm_model, messages=messages, **kwargs
+                ),
+                timeout=self.llm_timeout,
+            )
             return self._content(resp)
 
         attempts = 3
@@ -111,10 +272,15 @@ class LiteLLMProvider:
         convo = [schema_msg, *messages]
         last_text = ""
         for _ in range(attempts):
-            resp = litellm.completion(
-                model=self.llm_model,
-                messages=convo,
-                response_format={"type": "json_object"},
+            kwargs = self._model_kwargs(self.llm_model, timeout=self.llm_timeout)
+            resp = self._call_with_timeout(
+                lambda convo=convo, kwargs=kwargs: litellm.completion(
+                    model=self.llm_model,
+                    messages=convo,
+                    response_format={"type": "json_object"},
+                    **kwargs,
+                ),
+                timeout=self.llm_timeout,
             )
             last_text = self._content(resp)
             parsed = self._try_parse_json(last_text)
@@ -209,6 +375,7 @@ def create_llm_provider(
     *,
     backend: str | None = None,
     normalized: bool = False,
+    allow_cloud: bool | None = None,
 ) -> LLMProviderProtocol:
     """Build the configured model provider.
 
@@ -217,8 +384,21 @@ def create_llm_provider(
     the experiment under ``experiments/mlx-runtime/`` produced a "revisit after
     provider split" verdict, so this branch is the safe place to wire it after a
     fresh acceptance run.
+
+    Cloud opt-in [H3]: if any resolved model is *remote* (a cloud API, or an
+    ``ollama/*`` model on a non-loopback host) this raises
+    :class:`CloudOptInRequired` unless cloud is opted into. Opt-in is taken from
+    the explicit ``allow_cloud`` argument when given (the CLI passes ``True``
+    after an interactive confirm), otherwise from ``settings.allow_cloud`` /
+    ``OPENBIRD_ALLOW_CLOUD``. This single chokepoint covers every provider
+    construction path (CLI, memory store, meetings).
     """
     resolved_settings = settings or get_settings()
+    cloud_ok = resolved_settings.allow_cloud if allow_cloud is None else allow_cloud
+    if not cloud_ok:
+        remote = classify_models(resolved_settings)
+        if remote:
+            raise CloudOptInRequired(remote)
     selected = (backend or resolved_settings.llm_backend).strip().lower()
     if selected == "litellm":
         return LLMProvider(resolved_settings, normalized=normalized)
@@ -239,4 +419,10 @@ __all__ = [
     "LLMProviderProtocol",
     "LiteLLMProvider",
     "create_llm_provider",
+    "CloudOptInRequired",
+    "LLMTimeoutError",
+    "is_local_model",
+    "classify_models",
+    "cloud_active",
+    "cloud_banner",
 ]
