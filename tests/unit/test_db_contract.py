@@ -112,6 +112,38 @@ def test_concurrent_reader_not_blocked_by_slow_embed(tmp_path):
     assert reader_elapsed and reader_elapsed[0] < 1.0, reader_elapsed
 
 
+def test_embed_failure_writes_no_partial_state(tmp_path):
+    """If provider.embed() raises, add_observation leaves NO partial rows (B3).
+
+    Embedding now happens BEFORE the write transaction opens, so a provider
+    failure must abort with zero observations/blobs/chunks written.
+    """
+    db = str(tmp_path / "embedfail.db")
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+
+    class BoomProvider(FakeProvider):
+        def __init__(self):
+            super().__init__(embed_dim=64)
+            self.calls = 0
+
+        def embed(self, texts):
+            self.calls += 1
+            # First call is the cohort/setup-free path; fail on the real ingest.
+            raise RuntimeError("ollama exploded")
+
+    s = MemoryStore(db_path=db, settings=settings, provider=BoomProvider())
+    try:
+        with pytest.raises(RuntimeError, match="ollama exploded"):
+            s.add_observation("content that needs an embedding", source="t", ts=1.0)
+        stats = s.stats()
+        assert stats["observations"] == 0
+        assert stats["blobs"] == 0
+        assert stats["chunks"] == 0
+        assert stats["vectors"] == 0
+    finally:
+        s.close()
+
+
 def test_busy_timeout_set_on_plaintext_and_sqlcipher_paths(monkeypatch, tmp_path):
     """Every on-disk connection sets PRAGMA busy_timeout (B3)."""
     db = str(tmp_path / "bt.db")
