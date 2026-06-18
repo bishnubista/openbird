@@ -618,6 +618,13 @@ class MemoryStore:
         # VACUUM requires autocommit (no open transaction). isolation_level is
         # None for this store, so a bare execute runs outside any txn.
         self.conn.execute("VACUUM")
+        # In WAL mode VACUUM writes the compacted image into the WAL, so the main
+        # DB file is not physically truncated until the next checkpoint. Force one
+        # so `openbird data vacuum` reclaims space on disk, not just logically.
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
         after_pages, after_free = _gauge()
         return {
             "page_size": page_size,
