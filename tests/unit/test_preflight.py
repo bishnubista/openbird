@@ -808,14 +808,16 @@ def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
     # Build the runtime provider and capture the api_base it would use.
     from openbird.llm.provider import LLMProvider
 
+    def _fake_embedding(self, *, model, **kw):
+        # Pop the texts out of **kw (rather than an `input=` param) so we don't
+        # shadow the `input` builtin (Ruff A006) while keeping embedding_kwargs
+        # to the remaining kwargs only (e.g. api_base) — matching the assertion.
+        texts = kw.pop("input")
+        self.embedding_kwargs = kw
+        return {"data": [{"embedding": [0.0] * 768} for _ in texts]}
+
     fake = type(
-        "F", (), {
-            "embedding_kwargs": None,
-            "embedding": lambda self, *, model, input, **kw: (
-                setattr(self, "embedding_kwargs", kw)
-                or {"data": [{"embedding": [0.0] * 768} for _ in input]}
-            ),
-        },
+        "F", (), {"embedding_kwargs": None, "embedding": _fake_embedding}
     )()
     monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
     LLMProvider(s).embed(["x"])
