@@ -148,15 +148,21 @@ class Transcriber:
         The window's host-clock start time is preserved so downstream stitching
         and citations stay on the shared clock.
         """
-        model = self._load_model()
-        # _segment_to_pcm resamples to 16 kHz mono float32 (Whisper's required
-        # rate) regardless of the helper's capture rate (e.g. SCK's 48 kHz).
+        # Build (and cap) the PCM BEFORE loading the model: an oversized/hostile
+        # window must be rejected without paying the lazy WhisperModel
+        # construction/download/load cost. _segment_to_pcm preflights the sample
+        # count before allocating, and resamples to 16 kHz mono float32 (Whisper's
+        # required rate) regardless of the helper's capture rate (e.g. SCK 48 kHz).
         samples = _segment_to_pcm(segment)
+        # Defense in depth: the preflight inside _segment_to_pcm already enforces
+        # the cap before allocating, but re-check the realized buffer so no path
+        # can ever feed an oversized array to whisper.
         if len(samples) > _MAX_TRANSCRIBE_SAMPLES:
             raise MeetingsAudioTooLong(
                 f"transcription window has {len(samples)} samples "
                 f"(> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing to transcribe [M6]"
             )
+        model = self._load_model()
         whisper_segments, _info = model.transcribe(samples, language=None)
         text = " ".join(seg.text.strip() for seg in whisper_segments).strip()
         return TranscriptSegment(
@@ -249,6 +255,17 @@ def _segment_to_pcm(segment: SpeechSegment):
     48 kHz) to the 16 kHz Whisper expects. Returns a numpy ``float32`` array when
     numpy is present, else a plain list (keeps this importable without numpy).
     """
+    # Preflight the total input size from frame metadata BEFORE concatenating, so
+    # a mis-tuned/hostile window can't first duplicate an oversized buffer in
+    # memory and only then trip the cap [M6]. ``len(frame.samples)`` is O(1) and
+    # touches no PCM. The projected post-resample size is re-checked inside
+    # ``_resample_to_16k``; this is the cheaper, earlier gate.
+    n_in = sum(len(frame.samples) for frame in segment.frames)
+    if n_in > _MAX_TRANSCRIBE_SAMPLES:
+        raise MeetingsAudioTooLong(
+            f"transcription window has {n_in} input samples "
+            f"(> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing before concatenation [M6]"
+        )
     # Accumulate into an ``array('f')`` rather than a Python ``list`` so the
     # frames' compact float32 buffers aren't re-boxed into ~28-byte Python floats
     # while flattening a long window [M6]. ``array.extend`` of an ``array('f')``

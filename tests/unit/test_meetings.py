@@ -299,10 +299,15 @@ def test_transcribe_segment_uses_loaded_model(monkeypatch):
 
 
 def test_transcribe_segment_rejects_oversize_window(monkeypatch):
-    """[M6] A window exceeding the sample cap is refused before model.transcribe."""
+    """[M6] A window exceeding the sample cap is refused before the model loads.
+
+    The cap must fire ahead of both ``model.transcribe`` AND ``_load_model``, so an
+    oversized/hostile window never pays the lazy WhisperModel construction cost.
+    """
     import openbird.meetings.transcribe as tr
 
     transcribe_called = False
+    model_loaded = False
 
     class _FakeModel:
         def transcribe(self, audio, language=None):
@@ -310,9 +315,14 @@ def test_transcribe_segment_rejects_oversize_window(monkeypatch):
             transcribe_called = True
             return ([], {})
 
+    def _fake_load():
+        nonlocal model_loaded
+        model_loaded = True
+        return _FakeModel()
+
     t = Transcriber()
     monkeypatch.setattr(tr, "whisper_available", lambda: True)
-    monkeypatch.setattr(t, "_load_model", lambda: _FakeModel())
+    monkeypatch.setattr(t, "_load_model", _fake_load)
     # Shrink the cap so a tiny segment trips it without allocating millions.
     monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 2)
     seg = tr.SpeechSegment(
@@ -321,6 +331,7 @@ def test_transcribe_segment_rejects_oversize_window(monkeypatch):
     with pytest.raises(tr.MeetingsAudioTooLong):
         t.transcribe_segment(seg)
     assert transcribe_called is False  # guarded BEFORE inference
+    assert model_loaded is False  # and BEFORE the model is even loaded
 
 
 def test_resample_rejects_oversize_before_allocation(monkeypatch):
@@ -353,6 +364,35 @@ def test_resample_rejects_oversize_pure_python_path(monkeypatch):
     monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 100)
     with pytest.raises(tr.MeetingsAudioTooLong):
         tr._resample_to_16k(_array("f", [0.1] * 4000), src_sr=1)
+
+
+def test_segment_to_pcm_rejects_before_concatenation(monkeypatch):
+    # [M6] The cap must fire from frame metadata (O(1) len sum) BEFORE the frames
+    # are concatenated into one buffer, so an oversized window is never duplicated
+    # in memory just to be rejected. A frame whose `.samples` raises on iteration
+    # proves the preflight uses len() only and never touches the PCM.
+    import openbird.meetings.transcribe as tr
+
+    class _ExplodingFrame:
+        """Has a cheap len() but blows up if anything iterates the samples."""
+
+        class _Samples:
+            def __len__(self):
+                return 1600
+
+            def __iter__(self):
+                raise AssertionError("samples were read before the cap fired")
+
+        def __init__(self):
+            self.samples = self._Samples()
+            self.sample_rate = SR
+
+    monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 50)
+    seg = tr.SpeechSegment.__new__(tr.SpeechSegment)
+    object.__setattr__(seg, "frames", [_ExplodingFrame(), _ExplodingFrame()])
+
+    with pytest.raises(tr.MeetingsAudioTooLong):
+        tr._segment_to_pcm(seg)  # 2*1600 = 3200 > cap 50, rejected via len() only
 
 
 # --------------------------------------------------------------------------- #

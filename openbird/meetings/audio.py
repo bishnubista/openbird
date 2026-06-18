@@ -50,8 +50,10 @@ from typing import BinaryIO
 # samples as a stdlib ``array('f')`` (4 bytes/sample) rather than a Python tuple
 # of floats (~28 bytes/sample) so a single 25 s @ 48 kHz frame is ~4.8 MB instead
 # of ~33 MB. Pin the item size so a platform where ``float`` isn't 32-bit can't
-# silently violate the wire contract.
-assert array("f").itemsize == 4, "array('f') must be 32-bit to match the f32 IPC wire format"
+# silently violate the wire contract. This is a real runtime invariant, so raise
+# explicitly rather than ``assert`` (which is stripped under ``python -O``).
+if array("f").itemsize != 4:  # pragma: no cover - CPython guarantees f32
+    raise RuntimeError("array('f') must be 32-bit to match the f32 IPC wire format")
 
 
 class Track(str, enum.Enum):
