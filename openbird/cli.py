@@ -530,16 +530,26 @@ def routine_uninstall(
     from openbird.routines.launchd import agent_plist_path
 
     path = agent_plist_path()
+    unload_failed = False
     if unload and path.exists():
         try:
             subprocess.run(["launchctl", "unload", str(path)], check=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             _err_console.print(f"[red]launchctl unload failed:[/] {type(exc).__name__}")
+            unload_failed = True
     if path.exists():
         path.unlink()
         _console.print(f"[green]Removed LaunchAgent:[/] {path}")
     else:
         _console.print("[yellow]No LaunchAgent installed.[/]")
+    if unload_failed:
+        # The plist was removed, but launchd may still hold the (now orphaned)
+        # job; surface that as a nonzero exit instead of pretending success.
+        _err_console.print(
+            "[yellow]Note:[/] the agent file was removed but `launchctl unload` "
+            "failed; the running job may persist until logout or a manual unload."
+        )
+        raise typer.Exit(code=1)
 
 
 # --------------------------------------------------------------------------- #

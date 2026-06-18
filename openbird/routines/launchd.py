@@ -53,6 +53,10 @@ def build_agent_plist(
     """
     if not program_args:
         raise ValueError("program_args must be non-empty")
+    if int(throttle_seconds) < 1:
+        raise ValueError("throttle_seconds must be >= 1")
+    if not stderr_path or not stderr_path.strip():
+        raise ValueError("stderr_path must be a non-empty path")
     plist: dict[str, object] = {
         "Label": label,
         "ProgramArguments": list(program_args),
