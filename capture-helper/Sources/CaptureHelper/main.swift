@@ -218,36 +218,28 @@ private func anyMatch(_ bundleId: String, _ entries: Set<String>) -> Bool {
     return false
 }
 
-// Hardcoded backstop FALLBACK: bundle-id substrings whose content is never
-// captured even if (mis)allowlisted. This MUST mirror
-// `redact._DANGEROUS_BUNDLE_SUBSTRINGS` (Python) and the committed
-// `dangerous_apps.json` resource — the parity unit test in
-// tests/unit/test_capture.py fails if these three drift. Edit ALL THREE
-// together. This baked constant is the FALLBACK; the effective list is this
-// fallback UNION the JSON resource, so the backstop can only ever grow, never
-// shrink to empty/partial (fail-closed). See `dangerousBundleSubstrings`.
-private let dangerousBundleSubstringsFallback: [String] = [
+// SINGLE SOURCE OF TRUTH [H7]: bundle-id substrings whose content is never
+// captured even if (mis)allowlisted (password managers / vaults). This baked
+// constant MUST mirror `redact._DANGEROUS_BUNDLE_SUBSTRINGS` (Python) and the
+// committed canonical list `dangerous_apps.json`. The parity unit test in
+// tests/unit/test_capture.py parses THIS literal, the JSON, and the Python
+// tuple and fails the build if any of the three drift — so editing the list
+// means editing all three together.
+//
+// Why a baked constant and NOT a runtime `Bundle.module` JSON read: the shipped
+// helper is a bare executable copied into `OpenBird.app` (see
+// script/build_and_run.sh) WITHOUT SwiftPM's generated resource bundle.
+// `Bundle.module` `fatalError`s when that bundle is absent, which would crash
+// the helper before any fallback could run — defeating the fail-closed intent
+// and breaking capture for every allowlisted app. Baking the list in keeps the
+// backstop always complete and dependency-free at runtime; the JSON exists as
+// the canonical drift-detection source for the parity test (and for any future
+// build-time codegen), not as a runtime input.
+private let dangerousBundleSubstrings: [String] = [
     "1password", "onepassword", "lastpass", "bitwarden", "dashlane",
     "keepass", "keychain", "keychainaccess", "keeper", "nordpass",
     "enpass", "protonpass",
-]
-
-/// The effective dangerous-bundle substrings: the baked fallback UNION the
-/// committed `dangerous_apps.json` resource (loaded via `Bundle.module`). On a
-/// missing, unreadable, malformed, or empty JSON resource we fall back to the
-/// full baked list — the backstop is fail-closed and never empty or partial.
-private let dangerousBundleSubstrings: [String] = {
-    var set = Set(dangerousBundleSubstringsFallback.map { $0.lowercased() })
-    if let url = Bundle.module.url(forResource: "dangerous_apps", withExtension: "json"),
-       let data = try? Data(contentsOf: url),
-       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-       let list = obj["dangerous_bundle_substrings"] as? [String] {
-        for entry in list { set.insert(entry.lowercased()) }
-    } else {
-        diag("capture: dangerous_list_fallback")  // non-content diagnostic only
-    }
-    return Array(set)
-}()
+].map { $0.lowercased() }
 
 // Window-title markers that signal a private/incognito window.
 private let incognitoTitleMarkers = [

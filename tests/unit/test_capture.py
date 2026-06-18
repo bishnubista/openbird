@@ -991,14 +991,14 @@ def _json_dangerous_set() -> set[str]:
 
 
 def _swift_fallback_set() -> set[str]:
-    """Parse the Swift `dangerousBundleSubstringsFallback` array literal."""
+    """Parse the Swift `dangerousBundleSubstrings` baked array literal."""
     src = _CAPTURE_SWIFT.read_text()
     m = re.search(
-        r"dangerousBundleSubstringsFallback\s*:\s*\[String\]\s*=\s*\[(.*?)\]",
+        r"dangerousBundleSubstrings\s*:\s*\[String\]\s*=\s*\[(.*?)\]",
         src,
         re.DOTALL,
     )
-    assert m, "could not locate dangerousBundleSubstringsFallback literal in main.swift"
+    assert m, "could not locate dangerousBundleSubstrings literal in main.swift"
     return {tok.lower() for tok in re.findall(r'"([^"]+)"', m.group(1))}
 
 
