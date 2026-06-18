@@ -75,7 +75,7 @@ class AudioFrame:
     Attributes:
         samples: Mono PCM samples as float32, stored in a stdlib ``array('f')``
             (~4 bytes/sample) rather than a tuple of Python floats (~28 bytes
-            each) so large windows don't blow up memory [M6]. Any input sequence
+            each) so large windows don't blow up memory. Any input sequence
             (tuple/list/array) is coerced to ``array('f')`` at construction;
             values land in roughly ``[-1.0, 1.0]``. The array is technically
             mutable, but the contract is that ``samples`` is **immutable** — never
@@ -201,7 +201,7 @@ _MAX_SAMPLES_PER_FRAME = 480_000
 # crashed/corrupt helper can emit a negative, absurdly large, or sub-1 Hz value.
 # A rate below 1.0 would also round to 0 in ``int(round(...))`` and silently
 # disable timing math, so we require ``1.0 <= sample_rate <= _MAX_SAMPLE_RATE``
-# and treat anything else as a corrupt stream [L4].
+# and treat anything else as a corrupt stream.
 _MIN_SAMPLE_RATE = 1.0
 _MAX_SAMPLE_RATE = 768_000.0
 
@@ -250,13 +250,13 @@ def decode_frames(reader: BinaryIO) -> Iterator[AudioFrame]:
         if not (math.isfinite(sample_rate) and _MIN_SAMPLE_RATE <= sample_rate <= _MAX_SAMPLE_RATE):
             # NaN/inf, negative, sub-1 Hz (would round to 0 and disable timing),
             # or absurdly large rates are all corrupt — clean-stop, don't crash on
-            # ``int(round(sample_rate))`` or carry a nonsense rate downstream [L4].
+            # ``int(round(sample_rate))`` or carry a nonsense rate downstream.
             return
         track = _TRACK_BY_CODE.get(track_code)
         if track is None:
             # The wire protocol is a fixed two-track (SYSTEM=0, MIC=1) contract.
             # An unknown code is a corrupt/incompatible stream; silently mapping it
-            # to SYSTEM would misattribute "me vs. others". Clean-stop instead [L4].
+            # to SYSTEM would misattribute "me vs. others". Clean-stop instead.
             return
         if count > _MAX_SAMPLES_PER_FRAME:
             # Corrupt/hostile stream: don't read/allocate `count * 4` bytes.
@@ -266,7 +266,7 @@ def decode_frames(reader: BinaryIO) -> Iterator[AudioFrame]:
             return  # truncated tail
         samples = struct.unpack(f"<{count}f", body) if count else ()
         yield AudioFrame(
-            samples=samples,  # AudioFrame.__post_init__ coerces to array('f') [M6]
+            samples=samples,  # AudioFrame.__post_init__ coerces to array('f')
             sample_rate=int(round(sample_rate)),
             host_ts=host_ts,
             track=track,

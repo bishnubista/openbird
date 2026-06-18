@@ -1,4 +1,4 @@
-"""Tests for `openbird reindex` [M2]: cohort rebuild + atomic rollback.
+"""Tests for `openbird reindex`: cohort rebuild + atomic rollback.
 
 Exercises the real CLI command against an on-disk SQLite store populated through
 MemoryStore, swapping in a provider with a DIFFERENT cohort/dimension to prove the

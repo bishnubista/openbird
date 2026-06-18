@@ -192,7 +192,7 @@ class MeetingPipeline:
             # other call site: ``_close`` returns ``None`` for a sub-``min_speech``
             # window (e.g. when ``max_window <= min_speech``), and appending that
             # ``None`` would crash downstream transcription with an AttributeError
-            # on ``.frames``/``.track`` [H9].
+            # on ``.frames``/``.track``.
             if open_seg.duration >= self.config.max_window:
                 closed = self._close(track, carry_overlap=True)
                 if closed is not None:

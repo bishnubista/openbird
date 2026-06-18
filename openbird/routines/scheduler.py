@@ -45,13 +45,13 @@ from openbird.routines.store import RoutineStore, default_idempotency_key
 from openbird.routines.templates import BUILTIN_TEMPLATES, RoutineTemplate
 from openbird.types import RoutineRun
 
-# Metadata-only logger [L3]. Per the privacy contract (R4/R5) this logger MUST
+# Metadata-only logger. Per the privacy contract this logger MUST
 # only ever emit non-content metadata — routine names, statuses, scheduled
 # timestamps, and counts — never summary bodies or exception message strings
 # (which can embed captured content). Routed to stderr by the CLI daemon.
 logger = logging.getLogger("openbird.routines")
 
-# Default cap on how far back startup catch-up reaches [M5]. Without a cap, a
+# Default cap on how far back startup catch-up reaches. Without a cap, a
 # laptop asleep for weeks would, on the next `start()`, fire every missed
 # occurrence back-to-back — a startup "LLM storm" that can appear to hang. Seven
 # days is a sane default; pass ``lookback=None`` to ``start()`` to disable the
@@ -254,7 +254,7 @@ class RoutineScheduler:
                 error_code=ERROR_CODE_RUNNER,
             )
             # Metadata only: routine, scheduled occurrence, error class + code.
-            # NEVER the exception message (it can embed captured content) [L3].
+            # NEVER the exception message (it can embed captured content).
             logger.warning(
                 "routine error: name=%s scheduled_ts=%.0f error_class=%s error_code=%s",
                 name,
@@ -268,7 +268,7 @@ class RoutineScheduler:
             )
 
         self.deliverer(name, text)
-        # Metadata only: output length, never the body [L3].
+        # Metadata only: output length, never the body.
         logger.info(
             "routine done: name=%s scheduled_ts=%.0f output_len=%d",
             name,
@@ -347,7 +347,7 @@ class RoutineScheduler:
             catch_up: Run missed occurrences before scheduling future ones.
             lookback: Cap how far back catch-up reaches (seconds). Defaults to
                 :data:`DEFAULT_CATCHUP_LOOKBACK` to avoid a startup "LLM storm"
-                after a long downtime [M5]. Pass ``None`` to disable the cap.
+                after a long downtime. Pass ``None`` to disable the cap.
         """
         if catch_up:
             self.run_missed(lookback=lookback)

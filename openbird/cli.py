@@ -13,7 +13,7 @@ Wires the frozen subsystems into a single ``openbird`` entrypoint:
 
 Design notes
 ------------
-* The CLI is the serialized integration point (PLAN Phase 3): it imports the
+* The CLI is the serialized integration point: it imports the
   shared contracts and never reaches inside subsystem internals.
 * Captured content is treated carefully: ``chat`` prints answers and citation
   *metadata* (app/window/time + a short snippet) but the command surface never
@@ -59,7 +59,7 @@ _err_console = Console(stderr=True)
 
 
 def _resolve_cloud_opt_in(remote_models: dict[str, str]) -> bool:
-    """Decide whether to proceed with a REMOTE model route [H3].
+    """Decide whether to proceed with a REMOTE model route.
 
     Called when the provider factory refused because a cloud (or remote-Ollama)
     model is configured without opt-in. On an interactive TTY we ask for an
@@ -84,7 +84,7 @@ def _resolve_cloud_opt_in(remote_models: dict[str, str]) -> bool:
 
 
 def _provider():
-    """Construct the configured LLM provider, enforcing cloud opt-in [H3].
+    """Construct the configured LLM provider, enforcing cloud opt-in.
 
     The provider factory refuses a remote model unless cloud is opted into. Here
     we surface that refusal as an interactive confirm (TTY) or a clean exit
@@ -181,7 +181,7 @@ def _peek_cohort(settings) -> str | None:
 
 
 def _store_maintenance():
-    """Open the store for delete-only ops (purge/stats) WITHOUT a cloud gate [H3].
+    """Open the store for delete-only ops (purge/stats) WITHOUT a cloud gate.
 
     Purge and stats never embed or send captured content to a model, so:
       * they must NOT require ``OPENBIRD_ALLOW_CLOUD`` (deleting local data on a
@@ -542,7 +542,7 @@ def routine_start(
         False, "--no-catch-up", help="Skip missed-occurrence catch-up entirely."
     ),
 ) -> None:
-    """Run the routine scheduler as a foreground daemon until SIGINT/SIGTERM [B2].
+    """Run the routine scheduler as a foreground daemon until SIGINT/SIGTERM.
 
     This is the always-on entrypoint a LaunchAgent (see `routine install`) execs.
     It registers every built-in routine, catches up missed occurrences (capped),
@@ -632,7 +632,7 @@ def routine_install(
         False, "--load", help="Also `launchctl load` the agent now (starts it)."
     ),
 ) -> None:
-    """Write the per-user LaunchAgent so routines run at login [B2].
+    """Write the per-user LaunchAgent so routines run at login.
 
     Writes ~/Library/LaunchAgents/ai.openbird.routines.plist pointing at the
     resolved `openbird` executable. By default it only writes the file and
@@ -682,7 +682,7 @@ def routine_uninstall(
         False, "--unload", help="Also `launchctl unload` the agent before removing."
     ),
 ) -> None:
-    """Remove the per-user LaunchAgent for the routine daemon [B2]."""
+    """Remove the per-user LaunchAgent for the routine daemon."""
     import subprocess
 
     from openbird.routines.launchd import agent_plist_path
@@ -891,7 +891,7 @@ def reindex(
         help="Re-embed even when the stored cohort already matches the provider.",
     ),
 ) -> None:
-    """Re-embed every stored chunk under the current embedding model [M2].
+    """Re-embed every stored chunk under the current embedding model.
 
     Switching ``OPENBIRD_EMBED_MODEL`` (or its dimension) leaves the store in a
     cohort mismatch — old vectors are incompatible with new queries. This rebuilds

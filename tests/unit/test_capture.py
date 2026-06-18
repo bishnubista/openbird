@@ -211,7 +211,7 @@ def test_scrub_jwt_and_pem():
 
 
 # ---------------------------------------------------------------------------
-# H5 — credit-card (PAN) redaction: Luhn-validated, group-anchored.
+# credit-card (PAN) redaction: Luhn-validated, group-anchored.
 # ---------------------------------------------------------------------------
 
 
@@ -273,7 +273,7 @@ def test_scrub_continuous_run_with_embedded_valid_window_not_masked():
 
 
 def test_scrub_separated_over_19_digits_masks_valid_prefix():
-    # R3 note: separated runs whose TOTAL exceeds 19 digits — the longest VALID
+    # Regression note: separated runs whose TOTAL exceeds 19 digits — the longest VALID
     # 13-19 digit whole-group prefix is masked; trailing groups are preserved.
     scrubbed, matched = redact.scrub("4111 1111 1111 1111 1234 5678")
     assert "card_number" in matched
@@ -301,7 +301,7 @@ def test_scrub_card_ignores_non_ascii_digits():
 
 
 # ---------------------------------------------------------------------------
-# H6 — token/JWT boundaries must not rely on Unicode-aware \b.
+# token/JWT boundaries must not rely on Unicode-aware \b.
 # ---------------------------------------------------------------------------
 
 
@@ -335,7 +335,7 @@ def test_scrub_token_after_underscore_redacts():
     ],
 )
 def test_scrub_token_dash_punctuated_redacts(wrapped):
-    # Regression: the H6 ASCII lookarounds must treat ``-`` (and ``_``) as token
+    # Regression: the ASCII lookarounds must treat ``-`` (and ``_``) as token
     # boundaries, so a dash-prefixed/suffixed key is still redacted (the old
     # ``\b`` caught these; a lookahead that rejected ``-`` would leak them).
     scrubbed, matched = redact.scrub(f"see {wrapped} end")
@@ -643,7 +643,7 @@ def test_daemon_run_respects_max_events(allow_settings):
 
 
 # ---------------------------------------------------------------------------
-# [Finding 5] Modern secret shapes: sk-proj, Stripe live/test, env names
+# Modern secret shapes: sk-proj, Stripe live/test, env names
 # ---------------------------------------------------------------------------
 
 
@@ -693,7 +693,7 @@ def test_scrub_env_name_does_not_overmatch_plain_words():
 
 
 # ---------------------------------------------------------------------------
-# [Finding 4] Exact bundle-id matching for allow/blocklists
+# Exact bundle-id matching for allow/blocklists
 # ---------------------------------------------------------------------------
 
 
@@ -760,7 +760,7 @@ def test_malformed_regex_entry_fails_closed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# [Finding 6] Metadata scrubbing: URL query/fragment + window titles
+# Metadata scrubbing: URL query/fragment + window titles
 # ---------------------------------------------------------------------------
 
 
@@ -824,7 +824,7 @@ def test_daemon_scrubs_url_and_window_before_ingest(allow_settings):
 
 
 # ---------------------------------------------------------------------------
-# [Finding 1] Store/embed failure must not leak content into logs
+# Store/embed failure must not leak content into logs
 # ---------------------------------------------------------------------------
 
 
@@ -856,7 +856,7 @@ def test_store_failure_does_not_log_content(allow_settings, caplog):
 
 
 # ---------------------------------------------------------------------------
-# [Finding 3] Signed-helper resolution: fail closed on missing/dev binary
+# Signed-helper resolution: fail closed on missing/dev binary
 # ---------------------------------------------------------------------------
 
 
@@ -947,7 +947,7 @@ def test_capture_cli_registers_top_level_command(monkeypatch, allow_settings):
     monkeypatch.setattr(capture_cli, "get_settings", lambda: allow_settings)
     monkeypatch.setattr(store_mod, "MemoryStore", FakeCliStore)
     monkeypatch.setattr(daemon_mod, "CaptureDaemon", FakeDaemon)
-    # Capture now routes through the cloud-checked provider [H3]; stub it.
+    # Capture now routes through the cloud-checked provider; stub it.
     monkeypatch.setattr(root_cli, "_provider", lambda: object())
 
     result = CliRunner().invoke(
@@ -974,7 +974,7 @@ def test_capture_cli_registers_top_level_command(monkeypatch, allow_settings):
 
 
 # ---------------------------------------------------------------------------
-# [Finding 2] stderr is drained so a chatty helper cannot deadlock capture
+# stderr is drained so a chatty helper cannot deadlock capture
 # ---------------------------------------------------------------------------
 
 
@@ -1003,7 +1003,7 @@ def test_run_does_not_deadlock_on_large_stderr(allow_settings):
 
 
 # ---------------------------------------------------------------------------
-# B1: supervised continuous-capture loop (run_forever)
+# supervised continuous-capture loop (run_forever)
 # ---------------------------------------------------------------------------
 
 
@@ -1020,7 +1020,7 @@ def _oneshot_emitter(n: int) -> list[str]:
 
 
 def test_run_forever_respawns_helper_each_cycle(allow_settings):
-    # [B1] The one-shot helper emits 2 events then exits; run_forever must
+    # The one-shot helper emits 2 events then exits; run_forever must
     # re-spawn it each cycle, so 3 cycles ingest 3x the events.
     store = FakeStore()
     daemon = CaptureDaemon(
@@ -1035,7 +1035,7 @@ def test_run_forever_respawns_helper_each_cycle(allow_settings):
 
 
 def test_run_forever_stops_when_event_already_set(allow_settings):
-    # [B1] A pre-set stop event means the loop body never runs (clean no-op).
+    # A pre-set stop event means the loop body never runs (clean no-op).
     import threading
 
     stop = threading.Event()
@@ -1054,7 +1054,7 @@ def test_run_forever_stops_when_event_already_set(allow_settings):
 def test_run_forever_circuit_breaker_trips_on_repeated_failure(
     allow_settings, monkeypatch
 ):
-    # [B1] Consecutive failing cycles must trip the breaker and stop, not spin.
+    # Consecutive failing cycles must trip the breaker and stop, not spin.
     import openbird.capture.daemon as daemon_mod
 
     monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)  # no real sleeps
@@ -1080,7 +1080,7 @@ def test_run_forever_circuit_breaker_trips_on_repeated_failure(
 
 
 def test_run_forever_propagates_helper_unavailable(allow_settings):
-    # [B1] A missing signed bundle is permanent, not transient: re-raise, don't
+    # A missing signed bundle is permanent, not transient: re-raise, don't
     # retry forever.
     daemon = CaptureDaemon(
         FakeStore(),
@@ -1093,7 +1093,7 @@ def test_run_forever_propagates_helper_unavailable(allow_settings):
 
 
 def test_run_forever_resets_failure_count_after_success(allow_settings, monkeypatch):
-    # [B1] A success between failures must reset the consecutive-failure counter
+    # A success between failures must reset the consecutive-failure counter
     # so the breaker only trips on *consecutive* failures.
     import openbird.capture.daemon as daemon_mod
 
@@ -1123,7 +1123,7 @@ def test_run_forever_resets_failure_count_after_success(allow_settings, monkeypa
 
 
 def test_run_forever_nonzero_helper_exit_trips_breaker(allow_settings, monkeypatch):
-    # [B1/P1a] A helper exiting non-zero ON ITS OWN (e.g. Accessibility denied=2)
+    # A helper exiting non-zero ON ITS OWN (e.g. Accessibility denied=2)
     # must count as a failure so the breaker trips — not be re-spawned forever.
     import openbird.capture.daemon as daemon_mod
 
@@ -1140,7 +1140,7 @@ def test_run_forever_nonzero_helper_exit_trips_breaker(allow_settings, monkeypat
 
 
 def test_run_clean_exit_zero_is_not_a_failure(allow_settings):
-    # [B1/P1a] A helper that exits 0 after emitting is a success, not a failure.
+    # A helper that exits 0 after emitting is a success, not a failure.
     daemon = CaptureDaemon(
         FakeStore(),
         settings=allow_settings,
@@ -1152,7 +1152,7 @@ def test_run_clean_exit_zero_is_not_a_failure(allow_settings):
 
 
 def test_run_terminates_helper_when_stop_set(allow_settings):
-    # [B1/P1b] With stop set, an active/hung helper is terminated promptly so a
+    # With stop set, an active/hung helper is terminated promptly so a
     # clean shutdown isn't blocked on the stdout iterator (no hang, no raise).
     import threading
 
@@ -1176,7 +1176,7 @@ def test_run_terminates_helper_when_stop_set(allow_settings):
 
 
 def test_run_stop_initiated_exit_not_misclassified_as_failure(allow_settings):
-    # [B1/P1 race] A helper that traps SIGTERM and exits positive after WE stop
+    # A helper that traps SIGTERM and exits positive after WE stop
     # it must NOT raise HelperExitError — the stop was our-initiated.
     import threading
 
@@ -1200,7 +1200,7 @@ def test_run_stop_initiated_exit_not_misclassified_as_failure(allow_settings):
 
 
 def test_run_signal_killed_helper_is_a_failure(allow_settings):
-    # [B1/P1] A helper that dies by signal (negative returncode, e.g. SIGKILL=-9)
+    # A helper that dies by signal (negative returncode, e.g. SIGKILL=-9)
     # during normal operation is a genuine failure, not a clean exit.
     code = "import os,signal; os.kill(os.getpid(), signal.SIGKILL)"
     daemon = CaptureDaemon(
@@ -1214,7 +1214,7 @@ def test_run_signal_killed_helper_is_a_failure(allow_settings):
 
 
 # ---------------------------------------------------------------------------
-# H7 — dangerous-app list parity: the canonical JSON, the Swift baked fallback,
+# dangerous-app list parity: the canonical JSON, the Swift baked fallback,
 # and the Python baked tuple MUST stay in lockstep (single source of truth).
 # ---------------------------------------------------------------------------
 

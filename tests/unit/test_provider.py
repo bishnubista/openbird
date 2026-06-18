@@ -23,7 +23,7 @@ class _FakeLiteLLM:
     """Minimal litellm stand-in capturing the embedding dim and JSON behavior.
 
     Records the kwargs of the last embedding/completion call so tests can assert
-    timeout / num_retries / api_base were threaded through [B4/H4/M1].
+    timeout / num_retries / api_base were threaded through.
     """
 
     def __init__(self, dim: int = 768, completion_text: str = ""):
@@ -155,7 +155,7 @@ def test_factory_rejects_unknown_backend():
 
 
 # --------------------------------------------------------------------------- #
-# B4: timeouts                                                                #
+# timeouts                                                                #
 # --------------------------------------------------------------------------- #
 
 
@@ -203,7 +203,7 @@ class _HangingLiteLLM(_FakeLiteLLM):
 
 
 def test_embed_wall_clock_timeout_does_not_hang(monkeypatch):
-    # B4: even if litellm ignores its own timeout, the wall-clock guard fires.
+    # even if litellm ignores its own timeout, the wall-clock guard fires.
     import time as _t
 
     fake = _HangingLiteLLM(sleep_s=30.0)
@@ -217,7 +217,7 @@ def test_embed_wall_clock_timeout_does_not_hang(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# H4: retry-then-succeed                                                       #
+# retry-then-succeed                                                       #
 # --------------------------------------------------------------------------- #
 
 
@@ -285,7 +285,7 @@ def test_embed_gives_up_after_exhausting_retries(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# M1: api_base threading                                                       #
+# api_base threading                                                       #
 # --------------------------------------------------------------------------- #
 
 
@@ -336,7 +336,7 @@ def test_provider_honors_both_ollama_env_vars(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# H3: cloud classification + opt-in                                            #
+# cloud classification + opt-in                                            #
 # --------------------------------------------------------------------------- #
 
 

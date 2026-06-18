@@ -1,7 +1,7 @@
 """MCP (Model Context Protocol) client registry and connectors.
 
-MVP scope [PLAN R2, §8]
------------------------
+MVP scope
+---------
 * Only a **local FILESYSTEM MCP connector** is provided, and it is clearly
   labeled as such (``kind == "filesystem"``, ``LABEL`` attribute).
 * **Write actions are disabled.** Connectors expose read-only resource
@@ -14,8 +14,8 @@ MVP scope [PLAN R2, §8]
   spawned MCP server). :func:`mcp_available` reports availability.
 
 Retrieved file content is treated as **untrusted data** when it later reaches
-the LLM (see PLAN "Prompt-injection defense"); this module only ingests it as
-observations tagged with ``source="mcp"`` and never executes it.
+the LLM; this module only ingests it as observations tagged with
+``source="mcp"`` and never executes it.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ class MCPWriteDisabledError(RuntimeError):
     """Raised when a write/mutation is attempted through an MCP connector.
 
     All write actions are disabled in the MVP until OAuth scopes, a confirmation
-    UX, and an audit log exist (PLAN §8).
+    UX, and an audit log exist.
     """
 
 

@@ -114,11 +114,11 @@ _MAX_TEXT_BYTES = 1_000_000
 
 # Hard cap on how many bytes of helper stderr we will drain/buffer. stderr must
 # carry only non-content diagnostics; we drain it on a separate thread so a
-# chatty helper can't deadlock capture by filling the pipe (PLAN subprocess
-# hygiene). We never log its contents — only a byte count.
+# chatty helper can't deadlock capture by filling the pipe. We never log its
+# contents — only a byte count.
 _MAX_STDERR_BYTES = 64 * 1024
 
-# Supervised-loop defaults [B1]. The Swift capture-helper captures the frontmost
+# Supervised-loop defaults. The Swift capture-helper captures the frontmost
 # window and exits, so continuous capture means re-spawning it on an interval.
 _DEFAULT_POLL_INTERVAL = 2.0  # seconds the supervisor idles between helper spawns
 _DEFAULT_MAX_CONSECUTIVE_FAILURES = 5  # circuit breaker: stop after this many
@@ -524,7 +524,7 @@ class CaptureDaemon:
                 terminate the helper (useful for bounded runs/tests against a
                 long-lived emitter).
             stop_event: If set, a watcher terminates the helper when the event
-                fires so a clean shutdown isn't blocked by a hung helper [B1].
+                fires so a clean shutdown isn't blocked by a hung helper.
 
         Returns:
             Aggregate :class:`CaptureStats` for the run.
@@ -589,7 +589,7 @@ class CaptureDaemon:
         max_consecutive_failures: int = _DEFAULT_MAX_CONSECUTIVE_FAILURES,
         max_cycles: int | None = None,
     ) -> CaptureStats:
-        """Supervise the one-shot helper, re-spawning it until stopped [B1].
+        """Supervise the one-shot helper, re-spawning it until stopped.
 
         The Swift capture-helper captures the current frontmost window and exits,
         so a single :meth:`run` yields one batch then EOF. Continuous capture

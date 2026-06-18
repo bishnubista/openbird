@@ -64,7 +64,7 @@ def capture(
 
     helper_cmd = _parse_helper_cmd(helper)
     settings = get_settings()
-    # Build the cloud-checked provider [H3]: capture sends screen text to the
+    # Build the cloud-checked provider: capture sends screen text to the
     # embedding model, so it must go through the same opt-in confirm + CLOUD
     # ACTIVE banner path as every other store-opening command — never silently.
     provider = _provider()
@@ -81,7 +81,7 @@ def capture(
                 stats = daemon.run(max_events=max_events)
             else:
                 # Continuous capture: supervise the one-shot helper, re-spawning
-                # it on a cadence until SIGINT/SIGTERM requests a clean stop [B1].
+                # it on a cadence until SIGINT/SIGTERM requests a clean stop.
                 logging.basicConfig(
                     level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s",

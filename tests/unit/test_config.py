@@ -1,4 +1,4 @@
-"""Unit tests for Settings env coercion + Ollama host resolution [B4/H4/H3/M1]."""
+"""Unit tests for Settings env coercion + Ollama host resolution."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ def test_defaults_are_sane():
 
 
 # --------------------------------------------------------------------------- #
-# host resolution (M1)                                                         #
+# host resolution                                                         #
 # --------------------------------------------------------------------------- #
 
 
@@ -117,7 +117,7 @@ def test_scheme_host_is_left_unchanged(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# loopback classification (H3 route-based)                                     #
+# loopback classification                                                      #
 # --------------------------------------------------------------------------- #
 
 

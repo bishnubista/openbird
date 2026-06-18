@@ -54,7 +54,7 @@ class Settings:
     embed_model: str = "ollama/nomic-embed-text"
     embed_dim: int = 768
 
-    # LLM resilience [B4/H4]: explicit timeouts and bounded retries so a
+    # LLM resilience: explicit timeouts and bounded retries so a
     # reachable-but-wedged Ollama (or a flaky cloud endpoint) can never hang the
     # process forever. Values are seconds; retries are passed to LiteLLM, which
     # backs off on connection errors / 5xx / rate-limit responses.
@@ -62,12 +62,12 @@ class Settings:
     embed_timeout: float = 30.0
     llm_num_retries: int = 2
 
-    # Cloud opt-in [H3]: OpenBird is local-first. Resolving a *remote* model
+    # Cloud opt-in: OpenBird is local-first. Resolving a *remote* model
     # (anything not ollama/* or an mlx local backend) silently POSTs private
     # memory to a third party, so it MUST be explicitly opted into. Default off.
     allow_cloud: bool = False
 
-    # Runtime Ollama host [M1]: the base URL threaded into LiteLLM as api_base
+    # Runtime Ollama host: the base URL threaded into LiteLLM as api_base
     # for ollama/* models, so the runtime provider talks to the SAME host that
     # preflight probes. None falls back to the OLLAMA_HOST / OPENBIRD_OLLAMA_HOST
     # env vars (see resolved_ollama_host) then the localhost default.
@@ -83,7 +83,7 @@ class Settings:
     encryption_enabled: bool = False
     # When True (env OPENBIRD_REQUIRE_ENCRYPTION=1), opening the DB RAISES rather
     # than silently degrading to a plaintext file when SQLCipher cannot be
-    # verified (H2). Default False keeps the backward-compatible plaintext
+    # verified. Default False keeps the backward-compatible plaintext
     # fallback.
     require_encryption: bool = False
     # Retention window in days. When > 0, observations older than this many days
@@ -149,10 +149,10 @@ def resolved_ollama_host(settings: "Settings | None" = None) -> str:
       3. The localhost default.
 
     Both preflight and the runtime provider call this so a green preflight and
-    the actual runtime call always target the same host [M1]. The result is
+    the actual runtime call always target the same host. The result is
     always a full ``scheme://...`` URL: a bare ``host:port`` (the common
     ``OLLAMA_HOST`` form) is normalized to ``http://host:port`` so LiteLLM's
-    ``api_base`` and preflight's ``urljoin`` both work [B+F round-3].
+    ``api_base`` and preflight's ``urljoin`` both work.
     """
     env_host = os.environ.get("OLLAMA_HOST")
     if env_host:
@@ -208,7 +208,7 @@ def ollama_bare_model(model: str) -> str | None:
 
 # Loopback host names that keep traffic on this machine. A non-loopback Ollama
 # host means captured chunks leave the device, so it is treated as remote even
-# for an ollama/* model (route-based cloud classification [H3]).
+# for an ollama/* model (route-based cloud classification).
 _LOOPBACK_HOSTS: frozenset[str] = frozenset(
     {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
 )
