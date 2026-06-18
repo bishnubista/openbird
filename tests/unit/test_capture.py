@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,8 @@ from openbird.capture import adapters, redact
 from openbird.capture.daemon import (
     CaptureDaemon,
     CaptureStats,
+    CaptureSupervisorError,
+    HelperExitError,
     HelperUnavailableError,
     default_helper_cmd,
     parse_event,
@@ -205,6 +208,165 @@ def test_scrub_jwt_and_pem():
     scrubbed, matched = redact.scrub(f"token={jwt}")
     assert "jwt" in matched
     assert jwt not in scrubbed
+
+
+# ---------------------------------------------------------------------------
+# H5 — credit-card (PAN) redaction: Luhn-validated, group-anchored.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "pan",
+    [
+        "4111 1111 1111 1111",        # valid 16-digit Visa (separated)
+        "4111111111111111",           # valid 16-digit Visa (continuous)
+        "4000000000006",              # valid 13-digit
+        "378282246310005",            # valid 15-digit Amex
+        "6045632000000000120",        # valid 19-digit (Maestro range)
+        "6045 6320 0000 0000 120",    # valid 19-digit, separated
+    ],
+)
+def test_scrub_masks_valid_pans(pan):
+    scrubbed, matched = redact.scrub(f"my card is {pan} thanks")
+    assert "card_number" in matched
+    assert "[REDACTED:card]" in scrubbed
+    # No long run of the original PAN digits survives.
+    assert pan.replace(" ", "") not in scrubbed.replace(" ", "")
+
+
+@pytest.mark.parametrize(
+    "not_a_pan",
+    [
+        "1234567890123456",            # 16-digit run that FAILS Luhn (phone-like)
+        "1234 5678 9012 3456",         # same, separated, fails Luhn
+        "123456789012345678",          # 18-digit legit order/account ID (fails Luhn)
+        "12345678901234567890",        # 20-digit run: not a card length at all
+        "order 30000000000004567 ref", # long ID; never inner-scanned
+    ],
+)
+def test_scrub_preserves_non_pans(not_a_pan):
+    text = f"reference {not_a_pan} end"
+    scrubbed, matched = redact.scrub(text)
+    assert "card_number" not in matched
+    assert scrubbed == text
+
+
+def test_scrub_card_plus_cvv_masks_only_pan():
+    # '4111 1111 1111 1111 999' is 19 digits and fails Luhn as a whole, but the
+    # first four groups (16 digits) are a valid PAN. We mask the PAN groups only
+    # and leave the trailing CVV-like group intact (group-boundary masking).
+    scrubbed, matched = redact.scrub("pay 4111 1111 1111 1111 999 now")
+    assert "card_number" in matched
+    assert "[REDACTED:card]" in scrubbed
+    assert "4111" not in scrubbed
+    assert scrubbed.endswith("999 now")
+
+
+def test_scrub_continuous_run_with_embedded_valid_window_not_masked():
+    # A continuous 18-digit ID can contain a Luhn-valid 16-digit inner window;
+    # we NEVER scan arbitrary inner windows on a continuous run, so it survives.
+    embedded = "4111111111111111"  # valid 16-digit window
+    text = f"id 99{embedded} stop"  # 18 continuous digits, whole fails Luhn
+    scrubbed, matched = redact.scrub(text)
+    assert "card_number" not in matched
+    assert scrubbed == text
+
+
+def test_scrub_separated_over_19_digits_masks_valid_prefix():
+    # R3 note: separated runs whose TOTAL exceeds 19 digits — the longest VALID
+    # 13-19 digit whole-group prefix is masked; trailing groups are preserved.
+    scrubbed, matched = redact.scrub("4111 1111 1111 1111 1234 5678")
+    assert "card_number" in matched
+    assert scrubbed.endswith("1234 5678")
+    assert "4111" not in scrubbed
+
+
+def test_scrub_card_not_torn_from_alnum_token():
+    # A PAN-shaped digit run embedded in an alnum identifier is bounded out by
+    # the ASCII token lookarounds and not masked mid-token.
+    text = "abc4111111111111111xyz"
+    scrubbed, matched = redact.scrub(text)
+    assert "card_number" not in matched
+    assert scrubbed == text
+
+
+def test_scrub_card_ignores_non_ascii_digits():
+    # Fullwidth/Unicode decimal digits match Python's \d and str.isdigit(), but
+    # the Luhn helper assumes ASCII. The candidate regex uses re.ASCII so these
+    # are never treated as card candidates (no false [REDACTED:card]).
+    text = "１２３４ ５６７８ ９０１２ ３４５６"  # fullwidth digits
+    scrubbed, matched = redact.scrub(text)
+    assert "card_number" not in matched
+    assert scrubbed == text
+
+
+# ---------------------------------------------------------------------------
+# H6 — token/JWT boundaries must not rely on Unicode-aware \b.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["keyσ", "テスト", "secret中文"],  # Greek sigma, CJK
+)
+def test_scrub_token_abutting_non_ascii_redacts(prefix):
+    key = "sk-abcdefghijklmnop1234567890"
+    scrubbed, matched = redact.scrub(f"{prefix}{key} tail")
+    assert "token_prefixed" in matched
+    assert key not in scrubbed
+
+
+def test_scrub_token_after_underscore_redacts():
+    key = "sk-abcdefghijklmnop1234567890"
+    scrubbed, matched = redact.scrub(f"value_{key}")
+    assert "token_prefixed" in matched
+    assert key not in scrubbed
+
+
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        "-sk-abcdefghijklmnop1234567890",          # leading dash boundary
+        "sk-abcdefghijklmnop1234567890-",          # trailing dash boundary
+        "ghp_0123456789abcdefghijABCDEFGHIJ-",     # trailing dash, no-dash body
+        "(ghp_0123456789abcdefghijABCDEFGHIJ)",    # punctuation boundaries
+        "AKIAIOSFODNN7EXAMPLE-",                   # trailing dash, AWS key
+        "x-sk-abcdefghijklmnop1234567890-y",       # dash-delimited within text
+    ],
+)
+def test_scrub_token_dash_punctuated_redacts(wrapped):
+    # Regression: the H6 ASCII lookarounds must treat ``-`` (and ``_``) as token
+    # boundaries, so a dash-prefixed/suffixed key is still redacted (the old
+    # ``\b`` caught these; a lookahead that rejected ``-`` would leak them).
+    scrubbed, matched = redact.scrub(f"see {wrapped} end")
+    assert "token_prefixed" in matched
+    assert "[REDACTED:token]" in scrubbed
+
+
+def test_scrub_jwt_dash_suffixed_redacts():
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQabcdef"
+    scrubbed, matched = redact.scrub(f"-{jwt}-")
+    assert "jwt" in matched
+    assert jwt not in scrubbed
+
+
+def test_scrub_jwt_abutting_non_ascii_redacts():
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQabcdef"
+    scrubbed, matched = redact.scrub(f"令牌{jwt}結尾")
+    assert "jwt" in matched
+    assert jwt not in scrubbed
+
+
+def test_scrub_token_glued_to_ascii_identifier_documented_leak():
+    # DOCUMENTED limitation: a key glued behind an ASCII alnum char (e.g.
+    # 'xsk-...') is treated as part of an identifier token and is NOT redacted.
+    # The leading boundary class includes [A-Za-z0-9] so this is by design; we
+    # assert it to make the behavior explicit (changing it risks tearing apart
+    # legitimate identifiers/filenames).
+    key = "sk-abcdefghijklmnop1234567890"
+    scrubbed, matched = redact.scrub(f"x{key}")
+    assert "token_prefixed" not in matched
+    assert scrubbed == f"x{key}"
 
 
 def test_apply_rejected_returns_no_text(allow_settings):
@@ -838,3 +1000,271 @@ def test_run_does_not_deadlock_on_large_stderr(allow_settings):
     stats = daemon.run()
     assert stats.received == 3
     assert stats.ingested == 3
+
+
+# ---------------------------------------------------------------------------
+# B1: supervised continuous-capture loop (run_forever)
+# ---------------------------------------------------------------------------
+
+
+def _oneshot_emitter(n: int) -> list[str]:
+    """A helper cmd: prints n events then EXITS (like the real one-shot helper)."""
+    code = (
+        "import json,sys\n"
+        f"for i in range({n}):\n"
+        "    sys.stdout.write(json.dumps({'app':'com.apple.mail','window':'w',"
+        "'text':'msg %d'%i,'ts':float(i)})+'\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    return [sys.executable, "-c", code]
+
+
+def test_run_forever_respawns_helper_each_cycle(allow_settings):
+    # [B1] The one-shot helper emits 2 events then exits; run_forever must
+    # re-spawn it each cycle, so 3 cycles ingest 3x the events.
+    store = FakeStore()
+    daemon = CaptureDaemon(
+        store,
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(2),
+        require_signed_helper=False,
+    )
+    stats = daemon.run_forever(poll_interval=0.0, max_cycles=3)
+    assert stats.received == 6  # 3 re-spawns x 2 events — proves continuity
+    assert stats.ingested == 6
+
+
+def test_run_forever_stops_when_event_already_set(allow_settings):
+    # [B1] A pre-set stop event means the loop body never runs (clean no-op).
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    store = FakeStore()
+    daemon = CaptureDaemon(
+        store,
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(2),
+        require_signed_helper=False,
+    )
+    stats = daemon.run_forever(poll_interval=0.0, stop_event=stop, max_cycles=99)
+    assert stats.received == 0
+
+
+def test_run_forever_circuit_breaker_trips_on_repeated_failure(
+    allow_settings, monkeypatch
+):
+    # [B1] Consecutive failing cycles must trip the breaker and stop, not spin.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)  # no real sleeps
+    store = FakeStore()
+    daemon = CaptureDaemon(
+        store,
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(1),
+        require_signed_helper=False,
+    )
+
+    calls = {"n": 0}
+
+    def _boom(*_a, **_k):
+        calls["n"] += 1
+        raise RuntimeError("transient helper failure")
+
+    monkeypatch.setattr(daemon, "run", _boom)
+    with pytest.raises(CaptureSupervisorError):
+        daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
+    assert calls["n"] == 3  # stopped exactly at the breaker threshold
+    assert daemon.error_count == 3
+
+
+def test_run_forever_propagates_helper_unavailable(allow_settings):
+    # [B1] A missing signed bundle is permanent, not transient: re-raise, don't
+    # retry forever.
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=["/nonexistent/openbird/capture-helper"],
+        require_signed_helper=True,
+    )
+    with pytest.raises(HelperUnavailableError):
+        daemon.run_forever(poll_interval=0.0, max_cycles=5)
+
+
+def test_run_forever_resets_failure_count_after_success(allow_settings, monkeypatch):
+    # [B1] A success between failures must reset the consecutive-failure counter
+    # so the breaker only trips on *consecutive* failures.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(1),
+        require_signed_helper=False,
+    )
+    seq = iter([RuntimeError("f1"), RuntimeError("f2"), None, RuntimeError("f3")])
+    real_run = daemon.run
+
+    def _maybe_boom(*a, **k):
+        try:
+            exc = next(seq)
+        except StopIteration:
+            return real_run(*a, **k)
+        if exc is not None:
+            raise exc
+        return real_run(*a, **k)
+
+    monkeypatch.setattr(daemon, "run", _maybe_boom)
+    # 2 fails, 1 success (resets), 1 fail, then clean cycles. Breaker=3 never trips.
+    stats = daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3, max_cycles=3)
+    assert stats.received >= 1  # at least the successful + subsequent cycles ran
+
+
+def test_run_forever_nonzero_helper_exit_trips_breaker(allow_settings, monkeypatch):
+    # [B1/P1a] A helper exiting non-zero ON ITS OWN (e.g. Accessibility denied=2)
+    # must count as a failure so the breaker trips — not be re-spawned forever.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", "import sys; sys.exit(2)"],
+        require_signed_helper=False,
+    )
+    with pytest.raises(CaptureSupervisorError):
+        daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
+    assert daemon.error_count == 3  # each non-zero exit counted, breaker tripped
+
+
+def test_run_clean_exit_zero_is_not_a_failure(allow_settings):
+    # [B1/P1a] A helper that exits 0 after emitting is a success, not a failure.
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(1),
+        require_signed_helper=False,
+    )
+    stats = daemon.run()  # must not raise HelperExitError
+    assert stats.received == 1
+
+
+def test_run_terminates_helper_when_stop_set(allow_settings):
+    # [B1/P1b] With stop set, an active/hung helper is terminated promptly so a
+    # clean shutdown isn't blocked on the stdout iterator (no hang, no raise).
+    import threading
+
+    code = (
+        "import json,sys,time\n"
+        "sys.stdout.write(json.dumps({'app':'com.apple.mail','window':'w',"
+        "'text':'x','ts':1.0})+'\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(3600)\n"  # hang forever unless terminated
+    )
+    stop = threading.Event()
+    stop.set()
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", code],
+        require_signed_helper=False,
+    )
+    stats = daemon.run(stop_event=stop)  # returns promptly; does not hang/raise
+    assert isinstance(stats, CaptureStats)
+
+
+def test_run_stop_initiated_exit_not_misclassified_as_failure(allow_settings):
+    # [B1/P1 race] A helper that traps SIGTERM and exits positive after WE stop
+    # it must NOT raise HelperExitError — the stop was our-initiated.
+    import threading
+
+    code = (
+        "import signal,sys,time\n"
+        "signal.signal(signal.SIGTERM, lambda *a: sys.exit(7))\n"
+        "sys.stdout.write('\\n'); sys.stdout.flush()\n"  # one blank line, then hang
+        "time.sleep(3600)\n"
+    )
+    stop = threading.Event()
+    stop.set()
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", code],
+        require_signed_helper=False,
+    )
+    # Must return cleanly (no HelperExitError) even though the child exits 7.
+    stats = daemon.run(stop_event=stop)
+    assert isinstance(stats, CaptureStats)
+
+
+def test_run_signal_killed_helper_is_a_failure(allow_settings):
+    # [B1/P1] A helper that dies by signal (negative returncode, e.g. SIGKILL=-9)
+    # during normal operation is a genuine failure, not a clean exit.
+    code = "import os,signal; os.kill(os.getpid(), signal.SIGKILL)"
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", code],
+        require_signed_helper=False,
+    )
+    with pytest.raises(HelperExitError):
+        daemon.run()
+
+
+# ---------------------------------------------------------------------------
+# H7 — dangerous-app list parity: the canonical JSON, the Swift baked fallback,
+# and the Python baked tuple MUST stay in lockstep (single source of truth).
+# ---------------------------------------------------------------------------
+
+# tests/unit/test_capture.py -> repo root is two parents up.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DANGEROUS_JSON = (
+    _REPO_ROOT / "capture-helper" / "Sources" / "CaptureHelper" / "dangerous_apps.json"
+)
+_CAPTURE_SWIFT = (
+    _REPO_ROOT / "capture-helper" / "Sources" / "CaptureHelper" / "main.swift"
+)
+
+
+def _json_dangerous_set() -> set[str]:
+    data = json.loads(_DANGEROUS_JSON.read_text())
+    return {s.lower() for s in data["dangerous_bundle_substrings"]}
+
+
+def _swift_fallback_set() -> set[str]:
+    """Parse the Swift `dangerousBundleSubstrings` baked array literal."""
+    src = _CAPTURE_SWIFT.read_text()
+    m = re.search(
+        r"dangerousBundleSubstrings\s*:\s*\[String\]\s*=\s*\[(.*?)\]",
+        src,
+        re.DOTALL,
+    )
+    assert m, "could not locate dangerousBundleSubstrings literal in main.swift"
+    return {tok.lower() for tok in re.findall(r'"([^"]+)"', m.group(1))}
+
+
+def test_dangerous_list_parity_json_swift_python():
+    json_set = _json_dangerous_set()
+    swift_set = _swift_fallback_set()
+    python_set = {s.lower() for s in redact._DANGEROUS_BUNDLE_SUBSTRINGS}
+
+    # Pairwise diffs for diagnosis (so a failure says exactly what drifted).
+    assert json_set == python_set, (
+        f"JSON vs Python drift: only-json={json_set - python_set} "
+        f"only-python={python_set - json_set}"
+    )
+    assert json_set == swift_set, (
+        f"JSON vs Swift drift: only-json={json_set - swift_set} "
+        f"only-swift={swift_set - json_set}"
+    )
+    assert swift_set == python_set, (
+        f"Swift vs Python drift: only-swift={swift_set - python_set} "
+        f"only-python={python_set - swift_set}"
+    )
+
+    # The backstop must never be empty and must contain the historically-listed
+    # vendors from BOTH original sides (the union the drift was hiding).
+    for vendor in ("1password", "keychain", "keeper", "protonpass", "keychainaccess"):
+        assert vendor in python_set

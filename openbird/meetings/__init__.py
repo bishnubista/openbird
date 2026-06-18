@@ -31,6 +31,7 @@ from openbird.meetings.pipeline import (
 )
 from openbird.meetings.transcribe import (
     ACTION_ITEMS_SCHEMA,
+    MeetingsAudioTooLong,
     MeetingsExtraNotInstalled,
     Transcriber,
     TranscriptSegment,
@@ -54,6 +55,7 @@ __all__ = [
     "frame_energy",
     "stitch_segments",
     "ACTION_ITEMS_SCHEMA",
+    "MeetingsAudioTooLong",
     "MeetingsExtraNotInstalled",
     "Transcriber",
     "TranscriptSegment",

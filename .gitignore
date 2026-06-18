@@ -27,3 +27,6 @@ dist/
 # Secrets
 .env
 .env.*
+
+# SwiftPM scratch cache (from sandboxed builds)
+.swift-cache/

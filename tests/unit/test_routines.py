@@ -13,6 +13,7 @@ import pytest
 
 from openbird.routines import templates
 from openbird.routines.scheduler import (
+    DEFAULT_CATCHUP_LOOKBACK,
     ERROR_CODE_RUNNER,
     Routine,
     RoutineScheduler,
@@ -651,3 +652,104 @@ def test_render_context_defangs_window_title_fence():
     )
     out = templates.render_context([obs])
     assert "</observations>" not in out
+
+
+# -- B2/M5/L3: daemon, catch-up cap, logging, launchd ------------------------
+
+
+class _FakeAPScheduler:
+    """Stand-in for APScheduler so start() doesn't spawn real threads."""
+
+    def __init__(self) -> None:
+        self.running = False
+        self.jobs: list[str] = []
+
+    def add_job(self, *_a, **kw) -> None:
+        self.jobs.append(kw.get("id"))
+
+    def start(self) -> None:
+        self.running = True
+
+    def shutdown(self, *, wait: bool = True) -> None:
+        self.running = False
+
+
+def test_start_defaults_catchup_lookback_to_cap(run_store, clock, monkeypatch):
+    # [M5] start() must default catch-up to the bounded lookback cap, not None,
+    # so a long-idle daemon doesn't replay every missed occurrence at boot.
+    sched, *_ = _make_scheduler(run_store, clock)
+    sched.register("daily-briefing", "p", interval=100.0)
+    seen: dict[str, float | None] = {}
+
+    def _spy(*, lookback=None):
+        seen["lookback"] = lookback
+        return []
+
+    monkeypatch.setattr(sched, "run_missed", _spy)
+    sched._scheduler = _FakeAPScheduler()
+
+    sched.start()
+    assert seen["lookback"] == DEFAULT_CATCHUP_LOOKBACK
+    sched.start(lookback=None)  # explicit opt-out still works
+    assert seen["lookback"] is None
+
+
+def test_fire_logs_metadata_only_never_body(run_store, clock, caplog):
+    # [L3] Success logs routine/scheduled/len — never the summary body.
+    sched, *_ = _make_scheduler(
+        run_store, clock, memory=FakeMemoryStore([_obs(clock() - 50)])
+    )
+    sched.register("daily", "p", interval=100.0, runner=_runner)
+    with caplog.at_level("INFO", logger="openbird.routines"):
+        sched.fire("daily")
+    msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "routine done" in msgs
+    assert "SUMMARY" not in msgs  # the generated body must never be logged
+
+
+def test_fire_error_logs_class_not_message(run_store, clock, caplog):
+    # [L3] Errors log the class + stable code, never the exception message.
+    def boom(store, provider, *, now):
+        raise RuntimeError("secret captured content in message")
+
+    sched, *_ = _make_scheduler(run_store, clock)
+    sched.register("custom", "p", interval=100.0, runner=boom)
+    with caplog.at_level("WARNING", logger="openbird.routines"):
+        sched.fire("custom")
+    msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "RuntimeError" in msgs and ERROR_CODE_RUNNER in msgs
+    assert "secret captured content" not in msgs
+
+
+def test_build_agent_plist_has_supervision_keys():
+    import plistlib
+
+    from openbird.routines.launchd import AGENT_LABEL, build_agent_plist
+
+    data = plistlib.loads(
+        build_agent_plist(
+            program_args=["/usr/local/bin/openbird", "routine", "start"],
+            stderr_path="/tmp/routines.err.log",
+        )
+    )
+    assert data["Label"] == AGENT_LABEL
+    assert data["ProgramArguments"] == ["/usr/local/bin/openbird", "routine", "start"]
+    assert data["RunAtLoad"] is True
+    # Restart only after a crash, not after a clean unload/SIGTERM.
+    assert data["KeepAlive"] == {"SuccessfulExit": False}
+    assert data["ThrottleInterval"] >= 1
+    assert data["StandardErrorPath"] == "/tmp/routines.err.log"
+
+
+def test_build_agent_plist_rejects_empty_args():
+    from openbird.routines.launchd import build_agent_plist
+
+    with pytest.raises(ValueError):
+        build_agent_plist(program_args=[], stderr_path="/tmp/e.log")
+
+
+def test_agent_plist_path_respects_home(tmp_path):
+    from openbird.routines.launchd import AGENT_LABEL, agent_plist_path
+
+    p = agent_plist_path(home=tmp_path)
+    assert p == tmp_path / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"

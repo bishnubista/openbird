@@ -219,6 +219,57 @@ def test_cli_ingest_chat_purge_roundtrip(tmp_path, monkeypatch):
     assert stats["observations"] == 0
 
 
+def test_cli_prune_and_vacuum_roundtrip(tmp_path, monkeypatch):
+    """Drive `data prune --older-than` + `data vacuum` through the CLI (H10).
+
+    Ingests two files with controlled timestamps via direct store writes, prunes
+    the old one through the CLI, and vacuums — proving the retention + reclaim
+    commands are wired and report sane output.
+    """
+    import time
+
+    from typer.testing import CliRunner
+
+    import openbird.cli as cli
+
+    db_path = str(tmp_path / "cli_prune.db")
+    settings = Settings(data_dir=tmp_path, embed_dim=768)
+
+    def fake_store(*, provider=None):
+        return MemoryStore(db_path=db_path, settings=settings,
+                           provider=provider or FakeProvider(embed_dim=768))
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "_store", fake_store)
+    # prune + stats are maintenance ops that go through _store_maintenance (no
+    # cloud gate); point it at the same test DB so the roundtrip is observable.
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: fake_store())
+
+    now = time.time()
+    seed = fake_store()
+    seed.add_observation("ancient memory", source="t", ts=now - 100 * 86400)
+    seed.add_observation("fresh memory", source="t", ts=now - 1 * 86400)
+    seed.close()
+
+    runner = CliRunner()
+
+    # prune everything older than 30 days (the ancient one).
+    res = runner.invoke(cli.app, ["data", "prune", "--older-than", "30d", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "Pruned 1" in res.output
+
+    res = runner.invoke(cli.app, ["data", "stats"])
+    stats = json.loads(res.output)
+    assert stats["observations"] == 1
+
+    # vacuum reclaims; emits JSON stats.
+    res = runner.invoke(cli.app, ["data", "vacuum"])
+    assert res.exit_code == 0, res.output
+    assert "Vacuumed" in res.output
+    payload = json.loads(res.output.split("\n", 1)[1])
+    assert payload["bytes_after"] <= payload["bytes_before"]
+
+
 def test_cli_capture_then_chat_roundtrip_with_fake_helper(tmp_path, monkeypatch):
     """Drive the product-shaped path: capture helper -> store -> chat -> purge.
 

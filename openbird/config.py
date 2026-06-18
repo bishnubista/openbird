@@ -81,6 +81,15 @@ class Settings:
     # backend (SQLCipher) is actually available. Default False = "local-only,
     # not yet app-encrypted".
     encryption_enabled: bool = False
+    # When True (env OPENBIRD_REQUIRE_ENCRYPTION=1), opening the DB RAISES rather
+    # than silently degrading to a plaintext file when SQLCipher cannot be
+    # verified (H2). Default False keeps the backward-compatible plaintext
+    # fallback.
+    require_encryption: bool = False
+    # Retention window in days. When > 0, observations older than this many days
+    # are eligible for `openbird data prune` / programmatic pruning (H10). 0 (the
+    # default) disables automatic retention; data is kept until explicitly pruned.
+    retention_days: int = 0
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir).expanduser()
@@ -98,7 +107,12 @@ def _coerce(name: str, raw: str, default: object) -> object:
     """Coerce an env-var string to the type implied by the field default."""
     if name in ("allowlist", "blocklist"):
         return [item.strip() for item in raw.split(",") if item.strip()]
-    if isinstance(default, bool) or name in ("ocr_enabled", "encryption_enabled", "allow_cloud"):
+    if isinstance(default, bool) or name in (
+        "ocr_enabled",
+        "encryption_enabled",
+        "allow_cloud",
+        "require_encryption",
+    ):
         return raw.strip().lower() in ("1", "true", "yes", "on")
     if isinstance(default, float) or name in ("llm_timeout", "embed_timeout"):
         return float(raw)
@@ -113,6 +127,8 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "ocr_enabled": False,
     "encryption_enabled": False,
     "allow_cloud": False,
+    "require_encryption": False,
+    "retention_days": 0,
     "embed_dim": 768,
     "llm_timeout": 60.0,
     "embed_timeout": 30.0,

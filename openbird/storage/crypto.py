@@ -32,6 +32,25 @@ _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIR_MODE = 0o700
 _DEFAULT_KEYRING_TIMEOUT_SECONDS = 2.0
 _KEYRING_TIMEOUT = object()
+# Wait up to this long for a busy DB lock before raising "database is locked"
+# (B3): a concurrent reader/writer must queue, not fail immediately, while the
+# single WAL writer slot is briefly held by an INSERT-only transaction.
+_BUSY_TIMEOUT_MS = 5000
+# Auto-checkpoint the WAL back into the main DB roughly every this-many pages so
+# the -wal sidecar cannot grow without bound (H10). 1000 pages is SQLite's
+# default; we set it explicitly so the bound is documented and deterministic.
+_WAL_AUTOCHECKPOINT_PAGES = 1000
+
+
+class EncryptionUnavailableError(RuntimeError):
+    """Raised when strict encryption is required but cannot be verified.
+
+    Surfaced only when ``OPENBIRD_REQUIRE_ENCRYPTION`` is enabled (or
+    ``settings.require_encryption`` is True) and the SQLCipher path could not be
+    verified — instead of silently degrading to a plaintext DB (H2). The message
+    distinguishes *why* encryption was unavailable (missing deps, key
+    unavailable, or an unverifiable cipher) so the failure is actionable.
+    """
 
 
 @dataclass(frozen=True)
@@ -197,6 +216,8 @@ def _try_sqlcipher(path: str, key: str) -> sqlite3.Connection | None:
         _prepare_private_db_path(path)
         conn = sqlcipher3.connect(path)  # type: ignore[attr-defined]
         _chmod_private_db_files(path)
+        # Queue on a busy lock rather than failing immediately (B3).
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
         # PRAGMA key must run before any other operation on the DB.
         conn.execute(f"PRAGMA key = \"x'{key}'\"")
         conn.execute("SELECT count(*) FROM sqlite_master")  # force key check
@@ -213,6 +234,8 @@ def _try_sqlcipher(path: str, key: str) -> sqlite3.Connection | None:
         mode = str(row[0]).lower() if row and row[0] is not None else ""
         if mode != "wal":
             raise RuntimeError(f"SQLCipher WAL mode unavailable: {mode or 'unknown'}")
+        # Bound the WAL sidecar so it cannot grow without limit (H10).
+        conn.execute(f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}")
         _chmod_private_db_files(path)
         return conn
     except Exception as exc:
@@ -226,15 +249,40 @@ def _try_sqlcipher(path: str, key: str) -> sqlite3.Connection | None:
         return None
 
 
-def _open_plaintext(path: str) -> sqlite3.Connection:
-    """Open a plain sqlite3 DB with 0600 file perms and sqlite-vec loaded."""
+def _open_plaintext(path: str) -> tuple[sqlite3.Connection, bool]:
+    """Open a plain sqlite3 DB with 0600 file perms and sqlite-vec loaded.
+
+    Returns the connection plus a live-probed ``wal_enabled`` flag. WAL is
+    REQUIRED for the local-first concurrency contract (B3): a reader must not be
+    blocked by — nor error against — the single short INSERT-only writer txn.
+    ``busy_timeout`` is set so a contended lock queues instead of failing.
+    """
     _prepare_private_db_path(path)
     conn = sqlite3.connect(path)
     # Touch was implicit on connect; tighten perms on first creation and every
     # subsequent open so older DBs are repaired in place.
     _chmod_private_db_files(path)
     _load_vec(conn)
-    return conn
+    # Queue on a busy lock instead of erroring immediately (B3).
+    conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+    # Enable WAL on the plaintext path too (previously hard-coded off): readers
+    # and the writer can then proceed concurrently. Probe the LIVE mode rather
+    # than assuming it engaged.
+    conn.execute("PRAGMA journal_mode = WAL")
+    row = conn.execute("PRAGMA journal_mode").fetchone()
+    wal_enabled = bool(row) and str(row[0]).lower() == "wal"
+    if wal_enabled:
+        # Bound the WAL sidecar so it cannot grow without limit (H10).
+        conn.execute(f"PRAGMA wal_autocheckpoint = {_WAL_AUTOCHECKPOINT_PAGES}")
+    else:
+        logger.warning(
+            "plaintext DB could not enable WAL (journal_mode=%s); "
+            "concurrent reads during writes may block",
+            (row[0] if row else "unknown"),
+        )
+    # Re-tighten perms now that the -wal/-shm sidecars exist.
+    _chmod_private_db_files(path)
+    return conn, wal_enabled
 
 
 def open_db_verified(
@@ -262,6 +310,17 @@ def open_db_verified(
     db_path = path or settings.db_path
     assert db_path is not None
 
+    require_encryption = bool(getattr(settings, "require_encryption", False))
+
+    # Track WHY encryption was unavailable so strict mode can raise an actionable
+    # error distinguishing missing deps / locked-or-missing key / unverifiable
+    # cipher (H2) — rather than a vague "encryption unavailable".
+    reason = "no key available (keyring/Keychain unavailable, locked, or timed out)"
+    try:
+        import sqlcipher3  # type: ignore  # noqa: F401
+    except ImportError:
+        reason = "sqlcipher3 is not installed"
+
     key = _get_or_create_key()
     if key is not None:
         conn = _try_sqlcipher(db_path, key)
@@ -279,19 +338,39 @@ def open_db_verified(
                     wal_enabled=True,
                 )
             conn.close()
+            reason = "SQLCipher opened but its encryption could not be verified"
+        else:
+            # _try_sqlcipher already logged the specific failure; the key existed
+            # so deps/key were not the blocker.
+            reason = "the SQLCipher backend was unusable (see logs for the cause)"
 
-    conn = _open_plaintext(db_path)
+    if require_encryption:
+        # H2 strict mode: refuse to silently create/open a PLAINTEXT database.
+        raise EncryptionUnavailableError(
+            "OPENBIRD_REQUIRE_ENCRYPTION is set but the database could not be "
+            f"opened with verified SQLCipher encryption: {reason}. "
+            "Refusing to fall back to a plaintext database. Install the "
+            "'encryption' extra (sqlcipher3 + keyring) and ensure the Keychain "
+            "is unlocked, or unset OPENBIRD_REQUIRE_ENCRYPTION to allow the "
+            "0600 plaintext fallback."
+        )
+
+    conn, wal_enabled = _open_plaintext(db_path)
     settings.encryption_enabled = False
-    logger.info(
-        "DB opened WITHOUT app-level encryption (local-only, 0600 perms; "
-        "relies on FileVault). Install sqlcipher3 + keyring to enable SQLCipher."
+    logger.warning(
+        "DB opened WITHOUT app-level encryption (local-only, 0600 perms, "
+        "WAL=%s; relies on FileVault for at-rest protection). Cause: %s. "
+        "Install the 'encryption' extra (sqlcipher3 + keyring) to enable "
+        "SQLCipher, or set OPENBIRD_REQUIRE_ENCRYPTION=1 to refuse plaintext.",
+        wal_enabled,
+        reason,
     )
     return DbHandle(
         conn=conn,
         backend="sqlite3",
         encrypted=False,
         cipher_version=None,
-        wal_enabled=False,
+        wal_enabled=wal_enabled,
     )
 
 
@@ -314,6 +393,7 @@ def open_encrypted_db(
 
 __all__ = [
     "DbHandle",
+    "EncryptionUnavailableError",
     "cipher_version",
     "mapping_row_factory",
     "open_db_verified",

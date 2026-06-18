@@ -20,7 +20,15 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "CaptureHelper",
-            path: "Sources/CaptureHelper"
+            path: "Sources/CaptureHelper",
+            // NOTE: dangerous_apps.json is the CANONICAL dangerous-app list and a
+            // committed source file, but it is intentionally NOT bundled as a
+            // runtime resource. The shipped helper is a bare executable (no
+            // SwiftPM resource bundle is copied into OpenBird.app), so reading it
+            // via `Bundle.module` would `fatalError`. The list is baked into
+            // `main.swift` instead; a Python parity test keeps the JSON, the
+            // Swift literal, and the Python tuple in lockstep. See main.swift.
+            exclude: ["dangerous_apps.json"]
         )
     ]
 )

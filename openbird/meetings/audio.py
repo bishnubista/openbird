@@ -39,10 +39,21 @@ it yields :class:`AudioFrame` objects (mono float32 PCM samples + host timestamp
 from __future__ import annotations
 
 import enum
+import math
 import struct
+from array import array
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import BinaryIO
+
+# The IPC wire format is little-endian f32 PCM (see ``encode_frame``). We store
+# samples as a stdlib ``array('f')`` (4 bytes/sample) rather than a Python tuple
+# of floats (~28 bytes/sample) so a single 25 s @ 48 kHz frame is ~4.8 MB instead
+# of ~33 MB. Pin the item size so a platform where ``float`` isn't 32-bit can't
+# silently violate the wire contract. This is a real runtime invariant, so raise
+# explicitly rather than ``assert`` (which is stripped under ``python -O``).
+if array("f").itemsize != 4:  # pragma: no cover - CPython guarantees f32
+    raise RuntimeError("array('f') must be 32-bit to match the f32 IPC wire format")
 
 
 class Track(str, enum.Enum):
@@ -62,9 +73,14 @@ class AudioFrame:
     """A single block of mono PCM audio from one track.
 
     Attributes:
-        samples: Mono PCM samples as floats in roughly ``[-1.0, 1.0]``. A tuple
-            (immutable) so frames are safe to share/hash; conversion from the
-            helper's interleaved int16/float32 buffer happens at the boundary.
+        samples: Mono PCM samples as float32, stored in a stdlib ``array('f')``
+            (~4 bytes/sample) rather than a tuple of Python floats (~28 bytes
+            each) so large windows don't blow up memory [M6]. Any input sequence
+            (tuple/list/array) is coerced to ``array('f')`` at construction;
+            values land in roughly ``[-1.0, 1.0]``. The array is technically
+            mutable, but the contract is that ``samples`` is **immutable** — never
+            mutate it in place; build a new frame instead. (``AudioFrame`` is
+            therefore unhashable; see ``__hash__``.)
         sample_rate: Sample rate in Hz (e.g. 16000 for whisper-friendly audio).
         host_ts: Common monotonic host timestamp (seconds) of the *first* sample
             in this frame. This is the shared clock used to align the mic and
@@ -73,11 +89,25 @@ class AudioFrame:
         seq: Monotonic per-source sequence number, for gap/drop detection.
     """
 
-    samples: tuple[float, ...] = field(repr=False)
+    samples: "array[float]" = field(repr=False)
     sample_rate: int
     host_ts: float
     track: Track = Track.SYSTEM
     seq: int = 0
+
+    # ``samples`` is a mutable ``array`` whose contents are part of ``__eq__``, so
+    # the frame is not safely hashable. ``frozen=True`` would otherwise synthesize
+    # a ``__hash__`` that calls ``hash(self.samples)`` and raises ``TypeError`` at
+    # use; make the intent explicit and unsurprising instead.
+    __hash__ = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        # Coerce any input sequence (tuple/list/array) to a float32 ``array('f')``
+        # so storage is compact and equality between two frames is array-vs-array
+        # (by value). Always COPY — even an existing array('f') is duplicated so a
+        # caller mutating their original buffer after construction cannot silently
+        # change this frozen frame's PCM/equality. Frozen => object.__setattr__.
+        object.__setattr__(self, "samples", array("f", self.samples))
 
     def __repr__(self) -> str:
         """Metadata-only repr — never dumps raw PCM samples [R4/R5].
@@ -167,6 +197,14 @@ _CODE_BY_TRACK: dict[Track, int] = {Track.SYSTEM: 0, Track.MIC: 1}
 # stops decoding, so a bogus uint32 count can't force a huge read/allocation.
 _MAX_SAMPLES_PER_FRAME = 480_000
 
+# Sane bounds for a decoded sample rate (Hz). The header carries it as f64, so a
+# crashed/corrupt helper can emit a negative, absurdly large, or sub-1 Hz value.
+# A rate below 1.0 would also round to 0 in ``int(round(...))`` and silently
+# disable timing math, so we require ``1.0 <= sample_rate <= _MAX_SAMPLE_RATE``
+# and treat anything else as a corrupt stream [L4].
+_MIN_SAMPLE_RATE = 1.0
+_MAX_SAMPLE_RATE = 768_000.0
+
 
 def _read_exactly(reader: BinaryIO, n: int) -> bytes | None:
     """Read exactly ``n`` bytes, or ``None`` at clean/truncated EOF."""
@@ -205,6 +243,21 @@ def decode_frames(reader: BinaryIO) -> Iterator[AudioFrame]:
         if header is None:
             return
         track_code, host_ts, sample_rate, count = _FRAME_HEADER.unpack(header)
+        if not math.isfinite(host_ts):
+            # Corrupt/hostile stream: a NaN/inf host_ts would poison clock
+            # alignment. Stop cleanly, mirroring the count/truncated-tail paths.
+            return
+        if not (math.isfinite(sample_rate) and _MIN_SAMPLE_RATE <= sample_rate <= _MAX_SAMPLE_RATE):
+            # NaN/inf, negative, sub-1 Hz (would round to 0 and disable timing),
+            # or absurdly large rates are all corrupt — clean-stop, don't crash on
+            # ``int(round(sample_rate))`` or carry a nonsense rate downstream [L4].
+            return
+        track = _TRACK_BY_CODE.get(track_code)
+        if track is None:
+            # The wire protocol is a fixed two-track (SYSTEM=0, MIC=1) contract.
+            # An unknown code is a corrupt/incompatible stream; silently mapping it
+            # to SYSTEM would misattribute "me vs. others". Clean-stop instead [L4].
+            return
         if count > _MAX_SAMPLES_PER_FRAME:
             # Corrupt/hostile stream: don't read/allocate `count * 4` bytes.
             return
@@ -213,10 +266,10 @@ def decode_frames(reader: BinaryIO) -> Iterator[AudioFrame]:
             return  # truncated tail
         samples = struct.unpack(f"<{count}f", body) if count else ()
         yield AudioFrame(
-            samples=tuple(samples),
+            samples=samples,  # AudioFrame.__post_init__ coerces to array('f') [M6]
             sample_rate=int(round(sample_rate)),
             host_ts=host_ts,
-            track=_TRACK_BY_CODE.get(track_code, Track.SYSTEM),
+            track=track,
             seq=seq,
         )
         seq += 1

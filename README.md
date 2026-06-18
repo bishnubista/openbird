@@ -85,7 +85,9 @@ The formula downloads the source archive attached to the matching GitHub tag
 release. On every `v*` tag, `.github/workflows/homebrew-release.yml` builds a
 deterministic `openbird-<version>.tar.gz` source archive, uploads it to the
 GitHub release, updates `Formula/openbird.rb` with the new source URL and sha256,
-and commits that formula bump back to `main`.
+and **opens a pull request** with that formula bump. The PR is reviewed and
+merged through the normal protected-`main` flow rather than pushed directly, so
+branch protection on the formula is preserved.
 
 To cut the first Homebrew release:
 
@@ -94,7 +96,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-After the workflow commits the formula update, users can upgrade through the
+After the formula-bump pull request is merged, users can upgrade through the
 normal Homebrew path:
 
 ```bash
@@ -106,6 +108,22 @@ The formula installs `openbird` with the SQLCipher encryption extra as a
 virtualenv-backed CLI and stages `OpenBird.app` under Homebrew's prefix.
 `openbird-app` launches that installed bundle.
 
+> **Install requires network, and is not vendored/offline.** `brew install`
+> builds from source: it runs `uv pip install ".[encryption]"`, which resolves
+> and downloads Python dependencies from PyPI at install time. The dependency
+> set is not vendored into the archive and is not pinned for reproducible
+> offline installs. "Local-first" describes where your data lives at runtime
+> (on your device), not the install path.
+>
+> **The Homebrew app bundle is unsigned and is not a supported capture/audio
+> artifact.** `script/build_and_run.sh` does no code-signing or notarization, so
+> the `OpenBird.app` staged by the formula cannot obtain macOS Screen Recording
+> or Accessibility (TCC) permissions — screen and audio capture will not work
+> from a brew install. Functional capture requires a signed bundle with a stable
+> identity plus manually granted macOS permissions (see
+> [Release gates](#release-gates)). The CLI memory features
+> (`openbird ingest` / `chat` / `routine`) work fully from the brew install.
+
 ### CLI
 
 ```
@@ -115,7 +133,10 @@ openbird chat "<question>"      # grounded, cited answer over your memory
 openbird capture [--loop]       # run the capture daemon over the helper
 openbird routine list|run <name>  # scheduled routines (daily-briefing, yesterday's-work, weekly-summary)
 openbird meeting                # meeting capture (gated on signed audio helper)
-openbird data stats|purge --since <when>   # inspect / delete stored memory
+openbird data stats             # row counts + active embedding cohort
+openbird data purge --since <when> | --all   # cascade-delete stored memory
+openbird data prune --older-than <span>      # retention prune (e.g. 90d, 24h)
+openbird data vacuum            # reclaim freed disk space (VACUUM + WAL checkpoint)
 ```
 
 ### macOS app
@@ -143,6 +164,25 @@ Environment overrides (all optional):
 | `OPENBIRD_LLM_BACKEND` | `litellm` | provider backend selector; `mlx` is reserved pending experiment promotion |
 | `OPENBIRD_LLM_MODEL` | `ollama/llama3.2` | any LiteLLM model string (e.g. `claude-...`, `gpt-...`) |
 | `OPENBIRD_EMBED_MODEL` | `ollama/nomic-embed-text` | embedding model (dim pinned per cohort) |
+| `OPENBIRD_REQUIRE_ENCRYPTION` | `0` | when `1`, opening the DB **fails closed** (raises) instead of falling back to a plaintext file if SQLCipher cannot be verified |
+| `OPENBIRD_RETENTION_DAYS` | `0` (keep forever) | default cutoff for `openbird data prune` when `--older-than` is omitted |
+
+## Storage growth & retention
+
+Memory is stored in on-device SQLite (WAL mode, `busy_timeout` so concurrent
+readers/writers queue rather than fail). Each observation is one row referencing
+a deduped content blob; identical chunks are embedded and indexed exactly once,
+so storage grows with *unique* captured content, not raw capture volume. Vectors
+dominate size (one `float32[embed_dim]` blob per unique chunk — ~3 KB/chunk at
+the default 768 dims) alongside the FTS5 index.
+
+To bound growth:
+
+- `openbird data prune --older-than 90d` cascade-deletes observations older than
+  the cutoff (and any blobs/chunks/index rows they orphaned), atomically.
+- `openbird data vacuum` reclaims the freed pages back to the OS (deletes only
+  mark pages free; the file shrinks after `VACUUM`). The WAL sidecar is bounded
+  by an explicit `wal_autocheckpoint` and truncated on vacuum.
 
 ## Privacy
 
