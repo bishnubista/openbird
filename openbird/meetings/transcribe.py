@@ -429,6 +429,7 @@ def summarize_transcript(
 
 __all__ = [
     "MeetingsExtraNotInstalled",
+    "MeetingsAudioTooLong",
     "TranscriptSegment",
     "Transcriber",
     "ACTION_ITEMS_SCHEMA",
