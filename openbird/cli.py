@@ -471,7 +471,7 @@ def data_prune(
     orphaned blobs/chunks/index entries (atomic, rollback-guarded). Run
     ``openbird data vacuum`` afterwards to reclaim the freed space on disk.
     """
-    cutoff = _parse_since(older_than)
+    cutoff = _parse_since(older_than, option_name="--older-than")
     if not yes:
         confirm = typer.confirm(
             f"Permanently delete data older than {_fmt_ts(cutoff)}?", default=False
@@ -543,12 +543,13 @@ def _fmt_interval(seconds: float) -> str:
     return f"{int(seconds // 60)}m"
 
 
-def _parse_since(value: str) -> float:
-    """Parse a --since value into a unix timestamp.
+def _parse_since(value: str, *, option_name: str = "--since") -> float:
+    """Parse a time-spec value into a unix timestamp.
 
     Accepts a bare unix timestamp, a relative span (``7d``/``24h``/``30m``/
     ``45s``), or an ISO 8601 date/datetime. Relative spans are subtracted from
-    *now*.
+    *now*. ``option_name`` names the originating CLI flag so parse errors point
+    at the flag the user actually passed (e.g. ``--older-than`` for prune).
     """
     import time
 
@@ -571,7 +572,8 @@ def _parse_since(value: str) -> float:
         return dt.timestamp()
     except ValueError as exc:
         raise typer.BadParameter(
-            f"could not parse --since {value!r}; use a unix ts, ISO date, or span like '7d'."
+            f"could not parse {option_name} {value!r}; use a unix ts, ISO date, "
+            "or span like '7d'."
         ) from exc
 
 

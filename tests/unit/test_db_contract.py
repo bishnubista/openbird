@@ -106,6 +106,8 @@ def test_concurrent_reader_not_blocked_by_slow_embed(tmp_path):
     finally:
         t.join(timeout=10.0)
 
+    # A timed-out join would silently leave the writer hung; fail loudly instead.
+    assert not t.is_alive(), "writer thread did not finish within the join timeout"
     assert not errors, f"writer raised: {errors}"
     # The read happened DURING the 1.5s embed and returned fast => the writer was
     # not holding the lock across the network round-trip.
