@@ -31,6 +31,7 @@
 // so CI/`swift run` terminates.
 
 import AVFoundation
+import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 
@@ -38,6 +39,62 @@ import ScreenCaptureKit
 
 private func diag(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
+private struct GrantReport: Encodable {
+    let screen_recording: String
+    let microphone: String
+    let system_audio: String
+}
+
+private func screenRecordingGrantState() -> String {
+    if CGPreflightScreenCaptureAccess() {
+        return "passed"
+    }
+    // CoreGraphics exposes a non-prompting boolean here, not the mic-style
+    // notDetermined/denied split. False proves only "not currently granted".
+    return "unknown"
+}
+
+private func microphoneGrantState() -> String {
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .authorized:
+        return "passed"
+    case .denied, .restricted:
+        return "failed"
+    case .notDetermined:
+        return "unknown"
+    @unknown default:
+        return "unknown"
+    }
+}
+
+private func emitGrantReport() {
+    let screenRecording: String
+    let systemAudio: String
+    if #available(macOS 13.0, *) {
+        screenRecording = screenRecordingGrantState()
+        systemAudio = screenRecording
+    } else {
+        screenRecording = "unknown"
+        systemAudio = "failed"
+    }
+    let report = GrantReport(
+        screen_recording: screenRecording,
+        microphone: microphoneGrantState(),
+        // OpenBird's current system-audio path is a ScreenCaptureKit display
+        // stream with capturesAudio=true, so this grant follows the
+        // screen/system-audio TCC gate for the packaged helper.
+        system_audio: systemAudio
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.withoutEscapingSlashes]
+    guard let data = try? encoder.encode(report) else {
+        diag("audio: preflight_encode_failed")
+        exit(2)
+    }
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data("\n".utf8))
 }
 
 // MARK: - Frame model (the contract the Python pipeline consumes)
@@ -344,6 +401,11 @@ private func openOutput(_ path: String?) -> FileHandle {
 }
 
 private func run() {
+    if CommandLine.arguments.contains("--preflight-grants") {
+        emitGrantReport()
+        return
+    }
+
     guard #available(macOS 13.0, *) else {
         diag("audio: requires_macos_13+")
         exit(2)

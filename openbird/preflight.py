@@ -24,14 +24,13 @@ import json
 import os
 import platform
 import sqlite3
+import subprocess
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urljoin
 
-from openbird.config import (
-    DEFAULT_OLLAMA_HOST as _DEFAULT_OLLAMA_HOST,
-)
 from openbird.config import (
     Settings,
     get_settings,
@@ -452,6 +451,12 @@ class HelperProbe(Protocol):
     def __call__(self, capability: str) -> str: ...
 
 
+CAPTURE_HELPER_PATH_ENV = "OPENBIRD_CAPTURE_HELPER"
+AUDIO_HELPER_PATH_ENV = "OPENBIRD_AUDIO_HELPER"
+_HELPER_PROBE_ARG = "--preflight-grants"
+_HELPER_PROBE_TIMEOUT_SECONDS = 3.0
+
+
 def _normalize_grant(value: object) -> str:
     """Coerce a probe return value to a known grant state (default unknown)."""
     text = str(value).strip().lower()
@@ -460,6 +465,87 @@ def _normalize_grant(value: object) -> str:
     if text in (GRANT_FAILED, "denied", "restricted", "false", "no"):
         return GRANT_FAILED
     return GRANT_UNKNOWN
+
+
+def _helper_path_from_env(name: str) -> Path | None:
+    """Return an executable helper path from ``name`` when the app wrapper set it."""
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
+    return None
+
+
+def _run_helper_grant_probe(path: Path) -> dict[str, str]:
+    """Run one packaged helper's non-capturing grant probe.
+
+    Helpers return a flat JSON object such as ``{"accessibility": "passed"}``.
+    Raises on execution/parsing failure so the final report can distinguish a
+    broken probe from a helper that successfully reported an ungranted gate.
+    """
+    try:
+        proc = subprocess.run(
+            [str(path), _HELPER_PROBE_ARG],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_HELPER_PROBE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise RuntimeError(type(exc).__name__) from exc
+    if proc.returncode != 0:
+        raise RuntimeError(f"exit:{proc.returncode}")
+    try:
+        payload = json.loads(proc.stdout)
+    except Exception as exc:
+        raise ValueError(type(exc).__name__) from exc
+    if not isinstance(payload, dict):
+        raise ValueError("non_object_json")
+    return {str(k): _normalize_grant(v) for k, v in payload.items()}
+
+
+def _packaged_helper_probe(
+    *,
+    capture_helper: Path | None = None,
+    audio_helper: Path | None = None,
+    runner: Callable[[Path], dict[str, str]] = _run_helper_grant_probe,
+) -> HelperProbe | None:
+    """Build a cached probe over the helpers bundled beside ``openbird-cli``.
+
+    The app wrapper exports helper paths before invoking the Python CLI. Outside
+    that packaged path there may be no stable signed helper, so returning
+    ``None`` keeps preflight's report honestly ``unknown``.
+    """
+    capture_path = capture_helper or _helper_path_from_env(CAPTURE_HELPER_PATH_ENV)
+    audio_path = audio_helper or _helper_path_from_env(AUDIO_HELPER_PATH_ENV)
+    if capture_path is None and audio_path is None:
+        return None
+
+    cache: dict[str, dict[str, str]] = {}
+    errors: dict[str, str] = {}
+
+    def _probe(capability: str) -> str:
+        if capability == "accessibility":
+            if capture_path is None:
+                raise FileNotFoundError(CAPTURE_HELPER_PATH_ENV)
+            key, path = "capture", capture_path
+        else:
+            if audio_path is None:
+                raise FileNotFoundError(AUDIO_HELPER_PATH_ENV)
+            key, path = "audio", audio_path
+        if key in errors:
+            raise RuntimeError(errors[key])
+        if key not in cache:
+            try:
+                cache[key] = runner(path)
+            except Exception as exc:
+                errors[key] = type(exc).__name__
+                raise
+        return _normalize_grant(cache[key].get(capability, GRANT_UNKNOWN))
+
+    return _probe
 
 
 def check_macos_capabilities(
@@ -502,10 +588,17 @@ def check_macos_capabilities(
             "Authoritative TCC/Accessibility and audio-capture checks require the "
             "packaged signed helper; reported as 'unknown' here."
         )
+    elif probe_error:
+        note = (
+            "Packaged helper probe was unavailable or failed; unverified gates "
+            "are reported as 'unknown'."
+        )
     elif all_passed:
         note = "All TCC/audio gates granted (verified via signed helper)."
+    elif any_failed:
+        note = "Signed helper reported some TCC/audio gates not passed."
     else:
-        note = "Signed helper reported some TCC/audio gates not granted."
+        note = "Signed helper could not prove every TCC/audio gate."
 
     return {
         "platform": plat,
@@ -643,7 +736,10 @@ def run_preflight(
             "error": None,
         }
 
-    macos = check_macos_capabilities(system=system, helper_probe=helper_probe)
+    mac_helper_probe = helper_probe
+    if mac_helper_probe is None and system is None and platform.system() == "Darwin":
+        mac_helper_probe = _packaged_helper_probe()
+    macos = check_macos_capabilities(system=system, helper_probe=mac_helper_probe)
 
     report: dict[str, Any] = {
         "ollama": ollama,
@@ -781,6 +877,7 @@ __all__ = [
     "check_sqlite_vec",
     "check_encryption",
     "check_macos_capabilities",
+    "_packaged_helper_probe",
     "HelperProbe",
     "GRANT_PASSED",
     "GRANT_FAILED",
