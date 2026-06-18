@@ -58,17 +58,71 @@ _err_console = Console(stderr=True)
 # --------------------------------------------------------------------------- #
 
 
-def _provider():
-    """Construct the configured LLM provider (imported lazily)."""
-    from openbird.llm.provider import create_llm_provider
+def _resolve_cloud_opt_in(remote_models: dict[str, str]) -> bool:
+    """Decide whether to proceed with a REMOTE model route [H3].
 
-    return create_llm_provider(get_settings())
+    Called when the provider factory refused because a cloud (or remote-Ollama)
+    model is configured without opt-in. On an interactive TTY we ask for an
+    explicit confirmation after showing exactly which model(s) would send
+    captured memory off the machine; non-interactively we refuse (the safe,
+    automation-friendly default). Returns True only if the user opts in here.
+    """
+    names = ", ".join(f"{role}={model}" for role, model in remote_models.items())
+    _err_console.print(
+        "[bold red]CLOUD MODEL CONFIGURED[/] — the following model(s) would send "
+        f"your captured memory to a third party: [bold]{names}[/]."
+    )
+    if not sys.stdin.isatty():
+        _err_console.print(
+            "[red]Refusing[/] (non-interactive). Set [bold]OPENBIRD_ALLOW_CLOUD=1[/] "
+            "to opt in, or use a local ollama/* model on a loopback host."
+        )
+        return False
+    return typer.confirm(
+        "Send captured memory to this remote model?", default=False
+    )
+
+
+def _provider():
+    """Construct the configured LLM provider, enforcing cloud opt-in [H3].
+
+    The provider factory refuses a remote model unless cloud is opted into. Here
+    we surface that refusal as an interactive confirm (TTY) or a clean exit
+    (non-interactive), then print the CLOUD ACTIVE banner whenever a remote model
+    is in use so it is never silent.
+    """
+    from openbird.llm.provider import (
+        CloudOptInRequired,
+        cloud_banner,
+        create_llm_provider,
+    )
+
+    settings = get_settings()
+    try:
+        provider = create_llm_provider(settings)
+    except CloudOptInRequired as exc:
+        if not _resolve_cloud_opt_in(exc.remote_models):
+            raise typer.Exit(code=2) from exc
+        provider = create_llm_provider(settings, allow_cloud=True)
+
+    banner = cloud_banner(settings)
+    if banner:
+        _err_console.print(f"[bold yellow]⚠ {banner}[/]")
+    return provider
 
 
 def _store(*, provider=None):
-    """Open the on-disk :class:`MemoryStore` (imported lazily)."""
+    """Open the on-disk :class:`MemoryStore` with the cloud-checked provider.
+
+    Always builds the provider through :func:`_provider` (unless one is passed
+    in) so the cloud opt-in policy + banner apply on every store-opening command
+    (ingest, data stats, reindex), not just chat/routine. MemoryStore would
+    otherwise construct a provider internally and bypass the CLI's confirm/banner.
+    """
     from openbird.memory.store import MemoryStore
 
+    if provider is None:
+        provider = _provider()
     return MemoryStore(settings=get_settings(), provider=provider)
 
 
@@ -156,6 +210,22 @@ def _render_preflight(report: dict) -> None:
         str(enc.get("status")),
         f"backend={enc.get('backend')} verified={enc.get('verified')}",
     )
+
+    cloud = report.get("cloud", {})
+    if cloud.get("active"):
+        if cloud.get("blocked"):
+            c_status, c_detail = (
+                "blocked",
+                f"remote {cloud.get('remote_models')} — set OPENBIRD_ALLOW_CLOUD=1 to opt in",
+            )
+        else:
+            c_status, c_detail = (
+                "CLOUD ACTIVE",
+                f"remote {cloud.get('remote_models')} (memory leaves this machine)",
+            )
+    else:
+        c_status, c_detail = "local", "all models local"
+    table.add_row("cloud", c_status, c_detail)
 
     priv = report["privacy"]
     table.add_row(
@@ -464,6 +534,167 @@ def data_stats() -> None:
     finally:
         store.close()
     _console.print_json(json.dumps(stats))
+
+
+# --------------------------------------------------------------------------- #
+# reindex                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _serialize_f32(vector: list[float]) -> bytes:
+    """Pack a float vector into sqlite-vec's little-endian float32 blob format.
+
+    Re-declared locally (it is a one-line ``struct.pack``) so reindex does not
+    import a private symbol from :mod:`openbird.memory.store`.
+    """
+    import struct
+
+    return struct.pack(f"<{len(vector)}f", *vector)
+
+
+@app.command()
+def reindex(
+    batch_size: int = typer.Option(
+        64, "--batch-size", help="How many chunks to embed per provider call."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-embed even when the stored cohort already matches the provider.",
+    ),
+) -> None:
+    """Re-embed every stored chunk under the current embedding model [M2].
+
+    Switching ``OPENBIRD_EMBED_MODEL`` (or its dimension) leaves the store in a
+    cohort mismatch — old vectors are incompatible with new queries. This rebuilds
+    ``vec_chunks`` at the new dimension, re-embeds all chunk text with the current
+    provider, and adopts the new cohort key. The whole rebuild runs in a single
+    transaction: if any embedding call fails (e.g. Ollama down) it rolls back, so
+    the old, searchable vectors and cohort survive intact.
+
+    The DB is opened directly (not via ``MemoryStore``) because ``MemoryStore``
+    refuses to construct on a populated cohort mismatch — which is exactly the
+    state ``reindex`` exists to repair.
+    """
+    from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
+
+    settings = get_settings()
+    provider = _provider()  # cloud opt-in + banner enforced here too.
+    new_cohort = provider.cohort_key()
+    new_dim = provider.embed_dim
+
+    conn = open_encrypted_db(settings.db_path, settings=settings)
+    conn.row_factory = mapping_row_factory
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        cohort_row = conn.execute(
+            "SELECT value FROM embedding_meta WHERE key = 'cohort_key'"
+        ).fetchone()
+        current_cohort = cohort_row["value"] if cohort_row else None
+
+        chunk_rows = conn.execute(
+            "SELECT rowid_int, text FROM chunks WHERE rowid_int IS NOT NULL "
+            "ORDER BY rowid_int"
+        ).fetchall()
+        total = len(chunk_rows)
+
+        if current_cohort == new_cohort and not force:
+            _console.print(
+                f"[green]Already on cohort[/] {new_cohort} "
+                f"({total} chunk(s)); nothing to do. Use --force to rebuild anyway."
+            )
+            return
+
+        _console.print(
+            f"Reindex: [cyan]{current_cohort or '(none)'}[/] -> [cyan]{new_cohort}[/] "
+            f"· {total} chunk(s) · dim={new_dim}"
+        )
+        if not yes:
+            if not sys.stdin.isatty():
+                _err_console.print(
+                    "[red]Refusing[/] (non-interactive). Re-run with --yes to reindex."
+                )
+                raise typer.Exit(code=1)
+            if not typer.confirm("Re-embed all chunks under the new cohort?", default=False):
+                _console.print("[yellow]Aborted.[/]")
+                raise typer.Exit(code=1)
+
+        try:
+            # Wrap the whole rebuild in ONE explicit transaction. Python's sqlite3
+            # does NOT auto-begin a transaction for DDL (only DML), so without an
+            # explicit BEGIN the DROP/CREATE would auto-commit and a later failure
+            # could not roll back — destroying the old vectors. With BEGIN, a mid-
+            # reindex embed failure rolls back the drop+rebuild atomically.
+            conn.execute("BEGIN")
+            # Rebuild the vector table at the (possibly new) dimension. CREATE ...
+            # IF NOT EXISTS would keep the stale dim, so drop first.
+            conn.execute("DROP TABLE IF EXISTS vec_chunks")
+            conn.execute(
+                f"CREATE VIRTUAL TABLE vec_chunks USING vec0("
+                f"chunk_rowid INTEGER PRIMARY KEY, embedding FLOAT[{new_dim}])"
+            )
+
+            done = 0
+            with _progress_columns() as progress:
+                task = progress.add_task("Embedding chunks", total=total) if total else None
+                for start in range(0, total, max(1, batch_size)):
+                    batch = chunk_rows[start : start + max(1, batch_size)]
+                    vectors = provider.embed([r["text"] for r in batch])
+                    for row, vec in zip(batch, vectors):
+                        conn.execute(
+                            "INSERT INTO vec_chunks(chunk_rowid, embedding) VALUES (?, ?)",
+                            (int(row["rowid_int"]), _serialize_f32(vec)),
+                        )
+                    done += len(batch)
+                    if task is not None:
+                        progress.update(task, completed=done)
+
+            # Adopt the new cohort only after every vector is in place.
+            if current_cohort is None:
+                conn.execute(
+                    "INSERT INTO embedding_meta(key, value) VALUES ('cohort_key', ?)",
+                    (new_cohort,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE embedding_meta SET value = ? WHERE key = 'cohort_key'",
+                    (new_cohort,),
+                )
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            _err_console.print(
+                f"[red]Reindex failed[/] ({type(exc).__name__}: {exc}); rolled back. "
+                "Your existing vectors and cohort are unchanged."
+            )
+            raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    _console.print(
+        f"[green]Reindexed[/] {total} chunk(s) under cohort {new_cohort} (dim={new_dim})."
+    )
+
+
+def _progress_columns():
+    """A rich progress bar for long reindex runs (spinner + bar + count)."""
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+    )
+
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=_console,
+        transient=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
