@@ -101,6 +101,19 @@ def test_empty_ollama_host_setting_falls_through(monkeypatch):
     assert resolved_ollama_host(Settings(ollama_host="")) == DEFAULT_OLLAMA_HOST
 
 
+def test_bare_host_port_is_normalized_to_http_url(monkeypatch):
+    # OLLAMA_HOST commonly is a bare host:port; api_base / urljoin need a scheme.
+    monkeypatch.setenv("OLLAMA_HOST", "localhost:11434")
+    assert resolved_ollama_host(Settings()) == "http://localhost:11434"
+    monkeypatch.setenv("OLLAMA_HOST", "10.0.0.5:11434")
+    assert resolved_ollama_host(Settings()) == "http://10.0.0.5:11434"
+
+
+def test_scheme_host_is_left_unchanged(monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "https://secure-ollama:443")
+    assert resolved_ollama_host(Settings()) == "https://secure-ollama:443"
+
+
 # --------------------------------------------------------------------------- #
 # loopback classification (H3 route-based)                                     #
 # --------------------------------------------------------------------------- #

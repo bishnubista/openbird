@@ -133,17 +133,36 @@ def resolved_ollama_host(settings: "Settings | None" = None) -> str:
       3. The localhost default.
 
     Both preflight and the runtime provider call this so a green preflight and
-    the actual runtime call always target the same host [M1].
+    the actual runtime call always target the same host [M1]. The result is
+    always a full ``scheme://...`` URL: a bare ``host:port`` (the common
+    ``OLLAMA_HOST`` form) is normalized to ``http://host:port`` so LiteLLM's
+    ``api_base`` and preflight's ``urljoin`` both work [B+F round-3].
     """
     env_host = os.environ.get("OLLAMA_HOST")
     if env_host:
-        return env_host
+        return _normalize_host_url(env_host)
     if settings is not None and settings.ollama_host:
-        return settings.ollama_host
+        return _normalize_host_url(settings.ollama_host)
     openbird_host = os.environ.get("OPENBIRD_OLLAMA_HOST")
     if openbird_host:
-        return openbird_host
+        return _normalize_host_url(openbird_host)
     return DEFAULT_OLLAMA_HOST
+
+
+def _normalize_host_url(host: str) -> str:
+    """Ensure ``host`` is a full URL, defaulting a missing scheme to ``http://``.
+
+    Ollama's ``OLLAMA_HOST`` convention accepts a bare ``host:port`` (e.g.
+    ``localhost:11434``); LiteLLM ``api_base`` and ``urljoin`` both need a scheme,
+    so prepend ``http://`` when none is present. A value that already has a scheme
+    (``http://`` / ``https://``) is returned unchanged.
+    """
+    text = host.strip()
+    if not text:
+        return DEFAULT_OLLAMA_HOST
+    if "://" in text:
+        return text
+    return f"http://{text}"
 
 
 # Loopback host names that keep traffic on this machine. A non-loopback Ollama
