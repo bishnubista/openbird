@@ -1,7 +1,7 @@
 """Text normalization, chunking, and content hashing for the memory store.
 
 Dedup and hashing operate on *normalized chunks* (whitespace-collapsed,
-boilerplate-stripped) rather than full windows [R4], so a one-character edit
+boilerplate-stripped) rather than full windows, so a one-character edit
 does not fork an entire window and static chrome does not dominate ranking.
 """
 

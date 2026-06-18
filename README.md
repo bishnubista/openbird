@@ -11,15 +11,14 @@ fully auditable.
 
 > Status: **early but working.** Python core + Swift capture/audio helpers + a native macOS
 > trust-controller app build and pass the test suite. Functional screen/audio capture requires a signed bundle + macOS permissions (see
-> [Release gates](#release-gates)). See [`PLAN.md`](PLAN.md) for the full design and current
-> release constraints.
+> [Release gates](#release-gates)).
 
 ## Why local-first?
 
 - **Private by default:** memory lives in on-device SQLite, with encryption gated by preflight.
 - **Text-first capture:** active-window text and UI metadata are stored, not screenshots or video.
 - **Model choice:** Ollama is the default, and cloud models are explicit opt-in through LiteLLM.
-- **Auditable behavior:** capture allowlists, redaction policy, audit metadata, and deletion commands
+- **Auditable behavior:** capture allowlists, redaction policy, source metadata, and deletion commands
   are part of the product surface.
 - **Extensible integrations:** the MVP starts with a filesystem MCP connector and keeps write
   actions behind explicit confirmation.
@@ -32,13 +31,13 @@ Five subsystems over one shared, local text memory:
 [capture-helper: Swift/AX] ─┐
 [audio-helper: Swift/SCK]  ─┼─▶ SQLite + FTS5 + sqlite-vec   ◀── chat   (RAG + LLM, cited)
 [integrations: MCP]        ─┘     hybrid search · RRF · MMR   ◀── routines (durable → RAG → deliver)
-                                  ▲ privacy: allowlist, redaction, capture indicator, audit log
+                                  ▲ privacy: allowlist, redaction, capture indicator, deletion controls
 ```
 
 The memory model separates **observations** (one row per timestamped occurrence — never deduped) from
 **content blobs/chunks** (deduped, embedded once). This keeps timeline queries ("what did I do
 yesterday") correct while avoiding redundant storage. Citations resolve back to the specific
-observation (app/window/time). Full rationale in [`PLAN.md`](PLAN.md).
+observation (app/window/time).
 
 ## Quickstart
 
@@ -122,9 +121,9 @@ openbird data stats|purge --since <when>   # inspect / delete stored memory
 
 `./script/build_and_run.sh` builds `dist/OpenBird.app` from the SwiftPM app target,
 stages the capture/audio helpers into `Contents/MacOS`, adds an `openbird-cli`
-shim for local preflight checks, and launches the bundle. The app exposes the
-early trust surface from `PLAN.md`: packaged-helper status, preflight summary,
-pause/resume ingestion, stop helpers, and quick access to the local data folder.
+shim for local preflight checks, and launches the bundle. The app exposes an
+early trust surface: packaged-helper status, preflight summary, pause/resume
+ingestion, stop helpers, and quick access to the local data folder.
 Pause is an ingestion gate: helper processes may still read and emit text until
 you use **Stop Helpers** or quit the helper process.
 
@@ -148,9 +147,10 @@ Environment overrides (all optional):
 
 - **Allowlist-first:** the capture daemon only records apps you explicitly allow; terminals, editors,
   and browsers are off until enabled.
-- **Redaction is defense-in-depth, not a guarantee** — see [Accepted residual risks](PLAN.md).
-- **Whole-data-path:** captured text is never written to logs, exceptions, or argv; the audit log
-  stores metadata, not content.
+- **Redaction is defense-in-depth, not a guarantee.** Allowlists and blocklists are the primary
+  protection; secret scrubbing is a second layer.
+- **Whole-data-path:** captured text is never written to logs, exceptions, or argv; source metadata is
+  scrubbed before storage.
 - **Encryption** at rest activates when the SQLCipher gate passes; otherwise the DB is `0600` and
   `preflight` says `plaintext-0600` so the claim is never overstated. The gate command verifies
   SQLCipher + `sqlite-vec`, WAL, encrypted backup behavior, disabled extension loading, private

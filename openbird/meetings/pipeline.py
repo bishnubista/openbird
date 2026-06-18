@@ -151,7 +151,7 @@ class MeetingPipeline:
         track = frame.track
         emitted: list[SpeechSegment] = []
 
-        # React to clock-sync anomalies before VAD/windowing this frame [R4].
+        # React to clock-sync anomalies before VAD/windowing this frame.
         # A device switch (abrupt host-clock jump) or large cross/intra gap means
         # the current open window is no longer time-continuous, so we realign by
         # closing it (emitting if valid) and starting fresh from this frame —

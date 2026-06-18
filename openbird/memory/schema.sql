@@ -65,7 +65,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
     text
 );
 
--- Embedding cohort metadata [R3]: refuse search across incompatible cohorts.
+-- Embedding cohort metadata: refuse search across incompatible cohorts.
 CREATE TABLE IF NOT EXISTS embedding_meta (
     key        TEXT PRIMARY KEY,
     value      TEXT

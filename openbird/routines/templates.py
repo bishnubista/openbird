@@ -5,7 +5,7 @@ range-scans :meth:`MemoryStore.time_range` (the non-semantic activity-timeline
 path), assembles a clearly-delimited, **untrusted-data** context, asks the
 :class:`LLMProvider` for a grounded summary, and returns the text to deliver.
 
-Per the plan's prompt-injection defense [R4], routines run unattended and are
+For prompt-injection defense, routines run unattended and are
 therefore **read/summarize-only**: retrieved captured text is inserted as data,
 never as instructions, and no tool/write action is ever triggered from it.
 
@@ -31,7 +31,7 @@ DAY = 86400.0
 WEEK = 7 * DAY
 
 # Guardrail prefix making clear that captured content is untrusted data, not
-# instructions (prompt-injection defense [R4]).
+# instructions (prompt-injection defense).
 _SYSTEM_PROMPT = (
     "You are OpenBird's routine summarizer. You are given a log of the user's "
     "captured on-screen activity within a time window, delimited by "
@@ -125,7 +125,7 @@ def _defang_fence(text: str) -> str:
     Captured content is untrusted; if it contained a literal closing tag it could
     break out of the ``<observations>`` fence and inject instructions. We replace
     the angle brackets so the fence the prompt builder adds is the only real one
-    (prompt-injection defense [R4]).
+    (prompt-injection defense).
     """
     return _FENCE_RE.sub(lambda m: m.group(0).replace("<", "‹").replace(">", "›"), text)
 

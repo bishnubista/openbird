@@ -3,7 +3,7 @@
 Defaults to local Ollama (``ollama/llama3.2`` + ``ollama/nomic-embed-text``).
 Embeddings are guarded to the configured dimension, and a stable ``cohort_key``
 identifies the (provider, model, dim, normalized) tuple so the memory store can
-refuse to mix incompatible embedding cohorts [R3].
+refuse to mix incompatible embedding cohorts.
 
 The public factory, :func:`create_llm_provider`, is the insertion point for
 future backends. The current production backend is still LiteLLM, which preserves

@@ -8,7 +8,7 @@ canvas/GPU apps). This module:
 
   * Records *measured* coverage per app in :data:`COMPATIBILITY_MATRIX` so the
     product can honestly report which apps are well-supported vs degraded
-    (Accepted residual risk [R5]: AX coverage is uneven; no universal-text
+    (Accepted residual risk: AX coverage is uneven; no universal-text
     guarantee).
   * Provides light per-app text normalization (:func:`normalize_for_app`) to
     strip recurring chrome/boilerplate before the memory store chunks and
@@ -34,7 +34,7 @@ from dataclasses import dataclass
 #
 # ``fields`` lists which event fields the helper can usually populate for the
 # app. ``notes`` documents the known failure mode. These are honest, scoped
-# claims, not promises — see PLAN.md "Accepted residual risks".
+# claims, not promises.
 # ---------------------------------------------------------------------------
 
 

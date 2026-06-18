@@ -6,7 +6,7 @@
 //     {"app": "<bundle id>", "window": "<title>", "url": "<url|null>",
 //      "text": "<AX text>", "ts": <epoch seconds>, "incognito": false}
 //
-// Privacy by prevention (PLAN.md "Whole-data-path privacy" / subprocess hygiene):
+// Privacy by prevention:
 //   * Captured text is written ONLY to stdout (the JSON line). It is NEVER placed
 //     in stderr, argv, env, or any log line. stderr carries only non-content
 //     diagnostics (status words + counts).

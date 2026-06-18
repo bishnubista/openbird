@@ -8,7 +8,7 @@ import PackageDescription
 // float32 PCM frames + a shared host timestamp for the Python meetings pipeline
 // (`openbird/meetings/`). This target is the dev build; the shipping artifact
 // must be a signed `.app` / LaunchAgent holding Screen-Recording + Microphone
-// TCC (PLAN.md system-audio gate).
+// TCC / system-audio gate.
 //
 // NOTE: ScreenCaptureKit audio capture requires macOS 13+ and Screen-Recording
 // permission at runtime; this skeleton COMPILES without those grants — actual

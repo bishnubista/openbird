@@ -5,7 +5,7 @@ will be built later. This module deliberately wraps an *injectable* audio source
 so the Python pipeline can be developed and unit-tested with canned PCM frames —
 no microphone, no system-audio tap, no ffmpeg.
 
-Why a Swift helper (and why not ffmpeg) — design requirements [R4]
+Why a Swift helper (and why not ffmpeg)
 ------------------------------------------------------------------
 * **System output capture requires ScreenCaptureKit.** macOS does not expose the
   system *output* mix as a normal input device, so ``ffmpeg -f avfoundation`` is
@@ -266,7 +266,7 @@ class ClockSync:
 
     Mic and system audio are independent Core Audio streams; we align them on
     :attr:`AudioFrame.host_ts` rather than assuming sample alignment. Two things
-    are tracked [R4]:
+    are tracked:
 
     * **Intra-track continuity** — ``drift[track]`` is the gap/overlap between a
       track's previous frame end and the next frame's ``host_ts`` (a sudden large

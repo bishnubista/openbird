@@ -133,7 +133,7 @@ def test_ingest_then_chat_returns_cited_answer(store):
     assert result.citations, "answer should carry an occurrence-level citation"
 
     cite = result.citations[0]
-    # The citation must resolve to the REAL observation we just stored [R4].
+    # The citation must resolve to the REAL observation we just stored.
     assert cite.observation_id == obs.id
     assert cite.app == "Notes"
     assert cite.window == "OpenBird overview"
@@ -416,7 +416,7 @@ def test_ingest_then_chat_with_real_ollama(tmp_path):
         assert result.answer
         # With short positional source labels the local model reliably grounds its
         # answer: assert a real, validated citation is produced (this is the
-        # cited-answer behavior PLAN.md promises), and every citation resolves to
+        # cited-answer behavior README promises), and every citation resolves to
         # the one real observation — no hallucinated ids survive.
         assert result.grounded, "expected a grounded, cited answer over one observation"
         assert result.citations

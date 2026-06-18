@@ -139,7 +139,7 @@ def test_finish_records_terminal_state(run_store, clock):
     done = run_store.finish(run.id, status=STATUS_DONE, output="hello")
     assert done.status == STATUS_DONE
     assert done.finished_ts is not None
-    # Privacy [R4]: with the DB unencrypted, the summary BODY is not persisted;
+    # Privacy: with the DB unencrypted, the summary BODY is not persisted;
     # only content-safe metadata (length + hash) is stored.
     assert not run_store.encryption_enabled
     assert done.output is None

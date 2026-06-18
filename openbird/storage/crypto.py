@@ -185,7 +185,7 @@ def _try_sqlcipher(path: str, key: str) -> sqlite3.Connection | None:
     Returns the connection on success, or ``None`` if SQLCipher is unavailable,
     sqlite-vec fails to load under it, or the connection cannot be *verified* as
     genuinely encrypted via ``PRAGMA cipher_version``. WAL must also engage
-    under SQLCipher per the encryption gate (PLAN.md:84).
+    under SQLCipher per the encryption gate.
     """
     try:
         import sqlcipher3  # type: ignore

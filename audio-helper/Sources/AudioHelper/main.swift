@@ -1,6 +1,6 @@
 // OpenBird audio-helper — ScreenCaptureKit system audio + microphone capture.
 //
-// Design (PLAN.md Meetings [R3/R4]):
+// Design:
 //   * System OUTPUT audio is captured via ScreenCaptureKit's `SCStream` audio
 //     path. macOS does not expose the system output mix as a normal input
 //     device, so `ffmpeg -f avfoundation` is explicitly NOT a fallback.
