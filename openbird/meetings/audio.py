@@ -80,7 +80,7 @@ class AudioFrame:
     seq: int = 0
 
     def __repr__(self) -> str:
-        """Metadata-only repr — never dumps raw PCM samples [R4/R5].
+        """Metadata-only repr — never dumps raw PCM samples.
 
         Captured content (``samples``) must never reach a traceback, log line,
         or macOS crash report, so the repr emits only counts/timestamps.
@@ -251,7 +251,7 @@ class ClockEvent:
     """A single clock-sync anomaly emitted by :meth:`ClockSync.observe`.
 
     Carries only metadata (track, kind, magnitude, timestamps) — never any
-    captured audio — so it is safe to log/raise [R4/R5].
+    captured audio — so it is safe to log/raise.
     """
 
     kind: ClockEventKind

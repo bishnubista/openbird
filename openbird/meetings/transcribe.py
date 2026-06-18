@@ -66,7 +66,7 @@ class TranscriptSegment:
     text: str = field(repr=False)
 
     def __repr__(self) -> str:
-        """Metadata-only repr — never dumps the transcript text [R4/R5].
+        """Metadata-only repr — never dumps the transcript text.
 
         Captured/transcribed content must never reach a traceback, log line, or
         macOS crash report, so the repr emits only track/timestamps/text length.

@@ -66,7 +66,7 @@ class SpeechSegment:
     frames: list[AudioFrame] = field(default_factory=list, repr=False)
 
     def __repr__(self) -> str:
-        """Metadata-only repr — never dumps the captured PCM frames [R4/R5]."""
+        """Metadata-only repr — never dumps the captured PCM frames."""
         return (
             f"SpeechSegment(track={self.track.value!r}, start_ts={self.start_ts}, "
             f"end_ts={self.end_ts}, n_frames={len(self.frames)})"
@@ -91,7 +91,7 @@ class TranscriptPiece:
     text: str = field(repr=False)
 
     def __repr__(self) -> str:
-        """Metadata-only repr — never dumps the transcript text [R4/R5]."""
+        """Metadata-only repr — never dumps the transcript text."""
         return (
             f"TranscriptPiece(track={self.track.value!r}, start_ts={self.start_ts}, "
             f"end_ts={self.end_ts}, text_len={len(self.text)})"

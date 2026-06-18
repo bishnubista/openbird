@@ -8,7 +8,7 @@ Runs are persisted in a dedicated ``routine_runs`` SQLite table keyed by an
   * occurrences that were *missed* while the daemon was down can be detected and
     re-run on the next startup (missed-job catchup).
 
-Privacy boundary [R4/R5]
+Privacy boundary
 ------------------------
 Routine bookkeeping is operational metadata, but routine *output* (the generated
 summary) is derived from captured on-screen content and therefore must not sit

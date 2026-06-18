@@ -1,6 +1,6 @@
 -- OpenBird memory schema.
 --
--- Data model [R3/R5]: observations (every timestamped occurrence) are separated
+-- Data model: observations (every timestamped occurrence) are separated
 -- from deduped content (content_blobs), so dedup never destroys timeline
 -- semantics. Indexing/ranking is CHUNK-LEVEL: FTS5 over chunks, one vector per
 -- chunk. Each chunk maps content_hash -> blob -> observations.
