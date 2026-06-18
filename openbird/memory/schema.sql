@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_observations_ts   ON observations(ts);
 CREATE INDEX IF NOT EXISTS idx_observations_hash ON observations(content_hash);
 
 -- Globally-deduped retrievable chunks, addressed by SHA-256 of their *normalized
--- chunk text* (not the parent window) [R5 fix]. A unique chunk is stored,
+-- chunk text* (not the parent window). A unique chunk is stored,
 -- embedded, and indexed exactly once even when it recurs across many different
 -- windows/blobs — so a one-character edit elsewhere in a window does not re-embed
 -- the unchanged chunks.

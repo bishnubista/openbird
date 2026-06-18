@@ -66,7 +66,7 @@ ProviderFactory = Callable[[Settings], _EmbedProvider]
 
 
 def _ollama_host(settings: Settings | None = None) -> str:
-    """Resolve the Ollama base URL via the shared resolver [M1].
+    """Resolve the Ollama base URL via the shared resolver.
 
     Delegates to :func:`openbird.config.resolved_ollama_host` so preflight and
     the runtime provider always agree on the host (same precedence:
@@ -562,7 +562,7 @@ def run_preflight(
     """
     settings = settings or get_settings()
 
-    # Route-aware [H3/M1]: classify the configured models and derive the local
+    # Route-aware: classify the configured models and derive the local
     # models the active route actually needs, instead of hard-coding defaults.
     from openbird.llm.provider import classify_models
 
@@ -668,7 +668,7 @@ def run_preflight(
                 and not _has_mlx_model(settings)
             ),
         },
-        # Cloud route status [H3]: which configured models are remote, whether
+        # Cloud route status: which configured models are remote, whether
         # cloud is opted into, and whether captured memory would actually leave
         # this machine on the current config. "blocked" = remote model set but
         # no opt-in (the factory would refuse).

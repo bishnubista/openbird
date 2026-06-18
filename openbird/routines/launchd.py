@@ -1,4 +1,4 @@
-"""launchd LaunchAgent generation for the routine daemon [B2].
+"""launchd LaunchAgent generation for the routine daemon.
 
 The routine scheduler is only durable if something actually runs
 ``openbird routine start`` and keeps it alive. On macOS the right OS-level
@@ -10,7 +10,7 @@ agent path; it does NOT load/unload launchd itself — that is an explicit,
 user-driven step in the CLI (``--load`` / ``--unload``), since modifying the
 running launchd domain is a system-state change the user should opt into.
 
-Privacy [R4/R5]: the daemon runs with the content-safe ``null_deliverer``, so
+Privacy: the daemon runs with the content-safe ``null_deliverer``, so
 its stdout has no summary bodies. We still route stderr to a ``0600`` log under
 the data dir (metadata-only scheduler logs) rather than the default system log.
 """

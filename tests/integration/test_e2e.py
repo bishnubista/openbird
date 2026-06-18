@@ -1,6 +1,6 @@
 """End-to-end integration tests for the OpenBird core path.
 
-Two tiers (PLAN "Verification"):
+Two tiers:
 
 * **Fake-provider E2E (CI-able, no Ollama):** ingest sample text into a real
   :class:`MemoryStore`, then run the real :class:`RAG` pipeline with a *fake*

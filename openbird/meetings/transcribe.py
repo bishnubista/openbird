@@ -143,7 +143,7 @@ class Transcriber:
 
         NOTE: this is **synchronous and CPU-blocking** — ``model.transcribe`` runs
         the whisper inference inline. Callers on an event loop must run it in an
-        executor/thread; never ``await`` around it on the loop thread [M6].
+        executor/thread; never ``await`` around it on the loop thread.
 
         The window's host-clock start time is preserved so downstream stitching
         and citations stay on the shared clock.
@@ -160,7 +160,7 @@ class Transcriber:
         if len(samples) > _MAX_TRANSCRIBE_SAMPLES:
             raise MeetingsAudioTooLong(
                 f"transcription window has {len(samples)} samples "
-                f"(> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing to transcribe [M6]"
+                f"(> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing to transcribe"
             )
         model = self._load_model()
         whisper_segments, _info = model.transcribe(samples, language=None)
@@ -192,7 +192,7 @@ WHISPER_SR = 16_000
 # Hard cap on the post-resample sample count handed to faster-whisper, so a
 # mis-tuned ``max_window`` or a pathological accumulated segment can't drive an
 # unbounded in-memory transcribe. 30 min @ 16 kHz; normal pipeline windows are
-# bounded by ``max_window`` (seconds) and never approach this [M6].
+# bounded by ``max_window`` (seconds) and never approach this.
 _MAX_TRANSCRIBE_SAMPLES = WHISPER_SR * 60 * 30
 
 
@@ -212,7 +212,7 @@ def _resample_to_16k(samples: list[float], src_sr: int):
     # A malformed low src_sr makes n_out = n_in * 16000 / src_sr explode (src_sr=1
     # → 16000x), so a post-resample length check would allocate the very thing the
     # cap exists to prevent. This guard sits ahead of the numpy/pure-Python split,
-    # so it protects both paths by construction [M6].
+    # so it protects both paths by construction.
     projected = (
         n_in
         if not need_resample
@@ -221,7 +221,7 @@ def _resample_to_16k(samples: list[float], src_sr: int):
     if max(n_in, projected) > _MAX_TRANSCRIBE_SAMPLES:
         raise MeetingsAudioTooLong(
             f"resample of {n_in} samples @ {src_sr} Hz would produce {projected} "
-            f"samples (> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing before allocation [M6]"
+            f"samples (> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing before allocation"
         )
     try:
         import numpy as np  # type: ignore[import-not-found]
@@ -257,18 +257,18 @@ def _segment_to_pcm(segment: SpeechSegment):
     """
     # Preflight the total input size from frame metadata BEFORE concatenating, so
     # a mis-tuned/hostile window can't first duplicate an oversized buffer in
-    # memory and only then trip the cap [M6]. ``len(frame.samples)`` is O(1) and
+    # memory and only then trip the cap. ``len(frame.samples)`` is O(1) and
     # touches no PCM. The projected post-resample size is re-checked inside
     # ``_resample_to_16k``; this is the cheaper, earlier gate.
     n_in = sum(len(frame.samples) for frame in segment.frames)
     if n_in > _MAX_TRANSCRIBE_SAMPLES:
         raise MeetingsAudioTooLong(
             f"transcription window has {n_in} input samples "
-            f"(> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing before concatenation [M6]"
+            f"(> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing before concatenation"
         )
     # Accumulate into an ``array('f')`` rather than a Python ``list`` so the
     # frames' compact float32 buffers aren't re-boxed into ~28-byte Python floats
-    # while flattening a long window [M6]. ``array.extend`` of an ``array('f')``
+    # while flattening a long window. ``array.extend`` of an ``array('f')``
     # stays in C; both resample paths accept it (np.asarray / index access).
     samples = array("f")
     for frame in segment.frames:

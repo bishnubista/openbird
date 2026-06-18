@@ -1,4 +1,4 @@
-"""Schema versioning and a forward-only migration ladder (H1).
+"""Schema versioning and a forward-only migration ladder.
 
 Before this module, ``schema.sql`` used only ``CREATE TABLE IF NOT EXISTS`` and
 there was no ``PRAGMA user_version``: a future schema change had no way to

@@ -1,4 +1,4 @@
-"""CLI cloud opt-in behavior [H3]: refusal, banner, and confirm paths."""
+"""CLI cloud opt-in behavior: refusal, banner, and confirm paths."""
 
 from __future__ import annotations
 

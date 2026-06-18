@@ -187,7 +187,7 @@ def test_pipeline_splits_on_max_window_with_overlap():
 
 
 def test_pipeline_max_window_below_min_speech_emits_no_none():
-    # [H9] When a window hits max_window but the closed segment is shorter than
+    # When a window hits max_window but the closed segment is shorter than
     # min_speech, _close() returns None. The max_window flush must guard that
     # like every other close site; appending None crashed downstream
     # transcription with AttributeError on .frames/.track.
@@ -299,7 +299,7 @@ def test_transcribe_segment_uses_loaded_model(monkeypatch):
 
 
 def test_transcribe_segment_rejects_oversize_window(monkeypatch):
-    """[M6] A window exceeding the sample cap is refused before the model loads.
+    """ A window exceeding the sample cap is refused before the model loads.
 
     The cap must fire ahead of both ``model.transcribe`` AND ``_load_model``, so an
     oversized/hostile window never pays the lazy WhisperModel construction cost.
@@ -335,7 +335,7 @@ def test_transcribe_segment_rejects_oversize_window(monkeypatch):
 
 
 def test_resample_rejects_oversize_before_allocation(monkeypatch):
-    # [M6] A malformed low src_sr makes n_out = n_in * 16000 / src_sr explode;
+    # A malformed low src_sr makes n_out = n_in * 16000 / src_sr explode;
     # the cap must fire BEFORE allocating the output, not after. The guard sits
     # ahead of the numpy/pure-Python split, so it holds for both paths.
     import openbird.meetings.transcribe as tr
@@ -348,7 +348,7 @@ def test_resample_rejects_oversize_before_allocation(monkeypatch):
 
 
 def test_resample_rejects_oversize_pure_python_path(monkeypatch):
-    # [M6] Same guard with numpy import forced to fail (the pure-Python branch).
+    # Same guard with numpy import forced to fail (the pure-Python branch).
     import builtins
     import openbird.meetings.transcribe as tr
     from array import array as _array
@@ -367,7 +367,7 @@ def test_resample_rejects_oversize_pure_python_path(monkeypatch):
 
 
 def test_segment_to_pcm_rejects_before_concatenation(monkeypatch):
-    # [M6] The cap must fire from frame metadata (O(1) len sum) BEFORE the frames
+    # The cap must fire from frame metadata (O(1) len sum) BEFORE the frames
     # are concatenated into one buffer, so an oversized window is never duplicated
     # in memory just to be rejected. A frame whose `.samples` raises on iteration
     # proves the preflight uses len() only and never touches the PCM.
@@ -501,7 +501,7 @@ def test_summarize_default_provider_constructible(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Finding 1 — privacy: repr must never leak PCM samples or transcript text
+# Privacy: repr must never leak PCM samples or transcript text
 # --------------------------------------------------------------------------- #
 
 
@@ -549,7 +549,7 @@ def test_transcript_segment_repr_omits_text():
 
 
 # --------------------------------------------------------------------------- #
-# Finding 2 — cross-stream clock sync + device-switch recovery
+# Cross-stream clock sync + device-switch recovery
 # --------------------------------------------------------------------------- #
 
 
@@ -616,7 +616,7 @@ def test_pipeline_realigns_window_on_device_switch_jump():
 
 
 # --------------------------------------------------------------------------- #
-# Finding 3 — transcript data fence cannot be escaped by hostile content
+# Transcript data fence cannot be escaped by hostile content
 # --------------------------------------------------------------------------- #
 
 

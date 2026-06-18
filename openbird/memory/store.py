@@ -28,7 +28,7 @@ from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
 from openbird.types import Observation, SearchHit
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-# Wait up to this long on a busy lock for the :memory: branch too (B3); on-disk
+# Wait up to this long on a busy lock for the :memory: branch too; on-disk
 # connections get this from storage.crypto.
 _BUSY_TIMEOUT_MS = 5000
 
@@ -68,14 +68,14 @@ class MemoryStore:
             self.conn.enable_load_extension(True)
             sqlite_vec.load(self.conn)
             self.conn.enable_load_extension(False)
-            # Queue on a busy lock instead of erroring immediately (B3). Harmless
+            # Queue on a busy lock instead of erroring immediately. Harmless
             # for a single-connection in-memory DB; keeps behavior uniform.
             self.conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
         else:
             self.conn = open_encrypted_db(resolved, settings=self.settings)
 
         self.conn.row_factory = mapping_row_factory
-        # Take explicit control of transaction boundaries (B3/H8): we use
+        # Take explicit control of transaction boundaries: we use
         # BEGIN IMMEDIATE / COMMIT / ROLLBACK ourselves so the embedding network
         # call happens OUTSIDE the write lock and multi-statement deletes are
         # atomic. autocommit (isolation_level=None) disables sqlite3's implicit
@@ -99,7 +99,7 @@ class MemoryStore:
     # -- setup ----------------------------------------------------------------
 
     def _apply_schema(self) -> None:
-        """Apply schema.sql, create the vec table, and reconcile the version (H1).
+        """Apply schema.sql, create the vec table, and reconcile the version.
 
         ``schema.sql`` is idempotent (CREATE ... IF NOT EXISTS), so applying it on
         every open is safe for both fresh and existing DBs. After the baseline
@@ -118,7 +118,7 @@ class MemoryStore:
         ensure_schema_version(self.conn)
 
     def _begin(self) -> None:
-        """Open a write transaction, grabbing the writer lock up front (B3).
+        """Open a write transaction, grabbing the writer lock up front.
 
         ``BEGIN IMMEDIATE`` acquires the RESERVED lock immediately rather than
         lazily on first write, so the writer never has to upgrade a read lock
@@ -191,7 +191,7 @@ class MemoryStore:
         norm = ingest.normalize(text)
         chunks = ingest.chunk(text)
 
-        # -- Phase 1: embed OUTSIDE any write transaction (B3) -------------------
+        # -- Phase 1: embed OUTSIDE any write transaction -------------------
         # Previously provider.embed() ran INSIDE the write txn, so a slow/wedged
         # Ollama held the single WAL writer slot across a network round-trip and a
         # concurrent reader/writer hit `database is locked`. We now (a) read which
@@ -472,7 +472,7 @@ class MemoryStore:
         before_ts: float | None = None,
         all: bool = False,
     ) -> int:
-        """Delete observations and cascade-clean orphaned content (H8).
+        """Delete observations and cascade-clean orphaned content.
 
         Selectors (give exactly one):
           * ``all=True``        — remove everything.

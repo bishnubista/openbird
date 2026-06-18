@@ -47,7 +47,7 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     (
         "token_prefixed",
         re.compile(
-            # H6 fix: do NOT rely on Python's Unicode-aware ``\b``. A key abutting
+            # do NOT rely on Python's Unicode-aware ``\b``. A key abutting
             # non-ASCII text (e.g. ``keyσsk-...``) has no word boundary because the
             # Greek letter is itself a word char, so the real key would survive.
             # Use explicit ASCII negative lookbehind/lookahead that reject ONLY the
@@ -84,7 +84,7 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     # specific) rather than a bare assignment — both mask the value either way.
     (
         "jwt",
-        # H6 fix: same ASCII boundaries as ``token_prefixed`` (reject only
+        # same ASCII boundaries as ``token_prefixed`` (reject only
         # ``[A-Za-z0-9]``) so a JWT abutting non-ASCII text is caught and a JWT
         # preceded/followed by ``_``/``-`` still redacts.
         re.compile(
@@ -156,7 +156,7 @@ _INCOGNITO_MARKERS: tuple[str, ...] = (
 # Settings is the primary mechanism; this is a hardcoded backstop for the most
 # dangerous categories (password managers, banking/health) so a typo in the
 # allowlist cannot leak a vault. Documented as defense-in-depth.
-# SINGLE SOURCE OF TRUTH NOTE [H7]: this baked tuple, the Swift
+# SINGLE SOURCE OF TRUTH NOTE: this baked tuple, the Swift
 # ``dangerousBundleSubstrings`` constant (capture-helper), and the committed
 # ``capture-helper/Sources/CaptureHelper/dangerous_apps.json`` resource are kept
 # in lockstep by a parity unit test (tests/unit/test_capture.py). Edit ALL THREE
@@ -219,7 +219,7 @@ def _bundle_matches(app: str | None, entry: str) -> bool:
 
     Matching is **exact by default** (case-insensitive) to preserve the
     allowlist-ONLY guarantee: an app whose id merely *contains* an allowlisted
-    substring must NOT pass the gate (PLAN allowlist-only first run). Two
+    substring must NOT pass the gate. Two
     explicit opt-in syntaxes broaden a single entry:
 
       * ``glob:<pattern>`` — shell-style glob, e.g. ``glob:com.acme.*``.
@@ -340,7 +340,7 @@ def decide(
 
 
 # ---------------------------------------------------------------------------
-# Credit-card (PAN) redaction [H5]. A plain ``{13,16}`` regex both MISSED 17-19
+# Credit-card (PAN) redaction. A plain ``{13,16}`` regex both MISSED 17-19
 # digit PANs and OVER-redacted long numeric IDs / order numbers. We instead:
 #   1. Find candidate digit sequences (13-19 digits, optional SINGLE space/dash
 #      group separators) bounded by ASCII non-[A-Za-z0-9_-] on both sides, so a
@@ -479,7 +479,7 @@ def scrub(text: str) -> tuple[str, tuple[str, ...]]:
 
 
 # ---------------------------------------------------------------------------
-# Metadata scrubbing [R4 fix]: window titles and URLs are stored alongside the
+# Metadata scrubbing: window titles and URLs are stored alongside the
 # text and frequently leak secrets too — URLs embed OAuth codes/access tokens,
 # session ids, emails, document ids, or PHI in their query/fragment; window
 # titles can carry full message/document content. We therefore scrub metadata

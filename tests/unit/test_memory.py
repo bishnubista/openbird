@@ -99,7 +99,7 @@ def test_shared_chunk_resolves_to_most_recent_occurrence(store):
 
     This is an explicit, documented policy (not an accidental heuristic): the same
     content captured in two apps/times shares one chunk, and a retrieval hit
-    resolves to the latest occurrence (see PLAN accepted residual risks). Locking
+    resolves to the latest occurrence. Locking
     it here makes the behavior intentional and regression-guarded.
     """
     store.add_observation("identical shared note text", source="capture", app="AppA", ts=100.0)

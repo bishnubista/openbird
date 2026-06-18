@@ -654,7 +654,7 @@ def test_render_context_defangs_window_title_fence():
     assert "</observations>" not in out
 
 
-# -- B2/M5/L3: daemon, catch-up cap, logging, launchd ------------------------
+# -- daemon, catch-up cap, logging, launchd ------------------------
 
 
 class _FakeAPScheduler:
@@ -675,7 +675,7 @@ class _FakeAPScheduler:
 
 
 def test_start_defaults_catchup_lookback_to_cap(run_store, clock, monkeypatch):
-    # [M5] start() must default catch-up to the bounded lookback cap, not None,
+    # start() must default catch-up to the bounded lookback cap, not None,
     # so a long-idle daemon doesn't replay every missed occurrence at boot.
     sched, *_ = _make_scheduler(run_store, clock)
     sched.register("daily-briefing", "p", interval=100.0)
@@ -695,7 +695,7 @@ def test_start_defaults_catchup_lookback_to_cap(run_store, clock, monkeypatch):
 
 
 def test_fire_logs_metadata_only_never_body(run_store, clock, caplog):
-    # [L3] Success logs routine/scheduled/len — never the summary body.
+    # Success logs routine/scheduled/len — never the summary body.
     sched, *_ = _make_scheduler(
         run_store, clock, memory=FakeMemoryStore([_obs(clock() - 50)])
     )
@@ -708,7 +708,7 @@ def test_fire_logs_metadata_only_never_body(run_store, clock, caplog):
 
 
 def test_fire_error_logs_class_not_message(run_store, clock, caplog):
-    # [L3] Errors log the class + stable code, never the exception message.
+    # Errors log the class + stable code, never the exception message.
     def boom(store, provider, *, now):
         raise RuntimeError("secret captured content in message")
 

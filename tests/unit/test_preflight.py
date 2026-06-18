@@ -510,7 +510,7 @@ def test_run_preflight_reflects_privacy_config(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# cloud section + route-aware runtime_ok (H3) / host agreement (M1)            #
+# cloud section + route-aware runtime_ok / host agreement            #
 # --------------------------------------------------------------------------- #
 
 
@@ -796,7 +796,7 @@ def test_cloud_only_route_reports_no_ollama_requirements(tmp_path):
 
 
 def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
-    # M1 regression: preflight host == runtime provider api_base host. Use a
+    # Regression: preflight host == runtime provider api_base host. Use a
     # loopback custom host so the default ollama/* route stays local (the host is
     # threaded the same way regardless of loopback/remote).
     monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://127.0.0.1:4242")

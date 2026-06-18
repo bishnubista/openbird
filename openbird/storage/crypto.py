@@ -32,8 +32,8 @@ _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIR_MODE = 0o700
 _DEFAULT_KEYRING_TIMEOUT_SECONDS = 2.0
 _KEYRING_TIMEOUT = object()
-# Wait up to this long for a busy DB lock before raising "database is locked"
-# (B3): a concurrent reader/writer must queue, not fail immediately, while the
+# Wait up to this long for a busy DB lock before raising "database is locked":
+# a concurrent reader/writer must queue, not fail immediately, while the
 # single WAL writer slot is briefly held by an INSERT-only transaction.
 _BUSY_TIMEOUT_MS = 5000
 # Auto-checkpoint the WAL back into the main DB roughly every this-many pages so
@@ -47,7 +47,7 @@ class EncryptionUnavailableError(RuntimeError):
 
     Surfaced only when ``OPENBIRD_REQUIRE_ENCRYPTION`` is enabled (or
     ``settings.require_encryption`` is True) and the SQLCipher path could not be
-    verified — instead of silently degrading to a plaintext DB (H2). The message
+    verified — instead of silently degrading to a plaintext DB. The message
     distinguishes *why* encryption was unavailable (missing deps, key
     unavailable, or an unverifiable cipher) so the failure is actionable.
     """
@@ -216,7 +216,7 @@ def _try_sqlcipher(path: str, key: str) -> sqlite3.Connection | None:
         _prepare_private_db_path(path)
         conn = sqlcipher3.connect(path)  # type: ignore[attr-defined]
         _chmod_private_db_files(path)
-        # Queue on a busy lock rather than failing immediately (B3).
+        # Queue on a busy lock rather than failing immediately.
         conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
         # PRAGMA key must run before any other operation on the DB.
         conn.execute(f"PRAGMA key = \"x'{key}'\"")
@@ -253,7 +253,7 @@ def _open_plaintext(path: str) -> tuple[sqlite3.Connection, bool]:
     """Open a plain sqlite3 DB with 0600 file perms and sqlite-vec loaded.
 
     Returns the connection plus a live-probed ``wal_enabled`` flag. WAL is
-    REQUIRED for the local-first concurrency contract (B3): a reader must not be
+    REQUIRED for the local-first concurrency contract: a reader must not be
     blocked by — nor error against — the single short INSERT-only writer txn.
     ``busy_timeout`` is set so a contended lock queues instead of failing.
     """
@@ -263,7 +263,7 @@ def _open_plaintext(path: str) -> tuple[sqlite3.Connection, bool]:
     # subsequent open so older DBs are repaired in place.
     _chmod_private_db_files(path)
     _load_vec(conn)
-    # Queue on a busy lock instead of erroring immediately (B3).
+    # Queue on a busy lock instead of erroring immediately.
     conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
     # Enable WAL on the plaintext path too (previously hard-coded off): readers
     # and the writer can then proceed concurrently. Probe the LIVE mode rather
@@ -314,7 +314,7 @@ def open_db_verified(
 
     # Track WHY encryption was unavailable so strict mode can raise an actionable
     # error distinguishing missing deps / locked-or-missing key / unverifiable
-    # cipher (H2) — rather than a vague "encryption unavailable".
+    # cipher — rather than a vague "encryption unavailable".
     reason = "no key available (keyring/Keychain unavailable, locked, or timed out)"
     try:
         import sqlcipher3  # type: ignore  # noqa: F401
@@ -345,7 +345,7 @@ def open_db_verified(
             reason = "the SQLCipher backend was unusable (see logs for the cause)"
 
     if require_encryption:
-        # H2 strict mode: refuse to silently create/open a PLAINTEXT database.
+        # Strict mode: refuse to silently create/open a PLAINTEXT database.
         raise EncryptionUnavailableError(
             "OPENBIRD_REQUIRE_ENCRYPTION is set but the database could not be "
             f"opened with verified SQLCipher encryption: {reason}. "

@@ -1,8 +1,8 @@
-"""Track A regression tests: DB concurrency, migrations, strict encryption,
-delete atomicity, and retention/vacuum (findings B3/H1/H2/H8/H10).
+"""Regression tests for DB concurrency, migrations, strict encryption,
+delete atomicity, and retention/vacuum.
 
 These complement test_memory.py / test_crypto.py and exercise the on-disk
-behaviors the audit called out as production risks.
+behaviors that must stay reliable in production.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from tests.unit.conftest import FakeProvider
 
 
 # --------------------------------------------------------------------------- #
-# B3 — embed runs OUTSIDE the write txn; busy_timeout queues, no lock-during-IO #
+# embed runs OUTSIDE the write txn; busy_timeout queues, no lock-during-IO #
 # --------------------------------------------------------------------------- #
 
 
@@ -115,7 +115,7 @@ def test_concurrent_reader_not_blocked_by_slow_embed(tmp_path):
 
 
 def test_embed_failure_writes_no_partial_state(tmp_path):
-    """If provider.embed() raises, add_observation leaves NO partial rows (B3).
+    """If provider.embed() raises, add_observation leaves NO partial rows.
 
     Embedding now happens BEFORE the write transaction opens, so a provider
     failure must abort with zero observations/blobs/chunks written.
@@ -147,7 +147,7 @@ def test_embed_failure_writes_no_partial_state(tmp_path):
 
 
 def test_busy_timeout_set_on_plaintext_and_sqlcipher_paths(monkeypatch, tmp_path):
-    """Every on-disk connection sets PRAGMA busy_timeout (B3)."""
+    """Every on-disk connection sets PRAGMA busy_timeout."""
     db = str(tmp_path / "bt.db")
     monkeypatch.setattr(crypto, "_get_or_create_key", lambda: None)  # force plaintext
     settings = Settings(data_dir=tmp_path, db_path=db)
@@ -161,7 +161,7 @@ def test_busy_timeout_set_on_plaintext_and_sqlcipher_paths(monkeypatch, tmp_path
 
 
 # --------------------------------------------------------------------------- #
-# H1 — schema versioning / migration ladder                                   #
+# schema versioning / migration ladder                                   #
 # --------------------------------------------------------------------------- #
 
 
@@ -253,7 +253,7 @@ def test_migration_rolls_back_on_failure(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# H2 — strict encryption mode                                                 #
+# strict encryption mode                                                 #
 # --------------------------------------------------------------------------- #
 
 
@@ -312,7 +312,7 @@ def test_default_mode_still_falls_back_to_plaintext(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# H8 — delete atomicity / no orphans                                          #
+# delete atomicity / no orphans                                          #
 # --------------------------------------------------------------------------- #
 
 

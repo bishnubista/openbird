@@ -218,7 +218,7 @@ private func anyMatch(_ bundleId: String, _ entries: Set<String>) -> Bool {
     return false
 }
 
-// SINGLE SOURCE OF TRUTH [H7]: bundle-id substrings whose content is never
+// SINGLE SOURCE OF TRUTH: bundle-id substrings whose content is never
 // captured even if (mis)allowlisted (password managers / vaults). This baked
 // constant MUST mirror `redact._DANGEROUS_BUNDLE_SUBSTRINGS` (Python) and the
 // committed canonical list `dangerous_apps.json`. The parity unit test in

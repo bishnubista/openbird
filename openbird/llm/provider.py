@@ -28,7 +28,7 @@ from openbird.llm.base import LLMProviderProtocol
 
 
 class LLMTimeoutError(TimeoutError):
-    """Raised when an LLM call exceeds its wall-clock deadline [B4].
+    """Raised when an LLM call exceeds its wall-clock deadline.
 
     The LiteLLM ``timeout`` kwarg is honored for most provider paths, but at
     least the Ollama *embedding* path can ignore it against a reachable-but-
@@ -42,7 +42,7 @@ class LLMTimeoutError(TimeoutError):
 class CloudOptInRequired(RuntimeError):
     """Raised when a *remote* model is configured without explicit cloud opt-in.
 
-    OpenBird is local-first [H3]: resolving a model that would send captured
+    OpenBird is local-first: resolving a model that would send captured
     memory off this machine (a cloud model, or an ``ollama/*`` model pointed at a
     non-loopback host) requires the user to opt in via ``OPENBIRD_ALLOW_CLOUD=1``
     (or an interactive confirm at the CLI). The factory refuses otherwise so no
@@ -143,7 +143,7 @@ class LiteLLMProvider:
                 or an ``ollama/*`` model on a non-loopback host) and cloud is not
                 opted into. The guard lives HERE — not only in
                 :func:`create_llm_provider` — so the security gate cannot be
-                bypassed by constructing the concrete provider directly [H3].
+                bypassed by constructing the concrete provider directly.
         """
         self.settings = settings or get_settings()
         cloud_ok = self.settings.allow_cloud if allow_cloud is None else allow_cloud
@@ -155,16 +155,16 @@ class LiteLLMProvider:
         self.llm_model = self.settings.llm_model
         self.embed_dim = self.settings.embed_dim
         self.normalized = normalized
-        # B4/H4: explicit per-call timeouts + bounded transport retries.
+        # explicit per-call timeouts + bounded transport retries.
         self.llm_timeout = self.settings.llm_timeout
         self.embed_timeout = self.settings.embed_timeout
         self.num_retries = self.settings.llm_num_retries
-        # M1: the Ollama base URL to thread into LiteLLM as api_base for ollama/*
+        # the Ollama base URL to thread into LiteLLM as api_base for ollama/*
         # models so the runtime call targets the same host preflight probes.
         self._ollama_host = resolved_ollama_host(self.settings)
 
     def _call_with_timeout(self, fn: Callable[[], Any], *, timeout: float) -> Any:
-        """Run ``fn`` with a hard wall-clock deadline [B4].
+        """Run ``fn`` with a hard wall-clock deadline.
 
         LiteLLM's own ``timeout`` is passed through too (so a well-behaved
         backend cancels promptly and the worker thread exits), but this guard is
@@ -188,7 +188,7 @@ class LiteLLMProvider:
         # A DAEMON thread is essential: if the call wedges, the worker keeps the
         # stuck socket but never blocks interpreter shutdown (concurrent.futures'
         # ThreadPoolExecutor uses non-daemon threads + an atexit join, which would
-        # hang process exit — the very failure mode B4 is about).
+        # hang process exit — the very failure mode this guard prevents).
         worker = threading.Thread(target=_runner, name="openbird-llm", daemon=True)
         worker.start()
         worker.join(deadline)
@@ -203,7 +203,7 @@ class LiteLLMProvider:
         return box.get("result")
 
     def _model_kwargs(self, model: str, *, timeout: float) -> dict[str, Any]:
-        """Common LiteLLM kwargs: timeout, bounded retries, and (M1) api_base.
+        """Common LiteLLM kwargs: timeout, bounded retries, and api_base.
 
         ``api_base`` is only set for ``ollama/*`` models — a cloud model must NOT
         be pointed at the local Ollama host. ``num_retries`` lets LiteLLM retry
@@ -410,7 +410,7 @@ def create_llm_provider(
     provider split" verdict, so this branch is the safe place to wire it after a
     fresh acceptance run.
 
-    Cloud opt-in [H3]: if any resolved model is *remote* (a cloud API, or an
+    Cloud opt-in: if any resolved model is *remote* (a cloud API, or an
     ``ollama/*`` model on a non-loopback host) construction raises
     :class:`CloudOptInRequired` unless cloud is opted into. The guard is enforced
     in :meth:`LiteLLMProvider.__init__` (so direct construction cannot bypass it);
