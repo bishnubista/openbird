@@ -602,6 +602,38 @@ def test_mixed_local_chat_cloud_embed_needs_embed_probe(tmp_path):
     assert report["runtime_ok"] is False  # remote embed role not probe-verified
 
 
+def test_probe_uses_overridden_ollama_host(monkeypatch, tmp_path):
+    # Regression: with an ollama_host override + probe, the embedding/completion
+    # provider must target that host (api_base), not env/default localhost.
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.delenv("OPENBIRD_OLLAMA_HOST", raising=False)
+
+    class _FakeLiteLLM:
+        def __init__(self):
+            self.embedding_api_base = None
+
+        def embedding(self, *, model, input, **kw):
+            self.embedding_api_base = kw.get("api_base")
+            return {"data": [{"embedding": [0.0] * 768} for _ in input]}
+
+        def completion(self, *, model, messages, **kw):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    fake = _FakeLiteLLM()
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+
+    s = Settings(data_dir=tmp_path, embed_dim=768)  # default ollama models
+    # 127.0.0.1 stays loopback (no cloud opt-in needed) but is an explicit override.
+    run_preflight(
+        s,
+        ollama_host="http://127.0.0.1:9988",
+        probe_ollama=False,
+        probe_encryption=False,
+        probe_embedding=True,  # uses the real default provider factory
+    )
+    assert fake.embedding_api_base == "http://127.0.0.1:9988"
+
+
 def test_mixed_route_ready_when_both_ollama_and_embed_probe_ok(tmp_path):
     s = Settings(
         data_dir=tmp_path,

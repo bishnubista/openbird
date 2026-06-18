@@ -583,13 +583,23 @@ def run_preflight(
             "error": None,
         }
 
+    # Probe against the SAME resolved host the report shows. When an explicit
+    # ollama_host override is given, carry it in the settings used to build the
+    # probe provider so LiteLLM's api_base targets that host (not env/default) —
+    # otherwise a probe could succeed on localhost while the checked host differs.
+    probe_settings = settings
+    if ollama_host is not None and provider_factory is None:
+        import dataclasses
+
+        probe_settings = dataclasses.replace(settings, ollama_host=resolved_host)
+
     embedding = check_embedding(
-        settings, provider_factory=provider_factory, probe=probe_embedding
+        probe_settings, provider_factory=provider_factory, probe=probe_embedding
     )
     # Probe the chat model under the SAME flag so a remote chat endpoint is
     # validated (an embedding probe does not exercise the completion endpoint).
     completion = check_completion(
-        settings, provider_factory=provider_factory, probe=probe_embedding
+        probe_settings, provider_factory=provider_factory, probe=probe_embedding
     )
     sqlite_vec_info = check_sqlite_vec()
 
