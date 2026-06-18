@@ -455,6 +455,62 @@ def data_purge(
     _console.print(f"[green]Deleted[/] {deleted} observation(s) (cascade complete).")
 
 
+@data_app.command("prune")
+def data_prune(
+    older_than: str = typer.Option(
+        ...,
+        "--older-than",
+        help="Delete observations OLDER than this. Accepts a relative span like "
+        "'30d', '24h', a unix timestamp, or an ISO date/datetime.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Retention prune: cascade-delete observations older than a cutoff (H10).
+
+    Removes observations with ``ts`` strictly before the cutoff, cascading to
+    orphaned blobs/chunks/index entries (atomic, rollback-guarded). Run
+    ``openbird data vacuum`` afterwards to reclaim the freed space on disk.
+    """
+    cutoff = _parse_since(older_than, option_name="--older-than")
+    if not yes:
+        confirm = typer.confirm(
+            f"Permanently delete data older than {_fmt_ts(cutoff)}?", default=False
+        )
+        if not confirm:
+            _console.print("[yellow]Aborted.[/]")
+            raise typer.Exit(code=1)
+
+    store = _store()
+    try:
+        deleted = store.prune(older_than_ts=cutoff)
+    finally:
+        store.close()
+    _console.print(
+        f"[green]Pruned[/] {deleted} observation(s) older than {_fmt_ts(cutoff)} "
+        f"(cascade complete). Run `openbird data vacuum` to reclaim disk space."
+    )
+
+
+@data_app.command("vacuum")
+def data_vacuum() -> None:
+    """Reclaim disk space: checkpoint the WAL and VACUUM the database (H10).
+
+    Deletes/prunes only mark pages free; the file shrinks only after VACUUM
+    rewrites it. Prints the bytes reclaimed.
+    """
+    store = _store()
+    try:
+        result = store.vacuum()
+    finally:
+        store.close()
+    reclaimed = result["bytes_reclaimed"]
+    _console.print(
+        f"[green]Vacuumed[/] — reclaimed {reclaimed} bytes "
+        f"({result['bytes_before']} -> {result['bytes_after']})."
+    )
+    _console.print_json(json.dumps(result))
+
+
 @data_app.command("stats")
 def data_stats() -> None:
     """Print memory-store row counts and the active embedding cohort."""
@@ -487,12 +543,13 @@ def _fmt_interval(seconds: float) -> str:
     return f"{int(seconds // 60)}m"
 
 
-def _parse_since(value: str) -> float:
-    """Parse a --since value into a unix timestamp.
+def _parse_since(value: str, *, option_name: str = "--since") -> float:
+    """Parse a time-spec value into a unix timestamp.
 
     Accepts a bare unix timestamp, a relative span (``7d``/``24h``/``30m``/
     ``45s``), or an ISO 8601 date/datetime. Relative spans are subtracted from
-    *now*.
+    *now*. ``option_name`` names the originating CLI flag so parse errors point
+    at the flag the user actually passed (e.g. ``--older-than`` for prune).
     """
     import time
 
@@ -515,7 +572,8 @@ def _parse_since(value: str) -> float:
         return dt.timestamp()
     except ValueError as exc:
         raise typer.BadParameter(
-            f"could not parse --since {value!r}; use a unix ts, ISO date, or span like '7d'."
+            f"could not parse {option_name} {value!r}; use a unix ts, ISO date, "
+            "or span like '7d'."
         ) from exc
 
 
