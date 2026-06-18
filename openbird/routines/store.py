@@ -45,6 +45,7 @@ guaranteeing only one active execution at a time.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import sqlite3
@@ -64,6 +65,8 @@ from openbird.types import RoutineRun
 # A clock callable returning the current unix time; injectable for tests so that
 # lease timestamps and reclamation use the same (possibly fake) time base.
 Clock = Callable[[], float]
+
+logger = logging.getLogger("openbird.routines")
 
 # Run lifecycle statuses persisted in the ``status`` column.
 STATUS_PENDING = "pending"
@@ -159,6 +162,7 @@ def previous_scheduled_occurrence(
 
 
 def _calendar_interval_days(interval: float) -> int | None:
+    """Return whole calendar days for day-based intervals, else ``None``."""
     day = 86400.0
     days = interval / day
     if days >= 1 and math.isclose(days, round(days)):
@@ -167,6 +171,7 @@ def _calendar_interval_days(interval: float) -> int | None:
 
 
 def _coerce_timezone(value: tzinfo | str | None) -> tzinfo:
+    """Resolve a timezone object, IANA timezone name, or local default."""
     if isinstance(value, str):
         return ZoneInfo(value)
     if value is not None:
@@ -175,6 +180,7 @@ def _coerce_timezone(value: tzinfo | str | None) -> tzinfo:
 
 
 def _local_timezone() -> tzinfo:
+    """Best-effort local timezone lookup with UTC-safe fallback."""
     tz_env = os.environ.get("TZ")
     if tz_env:
         try:
@@ -190,13 +196,17 @@ def _local_timezone() -> tzinfo:
             name = "/".join(parts[idx + 1 :])
             if name:
                 return ZoneInfo(name)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - fallback keeps scheduling alive
+        logger.debug(
+            "local timezone resolution failed: error_class=%s",
+            type(exc).__name__,
+        )
 
     return datetime.now().astimezone().tzinfo or ZoneInfo("UTC")
 
 
 def _calendar_grid_floor(ts: float, *, days: int, timezone: tzinfo) -> float:
+    """Return the calendar-grid timestamp at or before ``ts``."""
     local = datetime.fromtimestamp(ts, timezone)
     local_day = local.date()
     epoch_day = date(1970, 1, 1)
@@ -210,6 +220,7 @@ def _calendar_grid_floor(ts: float, *, days: int, timezone: tzinfo) -> float:
 
 
 def _add_calendar_days(ts: float, *, days: int, timezone: tzinfo) -> float:
+    """Add calendar days in local time, preserving wall-clock fields."""
     local = datetime.fromtimestamp(ts, timezone)
     return (local + timedelta(days=days)).timestamp()
 
