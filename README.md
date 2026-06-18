@@ -85,7 +85,9 @@ The formula downloads the source archive attached to the matching GitHub tag
 release. On every `v*` tag, `.github/workflows/homebrew-release.yml` builds a
 deterministic `openbird-<version>.tar.gz` source archive, uploads it to the
 GitHub release, updates `Formula/openbird.rb` with the new source URL and sha256,
-and commits that formula bump back to `main`.
+and **opens a pull request** with that formula bump. The PR is reviewed and
+merged through the normal protected-`main` flow rather than pushed directly, so
+branch protection on the formula is preserved.
 
 To cut the first Homebrew release:
 
@@ -94,7 +96,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-After the workflow commits the formula update, users can upgrade through the
+After the formula-bump pull request is merged, users can upgrade through the
 normal Homebrew path:
 
 ```bash
@@ -105,6 +107,22 @@ brew upgrade openbird
 The formula installs `openbird` with the SQLCipher encryption extra as a
 virtualenv-backed CLI and stages `OpenBird.app` under Homebrew's prefix.
 `openbird-app` launches that installed bundle.
+
+> **Install requires network, and is not vendored/offline.** `brew install`
+> builds from source: it runs `uv pip install ".[encryption]"`, which resolves
+> and downloads Python dependencies from PyPI at install time. The dependency
+> set is not vendored into the archive and is not pinned for reproducible
+> offline installs. "Local-first" describes where your data lives at runtime
+> (on your device), not the install path.
+>
+> **The Homebrew app bundle is unsigned and is not a supported capture/audio
+> artifact.** `script/build_and_run.sh` does no code-signing or notarization, so
+> the `OpenBird.app` staged by the formula cannot obtain macOS Screen Recording
+> or Accessibility (TCC) permissions — screen and audio capture will not work
+> from a brew install. Functional capture requires a signed bundle with a stable
+> identity plus manually granted macOS permissions (see
+> [Release gates](#release-gates)). The CLI memory features
+> (`openbird ingest` / `chat` / `routine`) work fully from the brew install.
 
 ### CLI
 

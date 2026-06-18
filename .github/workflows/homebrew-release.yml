@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: homebrew-release
@@ -70,14 +71,44 @@ jobs:
               --title "OpenBird $TAG" \
               --notes "Source release for Homebrew."
           fi
-          gh release upload "$TAG" "$archive_path" --clobber
+
+          # Idempotent, non-destructive upload. `gh release upload --clobber`
+          # deletes the existing asset before re-uploading, so a failed
+          # re-upload would lose the asset the live formula URL points at.
+          # Instead: upload when absent, skip when byte-identical, and fail
+          # loudly when an asset with the same name exists but differs.
+          existing_url="$(
+            gh release view "$TAG" \
+              --json assets \
+              --jq ".assets[] | select(.name == \"$archive\") | .url" \
+            | head -n1
+          )"
+          if [[ -z "$existing_url" ]]; then
+            gh release upload "$TAG" "$archive_path"
+          else
+            existing_path="$RUNNER_TEMP/existing-$archive"
+            gh release download "$TAG" --pattern "$archive" --output "$existing_path" --clobber
+            existing_sha="$(sha256sum "$existing_path" | awk '{print $1}')"
+            if [[ "$existing_sha" == "$archive_sha256" ]]; then
+              echo "Release asset $archive already present and byte-identical; skipping upload."
+            else
+              echo "Release asset $archive already exists for $TAG with a different sha256." >&2
+              echo "  existing: $existing_sha" >&2
+              echo "  built:    $archive_sha256" >&2
+              echo "Refusing to overwrite a published asset." >&2
+              exit 1
+            fi
+          fi
 
       - name: Checkout default branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: main
           fetch-depth: 0
-          persist-credentials: false
+          # persist-credentials defaults to true; keep it so the formula-bump
+          # branch push below is authenticated via the checkout action's token.
+          # No hand-built Authorization header is required (and none must be
+          # added: `set -x` on such a step would leak the token).
 
       - name: Update formula
         shell: bash
@@ -87,19 +118,44 @@ jobs:
             --version "${{ steps.release.outputs.version }}" \
             --sha256 "$archive_sha256"
 
-      - name: Commit formula update
+      - name: Open formula-bump pull request
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
           if git diff --quiet -- Formula/openbird.rb; then
-            echo "Formula already current."
+            echo "Formula already current; no pull request needed."
             exit 0
           fi
+
+          branch="homebrew/formula-${TAG}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Commit the bump on a throwaway bot branch, never on main. Branch
+          # protection / required review on main is therefore preserved.
+          git checkout -b "$branch"
           git add Formula/openbird.rb
-          git commit -m "chore(homebrew): update formula for ${{ steps.release.outputs.tag }}"
-          auth_header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" push origin HEAD:main
+          git commit -m "chore(homebrew): update formula for ${TAG}"
+          # --force-with-lease is safe for this deterministic, bot-owned branch
+          # (a re-run for the same tag updates its own branch) and never
+          # rewrites a branch someone else advanced.
+          git push --force-with-lease origin "$branch"
+
+          # Note: `gh pr list --head` does not support owner-qualified
+          # (`owner:branch`) syntax, so the head is the plain branch name; the
+          # branch lives in this same repository.
+          existing_pr="$(gh pr list --state open --base main --head "$branch" --json url --jq '.[0].url // empty')"
+          if [[ -n "$existing_pr" ]]; then
+            echo "Open formula PR already exists: $existing_pr (branch updated in place)."
+            exit 0
+          fi
+
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$branch" \
+            --title "chore(homebrew): update formula for ${TAG}" \
+            --body "Automated Homebrew formula bump for \`${TAG}\`. Updates the source archive URL and sha256 in \`Formula/openbird.rb\`. Merge to publish the new release to Homebrew users."
