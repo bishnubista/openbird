@@ -115,7 +115,10 @@ openbird chat "<question>"      # grounded, cited answer over your memory
 openbird capture [--loop]       # run the capture daemon over the helper
 openbird routine list|run <name>  # scheduled routines (daily-briefing, yesterday's-work, weekly-summary)
 openbird meeting                # meeting capture (gated on signed audio helper)
-openbird data stats|purge --since <when>   # inspect / delete stored memory
+openbird data stats             # row counts + active embedding cohort
+openbird data purge --since <when> | --all   # cascade-delete stored memory
+openbird data prune --older-than <span>      # retention prune (e.g. 90d, 24h)
+openbird data vacuum            # reclaim freed disk space (VACUUM + WAL checkpoint)
 ```
 
 ### macOS app
@@ -143,6 +146,25 @@ Environment overrides (all optional):
 | `OPENBIRD_LLM_BACKEND` | `litellm` | provider backend selector; `mlx` is reserved pending experiment promotion |
 | `OPENBIRD_LLM_MODEL` | `ollama/llama3.2` | any LiteLLM model string (e.g. `claude-...`, `gpt-...`) |
 | `OPENBIRD_EMBED_MODEL` | `ollama/nomic-embed-text` | embedding model (dim pinned per cohort) |
+| `OPENBIRD_REQUIRE_ENCRYPTION` | `0` | when `1`, opening the DB **fails closed** (raises) instead of falling back to a plaintext file if SQLCipher cannot be verified |
+| `OPENBIRD_RETENTION_DAYS` | `0` (keep forever) | default cutoff for `openbird data prune` when `--older-than` is omitted |
+
+## Storage growth & retention
+
+Memory is stored in on-device SQLite (WAL mode, `busy_timeout` so concurrent
+readers/writers queue rather than fail). Each observation is one row referencing
+a deduped content blob; identical chunks are embedded and indexed exactly once,
+so storage grows with *unique* captured content, not raw capture volume. Vectors
+dominate size (one `float32[embed_dim]` blob per unique chunk — ~3 KB/chunk at
+the default 768 dims) alongside the FTS5 index.
+
+To bound growth:
+
+- `openbird data prune --older-than 90d` cascade-deletes observations older than
+  the cutoff (and any blobs/chunks/index rows they orphaned), atomically.
+- `openbird data vacuum` reclaims the freed pages back to the OS (deletes only
+  mark pages free; the file shrinks after `VACUUM`). The WAL sidecar is bounded
+  by an explicit `wal_autocheckpoint` and truncated on vacuum.
 
 ## Privacy
 

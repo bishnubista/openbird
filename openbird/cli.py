@@ -455,6 +455,62 @@ def data_purge(
     _console.print(f"[green]Deleted[/] {deleted} observation(s) (cascade complete).")
 
 
+@data_app.command("prune")
+def data_prune(
+    older_than: str = typer.Option(
+        ...,
+        "--older-than",
+        help="Delete observations OLDER than this. Accepts a relative span like "
+        "'30d', '24h', a unix timestamp, or an ISO date/datetime.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Retention prune: cascade-delete observations older than a cutoff (H10).
+
+    Removes observations with ``ts`` strictly before the cutoff, cascading to
+    orphaned blobs/chunks/index entries (atomic, rollback-guarded). Run
+    ``openbird data vacuum`` afterwards to reclaim the freed space on disk.
+    """
+    cutoff = _parse_since(older_than)
+    if not yes:
+        confirm = typer.confirm(
+            f"Permanently delete data older than {_fmt_ts(cutoff)}?", default=False
+        )
+        if not confirm:
+            _console.print("[yellow]Aborted.[/]")
+            raise typer.Exit(code=1)
+
+    store = _store()
+    try:
+        deleted = store.prune(older_than_ts=cutoff)
+    finally:
+        store.close()
+    _console.print(
+        f"[green]Pruned[/] {deleted} observation(s) older than {_fmt_ts(cutoff)} "
+        f"(cascade complete). Run `openbird data vacuum` to reclaim disk space."
+    )
+
+
+@data_app.command("vacuum")
+def data_vacuum() -> None:
+    """Reclaim disk space: checkpoint the WAL and VACUUM the database (H10).
+
+    Deletes/prunes only mark pages free; the file shrinks only after VACUUM
+    rewrites it. Prints the bytes reclaimed.
+    """
+    store = _store()
+    try:
+        result = store.vacuum()
+    finally:
+        store.close()
+    reclaimed = result["bytes_reclaimed"]
+    _console.print(
+        f"[green]Vacuumed[/] — reclaimed {reclaimed} bytes "
+        f"({result['bytes_before']} -> {result['bytes_after']})."
+    )
+    _console.print_json(json.dumps(result))
+
+
 @data_app.command("stats")
 def data_stats() -> None:
     """Print memory-store row counts and the active embedding cohort."""
