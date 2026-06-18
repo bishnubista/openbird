@@ -772,6 +772,9 @@ def test_cloud_only_route_reports_no_ollama_requirements(tmp_path):
     assert report["cloud"]["uses_local_ollama"] is False
     assert report["ollama"]["required_models"] == []
     assert report["ollama"]["missing_models"] == []
+    # Cloud-only route: the Ollama probe is skipped and reported not-applicable
+    # (no misleading "down" for a service the route never uses).
+    assert report["ollama"]["reachable"] == "n/a"
 
 
 def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):

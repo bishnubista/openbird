@@ -565,7 +565,20 @@ def run_preflight(
         is_ollama_model(m) for m in (settings.llm_model, settings.embed_model)
     )
 
-    if probe_ollama:
+    if not uses_ollama:
+        # Cloud-only / mlx-only route never touches local Ollama: skip the probe
+        # (no point reporting localhost "down" or spending the network call for a
+        # service the active route does not use). Reported as not-applicable.
+        ollama = {
+            "reachable": "n/a",
+            "host": resolved_host,
+            "models_present": [],
+            "required_models": [],
+            "models": {},
+            "missing_models": [],
+            "error": None,
+        }
+    elif probe_ollama:
         ollama = check_ollama(
             host=resolved_host,
             required_models=required_models,

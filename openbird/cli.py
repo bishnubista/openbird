@@ -257,6 +257,8 @@ def _render_preflight(report: dict) -> None:
         )
     elif reachable == "unknown":
         o_status, o_detail = "unknown", "probe skipped"
+    elif reachable == "n/a":
+        o_status, o_detail = "n/a", "not used by the active (cloud/mlx) route"
     else:
         o_status, o_detail = "down", f"unreachable ({ollama.get('error')})"
     table.add_row("ollama", o_status, f"{ollama.get('host')} · {o_detail}")
