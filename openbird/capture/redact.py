@@ -21,8 +21,10 @@ accidentally start capturing a non-allowlisted app.
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -47,9 +49,19 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     (
         "token_prefixed",
         re.compile(
+            # H6 fix: do NOT rely on Python's Unicode-aware ``\b``. A key abutting
+            # non-ASCII text (e.g. ``keyσsk-...``) has no word boundary because the
+            # Greek letter is itself a word char, so the real key would survive.
+            # Use an explicit ASCII-class negative lookbehind/lookahead instead.
+            # The LEADING boundary class deliberately EXCLUDES ``_`` so that a key
+            # glued behind an underscore (``_sk-...``) still redacts; the TRAILING
+            # class keeps ``_`` so a trailing ``_`` does not split the value. The
+            # lookarounds wrap the WHOLE alternation (never per-branch) so ordered
+            # alternation precedence is preserved.
+            r"(?<![A-Za-z0-9-])(?:"
             # Stripe-style underscore keys must come before the bare ``sk-`` so
             # ``sk_live_...`` is matched as a unit (alternation is ordered).
-            r"\b(?:(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}"
+            r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}"
             # OpenAI modern project/service-account keys (contain - and _).
             r"|sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{16,}"
             # OpenAI classic keys.
@@ -57,7 +69,7 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
             r"|gh[pousr]_[A-Za-z0-9]{20,}"
             r"|xox[baprs]-[A-Za-z0-9-]{10,}"
             r"|AKIA[0-9A-Z]{12,}"
-            r"|AIza[0-9A-Za-z_\-]{20,})\b"
+            r"|AIza[0-9A-Za-z_\-]{20,})(?![A-Za-z0-9_-])"
         ),
         "[REDACTED:token]",
     ),
@@ -72,7 +84,14 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     # specific) rather than a bare assignment — both mask the value either way.
     (
         "jwt",
-        re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b"),
+        # H6 fix: same ASCII-class boundaries as ``token_prefixed`` (see above) so
+        # a JWT abutting non-ASCII text is still caught. Leading class excludes
+        # ``_`` so ``_eyJ...`` redacts; the dotted base64url body keeps ``\b``-free.
+        re.compile(
+            r"(?<![A-Za-z0-9-])"
+            r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"
+            r"(?![A-Za-z0-9_-])"
+        ),
         "[REDACTED:jwt]",
     ),
     # PEM private-key blocks (also more specific than the generic assignment).
@@ -111,12 +130,9 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
         ),
         r"\1\2[REDACTED]",
     ),
-    # Credit-card-shaped 13-16 digit sequences (allowing space/dash grouping).
-    (
-        "card_number",
-        re.compile(r"\b(?:\d[ -]?){13,16}\b"),
-        "[REDACTED:card]",
-    ),
+    # Credit-card numbers are handled separately by ``_scrub_cards`` (Luhn-
+    # validated, group-anchored) because a simple regex both over-redacts long
+    # numeric IDs and under-redacts 17-19 digit PANs. See ``_scrub_cards``.
     # US Social Security numbers.
     (
         "ssn",
@@ -140,6 +156,18 @@ _INCOGNITO_MARKERS: tuple[str, ...] = (
 # Settings is the primary mechanism; this is a hardcoded backstop for the most
 # dangerous categories (password managers, banking/health) so a typo in the
 # allowlist cannot leak a vault. Documented as defense-in-depth.
+# SINGLE SOURCE OF TRUTH NOTE [H7]: this baked tuple, the Swift
+# ``dangerousBundleSubstrings`` constant (capture-helper), and the committed
+# ``capture-helper/Sources/CaptureHelper/dangerous_apps.json`` resource are kept
+# in lockstep by a parity unit test (tests/unit/test_capture.py). Edit ALL THREE
+# together. The list is a SUPERSET (union) of every vendor either side carried.
+#
+# This baked tuple is the runtime source for Python: it is always complete and
+# carries no filesystem dependency (so an installed wheel without the Swift
+# sources still has the full backstop). The JSON file exists so the Swift helper
+# can read one canonical list at build time and so the parity test can detect
+# drift across all three copies. ``_DANGEROUS_BUNDLE_SUBSTRINGS`` is never empty
+# or partial — the backstop fails closed.
 _DANGEROUS_BUNDLE_SUBSTRINGS: tuple[str, ...] = (
     "1password",
     "onepassword",
@@ -147,7 +175,12 @@ _DANGEROUS_BUNDLE_SUBSTRINGS: tuple[str, ...] = (
     "bitwarden",
     "dashlane",
     "keepass",
+    "keychain",
     "keychainaccess",
+    "keeper",
+    "nordpass",
+    "enpass",
+    "protonpass",
 )
 
 
@@ -306,6 +339,114 @@ def decide(
     return RedactionDecision(capture=True, reason="allowlisted")
 
 
+# ---------------------------------------------------------------------------
+# Credit-card (PAN) redaction [H5]. A plain ``{13,16}`` regex both MISSED 17-19
+# digit PANs and OVER-redacted long numeric IDs / order numbers. We instead:
+#   1. Find candidate digit sequences (13-19 digits, optional SINGLE space/dash
+#      group separators) bounded by ASCII non-[A-Za-z0-9_-] on both sides, so a
+#      PAN embedded inside a longer alnum token is not torn out mid-stream.
+#   2. Validate with the Luhn (mod-10) checksum — this drops false positives
+#      (random/phone-like runs) and admits genuine 13-19 digit PANs.
+#   3. Mask ONLY on whole-group boundaries:
+#        * a CONTINUOUS run (no separators): mask iff the whole run is a valid
+#          13-19 digit PAN; we NEVER scan arbitrary inner windows (a random
+#          18/19-digit ID contains a Luhn-valid sub-window ~90% of the time, so
+#          inner scanning would mass-false-positive legitimate IDs).
+#        * a SEPARATED candidate (e.g. ``4111 1111 1111 1111 999``): mask the
+#          longest PREFIX of whole groups that forms a valid 13-19 digit PAN,
+#          leaving any trailing CVV/amount group intact. Group boundaries only —
+#          never a mid-group split — so no dangling number fragment is produced.
+# ---------------------------------------------------------------------------
+
+_CARD_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:\d[ -]?){12,18}\d(?![A-Za-z0-9_-])")
+
+
+def _luhn_valid(digits: str) -> bool:
+    """Standard Luhn (mod-10) checksum over a pure-digit string.
+
+    ``digits`` must already be stripped of separators and be all-ASCII digits.
+    Trivial values such as ``0000000000000000`` DO satisfy Luhn and will be
+    masked — that is intentional and harmless for a defense-in-depth backstop.
+    """
+    total = 0
+    parity = len(digits) % 2
+    for i, ch in enumerate(digits):
+        d = ord(ch) - 48  # '0' == 48; caller guarantees ASCII digits
+        if i % 2 == parity:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def _scrub_cards(text: str) -> tuple[str, bool]:
+    """Mask Luhn-valid 13-19 digit PANs (group-anchored). Returns (text, masked?).
+
+    See the module section comment above for the exact masking rules. Masking is
+    always aligned to separator-group boundaries, never to arbitrary inner digit
+    offsets, so legitimate long numeric identifiers are preserved.
+    """
+    masked_any = False
+    out: list[str] = []
+    last = 0
+    for m in _CARD_CANDIDATE_RE.finditer(text):
+        cand = m.group(0)
+        # Positions (within ``cand``) of each digit, and the contiguous-digit
+        # GROUPS delimited by the single separators that are actually present.
+        digit_pos: list[int] = []
+        groups: list[tuple[int, int]] = []  # (start_idx_in_digit_pos, end_exclusive)
+        group_start = None
+        prev_was_digit = False
+        for idx, ch in enumerate(cand):
+            if ch.isdigit():
+                if not prev_was_digit:
+                    group_start = len(digit_pos)
+                digit_pos.append(idx)
+                prev_was_digit = True
+            else:  # a single space/dash separator between groups
+                if prev_was_digit:
+                    groups.append((group_start, len(digit_pos)))
+                prev_was_digit = False
+        if prev_was_digit:
+            groups.append((group_start, len(digit_pos)))
+
+        digits = "".join(cand[p] for p in digit_pos)
+        has_separators = len(groups) > 1
+
+        mask_end_digit: int | None = None  # exclusive index into digit_pos to mask up to
+        if not has_separators:
+            # Continuous run: only the whole run, never an inner window.
+            if 13 <= len(digits) <= 19 and _luhn_valid(digits):
+                mask_end_digit = len(digit_pos)
+        else:
+            # Longest prefix of WHOLE groups forming a valid 13-19 digit PAN.
+            for gi in range(len(groups), 0, -1):
+                end_digit = groups[gi - 1][1]
+                prefix = digits[:end_digit]
+                if 13 <= len(prefix) <= 19 and _luhn_valid(prefix):
+                    mask_end_digit = end_digit
+                    break
+
+        if mask_end_digit is None:
+            continue
+
+        # Map the digit span [0, mask_end_digit) back to a text slice of ``cand``:
+        # from the first digit through the LAST masked digit (inclusive), which
+        # includes interior separators but excludes any leading/trailing one.
+        slice_start = digit_pos[0]
+        slice_end = digit_pos[mask_end_digit - 1] + 1
+        out.append(text[last : m.start()])
+        out.append(cand[:slice_start])
+        out.append("[REDACTED:card]")
+        out.append(cand[slice_end:])
+        last = m.end()
+        masked_any = True
+
+    out.append(text[last:])
+    return "".join(out), masked_any
+
+
 def scrub(text: str) -> tuple[str, tuple[str, ...]]:
     """Mask obvious secrets in captured text (defense-in-depth, best-effort).
 
@@ -324,6 +465,11 @@ def scrub(text: str) -> tuple[str, tuple[str, ...]]:
         if n:
             matched.append(name)
             out = new_out
+    # Cards are validated with Luhn, so they cannot live in the simple subn loop
+    # above; run them last and only flag ``card_number`` when a PAN was masked.
+    out, card_masked = _scrub_cards(out)
+    if card_masked:
+        matched.append("card_number")
     return out, tuple(matched)
 
 
