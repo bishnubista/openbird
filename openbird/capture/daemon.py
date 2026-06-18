@@ -557,9 +557,14 @@ class CaptureDaemon:
             if watcher is not None:
                 watcher.join(timeout=1.0)
         # A non-zero code only counts as a helper-side failure when the helper
-        # exited on its OWN — if we terminated it (max_events/stop), the negative
-        # signal code is expected and not a failure.
-        if not stopped_by_us:
+        # exited on its OWN. We initiate termination two ways: the max_events/stop
+        # break in the loop (``stopped_by_us``) AND the watcher thread, which
+        # terminates the child when ``stop_event`` fires without the loop ever
+        # observing it. A helper that *traps* SIGTERM can then exit with a
+        # positive code; that is still our-initiated, so treat any set stop_event
+        # as our-initiated to avoid a spurious HelperExitError on shutdown.
+        we_stopped = stopped_by_us or (stop_event is not None and stop_event.is_set())
+        if not we_stopped:
             rc = proc.returncode
             if rc is not None and rc > 0:
                 raise HelperExitError(f"capture helper exited with code {rc}")

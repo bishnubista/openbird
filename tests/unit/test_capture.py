@@ -1008,3 +1008,27 @@ def test_run_terminates_helper_when_stop_set(allow_settings):
     )
     stats = daemon.run(stop_event=stop)  # returns promptly; does not hang/raise
     assert isinstance(stats, CaptureStats)
+
+
+def test_run_stop_initiated_exit_not_misclassified_as_failure(allow_settings):
+    # [B1/P1 race] A helper that traps SIGTERM and exits positive after WE stop
+    # it must NOT raise HelperExitError — the stop was our-initiated.
+    import threading
+
+    code = (
+        "import signal,sys,time\n"
+        "signal.signal(signal.SIGTERM, lambda *a: sys.exit(7))\n"
+        "sys.stdout.write('\\n'); sys.stdout.flush()\n"  # one blank line, then hang
+        "time.sleep(3600)\n"
+    )
+    stop = threading.Event()
+    stop.set()
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", code],
+        require_signed_helper=False,
+    )
+    # Must return cleanly (no HelperExitError) even though the child exits 7.
+    stats = daemon.run(stop_event=stop)
+    assert isinstance(stats, CaptureStats)
