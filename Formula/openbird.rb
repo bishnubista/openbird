@@ -60,7 +60,17 @@ class Openbird < Formula
       Launch it with:
         openbird-app
 
-      Functional capture/audio still requires the signed-bundle/TCC release gates.
+      This install built from source and pulled Python dependencies from PyPI
+      (uv pip install). It is not vendored/offline and is not pinned for
+      reproducible offline installs; network access is required at install time.
+
+      The bundled OpenBird.app is UNSIGNED and not notarized, so it cannot obtain
+      macOS Screen Recording / Accessibility (TCC) permissions: screen and audio
+      capture will NOT work from this Homebrew install. Functional capture/audio
+      requires a signed bundle with a stable identity plus manually granted macOS
+      permissions (the signed-bundle/TCC release gates).
+
+      The CLI memory features (openbird ingest / chat / routine) work fully.
     EOS
   end
 

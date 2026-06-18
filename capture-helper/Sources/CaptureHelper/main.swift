@@ -218,12 +218,28 @@ private func anyMatch(_ bundleId: String, _ entries: Set<String>) -> Bool {
     return false
 }
 
-// Hardcoded backstop: bundle-id substrings whose content is never captured even
-// if (mis)allowlisted — mirrors `redact._DANGEROUS_BUNDLE_SUBSTRINGS`.
-private let dangerousBundleSubstrings = [
-    "1password", "keychain", "bitwarden", "lastpass", "dashlane",
-    "keeper", "nordpass", "enpass", "protonpass",
-]
+// SINGLE SOURCE OF TRUTH [H7]: bundle-id substrings whose content is never
+// captured even if (mis)allowlisted (password managers / vaults). This baked
+// constant MUST mirror `redact._DANGEROUS_BUNDLE_SUBSTRINGS` (Python) and the
+// committed canonical list `dangerous_apps.json`. The parity unit test in
+// tests/unit/test_capture.py parses THIS literal, the JSON, and the Python
+// tuple and fails the build if any of the three drift — so editing the list
+// means editing all three together.
+//
+// Why a baked constant and NOT a runtime `Bundle.module` JSON read: the shipped
+// helper is a bare executable copied into `OpenBird.app` (see
+// script/build_and_run.sh) WITHOUT SwiftPM's generated resource bundle.
+// `Bundle.module` `fatalError`s when that bundle is absent, which would crash
+// the helper before any fallback could run — defeating the fail-closed intent
+// and breaking capture for every allowlisted app. Baking the list in keeps the
+// backstop always complete and dependency-free at runtime; the JSON exists as
+// the canonical drift-detection source for the parity test (and for any future
+// build-time codegen), not as a runtime input.
+private let dangerousBundleSubstrings: [String] = [
+    "1password", "onepassword", "lastpass", "bitwarden", "dashlane",
+    "keepass", "keychain", "keychainaccess", "keeper", "nordpass",
+    "enpass", "protonpass",
+].map { $0.lowercased() }
 
 // Window-title markers that signal a private/incognito window.
 private let incognitoTitleMarkers = [
@@ -272,6 +288,16 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>) {
         return
     }
 
+    // Dangerous-app backstop runs BEFORE any AX access (no AX element is even
+    // created for a password manager): mirrors `redact.decide`'s dangerous gate
+    // and ensures a vault's title/text is never read, even if (mis)allowlisted.
+    if isDangerousBundle(bundleId) {
+        diag("capture: skipped_dangerous_app")
+        emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
+                          ts: Date().timeIntervalSince1970, incognito: false))
+        return
+    }
+
     let appElement = AXUIElementCreateApplication(pid)
 
     // Resolve the focused window (fall back to the first window).
@@ -292,16 +318,6 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>) {
 
     guard let window = windowElement else {
         diag("capture: no_window pid=\(pid)")
-        return
-    }
-
-    // Dangerous-app backstop runs BEFORE we even read the window title (the title
-    // of a password manager can itself be sensitive): never captured, even if
-    // allowlisted.
-    if isDangerousBundle(bundleId) {
-        diag("capture: skipped_dangerous_app")
-        emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
-                          ts: Date().timeIntervalSince1970, incognito: false))
         return
     }
 

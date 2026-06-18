@@ -32,6 +32,7 @@ which commonly embed request payloads or captured text.
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from collections.abc import Callable
@@ -43,6 +44,19 @@ from openbird.routines import store as store_mod
 from openbird.routines.store import RoutineStore, default_idempotency_key
 from openbird.routines.templates import BUILTIN_TEMPLATES, RoutineTemplate
 from openbird.types import RoutineRun
+
+# Metadata-only logger [L3]. Per the privacy contract (R4/R5) this logger MUST
+# only ever emit non-content metadata — routine names, statuses, scheduled
+# timestamps, and counts — never summary bodies or exception message strings
+# (which can embed captured content). Routed to stderr by the CLI daemon.
+logger = logging.getLogger("openbird.routines")
+
+# Default cap on how far back startup catch-up reaches [M5]. Without a cap, a
+# laptop asleep for weeks would, on the next `start()`, fire every missed
+# occurrence back-to-back — a startup "LLM storm" that can appear to hang. Seven
+# days is a sane default; pass ``lookback=None`` to ``start()`` to disable the
+# cap explicitly, or a smaller value to tighten it.
+DEFAULT_CATCHUP_LOOKBACK: float = 7 * 24 * 3600.0
 
 # A clock callable returning the current unix time; injectable for tests.
 Clock = Callable[[], float]
@@ -239,12 +253,28 @@ class RoutineScheduler:
                 error_class=error_class,
                 error_code=ERROR_CODE_RUNNER,
             )
+            # Metadata only: routine, scheduled occurrence, error class + code.
+            # NEVER the exception message (it can embed captured content) [L3].
+            logger.warning(
+                "routine error: name=%s scheduled_ts=%.0f error_class=%s error_code=%s",
+                name,
+                sched,
+                error_class,
+                ERROR_CODE_RUNNER,
+            )
             # Surface a content-safe marker to the immediate caller (not stored).
             return persisted.model_copy(
                 update={"output": f"{error_class}: {ERROR_CODE_RUNNER}"}
             )
 
         self.deliverer(name, text)
+        # Metadata only: output length, never the body [L3].
+        logger.info(
+            "routine done: name=%s scheduled_ts=%.0f output_len=%d",
+            name,
+            sched,
+            len(text),
+        )
         # ``output`` is content derived from captured data; the store only
         # persists the body when the DB is encrypted at rest, otherwise it keeps
         # metadata (length + hash) only.
@@ -277,12 +307,21 @@ class RoutineScheduler:
         # Free occurrences whose worker crashed mid-run before computing what is
         # missed: a stale ``running`` row would otherwise strand its occurrence
         # forever (its idempotency key exists, so it is never retried).
-        self.run_store.reclaim_stale(now=now)
+        reclaimed = self.run_store.reclaim_stale(now=now)
+        if reclaimed:
+            logger.info("reclaimed stale running occurrences: count=%d", len(reclaimed))
         completed: list[RoutineRun] = []
         for name, routine in self._routines.items():
             missed = self.run_store.missed_occurrences(
                 name, routine.interval, now=now, lookback=lookback
             )
+            if missed:
+                logger.info(
+                    "catch-up: name=%s missed=%d lookback=%s",
+                    name,
+                    len(missed),
+                    "none" if lookback is None else f"{lookback:.0f}s",
+                )
             for scheduled_ts in missed:
                 run = self.fire(name, scheduled_ts=scheduled_ts)
                 if run is not None:
@@ -296,12 +335,19 @@ class RoutineScheduler:
             self._scheduler = BackgroundScheduler()
         return self._scheduler
 
-    def start(self, *, catch_up: bool = True, lookback: float | None = None) -> None:
+    def start(
+        self,
+        *,
+        catch_up: bool = True,
+        lookback: float | None = DEFAULT_CATCHUP_LOOKBACK,
+    ) -> None:
         """Run missed jobs, then start firing each routine on its interval.
 
         Args:
             catch_up: Run missed occurrences before scheduling future ones.
-            lookback: Passed to :meth:`run_missed`.
+            lookback: Cap how far back catch-up reaches (seconds). Defaults to
+                :data:`DEFAULT_CATCHUP_LOOKBACK` to avoid a startup "LLM storm"
+                after a long downtime [M5]. Pass ``None`` to disable the cap.
         """
         if catch_up:
             self.run_missed(lookback=lookback)
@@ -320,6 +366,11 @@ class RoutineScheduler:
             )
         if not scheduler.running:
             scheduler.start()
+        logger.info(
+            "scheduler started: routines=%d catch_up=%s",
+            len(self._routines),
+            catch_up,
+        )
 
     def _scheduled_fire(self, name: str) -> None:
         """APScheduler entrypoint: fire ``name`` at the current wall clock."""
@@ -329,6 +380,7 @@ class RoutineScheduler:
         """Stop the background scheduler and close the run store if we own it."""
         if self._scheduler is not None and self._scheduler.running:
             self._scheduler.shutdown(wait=wait)
+            logger.info("scheduler stopped")
         # Close the run store's (per-thread) connections only if we created it; an
         # injected store is the caller's to close.
         if self._owns_store:
@@ -347,4 +399,5 @@ __all__ = [
     "stdout_deliverer",
     "null_deliverer",
     "ERROR_CODE_RUNNER",
+    "DEFAULT_CATCHUP_LOOKBACK",
 ]

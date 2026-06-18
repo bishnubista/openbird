@@ -186,6 +186,19 @@ def test_pipeline_splits_on_max_window_with_overlap():
     assert segments[1].start_ts <= segments[0].end_ts + 1e-6
 
 
+def test_pipeline_max_window_below_min_speech_emits_no_none():
+    # [H9] When a window hits max_window but the closed segment is shorter than
+    # min_speech, _close() returns None. The max_window flush must guard that
+    # like every other close site; appending None crashed downstream
+    # transcription with AttributeError on .frames/.track.
+    cfg = VADConfig(min_silence=1.0, min_speech=0.5, max_window=0.3, overlap=0.0)
+    pipe = MeetingPipeline(cfg)
+    frames = [_frame(host_ts=i * FRAME_LEN, loud=True, seq=i) for i in range(6)]
+    segments = pipe.process(frames)  # must not raise
+    assert None not in segments
+    assert all(hasattr(seg, "frames") and hasattr(seg, "track") for seg in segments)
+
+
 # --------------------------------------------------------------------------- #
 # pipeline.py — stitching
 # --------------------------------------------------------------------------- #
@@ -283,6 +296,103 @@ def test_transcribe_segment_uses_loaded_model(monkeypatch):
     assert out.text == "hello world"
     assert out.track == Track.MIC
     assert out.start_ts == 4.0
+
+
+def test_transcribe_segment_rejects_oversize_window(monkeypatch):
+    """[M6] A window exceeding the sample cap is refused before the model loads.
+
+    The cap must fire ahead of both ``model.transcribe`` AND ``_load_model``, so an
+    oversized/hostile window never pays the lazy WhisperModel construction cost.
+    """
+    import openbird.meetings.transcribe as tr
+
+    transcribe_called = False
+    model_loaded = False
+
+    class _FakeModel:
+        def transcribe(self, audio, language=None):
+            nonlocal transcribe_called
+            transcribe_called = True
+            return ([], {})
+
+    def _fake_load():
+        nonlocal model_loaded
+        model_loaded = True
+        return _FakeModel()
+
+    t = Transcriber()
+    monkeypatch.setattr(tr, "whisper_available", lambda: True)
+    monkeypatch.setattr(t, "_load_model", _fake_load)
+    # Shrink the cap so a tiny segment trips it without allocating millions.
+    monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 2)
+    seg = tr.SpeechSegment(
+        Track.SYSTEM, 0.0, 1.0, frames=[_frame(host_ts=0.0, loud=True)]
+    )
+    with pytest.raises(tr.MeetingsAudioTooLong):
+        t.transcribe_segment(seg)
+    assert transcribe_called is False  # guarded BEFORE inference
+    assert model_loaded is False  # and BEFORE the model is even loaded
+
+
+def test_resample_rejects_oversize_before_allocation(monkeypatch):
+    # [M6] A malformed low src_sr makes n_out = n_in * 16000 / src_sr explode;
+    # the cap must fire BEFORE allocating the output, not after. The guard sits
+    # ahead of the numpy/pure-Python split, so it holds for both paths.
+    import openbird.meetings.transcribe as tr
+    from array import array as _array
+
+    monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 100)
+    # 4000 samples @ src_sr=1 -> projected 64,000,000 output samples >> cap.
+    with pytest.raises(tr.MeetingsAudioTooLong):
+        tr._resample_to_16k(_array("f", [0.1] * 4000), src_sr=1)
+
+
+def test_resample_rejects_oversize_pure_python_path(monkeypatch):
+    # [M6] Same guard with numpy import forced to fail (the pure-Python branch).
+    import builtins
+    import openbird.meetings.transcribe as tr
+    from array import array as _array
+
+    real_import = builtins.__import__
+
+    def _no_numpy(name, *a, **k):
+        if name == "numpy":
+            raise ImportError("forced: numpy unavailable for this test")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_numpy)
+    monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 100)
+    with pytest.raises(tr.MeetingsAudioTooLong):
+        tr._resample_to_16k(_array("f", [0.1] * 4000), src_sr=1)
+
+
+def test_segment_to_pcm_rejects_before_concatenation(monkeypatch):
+    # [M6] The cap must fire from frame metadata (O(1) len sum) BEFORE the frames
+    # are concatenated into one buffer, so an oversized window is never duplicated
+    # in memory just to be rejected. A frame whose `.samples` raises on iteration
+    # proves the preflight uses len() only and never touches the PCM.
+    import openbird.meetings.transcribe as tr
+
+    class _ExplodingFrame:
+        """Has a cheap len() but blows up if anything iterates the samples."""
+
+        class _Samples:
+            def __len__(self):
+                return 1600
+
+            def __iter__(self):
+                raise AssertionError("samples were read before the cap fired")
+
+        def __init__(self):
+            self.samples = self._Samples()
+            self.sample_rate = SR
+
+    monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 50)
+    seg = tr.SpeechSegment.__new__(tr.SpeechSegment)
+    object.__setattr__(seg, "frames", [_ExplodingFrame(), _ExplodingFrame()])
+
+    with pytest.raises(tr.MeetingsAudioTooLong):
+        tr._segment_to_pcm(seg)  # 2*1600 = 3200 > cap 50, rejected via len() only
 
 
 # --------------------------------------------------------------------------- #

@@ -372,6 +372,186 @@ def routine_run(
     )
 
 
+@routine_app.command("start")
+def routine_start(
+    lookback_days: float = typer.Option(
+        7.0,
+        "--lookback-days",
+        help="Cap startup catch-up to this many days (0 = no catch-up). "
+        "Prevents a startup 'LLM storm' after long downtime.",
+    ),
+    no_catch_up: bool = typer.Option(
+        False, "--no-catch-up", help="Skip missed-occurrence catch-up entirely."
+    ),
+) -> None:
+    """Run the routine scheduler as a foreground daemon until SIGINT/SIGTERM [B2].
+
+    This is the always-on entrypoint a LaunchAgent (see `routine install`) execs.
+    It registers every built-in routine, catches up missed occurrences (capped),
+    then fires each on its interval. Output is delivered via the content-safe
+    no-op sink, so no summary bodies reach stdout/stderr — only metadata logs.
+    """
+    import logging
+    import signal
+    import threading
+
+    from openbird.routines.scheduler import RoutineScheduler
+    from openbird.routines.templates import BUILTIN_TEMPLATES
+
+    # Metadata-only logs to stderr (the LaunchAgent routes these to a 0600 file).
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        stream=sys.stderr,
+    )
+
+    stop = threading.Event()
+
+    def _handle(signum, _frame) -> None:
+        _err_console.print(f"[yellow]routine daemon: signal {signum}, shutting down[/]")
+        stop.set()
+
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+
+    # `--lookback-days 0` (or negative) means "no catch-up", NOT unbounded
+    # catch-up: lookback=None disables the *cap*, so it must pair with
+    # catch_up=False to actually skip catch-up.
+    catch_up = not no_catch_up and lookback_days > 0
+    lookback = lookback_days * 86400.0 if catch_up else None
+
+    store = None
+    scheduler = None
+    try:
+        provider = _provider()
+        store = _store(provider=provider)
+        scheduler = RoutineScheduler(memory_store=store, provider=provider)
+        for template in BUILTIN_TEMPLATES.values():
+            scheduler.register_template(template)
+        scheduler.start(catch_up=catch_up, lookback=lookback)
+        _console.print(
+            f"[green]routine daemon started[/] routines={len(scheduler.routines)} "
+            f"(Ctrl-C to stop)"
+        )
+        stop.wait()
+    except Exception as exc:  # noqa: BLE001 - daemon must not dump content to logs
+        # Content-safe fatal handling: log the exception CLASS only (never the
+        # message/traceback, which can embed captured content), then exit nonzero
+        # so launchd restarts us (throttled).
+        logging.getLogger("openbird.routines").error(
+            "routine daemon fatal: error_class=%s", type(exc).__name__, exc_info=False
+        )
+        raise typer.Exit(code=1) from None
+    finally:
+        # Run cleanup on every path. Each step is attempted independently and its
+        # failure is logged content-safe (class only, no traceback) and swallowed,
+        # so a raising shutdown can't skip store.close() and no cleanup traceback
+        # escapes to the daemon log.
+        _log = logging.getLogger("openbird.routines")
+        if scheduler is not None:
+            try:
+                scheduler.shutdown(wait=True)
+            except Exception as exc:  # noqa: BLE001 - content-safe cleanup
+                _log.error(
+                    "scheduler shutdown failed: error_class=%s",
+                    type(exc).__name__,
+                    exc_info=False,
+                )
+        if store is not None:
+            try:
+                store.close()
+            except Exception as exc:  # noqa: BLE001 - content-safe cleanup
+                _log.error(
+                    "store close failed: error_class=%s",
+                    type(exc).__name__,
+                    exc_info=False,
+                )
+
+
+@routine_app.command("install")
+def routine_install(
+    load: bool = typer.Option(
+        False, "--load", help="Also `launchctl load` the agent now (starts it)."
+    ),
+) -> None:
+    """Write the per-user LaunchAgent so routines run at login [B2].
+
+    Writes ~/Library/LaunchAgents/ai.openbird.routines.plist pointing at the
+    resolved `openbird` executable. By default it only writes the file and
+    prints the load command; pass --load to register it with launchd now.
+    """
+    import shutil
+    import subprocess
+
+    from openbird.routines.launchd import agent_plist_path, build_agent_plist
+
+    openbird_exe = shutil.which("openbird") or sys.argv[0]
+    if not Path(openbird_exe).is_absolute():
+        _err_console.print(
+            "[red]Could not resolve an absolute path to the `openbird` executable.[/] "
+            "Install the CLI (e.g. `uv tool install .`) so it is on PATH, then retry."
+        )
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+    log_dir = settings.data_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stderr_path = str(log_dir / "routines.err.log")
+
+    plist_bytes = build_agent_plist(
+        program_args=[openbird_exe, "routine", "start"],
+        stderr_path=stderr_path,
+    )
+    path = agent_plist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(plist_bytes)
+    _console.print(f"[green]Wrote LaunchAgent:[/] {path}")
+
+    if load:
+        try:
+            subprocess.run(["launchctl", "load", str(path)], check=True)
+            _console.print("[green]Loaded into launchd (running at next interval).[/]")
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            _err_console.print(f"[red]launchctl load failed:[/] {type(exc).__name__}")
+            raise typer.Exit(code=1) from exc
+    else:
+        _console.print(f"To start it now:  launchctl load {path}")
+
+
+@routine_app.command("uninstall")
+def routine_uninstall(
+    unload: bool = typer.Option(
+        False, "--unload", help="Also `launchctl unload` the agent before removing."
+    ),
+) -> None:
+    """Remove the per-user LaunchAgent for the routine daemon [B2]."""
+    import subprocess
+
+    from openbird.routines.launchd import agent_plist_path
+
+    path = agent_plist_path()
+    unload_failed = False
+    if unload and path.exists():
+        try:
+            subprocess.run(["launchctl", "unload", str(path)], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            _err_console.print(f"[red]launchctl unload failed:[/] {type(exc).__name__}")
+            unload_failed = True
+    if path.exists():
+        path.unlink()
+        _console.print(f"[green]Removed LaunchAgent:[/] {path}")
+    else:
+        _console.print("[yellow]No LaunchAgent installed.[/]")
+    if unload_failed:
+        # The plist was removed, but launchd may still hold the (now orphaned)
+        # job; surface that as a nonzero exit instead of pretending success.
+        _err_console.print(
+            "[yellow]Note:[/] the agent file was removed but `launchctl unload` "
+            "failed; the running job may persist until logout or a manual unload."
+        )
+        raise typer.Exit(code=1)
+
+
 # --------------------------------------------------------------------------- #
 # meeting (stub)                                                              #
 # --------------------------------------------------------------------------- #
@@ -455,6 +635,62 @@ def data_purge(
     _console.print(f"[green]Deleted[/] {deleted} observation(s) (cascade complete).")
 
 
+@data_app.command("prune")
+def data_prune(
+    older_than: str = typer.Option(
+        ...,
+        "--older-than",
+        help="Delete observations OLDER than this. Accepts a relative span like "
+        "'30d', '24h', a unix timestamp, or an ISO date/datetime.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Retention prune: cascade-delete observations older than a cutoff (H10).
+
+    Removes observations with ``ts`` strictly before the cutoff, cascading to
+    orphaned blobs/chunks/index entries (atomic, rollback-guarded). Run
+    ``openbird data vacuum`` afterwards to reclaim the freed space on disk.
+    """
+    cutoff = _parse_since(older_than, option_name="--older-than")
+    if not yes:
+        confirm = typer.confirm(
+            f"Permanently delete data older than {_fmt_ts(cutoff)}?", default=False
+        )
+        if not confirm:
+            _console.print("[yellow]Aborted.[/]")
+            raise typer.Exit(code=1)
+
+    store = _store()
+    try:
+        deleted = store.prune(older_than_ts=cutoff)
+    finally:
+        store.close()
+    _console.print(
+        f"[green]Pruned[/] {deleted} observation(s) older than {_fmt_ts(cutoff)} "
+        f"(cascade complete). Run `openbird data vacuum` to reclaim disk space."
+    )
+
+
+@data_app.command("vacuum")
+def data_vacuum() -> None:
+    """Reclaim disk space: checkpoint the WAL and VACUUM the database (H10).
+
+    Deletes/prunes only mark pages free; the file shrinks only after VACUUM
+    rewrites it. Prints the bytes reclaimed.
+    """
+    store = _store()
+    try:
+        result = store.vacuum()
+    finally:
+        store.close()
+    reclaimed = result["bytes_reclaimed"]
+    _console.print(
+        f"[green]Vacuumed[/] — reclaimed {reclaimed} bytes "
+        f"({result['bytes_before']} -> {result['bytes_after']})."
+    )
+    _console.print_json(json.dumps(result))
+
+
 @data_app.command("stats")
 def data_stats() -> None:
     """Print memory-store row counts and the active embedding cohort."""
@@ -487,12 +723,13 @@ def _fmt_interval(seconds: float) -> str:
     return f"{int(seconds // 60)}m"
 
 
-def _parse_since(value: str) -> float:
-    """Parse a --since value into a unix timestamp.
+def _parse_since(value: str, *, option_name: str = "--since") -> float:
+    """Parse a time-spec value into a unix timestamp.
 
     Accepts a bare unix timestamp, a relative span (``7d``/``24h``/``30m``/
     ``45s``), or an ISO 8601 date/datetime. Relative spans are subtracted from
-    *now*.
+    *now*. ``option_name`` names the originating CLI flag so parse errors point
+    at the flag the user actually passed (e.g. ``--older-than`` for prune).
     """
     import time
 
@@ -515,7 +752,8 @@ def _parse_since(value: str) -> float:
         return dt.timestamp()
     except ValueError as exc:
         raise typer.BadParameter(
-            f"could not parse --since {value!r}; use a unix ts, ISO date, or span like '7d'."
+            f"could not parse {option_name} {value!r}; use a unix ts, ISO date, "
+            "or span like '7d'."
         ) from exc
 
 
