@@ -202,6 +202,21 @@ def _resample_to_16k(samples: list[float], src_sr: int):
     """
     n_in = len(samples)
     need_resample = src_sr > 0 and src_sr != WHISPER_SR and n_in > 1
+    # Enforce the cap on the PROJECTED output size BEFORE allocating anything.
+    # A malformed low src_sr makes n_out = n_in * 16000 / src_sr explode (src_sr=1
+    # → 16000x), so a post-resample length check would allocate the very thing the
+    # cap exists to prevent. This guard sits ahead of the numpy/pure-Python split,
+    # so it protects both paths by construction [M6].
+    projected = (
+        n_in
+        if not need_resample
+        else max(1, int(round(n_in * WHISPER_SR / float(src_sr))))
+    )
+    if max(n_in, projected) > _MAX_TRANSCRIBE_SAMPLES:
+        raise MeetingsAudioTooLong(
+            f"resample of {n_in} samples @ {src_sr} Hz would produce {projected} "
+            f"samples (> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing before allocation [M6]"
+        )
     try:
         import numpy as np  # type: ignore[import-not-found]
 

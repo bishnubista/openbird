@@ -323,6 +323,38 @@ def test_transcribe_segment_rejects_oversize_window(monkeypatch):
     assert transcribe_called is False  # guarded BEFORE inference
 
 
+def test_resample_rejects_oversize_before_allocation(monkeypatch):
+    # [M6] A malformed low src_sr makes n_out = n_in * 16000 / src_sr explode;
+    # the cap must fire BEFORE allocating the output, not after. The guard sits
+    # ahead of the numpy/pure-Python split, so it holds for both paths.
+    import openbird.meetings.transcribe as tr
+    from array import array as _array
+
+    monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 100)
+    # 4000 samples @ src_sr=1 -> projected 64,000,000 output samples >> cap.
+    with pytest.raises(tr.MeetingsAudioTooLong):
+        tr._resample_to_16k(_array("f", [0.1] * 4000), src_sr=1)
+
+
+def test_resample_rejects_oversize_pure_python_path(monkeypatch):
+    # [M6] Same guard with numpy import forced to fail (the pure-Python branch).
+    import builtins
+    import openbird.meetings.transcribe as tr
+    from array import array as _array
+
+    real_import = builtins.__import__
+
+    def _no_numpy(name, *a, **k):
+        if name == "numpy":
+            raise ImportError("forced: numpy unavailable for this test")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_numpy)
+    monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 100)
+    with pytest.raises(tr.MeetingsAudioTooLong):
+        tr._resample_to_16k(_array("f", [0.1] * 4000), src_sr=1)
+
+
 # --------------------------------------------------------------------------- #
 # transcribe.py — stitching + formatting + summary
 # --------------------------------------------------------------------------- #
