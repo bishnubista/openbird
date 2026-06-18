@@ -5,7 +5,7 @@ will be built later. This module deliberately wraps an *injectable* audio source
 so the Python pipeline can be developed and unit-tested with canned PCM frames —
 no microphone, no system-audio tap, no ffmpeg.
 
-Why a Swift helper (and why not ffmpeg) — design requirements [R4]
+Why a Swift helper (and why not ffmpeg)
 ------------------------------------------------------------------
 * **System output capture requires ScreenCaptureKit.** macOS does not expose the
   system *output* mix as a normal input device, so ``ffmpeg -f avfoundation`` is
@@ -110,7 +110,7 @@ class AudioFrame:
         object.__setattr__(self, "samples", array("f", self.samples))
 
     def __repr__(self) -> str:
-        """Metadata-only repr — never dumps raw PCM samples [R4/R5].
+        """Metadata-only repr — never dumps raw PCM samples.
 
         Captured content (``samples``) must never reach a traceback, log line,
         or macOS crash report, so the repr emits only counts/timestamps.
@@ -304,7 +304,7 @@ class ClockEvent:
     """A single clock-sync anomaly emitted by :meth:`ClockSync.observe`.
 
     Carries only metadata (track, kind, magnitude, timestamps) — never any
-    captured audio — so it is safe to log/raise [R4/R5].
+    captured audio — so it is safe to log/raise.
     """
 
     kind: ClockEventKind
@@ -319,7 +319,7 @@ class ClockSync:
 
     Mic and system audio are independent Core Audio streams; we align them on
     :attr:`AudioFrame.host_ts` rather than assuming sample alignment. Two things
-    are tracked [R4]:
+    are tracked:
 
     * **Intra-track continuity** — ``drift[track]`` is the gap/overlap between a
       track's previous frame end and the next frame's ``host_ts`` (a sudden large

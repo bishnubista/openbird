@@ -348,7 +348,7 @@ def check_encryption(
     non-empty value on that live connection (and, if the opener exposes a
     verified :class:`~openbird.storage.crypto.DbHandle`, when it agrees). A plain
     ``sqlite3`` connection — even with ``settings.encryption_enabled`` flipped
-    True — must NOT pass: the settings flag is never trusted here (PLAN.md:84).
+    True — must NOT pass: the settings flag is never trusted here.
     Failures are reported as ``status="unknown"`` and never raised.
     """
     result: dict[str, Any] = {
@@ -443,7 +443,7 @@ _MACOS_GATES: tuple[str, ...] = (
 class HelperProbe(Protocol):
     """A signed-helper probe: maps a capability name to its grant state.
 
-    Implemented by the packaged signed helper / LaunchAgent (PLAN.md:68). It
+    Implemented by the packaged signed helper / LaunchAgent. It
     returns one of :data:`GRANT_PASSED` / :data:`GRANT_FAILED` /
     :data:`GRANT_UNKNOWN` for a given capability. Pure-Python preflight cannot
     determine TCC grants itself, so without a helper every gate is ``unknown``.
@@ -470,7 +470,7 @@ def check_macos_capabilities(
     """macOS TCC / Accessibility + audio capability gate.
 
     Authoritative grant states come from a packaged **signed helper** via
-    ``helper_probe`` (PLAN.md:68) — pure-Python preflight cannot read TCC. Each
+    ``helper_probe`` — pure-Python preflight cannot read TCC. Each
     gate is reported as :data:`GRANT_PASSED` / :data:`GRANT_FAILED` /
     :data:`GRANT_UNKNOWN`. Off-mac everything is ``unknown``/unavailable. Without
     a helper, every gate stays ``unknown`` (the honest default) — preflight must
@@ -748,7 +748,7 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
 
 
 def _release_gate_ok(report: dict[str, Any]) -> bool:
-    """Whether the stricter RELEASE gate passes (PLAN.md:68, 84).
+    """Whether the stricter release gate passes.
 
     The release gate requires everything :func:`_runtime_ok` requires PLUS:
       * verified at-rest encryption (live SQLCipher ``cipher_version``), and

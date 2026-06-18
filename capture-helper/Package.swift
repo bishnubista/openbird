@@ -7,7 +7,7 @@ import PackageDescription
 // application's active-window text as a single JSON object per capture, on
 // stdout, for the Python capture daemon (`openbird/capture/daemon.py`) to parse.
 //
-// TCC / signing note (PLAN.md signed-bundle gate): Accessibility grants are
+// TCC / signing note: Accessibility grants are
 // bound to a specific *signed* binary path. This SPM target is the dev build;
 // the shipping artifact must be a signed `.app` / LaunchAgent with a stable
 // bundle id so the grant persists across rebuilds. `swift run` will NOT carry a

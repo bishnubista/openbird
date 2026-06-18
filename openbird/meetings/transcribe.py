@@ -14,7 +14,7 @@ Two concerns live here:
    using the provider's best-effort structured-output path (``json_schema``
    validate + retry). Retrieved/transcribed text is **untrusted input** (it can
    contain prompt-injection), so the system prompt frames the transcript as data
-   that must be summarized, never obeyed as instructions [R4].
+   that must be summarized, never obeyed as instructions.
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ class TranscriptSegment:
     text: str = field(repr=False)
 
     def __repr__(self) -> str:
-        """Metadata-only repr — never dumps the transcript text [R4/R5].
+        """Metadata-only repr — never dumps the transcript text.
 
         Captured/transcribed content must never reach a traceback, log line, or
         macOS crash report, so the repr emits only track/timestamps/text length.
@@ -350,7 +350,7 @@ def _fence_transcript(transcript: str) -> str:
 
     A meeting participant whose speech transcribes to ``"</transcript>"`` (or any
     case/spacing variant) must not be able to close the fence early and inject
-    instructions [R4]. Every occurrence of the closing delimiter in the body is
+    instructions. Every occurrence of the closing delimiter in the body is
     rewritten to an inert form before interpolation, so the only literal closing
     delimiter in the emitted block is the real one we append.
     """

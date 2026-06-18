@@ -1,6 +1,6 @@
 """The local memory store: observations, deduped blobs, chunk-level retrieval.
 
-Data model [R3/R5]:
+Data model:
   * ``content_blobs`` — deduped canonical text, embedded once.
   * ``observations`` — one row per occurrence, never deduped.
   * ``chunks`` + ``fts_chunks`` (FTS5) + ``vec_chunks`` (sqlite-vec, per chunk).

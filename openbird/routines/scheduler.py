@@ -16,9 +16,9 @@ firings. Every firing goes through :meth:`fire`, which **claims** the occurrence
 output through the configured deliverer, and records a terminal
 :class:`~openbird.types.RoutineRun`. ``launchd`` is the recommended OS-level
 supervisor for true always-on behavior; APScheduler is best-effort while the
-process runs (see PLAN.md, Routines [R2]).
+process runs.
 
-Privacy [R4/R5]
+Privacy
 ---------------
 Routine output is derived from captured on-screen content. The **daemon default
 deliverer is metadata-only** (:func:`null_deliverer`): it never writes summary

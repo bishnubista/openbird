@@ -1,6 +1,6 @@
 """Privacy redaction for captured screen text — defense-in-depth, NOT a guarantee.
 
-The real privacy protection in OpenBird is the **allowlist-only first run** [R3]:
+The real privacy protection in OpenBird is the **allowlist-only first run**:
 nothing is captured unless its app bundle id is explicitly allowlisted, and a
 blocklist (password managers, finance/health apps, terminals, editors, browsers
 until enabled) is always honored. The regex secret-scrubbing here is a second
@@ -317,7 +317,7 @@ def decide(
 
     Returns:
         A :class:`RedactionDecision`. ``reason`` is metadata-only and never
-        contains captured text, satisfying the no-plaintext-in-logs rule [R4].
+        contains captured text, satisfying the no-plaintext-in-logs rule.
     """
     settings = settings or get_settings()
 

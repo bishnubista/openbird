@@ -14,7 +14,7 @@ from pathlib import Path
 
 import platformdirs
 
-# Apps excluded from capture until the user explicitly enables them [R3]:
+# Apps excluded from capture until the user explicitly enables them:
 # terminals, code editors, browsers, password managers, finance/health apps.
 _DEFAULT_BLOCKLIST: list[str] = [
     "com.apple.Terminal",

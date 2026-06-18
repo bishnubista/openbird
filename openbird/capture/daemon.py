@@ -16,7 +16,7 @@ epoch seconds timestamp, and an optional ``incognito`` flag. This daemon:
   4. applies per-app normalization,
   5. and ingests accepted events via :class:`MemoryStore.add_observation`.
 
-Privacy by prevention [R4/R5]: captured text is NEVER written to logs, exception
+Privacy by prevention: captured text is NEVER written to logs, exception
 messages, argv, or env. On any parse/handle error we log a metadata-only
 diagnostic (``reason`` codes, byte counts) and move on — the raw text never
 leaves memory except into the (encrypted-at-rest) store.
@@ -44,8 +44,8 @@ logger = logging.getLogger("openbird.capture")
 #: Environment variable pointing at the **packaged, signed** capture helper
 #: binary inside the app/LaunchAgent bundle. TCC grants are per signed path, so
 #: the dev build path (``capture-helper/.build/release/...``) must never be the
-#: default — it has no stable Accessibility/Screen-Recording grant (PLAN.md
-#: signed-bundle/TCC gate). Operators/preflight set this to the bundled artifact.
+#: default — it has no stable Accessibility/Screen-Recording grant.
+#: Operators/preflight set this to the bundled artifact.
 HELPER_PATH_ENV = "OPENBIRD_CAPTURE_HELPER"
 
 #: Conventional install location of the signed helper inside the packaged app
@@ -318,7 +318,7 @@ class CaptureDaemon:
 
         normalized = _truncate(normalized)
 
-        # [R4 fix] Scrub metadata too: URLs embed auth codes/tokens/emails/doc
+        # Scrub metadata too: URLs embed auth codes/tokens/emails/doc
         # ids in their query/fragment, and window titles can carry full message
         # content. Body text alone going through scrub() is insufficient.
         safe_window, safe_url, title_rules = redact.scrub_metadata(
@@ -336,7 +336,7 @@ class CaptureDaemon:
                 ts=ts,
             )
         except Exception as exc:  # noqa: BLE001 - isolate one bad event from the loop
-            # [Privacy fix] Some store/embed layers raise exceptions whose
+            # Some store/embed layers raise exceptions whose
             # message embeds the input text. NEVER log the exception message or
             # a traceback at default level (exc_info=False, and we log only the
             # exception *type* + safe app metadata). Full tracebacks are gated

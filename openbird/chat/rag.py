@@ -1,6 +1,6 @@
 """Grounded RAG chat over the local memory store.
 
-Pipeline ([R2]/[R4]):
+Pipeline:
   1. Retrieve candidate chunks via :meth:`MemoryStore.search` (hybrid + RRF + MMR).
   2. Dedupe by document/session before context assembly, so near-identical
      captures don't crowd out the answer.
@@ -284,7 +284,7 @@ class RAG:
     def _assemble_context(self, hits: list[SearchHit]) -> list[_ContextItem]:
         """Dedupe hits at the chunk level and assign stable source ids.
 
-        Retrieval and citations are chunk-level ([R5]): two *distinct* chunks of
+        Retrieval and citations are chunk-level: two *distinct* chunks of
         one long captured document (same ``content_hash``, different
         ``chunk_id``/span/text) must both be able to reach the prompt, otherwise
         the only chunk containing the answer can be silently dropped.
@@ -333,8 +333,8 @@ class RAG:
         fixes). The label is positional and short on purpose: small local models
         reliably echo ``S3`` but garble a long ``<hex>:<hex>`` id, which silently
         dropped citations. The label resolves back to the concrete observation
-        (app/window/ts) during validation, preserving occurrence-level provenance
-        ([R4]). Hits without a resolved observation are not citable (empty id).
+        (app/window/ts) during validation, preserving occurrence-level provenance.
+        Hits without a resolved observation are not citable (empty id).
         """
         if hit.observation is None:
             return ""
@@ -443,7 +443,7 @@ class RAG:
 def _neutralize(text: str) -> str:
     """Strip structural markers from untrusted captured text.
 
-    Prompt-injection defense ([R4]): captured content is fenced as UNTRUSTED
+    Prompt-injection defense: captured content is fenced as UNTRUSTED
     data, but a malicious capture could embed the literal close delimiter (or a
     fake ``[source_id: ...]`` header) to break out of the fence so that text
     *after* it is read as trusted instructions. We defang this by removing the
