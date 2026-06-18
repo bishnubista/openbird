@@ -405,12 +405,6 @@ def routine_start(
         stream=sys.stderr,
     )
 
-    provider = _provider()
-    store = _store(provider=provider)
-    scheduler = RoutineScheduler(memory_store=store, provider=provider)
-    for template in BUILTIN_TEMPLATES.values():
-        scheduler.register_template(template)
-
     stop = threading.Event()
 
     def _handle(signum, _frame) -> None:
@@ -420,17 +414,43 @@ def routine_start(
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)
 
-    lookback = None if no_catch_up or lookback_days <= 0 else lookback_days * 86400.0
+    # `--lookback-days 0` (or negative) means "no catch-up", NOT unbounded
+    # catch-up: lookback=None disables the *cap*, so it must pair with
+    # catch_up=False to actually skip catch-up.
+    catch_up = not no_catch_up and lookback_days > 0
+    lookback = lookback_days * 86400.0 if catch_up else None
+
+    store = None
+    scheduler = None
     try:
-        scheduler.start(catch_up=not no_catch_up, lookback=lookback)
+        provider = _provider()
+        store = _store(provider=provider)
+        scheduler = RoutineScheduler(memory_store=store, provider=provider)
+        for template in BUILTIN_TEMPLATES.values():
+            scheduler.register_template(template)
+        scheduler.start(catch_up=catch_up, lookback=lookback)
         _console.print(
             f"[green]routine daemon started[/] routines={len(scheduler.routines)} "
             f"(Ctrl-C to stop)"
         )
         stop.wait()
+    except Exception as exc:  # noqa: BLE001 - daemon must not dump content to logs
+        # Content-safe fatal handling: log the exception CLASS only (never the
+        # message/traceback, which can embed captured content), then exit nonzero
+        # so launchd restarts us (throttled).
+        logging.getLogger("openbird.routines").error(
+            "routine daemon fatal: error_class=%s", type(exc).__name__, exc_info=False
+        )
+        raise typer.Exit(code=1) from None
     finally:
-        scheduler.shutdown(wait=True)
-        store.close()
+        # Run cleanup on every path; a failing scheduler.shutdown must not skip
+        # store.close().
+        try:
+            if scheduler is not None:
+                scheduler.shutdown(wait=True)
+        finally:
+            if store is not None:
+                store.close()
 
 
 @routine_app.command("install")
