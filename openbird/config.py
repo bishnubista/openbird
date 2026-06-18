@@ -54,6 +54,25 @@ class Settings:
     embed_model: str = "ollama/nomic-embed-text"
     embed_dim: int = 768
 
+    # LLM resilience [B4/H4]: explicit timeouts and bounded retries so a
+    # reachable-but-wedged Ollama (or a flaky cloud endpoint) can never hang the
+    # process forever. Values are seconds; retries are passed to LiteLLM, which
+    # backs off on connection errors / 5xx / rate-limit responses.
+    llm_timeout: float = 60.0
+    embed_timeout: float = 30.0
+    llm_num_retries: int = 2
+
+    # Cloud opt-in [H3]: OpenBird is local-first. Resolving a *remote* model
+    # (anything not ollama/* or an mlx local backend) silently POSTs private
+    # memory to a third party, so it MUST be explicitly opted into. Default off.
+    allow_cloud: bool = False
+
+    # Runtime Ollama host [M1]: the base URL threaded into LiteLLM as api_base
+    # for ollama/* models, so the runtime provider talks to the SAME host that
+    # preflight probes. None falls back to the OLLAMA_HOST / OPENBIRD_OLLAMA_HOST
+    # env vars (see resolved_ollama_host) then the localhost default.
+    ollama_host: str | None = None
+
     allowlist: list[str] = field(default_factory=list)
     blocklist: list[str] = field(default_factory=lambda: list(_DEFAULT_BLOCKLIST))
 
@@ -79,8 +98,10 @@ def _coerce(name: str, raw: str, default: object) -> object:
     """Coerce an env-var string to the type implied by the field default."""
     if name in ("allowlist", "blocklist"):
         return [item.strip() for item in raw.split(",") if item.strip()]
-    if isinstance(default, bool) or name in ("ocr_enabled", "encryption_enabled"):
+    if isinstance(default, bool) or name in ("ocr_enabled", "encryption_enabled", "allow_cloud"):
         return raw.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(default, float) or name in ("llm_timeout", "embed_timeout"):
+        return float(raw)
     if isinstance(default, int) and not isinstance(default, bool):
         return int(raw)
     return raw
@@ -91,8 +112,69 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "blocklist": [],
     "ocr_enabled": False,
     "encryption_enabled": False,
+    "allow_cloud": False,
     "embed_dim": 768,
+    "llm_timeout": 60.0,
+    "embed_timeout": 30.0,
+    "llm_num_retries": 2,
 }
+
+# The localhost Ollama base URL used when nothing else is configured. Kept in
+# sync with preflight._DEFAULT_OLLAMA_HOST via this single definition.
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+
+
+def resolved_ollama_host(settings: "Settings | None" = None) -> str:
+    """Resolve the Ollama base URL with a single precedence used everywhere.
+
+    Precedence (highest first):
+      1. ``OLLAMA_HOST`` env var (the LiteLLM / Ollama community convention).
+      2. ``OPENBIRD_OLLAMA_HOST`` env var (== ``settings.ollama_host``).
+      3. The localhost default.
+
+    Both preflight and the runtime provider call this so a green preflight and
+    the actual runtime call always target the same host [M1].
+    """
+    env_host = os.environ.get("OLLAMA_HOST")
+    if env_host:
+        return env_host
+    if settings is not None and settings.ollama_host:
+        return settings.ollama_host
+    openbird_host = os.environ.get("OPENBIRD_OLLAMA_HOST")
+    if openbird_host:
+        return openbird_host
+    return DEFAULT_OLLAMA_HOST
+
+
+# Loopback host names that keep traffic on this machine. A non-loopback Ollama
+# host means captured chunks leave the device, so it is treated as remote even
+# for an ollama/* model (route-based cloud classification [H3]).
+_LOOPBACK_HOSTS: frozenset[str] = frozenset(
+    {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
+)
+
+
+def is_loopback_host(host_url: str) -> bool:
+    """Return True if ``host_url`` resolves to this machine (loopback).
+
+    Parses the URL host component and compares against known loopback names.
+    A bare/blank host is treated as loopback (the localhost default). Anything
+    that fails to parse is treated as NON-loopback (the safe, opt-in-required
+    default), so a malformed host never silently counts as local.
+    """
+    from urllib.parse import urlsplit
+
+    raw = (host_url or "").strip()
+    if not raw:
+        return True
+    candidate = raw if "//" in raw else f"//{raw}"
+    try:
+        hostname = urlsplit(candidate).hostname
+    except ValueError:
+        return False
+    if hostname is None:
+        return False
+    return hostname.lower() in _LOOPBACK_HOSTS
 
 
 def _settings_from_env() -> Settings:
@@ -123,4 +205,11 @@ def reset_settings_cache() -> None:
     get_settings.cache_clear()
 
 
-__all__ = ["Settings", "get_settings", "reset_settings_cache"]
+__all__ = [
+    "Settings",
+    "get_settings",
+    "reset_settings_cache",
+    "resolved_ollama_host",
+    "is_loopback_host",
+    "DEFAULT_OLLAMA_HOST",
+]
