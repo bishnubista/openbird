@@ -68,6 +68,8 @@ if [[ ! -f "\$REPO_ROOT/pyproject.toml" ]]; then
   echo "OpenBird dev bundle cannot find the source checkout at \$REPO_ROOT" >&2
   exit 127
 fi
+export OPENBIRD_CAPTURE_HELPER="\$BIN_DIR/capture-helper"
+export OPENBIRD_AUDIO_HELPER="\$BIN_DIR/audio-helper"
 exec "\$UV_BIN" --directory "\$REPO_ROOT" run openbird "\$@"
 WRAPPER
 chmod +x "$APP_MACOS/openbird-cli"

@@ -11,6 +11,8 @@ from openbird.preflight import (
     GRANT_FAILED,
     GRANT_PASSED,
     GRANT_UNKNOWN,
+    _packaged_helper_probe,
+    _run_helper_grant_probe,
     check_embedding,
     check_encryption,
     check_macos_capabilities,
@@ -372,6 +374,93 @@ def test_macos_helper_probe_error_is_unknown():
     assert res["probe_error"] == "RuntimeError"
 
 
+def test_packaged_helper_probe_merges_capture_and_audio_helpers(tmp_path):
+    capture = tmp_path / "capture-helper"
+    audio = tmp_path / "audio-helper"
+    calls = []
+
+    def runner(path):
+        calls.append(path.name)
+        if path == capture:
+            return {"accessibility": "passed"}
+        return {
+            "screen_recording": "passed",
+            "microphone": "denied",
+            "system_audio": "passed",
+        }
+
+    probe = _packaged_helper_probe(
+        capture_helper=capture,
+        audio_helper=audio,
+        runner=runner,
+    )
+    assert probe is not None
+    assert probe("accessibility") == GRANT_PASSED
+    assert probe("screen_recording") == GRANT_PASSED
+    assert probe("microphone") == GRANT_FAILED
+    assert probe("system_audio") == GRANT_PASSED
+    # Each helper is executed once and cached across capability lookups.
+    assert calls == ["capture-helper", "audio-helper"]
+
+
+def test_packaged_helper_probe_unavailable_without_helper_env(monkeypatch):
+    monkeypatch.delenv("OPENBIRD_CAPTURE_HELPER", raising=False)
+    monkeypatch.delenv("OPENBIRD_AUDIO_HELPER", raising=False)
+    assert _packaged_helper_probe() is None
+
+
+def test_packaged_helper_probe_bad_json_keeps_grants_unknown(tmp_path):
+    capture = tmp_path / "capture-helper"
+    audio = tmp_path / "audio-helper"
+    probe = _packaged_helper_probe(
+        capture_helper=capture,
+        audio_helper=audio,
+        runner=lambda _path: {},
+    )
+    assert probe is not None
+    assert probe("accessibility") == GRANT_UNKNOWN
+    assert probe("screen_recording") == GRANT_UNKNOWN
+
+
+def test_helper_grant_subprocess_parses_json(tmp_path):
+    helper = tmp_path / "helper"
+    helper.write_text('#!/bin/sh\nprintf \'{"accessibility":"authorized"}\\n\'\n')
+    helper.chmod(0o700)
+    assert _run_helper_grant_probe(helper) == {"accessibility": GRANT_PASSED}
+
+
+def test_helper_grant_subprocess_failure_surfaces_probe_error(tmp_path):
+    helper = tmp_path / "helper"
+    helper.write_text("#!/bin/sh\nexit 2\n")
+    helper.chmod(0o700)
+    audio = tmp_path / "audio-helper"
+    audio.write_text(
+        "#!/bin/sh\n"
+        "printf '{\"screen_recording\":\"passed\","
+        "\"microphone\":\"passed\",\"system_audio\":\"passed\"}\\n'\n"
+    )
+    audio.chmod(0o700)
+    probe = _packaged_helper_probe(capture_helper=helper, audio_helper=audio)
+
+    res = check_macos_capabilities(system="Darwin", helper_probe=probe)
+    assert res["accessibility"] == GRANT_UNKNOWN
+    assert res["probe_error"] == "RuntimeError"
+    assert "probe was unavailable or failed" in res["note"]
+
+    # Cached helper failures should re-raise the original exception type.
+    assert probe("screen_recording") == GRANT_PASSED
+    with pytest.raises(RuntimeError):
+        probe("accessibility")
+
+
+def test_packaged_helper_probe_partial_helper_reports_unavailable(tmp_path):
+    probe = _packaged_helper_probe(capture_helper=tmp_path / "capture-helper")
+
+    res = check_macos_capabilities(system="Darwin", helper_probe=probe)
+    assert res["screen_recording"] == GRANT_UNKNOWN
+    assert res["probe_error"] == "FileNotFoundError"
+
+
 # --------------------------------------------------------------------------- #
 # run_preflight aggregation                                                   #
 # --------------------------------------------------------------------------- #
@@ -409,6 +498,26 @@ def test_run_preflight_release_gate_green_when_all_proven(settings):
     )
     assert report["runtime_ok"] is True
     assert report["encryption"]["enabled"] is True
+    assert report["macos"]["all_passed"] is True
+    assert report["release_gate_ok"] is True
+
+
+def test_run_preflight_uses_packaged_helper_probe_on_real_macos(monkeypatch, settings):
+    from openbird import preflight as preflight_module
+
+    monkeypatch.setattr(preflight_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        preflight_module,
+        "_packaged_helper_probe",
+        lambda: all_passed_probe,
+    )
+    report = run_preflight(
+        settings,
+        http_get=make_http_get(),
+        db_opener=encrypted_handle_opener(),
+        ollama_host="http://localhost:11434",
+    )
+    assert report["macos"]["helper_present"] is True
     assert report["macos"]["all_passed"] is True
     assert report["release_gate_ok"] is True
 

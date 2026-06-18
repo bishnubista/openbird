@@ -31,6 +31,9 @@ class Openbird < Formula
     (app_macos/"openbird-cli").write <<~SH
       #!/usr/bin/env bash
       set -euo pipefail
+      BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+      export OPENBIRD_CAPTURE_HELPER="$BIN_DIR/capture-helper"
+      export OPENBIRD_AUDIO_HELPER="$BIN_DIR/audio-helper"
       exec "#{bin}/openbird" "$@"
     SH
     chmod 0755, app_macos/"openbird-cli"

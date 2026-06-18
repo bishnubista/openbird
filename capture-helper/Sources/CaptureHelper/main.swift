@@ -55,6 +55,24 @@ private func ensureAccessibilityTrust(prompt: Bool) -> Bool {
     return AXIsProcessTrustedWithOptions(options)
 }
 
+private struct GrantReport: Encodable {
+    let accessibility: String
+}
+
+private func emitGrantReport() {
+    let report = GrantReport(
+        accessibility: ensureAccessibilityTrust(prompt: false) ? "passed" : "failed"
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.withoutEscapingSlashes]
+    guard let data = try? encoder.encode(report) else {
+        diag("capture: preflight_encode_failed")
+        exit(2)
+    }
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data("\n".utf8))
+}
+
 // MARK: - AX helpers
 
 /// A small budget tracker shared across a single capture traversal.
@@ -378,6 +396,11 @@ private func listArg(_ args: [String], _ name: String) -> Set<String> {
 
 private func run() {
     let args = CommandLine.arguments
+    if args.contains("--preflight-grants") {
+        emitGrantReport()
+        return
+    }
+
     let noPrompt = args.contains("--no-prompt")
     // Allowlist-first content policy, enforced before any AX text is read.
     let allow = listArg(args, "--allow")
