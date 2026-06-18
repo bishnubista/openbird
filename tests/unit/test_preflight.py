@@ -503,3 +503,96 @@ def test_run_preflight_reflects_privacy_config(tmp_path):
     assert report["privacy"]["allowlist"] == ["com.apple.Safari"]
     assert report["privacy"]["blocklist"] == ["com.apple.Terminal"]
     assert report["privacy"]["ocr_enabled"] is True
+
+
+# --------------------------------------------------------------------------- #
+# cloud section + route-aware runtime_ok (H3) / host agreement (M1)            #
+# --------------------------------------------------------------------------- #
+
+
+def test_cloud_section_local_default(settings):
+    report = run_preflight(
+        settings, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["cloud"]["active"] is False
+    assert report["cloud"]["blocked"] is False
+    assert report["cloud"]["remote_models"] == {}
+
+
+def test_cloud_section_blocked_without_opt_in(tmp_path):
+    s = Settings(data_dir=tmp_path, embed_dim=768, llm_model="gpt-4o-mini")
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["cloud"]["active"] is True
+    assert report["cloud"]["blocked"] is True
+    assert report["cloud"]["remote_models"] == {"llm": "gpt-4o-mini"}
+    # A remote model without opt-in cannot run -> not runtime-OK.
+    assert report["runtime_ok"] is False
+
+
+def test_cloud_route_with_opt_in_does_not_require_ollama(tmp_path):
+    # Cloud chat + cloud embed, opted in: Ollama down should NOT block runtime_ok.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="gpt-4o-mini",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(raise_exc=ConnectionRefusedError()),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["cloud"]["active"] is True
+    assert report["cloud"]["blocked"] is False
+    assert report["cloud"]["uses_local_ollama"] is False
+    # sqlite is available in this env; Ollama is irrelevant for a cloud route.
+    assert report["runtime_ok"] is True
+
+
+def test_preflight_required_models_derived_from_settings(tmp_path):
+    # Custom Ollama models -> preflight must check THOSE, not the hard defaults.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="ollama/mistral",
+        embed_model="ollama/mxbai-embed-large",
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("mistral:latest", "mxbai-embed-large:latest")),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert set(report["ollama"]["required_models"]) == {"mistral", "mxbai-embed-large"}
+    assert report["ollama"]["missing_models"] == []
+    assert report["runtime_ok"] is True
+
+
+def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
+    # M1 regression: preflight host == runtime provider api_base host.
+    monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://customhost:4242")
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    s = Settings(data_dir=tmp_path, embed_dim=768)
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    preflight_host = report["ollama"]["host"]
+
+    # Build the runtime provider and capture the api_base it would use.
+    from openbird.llm.provider import LLMProvider
+
+    fake = type(
+        "F", (), {
+            "embedding_kwargs": None,
+            "embedding": lambda self, *, model, input, **kw: (
+                setattr(self, "embedding_kwargs", kw)
+                or {"data": [{"embedding": [0.0] * 768} for _ in input]}
+            ),
+        },
+    )()
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    LLMProvider(s).embed(["x"])
+    assert preflight_host == "http://customhost:4242"
+    assert fake.embedding_kwargs["api_base"] == preflight_host

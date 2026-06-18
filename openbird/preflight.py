@@ -29,12 +29,19 @@ import urllib.request
 from typing import Any, Callable, Protocol
 from urllib.parse import urljoin
 
-from openbird.config import Settings, get_settings
+from openbird.config import (
+    DEFAULT_OLLAMA_HOST as _DEFAULT_OLLAMA_HOST,
+)
+from openbird.config import (
+    Settings,
+    get_settings,
+    resolved_ollama_host,
+)
 
-# Models OpenBird depends on by default; preflight checks they are pulled.
+# Models OpenBird depends on by default; preflight checks they are pulled. Used
+# as a fallback when settings do not name ollama/* models (route-aware path
+# below derives the real required set from settings.llm_model/embed_model).
 _REQUIRED_MODELS: tuple[str, ...] = ("llama3.2", "nomic-embed-text")
-
-_DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
 
 # --------------------------------------------------------------------------- #
@@ -56,9 +63,32 @@ DbOpener = Callable[..., sqlite3.Connection]
 ProviderFactory = Callable[[Settings], _EmbedProvider]
 
 
-def _ollama_host() -> str:
-    """Resolve the Ollama base URL from the environment, with a default."""
-    return os.environ.get("OLLAMA_HOST") or os.environ.get("OPENBIRD_OLLAMA_HOST") or _DEFAULT_OLLAMA_HOST
+def _ollama_host(settings: Settings | None = None) -> str:
+    """Resolve the Ollama base URL via the shared resolver [M1].
+
+    Delegates to :func:`openbird.config.resolved_ollama_host` so preflight and
+    the runtime provider always agree on the host (same precedence:
+    ``OLLAMA_HOST`` > ``settings.ollama_host`` / ``OPENBIRD_OLLAMA_HOST`` >
+    default).
+    """
+    return resolved_ollama_host(settings)
+
+
+def _ollama_required_models(settings: Settings) -> tuple[str, ...]:
+    """Derive the local Ollama models the active route actually needs.
+
+    Strips the ``ollama/`` prefix (and any ``:tag``) from the configured chat /
+    embed models so preflight checks the models the user really runs, not the
+    hard-coded defaults. Non-ollama (cloud/mlx) models contribute nothing here.
+    """
+    wanted: list[str] = []
+    for model in (settings.llm_model, settings.embed_model):
+        name = (model or "").strip()
+        if name.lower().startswith("ollama/"):
+            bare = name.split("/", 1)[1].split(":", 1)[0]
+            if bare and bare not in wanted:
+                wanted.append(bare)
+    return tuple(wanted) if wanted else _REQUIRED_MODELS
 
 
 def _http_get(url: str, timeout: float) -> tuple[int, bytes]:
@@ -472,15 +502,33 @@ def run_preflight(
     """
     settings = settings or get_settings()
 
+    # Route-aware [H3/M1]: classify the configured models and derive the local
+    # models the active route actually needs, instead of hard-coding defaults.
+    from openbird.llm.provider import classify_models
+
+    remote_models = classify_models(settings)
+    required_models = _ollama_required_models(settings)
+    resolved_host = ollama_host or _ollama_host(settings)
+    # Does the active route depend on local Ollama at all (either model ollama/*)?
+    uses_ollama = any(
+        (m or "").strip().lower().startswith("ollama/")
+        for m in (settings.llm_model, settings.embed_model)
+    )
+
     if probe_ollama:
-        ollama = check_ollama(host=ollama_host, http_get=http_get, timeout=ollama_timeout)
+        ollama = check_ollama(
+            host=resolved_host,
+            required_models=required_models,
+            http_get=http_get,
+            timeout=ollama_timeout,
+        )
     else:
         ollama = {
             "reachable": "unknown",
-            "host": ollama_host or _ollama_host(),
+            "host": resolved_host,
             "models_present": [],
-            "required_models": list(_REQUIRED_MODELS),
-            "models": {m: "unknown" for m in _REQUIRED_MODELS},
+            "required_models": list(required_models),
+            "models": {m: "unknown" for m in required_models},
             "missing_models": "unknown",
             "error": None,
         }
@@ -518,6 +566,19 @@ def run_preflight(
             "ocr_enabled": bool(settings.ocr_enabled),
         },
         "macos": macos,
+        # Cloud route status [H3]: which configured models are remote, whether
+        # cloud is opted into, and whether captured memory would actually leave
+        # this machine on the current config. "blocked" = remote model set but
+        # no opt-in (the factory would refuse).
+        "cloud": {
+            "remote_models": remote_models,
+            "active": bool(remote_models),
+            "allow_cloud": bool(settings.allow_cloud),
+            "blocked": bool(remote_models) and not settings.allow_cloud,
+            "llm_model": settings.llm_model,
+            "embed_model": settings.embed_model,
+            "uses_local_ollama": uses_ollama,
+        },
     }
     report["runtime_ok"] = _runtime_ok(report)
     report["release_gate_ok"] = _release_gate_ok(report)
@@ -529,17 +590,34 @@ def run_preflight(
 def _runtime_ok(report: dict[str, Any]) -> bool:
     """Whether the *hard runtime* requirements are satisfied.
 
-    Runtime-OK means the parts OpenBird cannot run without are present: Ollama
-    reachable with no missing required models, and sqlite-vec + FTS5 usable. It
-    deliberately does NOT gate on encryption or macOS capture grants — the
+    Runtime-OK means the parts OpenBird cannot run without are present:
+      * sqlite-vec + FTS5 usable, AND
+      * the active model route is usable — for a local Ollama route that means
+        Ollama reachable with no missing required models; for a route that does
+        not use local Ollama (a cloud or mlx model) Ollama is irrelevant, but a
+        REMOTE model with no cloud opt-in is *blocked* (the provider factory
+        would refuse) and so is not runtime-OK.
+
+    It deliberately does NOT gate on encryption or macOS capture grants — the
     product runs without capture and runs plaintext-with-0600 if SQLCipher is
     absent. ``"unknown"`` Ollama (probe skipped) does not count as OK.
     """
     ollama = report["ollama"]
     sqlite_info = report["sqlite"]
+    cloud = report.get("cloud", {})
 
-    ollama_ok = ollama.get("reachable") is True and not ollama.get("missing_models")
     sqlite_ok = bool(sqlite_info.get("vec_available")) and bool(sqlite_info.get("fts5_available"))
+
+    # A remote model configured without opt-in cannot run (factory refuses).
+    if cloud.get("blocked"):
+        return False
+
+    if cloud.get("uses_local_ollama", True):
+        ollama_ok = ollama.get("reachable") is True and not ollama.get("missing_models")
+    else:
+        # Cloud/mlx-only route: Ollama is not required for runtime readiness.
+        ollama_ok = True
+
     return bool(ollama_ok and sqlite_ok)
 
 
