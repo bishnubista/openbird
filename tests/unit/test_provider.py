@@ -301,21 +301,25 @@ def test_ollama_model_gets_api_base_from_resolved_host(monkeypatch):
 def test_cloud_model_does_not_get_local_api_base(monkeypatch):
     fake = _FakeLiteLLM(completion_text="hi")
     monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
-    # A remote chat model must NOT be pointed at the local Ollama host.
-    provider = LLMProvider(Settings(embed_dim=768, llm_model="gpt-4o-mini"))
+    # A remote chat model must NOT be pointed at the local Ollama host
+    # (allow_cloud=True since the gate now lives in the constructor).
+    provider = LLMProvider(
+        Settings(embed_dim=768, llm_model="gpt-4o-mini"), allow_cloud=True
+    )
     provider.complete([{"role": "user", "content": "hi"}])
     assert "api_base" not in fake.completion_kwargs
 
 
 def test_provider_honors_both_ollama_env_vars(monkeypatch):
-    # OPENBIRD_OLLAMA_HOST is honored when OLLAMA_HOST is unset.
+    # OPENBIRD_OLLAMA_HOST is honored when OLLAMA_HOST is unset. Use a loopback
+    # host so the default ollama/* models stay local (no cloud opt-in needed).
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
-    monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://box:1234")
+    monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://127.0.0.1:1234")
     fake = _FakeLiteLLM(dim=768)
     monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
     provider = LLMProvider(Settings(embed_dim=768))
     provider.embed(["x"])
-    assert fake.embedding_kwargs["api_base"] == "http://box:1234"
+    assert fake.embedding_kwargs["api_base"] == "http://127.0.0.1:1234"
 
 
 # --------------------------------------------------------------------------- #
@@ -388,3 +392,17 @@ def test_factory_refuses_remote_ollama_host_without_opt_in(monkeypatch):
     s = Settings(embed_dim=768)  # default ollama models, but remote host
     with pytest.raises(CloudOptInRequired):
         create_llm_provider(s)
+
+
+def test_direct_constructor_also_enforces_cloud_opt_in():
+    # Regression: the gate must not be bypassable by constructing the concrete
+    # provider directly (it lives in LiteLLMProvider.__init__, not just factory).
+    with pytest.raises(CloudOptInRequired):
+        LLMProvider(Settings(embed_dim=768, embed_model="text-embedding-3-small"))
+    with pytest.raises(CloudOptInRequired):
+        LiteLLMProvider(Settings(embed_dim=768, llm_model="gpt-4o-mini"))
+    # Opt-in argument lets it through.
+    p = LLMProvider(
+        Settings(embed_dim=768, llm_model="gpt-4o-mini"), allow_cloud=True
+    )
+    assert p.llm_model == "gpt-4o-mini"

@@ -531,8 +531,10 @@ def test_cloud_section_blocked_without_opt_in(tmp_path):
     assert report["runtime_ok"] is False
 
 
-def test_cloud_route_with_opt_in_does_not_require_ollama(tmp_path):
-    # Cloud chat + cloud embed, opted in: Ollama down should NOT block runtime_ok.
+def test_cloud_route_with_opt_in_not_ready_without_probe(tmp_path):
+    # Cloud route, opted in but NOT probed: Ollama is irrelevant, but the remote
+    # endpoint is unverified, so runtime_ok must stay False (a missing API key
+    # would fail the first call — sqlite alone must not report READY).
     s = Settings(
         data_dir=tmp_path,
         embed_dim=768,
@@ -544,11 +546,32 @@ def test_cloud_route_with_opt_in_does_not_require_ollama(tmp_path):
         s,
         http_get=make_http_get(raise_exc=ConnectionRefusedError()),
         db_opener=plaintext_handle_opener(),
+        probe_embedding=False,
     )
     assert report["cloud"]["active"] is True
     assert report["cloud"]["blocked"] is False
     assert report["cloud"]["uses_local_ollama"] is False
-    # sqlite is available in this env; Ollama is irrelevant for a cloud route.
+    assert report["runtime_ok"] is False
+
+
+def test_cloud_route_ready_when_embedding_probe_succeeds(tmp_path):
+    # Same cloud route, but a successful embedding probe confirms the endpoint
+    # works -> runtime_ok True without any Ollama dependency.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="gpt-4o-mini",
+        embed_model="text-embedding-3-small",
+        allow_cloud=True,
+    )
+    report = run_preflight(
+        s,
+        http_get=make_http_get(raise_exc=ConnectionRefusedError()),
+        db_opener=plaintext_handle_opener(),
+        provider_factory=lambda settings: FakeEmbedProvider(settings, dim=768),
+        probe_embedding=True,
+    )
+    assert report["embedding"]["dim_ok"] is True
     assert report["runtime_ok"] is True
 
 
@@ -571,8 +594,10 @@ def test_preflight_required_models_derived_from_settings(tmp_path):
 
 
 def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
-    # M1 regression: preflight host == runtime provider api_base host.
-    monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://customhost:4242")
+    # M1 regression: preflight host == runtime provider api_base host. Use a
+    # loopback custom host so the default ollama/* route stays local (the host is
+    # threaded the same way regardless of loopback/remote).
+    monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://127.0.0.1:4242")
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
     s = Settings(data_dir=tmp_path, embed_dim=768)
     report = run_preflight(
@@ -594,7 +619,7 @@ def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
     )()
     monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
     LLMProvider(s).embed(["x"])
-    assert preflight_host == "http://customhost:4242"
+    assert preflight_host == "http://127.0.0.1:4242"
     assert fake.embedding_kwargs["api_base"] == preflight_host
 
 

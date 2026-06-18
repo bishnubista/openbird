@@ -594,11 +594,14 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
 
     Runtime-OK means the parts OpenBird cannot run without are present:
       * sqlite-vec + FTS5 usable, AND
-      * the active model route is usable — for a local Ollama route that means
-        Ollama reachable with no missing required models; for a route that does
-        not use local Ollama (a cloud or mlx model) Ollama is irrelevant, but a
-        REMOTE model with no cloud opt-in is *blocked* (the provider factory
-        would refuse) and so is not runtime-OK.
+      * the active model route is usable:
+          - local Ollama route: Ollama reachable with no missing required models;
+          - REMOTE (cloud) route: a remote model with no opt-in is *blocked*
+            (the factory refuses) so not OK; even WITH opt-in the remote endpoint
+            is only OK once an embedding PROBE succeeds (``embedding.dim_ok``) —
+            sqlite alone must not report READY when a missing/invalid API key
+            would fail the first ingest/chat call;
+          - mlx-only local route: on-device, Ollama is irrelevant.
 
     It deliberately does NOT gate on encryption or macOS capture grants — the
     product runs without capture and runs plaintext-with-0600 if SQLCipher is
@@ -607,6 +610,7 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
     ollama = report["ollama"]
     sqlite_info = report["sqlite"]
     cloud = report.get("cloud", {})
+    embedding = report.get("embedding", {})
 
     sqlite_ok = bool(sqlite_info.get("vec_available")) and bool(sqlite_info.get("fts5_available"))
 
@@ -615,12 +619,17 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
         return False
 
     if cloud.get("uses_local_ollama", True):
-        ollama_ok = ollama.get("reachable") is True and not ollama.get("missing_models")
+        route_ok = ollama.get("reachable") is True and not ollama.get("missing_models")
+    elif cloud.get("active"):
+        # Remote (cloud) route: only OK once a live embedding probe confirms the
+        # endpoint/credentials work. Without the probe (the default), readiness is
+        # unverifiable, so do NOT report green from sqlite alone.
+        route_ok = embedding.get("dim_ok") is True
     else:
-        # Cloud/mlx-only route: Ollama is not required for runtime readiness.
-        ollama_ok = True
+        # Local non-ollama (mlx) route: on-device, no network dependency.
+        route_ok = True
 
-    return bool(ollama_ok and sqlite_ok)
+    return bool(route_ok and sqlite_ok)
 
 
 def _release_gate_ok(report: dict[str, Any]) -> bool:

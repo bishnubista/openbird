@@ -117,15 +117,35 @@ class LiteLLMProvider:
 
     backend_name = "litellm"
 
-    def __init__(self, settings: Settings | None = None, *, normalized: bool = False) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        normalized: bool = False,
+        allow_cloud: bool | None = None,
+    ) -> None:
         """Create a provider.
 
         Args:
             settings: Configuration; defaults to :func:`get_settings`.
             normalized: Whether embeddings are L2-normalized before storage.
                 Recorded in :meth:`cohort_key` so cohorts stay consistent.
+            allow_cloud: Opt-in override. When ``None`` (default), taken from
+                ``settings.allow_cloud`` / ``OPENBIRD_ALLOW_CLOUD``.
+
+        Raises:
+            CloudOptInRequired: if any resolved model is *remote* (a cloud API,
+                or an ``ollama/*`` model on a non-loopback host) and cloud is not
+                opted into. The guard lives HERE — not only in
+                :func:`create_llm_provider` — so the security gate cannot be
+                bypassed by constructing the concrete provider directly [H3].
         """
         self.settings = settings or get_settings()
+        cloud_ok = self.settings.allow_cloud if allow_cloud is None else allow_cloud
+        if not cloud_ok:
+            remote = classify_models(self.settings)
+            if remote:
+                raise CloudOptInRequired(remote)
         self.embed_model = self.settings.embed_model
         self.llm_model = self.settings.llm_model
         self.embed_dim = self.settings.embed_dim
@@ -386,22 +406,17 @@ def create_llm_provider(
     fresh acceptance run.
 
     Cloud opt-in [H3]: if any resolved model is *remote* (a cloud API, or an
-    ``ollama/*`` model on a non-loopback host) this raises
-    :class:`CloudOptInRequired` unless cloud is opted into. Opt-in is taken from
-    the explicit ``allow_cloud`` argument when given (the CLI passes ``True``
-    after an interactive confirm), otherwise from ``settings.allow_cloud`` /
-    ``OPENBIRD_ALLOW_CLOUD``. This single chokepoint covers every provider
-    construction path (CLI, memory store, meetings).
+    ``ollama/*`` model on a non-loopback host) construction raises
+    :class:`CloudOptInRequired` unless cloud is opted into. The guard is enforced
+    in :meth:`LiteLLMProvider.__init__` (so direct construction cannot bypass it);
+    here we just forward ``allow_cloud`` — taken from the explicit argument when
+    given (the CLI passes ``True`` after an interactive confirm), otherwise from
+    ``settings.allow_cloud`` / ``OPENBIRD_ALLOW_CLOUD``.
     """
     resolved_settings = settings or get_settings()
-    cloud_ok = resolved_settings.allow_cloud if allow_cloud is None else allow_cloud
-    if not cloud_ok:
-        remote = classify_models(resolved_settings)
-        if remote:
-            raise CloudOptInRequired(remote)
     selected = (backend or resolved_settings.llm_backend).strip().lower()
     if selected == "litellm":
-        return LLMProvider(resolved_settings, normalized=normalized)
+        return LLMProvider(resolved_settings, normalized=normalized, allow_cloud=allow_cloud)
     if selected == "mlx":
         raise NotImplementedError(
             "The MLX backend is not wired into OpenBird runtime yet. "
