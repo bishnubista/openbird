@@ -748,6 +748,22 @@ def test_mlx_backend_not_runtime_ready(tmp_path):
     assert report["runtime_ok"] is False
 
 
+def test_mlx_model_strings_under_litellm_not_ready(tmp_path):
+    # mlx/* model strings with the default litellm backend are unrunnable (litellm
+    # cannot serve them); preflight must not report READY.
+    s = Settings(
+        data_dir=tmp_path,
+        embed_dim=768,
+        llm_model="mlx/Qwen",
+        embed_model="mlx/embed",
+    )
+    report = run_preflight(
+        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
+    )
+    assert report["backend"]["supported"] is False
+    assert report["runtime_ok"] is False
+
+
 def test_litellm_backend_supported(tmp_path):
     s = Settings(data_dir=tmp_path, embed_dim=768)  # default litellm
     report = run_preflight(

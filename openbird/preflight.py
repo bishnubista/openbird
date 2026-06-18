@@ -105,6 +105,18 @@ def _ollama_required_models(settings: Settings) -> tuple[str, ...]:
     return () if any_model_configured else _REQUIRED_MODELS
 
 
+def _has_mlx_model(settings: Settings) -> bool:
+    """True if either configured model is an ``mlx*`` string (unwired today).
+
+    The MLX runtime is reserved/not wired, and litellm cannot serve ``mlx/*``
+    model strings, so a route naming one is not runnable regardless of backend.
+    """
+    return any(
+        (m or "").strip().lower().startswith("mlx")
+        for m in (settings.llm_model, settings.embed_model)
+    )
+
+
 def _http_get(url: str, timeout: float) -> tuple[int, bytes]:
     """Perform a GET, returning ``(status_code, body)``.
 
@@ -645,12 +657,16 @@ def run_preflight(
             "ocr_enabled": bool(settings.ocr_enabled),
         },
         "macos": macos,
-        # Provider backend readiness: only ``litellm`` is wired today; ``mlx`` is
-        # reserved (the factory raises NotImplementedError). Preflight must not
-        # report READY for an unwired backend even if sqlite is fine.
+        # Provider backend readiness. Two unwired-MLX cases must NOT report READY:
+        #   * the reserved ``mlx`` *backend* (factory raises NotImplementedError);
+        #   * ``mlx/*`` *model strings* under the default litellm backend — litellm
+        #     cannot serve them, so the first runtime call would fail.
         "backend": {
             "name": (settings.llm_backend or "").strip().lower(),
-            "supported": (settings.llm_backend or "").strip().lower() == "litellm",
+            "supported": (
+                (settings.llm_backend or "").strip().lower() == "litellm"
+                and not _has_mlx_model(settings)
+            ),
         },
         # Cloud route status [H3]: which configured models are remote, whether
         # cloud is opted into, and whether captured memory would actually leave
