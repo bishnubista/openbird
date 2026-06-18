@@ -82,14 +82,18 @@ def is_local_model(model: str, *, ollama_host: str | None = None) -> bool:
     return any(name.startswith(p) for p in _LOCAL_MODEL_PREFIXES)
 
 
-def classify_models(settings: Settings) -> dict[str, str]:
+def classify_models(settings: Settings, *, ollama_host: str | None = None) -> dict[str, str]:
     """Return ``{role: model}`` for each model that is REMOTE under this config.
 
     Roles are ``"llm"`` and ``"embed"``. An empty dict means the whole route is
     local (the local-first default). Used by the factory (to enforce opt-in) and
     by preflight / the CLI banner (to surface CLOUD ACTIVE).
+
+    ``ollama_host`` overrides the resolved host for classification — preflight
+    passes the SAME host it probes so an explicit (possibly non-loopback) host
+    override cannot be classified as local while the report shows a remote host.
     """
-    host = resolved_ollama_host(settings)
+    host = ollama_host if ollama_host is not None else resolved_ollama_host(settings)
     remote: dict[str, str] = {}
     if not is_local_model(settings.llm_model, ollama_host=host):
         remote["llm"] = settings.llm_model

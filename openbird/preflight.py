@@ -554,9 +554,12 @@ def run_preflight(
     # models the active route actually needs, instead of hard-coding defaults.
     from openbird.llm.provider import classify_models
 
-    remote_models = classify_models(settings)
-    required_models = _ollama_required_models(settings)
+    # Resolve the host FIRST and classify against it, so an explicit (possibly
+    # non-loopback) ``ollama_host`` override is reflected in cloud classification
+    # — not just in the probe — preventing a remote host from looking local.
     resolved_host = ollama_host or _ollama_host(settings)
+    remote_models = classify_models(settings, ollama_host=resolved_host)
+    required_models = _ollama_required_models(settings)
     # Does the active route depend on local Ollama at all (either model ollama*)?
     uses_ollama = any(
         is_ollama_model(m) for m in (settings.llm_model, settings.embed_model)

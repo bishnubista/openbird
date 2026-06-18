@@ -384,7 +384,7 @@ def test_run_preflight_runtime_ok_but_release_gate_blocked_when_grants_unknown(s
         http_get=make_http_get(),
         db_opener=encrypted_handle_opener(),
         system="Darwin",
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     # Runtime readiness ignores capture grants / encryption.
     assert report["runtime_ok"] is True
@@ -405,7 +405,7 @@ def test_run_preflight_release_gate_green_when_all_proven(settings):
         db_opener=encrypted_handle_opener(),
         system="Darwin",
         helper_probe=all_passed_probe,
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     assert report["runtime_ok"] is True
     assert report["encryption"]["enabled"] is True
@@ -420,7 +420,7 @@ def test_run_preflight_release_gate_blocked_when_encryption_plaintext(settings):
         db_opener=plaintext_handle_opener(),
         system="Darwin",
         helper_probe=all_passed_probe,
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     assert report["runtime_ok"] is True
     assert report["encryption"]["enabled"] is False
@@ -436,7 +436,7 @@ def test_run_preflight_release_gate_blocked_when_flag_lies(settings):
         db_opener=lying_flag_opener(),
         system="Darwin",
         helper_probe=all_passed_probe,
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     assert report["encryption"]["enabled"] is False
     assert report["release_gate_ok"] is False
@@ -448,7 +448,7 @@ def test_run_preflight_off_mac_release_gate_ignores_tcc(settings):
         http_get=make_http_get(),
         db_opener=encrypted_handle_opener(),
         system="Linux",
-        ollama_host="http://x:11434",
+        ollama_host="http://localhost:11434",
     )
     assert report["macos"]["is_macos"] is False
     # Off-mac TCC/audio gates are N/A; encryption proven -> release gate green.
@@ -678,6 +678,22 @@ def test_preflight_required_models_derived_from_settings(tmp_path):
     assert set(report["ollama"]["required_models"]) == {"mistral", "mxbai-embed-large"}
     assert report["ollama"]["missing_models"] == []
     assert report["runtime_ok"] is True
+
+
+def test_ollama_host_override_classified_as_remote(tmp_path):
+    # Regression: an explicit non-loopback ollama_host override must be reflected
+    # in cloud classification (not just the probe), or it could look local.
+    s = Settings(data_dir=tmp_path, embed_dim=768)  # default ollama models
+    report = run_preflight(
+        s,
+        ollama_host="http://10.0.0.5:11434",
+        http_get=make_http_get(),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["host"] == "http://10.0.0.5:11434"
+    assert report["cloud"]["active"] is True
+    assert report["cloud"]["blocked"] is True  # no OPENBIRD_ALLOW_CLOUD
+    assert report["runtime_ok"] is False
 
 
 def test_mlx_backend_not_runtime_ready(tmp_path):
