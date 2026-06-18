@@ -21,10 +21,8 @@ accidentally start capturing a non-allowlisted app.
 from __future__ import annotations
 
 import fnmatch
-import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
