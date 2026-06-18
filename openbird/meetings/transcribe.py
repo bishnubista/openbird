@@ -20,6 +20,7 @@ Two concerns live here:
 from __future__ import annotations
 
 import importlib.util
+from array import array
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -137,7 +138,13 @@ class Transcriber:
     def transcribe_segment(self, segment: SpeechSegment) -> TranscriptSegment:
         """Transcribe one speech window into a :class:`TranscriptSegment`.
 
-        Raises :class:`MeetingsExtraNotInstalled` if faster-whisper is absent.
+        Raises :class:`MeetingsExtraNotInstalled` if faster-whisper is absent, or
+        :class:`MeetingsAudioTooLong` if the window exceeds the sample cap.
+
+        NOTE: this is **synchronous and CPU-blocking** — ``model.transcribe`` runs
+        the whisper inference inline. Callers on an event loop must run it in an
+        executor/thread; never ``await`` around it on the loop thread [M6].
+
         The window's host-clock start time is preserved so downstream stitching
         and citations stay on the shared clock.
         """
@@ -145,6 +152,11 @@ class Transcriber:
         # _segment_to_pcm resamples to 16 kHz mono float32 (Whisper's required
         # rate) regardless of the helper's capture rate (e.g. SCK's 48 kHz).
         samples = _segment_to_pcm(segment)
+        if len(samples) > _MAX_TRANSCRIBE_SAMPLES:
+            raise MeetingsAudioTooLong(
+                f"transcription window has {len(samples)} samples "
+                f"(> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing to transcribe [M6]"
+            )
         whisper_segments, _info = model.transcribe(samples, language=None)
         text = " ".join(seg.text.strip() for seg in whisper_segments).strip()
         return TranscriptSegment(
@@ -170,6 +182,16 @@ class Transcriber:
 # 48 kHz, so the raw frames MUST be resampled before transcription or the audio
 # plays back ~3x too fast and transcribes to garbage.
 WHISPER_SR = 16_000
+
+# Hard cap on the post-resample sample count handed to faster-whisper, so a
+# mis-tuned ``max_window`` or a pathological accumulated segment can't drive an
+# unbounded in-memory transcribe. 30 min @ 16 kHz; normal pipeline windows are
+# bounded by ``max_window`` (seconds) and never approach this [M6].
+_MAX_TRANSCRIBE_SAMPLES = WHISPER_SR * 60 * 30
+
+
+class MeetingsAudioTooLong(RuntimeError):
+    """Raised when a single transcription window exceeds the sample-count cap."""
 
 
 def _resample_to_16k(samples: list[float], src_sr: int):
@@ -212,7 +234,11 @@ def _segment_to_pcm(segment: SpeechSegment):
     48 kHz) to the 16 kHz Whisper expects. Returns a numpy ``float32`` array when
     numpy is present, else a plain list (keeps this importable without numpy).
     """
-    samples: list[float] = []
+    # Accumulate into an ``array('f')`` rather than a Python ``list`` so the
+    # frames' compact float32 buffers aren't re-boxed into ~28-byte Python floats
+    # while flattening a long window [M6]. ``array.extend`` of an ``array('f')``
+    # stays in C; both resample paths accept it (np.asarray / index access).
+    samples = array("f")
     for frame in segment.frames:
         samples.extend(frame.samples)
     src_sr = segment.frames[0].sample_rate if segment.frames else WHISPER_SR

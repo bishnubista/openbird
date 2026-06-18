@@ -188,9 +188,15 @@ class MeetingPipeline:
                 self._open[track] = open_seg
             open_seg.frames.append(frame)
             open_seg.end_ts = frame.end_ts
-            # Flush if the window grew past max_window.
+            # Flush if the window grew past max_window. Guard the result like every
+            # other call site: ``_close`` returns ``None`` for a sub-``min_speech``
+            # window (e.g. when ``max_window <= min_speech``), and appending that
+            # ``None`` would crash downstream transcription with an AttributeError
+            # on ``.frames``/``.track`` [H9].
             if open_seg.duration >= self.config.max_window:
-                emitted.append(self._close(track, carry_overlap=True))
+                closed = self._close(track, carry_overlap=True)
+                if closed is not None:
+                    emitted.append(closed)
         else:
             if open_seg is not None:
                 started = self._silence_since.get(track)

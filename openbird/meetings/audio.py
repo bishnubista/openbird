@@ -39,10 +39,19 @@ it yields :class:`AudioFrame` objects (mono float32 PCM samples + host timestamp
 from __future__ import annotations
 
 import enum
+import math
 import struct
+from array import array
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import BinaryIO
+
+# The IPC wire format is little-endian f32 PCM (see ``encode_frame``). We store
+# samples as a stdlib ``array('f')`` (4 bytes/sample) rather than a Python tuple
+# of floats (~28 bytes/sample) so a single 25 s @ 48 kHz frame is ~4.8 MB instead
+# of ~33 MB. Pin the item size so a platform where ``float`` isn't 32-bit can't
+# silently violate the wire contract.
+assert array("f").itemsize == 4, "array('f') must be 32-bit to match the f32 IPC wire format"
 
 
 class Track(str, enum.Enum):
@@ -62,9 +71,14 @@ class AudioFrame:
     """A single block of mono PCM audio from one track.
 
     Attributes:
-        samples: Mono PCM samples as floats in roughly ``[-1.0, 1.0]``. A tuple
-            (immutable) so frames are safe to share/hash; conversion from the
-            helper's interleaved int16/float32 buffer happens at the boundary.
+        samples: Mono PCM samples as float32, stored in a stdlib ``array('f')``
+            (~4 bytes/sample) rather than a tuple of Python floats (~28 bytes
+            each) so large windows don't blow up memory [M6]. Any input sequence
+            (tuple/list/array) is coerced to ``array('f')`` at construction;
+            values land in roughly ``[-1.0, 1.0]``. The array is technically
+            mutable, but the contract is that ``samples`` is **immutable** — never
+            mutate it in place; build a new frame instead. (``AudioFrame`` is
+            therefore unhashable; see ``__hash__``.)
         sample_rate: Sample rate in Hz (e.g. 16000 for whisper-friendly audio).
         host_ts: Common monotonic host timestamp (seconds) of the *first* sample
             in this frame. This is the shared clock used to align the mic and
@@ -73,11 +87,24 @@ class AudioFrame:
         seq: Monotonic per-source sequence number, for gap/drop detection.
     """
 
-    samples: tuple[float, ...] = field(repr=False)
+    samples: "array[float]" = field(repr=False)
     sample_rate: int
     host_ts: float
     track: Track = Track.SYSTEM
     seq: int = 0
+
+    # ``samples`` is a mutable ``array`` whose contents are part of ``__eq__``, so
+    # the frame is not safely hashable. ``frozen=True`` would otherwise synthesize
+    # a ``__hash__`` that calls ``hash(self.samples)`` and raises ``TypeError`` at
+    # use; make the intent explicit and unsurprising instead.
+    __hash__ = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        # Coerce any input sequence (tuple/list/array) to a float32 ``array('f')``
+        # so storage is compact and equality between two frames is array-vs-array
+        # (by value). Frozen dataclass => assign through object.__setattr__.
+        if not (isinstance(self.samples, array) and self.samples.typecode == "f"):
+            object.__setattr__(self, "samples", array("f", self.samples))
 
     def __repr__(self) -> str:
         """Metadata-only repr — never dumps raw PCM samples [R4/R5].
@@ -205,6 +232,11 @@ def decode_frames(reader: BinaryIO) -> Iterator[AudioFrame]:
         if header is None:
             return
         track_code, host_ts, sample_rate, count = _FRAME_HEADER.unpack(header)
+        if not (math.isfinite(host_ts) and math.isfinite(sample_rate)):
+            # Corrupt/hostile stream: a NaN/inf host_ts or sample_rate would crash
+            # ``int(round(sample_rate))`` below and poison clock alignment. Stop
+            # cleanly, mirroring the count guard and truncated-tail paths [L4].
+            return
         if count > _MAX_SAMPLES_PER_FRAME:
             # Corrupt/hostile stream: don't read/allocate `count * 4` bytes.
             return
@@ -213,7 +245,7 @@ def decode_frames(reader: BinaryIO) -> Iterator[AudioFrame]:
             return  # truncated tail
         samples = struct.unpack(f"<{count}f", body) if count else ()
         yield AudioFrame(
-            samples=tuple(samples),
+            samples=samples,  # AudioFrame.__post_init__ coerces to array('f') [M6]
             sample_rate=int(round(sample_rate)),
             host_ts=host_ts,
             track=_TRACK_BY_CODE.get(track_code, Track.SYSTEM),

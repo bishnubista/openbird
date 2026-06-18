@@ -186,6 +186,19 @@ def test_pipeline_splits_on_max_window_with_overlap():
     assert segments[1].start_ts <= segments[0].end_ts + 1e-6
 
 
+def test_pipeline_max_window_below_min_speech_emits_no_none():
+    # [H9] When a window hits max_window but the closed segment is shorter than
+    # min_speech, _close() returns None. The max_window flush must guard that
+    # like every other close site; appending None crashed downstream
+    # transcription with AttributeError on .frames/.track.
+    cfg = VADConfig(min_silence=1.0, min_speech=0.5, max_window=0.3, overlap=0.0)
+    pipe = MeetingPipeline(cfg)
+    frames = [_frame(host_ts=i * FRAME_LEN, loud=True, seq=i) for i in range(6)]
+    segments = pipe.process(frames)  # must not raise
+    assert None not in segments
+    assert all(hasattr(seg, "frames") and hasattr(seg, "track") for seg in segments)
+
+
 # --------------------------------------------------------------------------- #
 # pipeline.py — stitching
 # --------------------------------------------------------------------------- #
@@ -283,6 +296,31 @@ def test_transcribe_segment_uses_loaded_model(monkeypatch):
     assert out.text == "hello world"
     assert out.track == Track.MIC
     assert out.start_ts == 4.0
+
+
+def test_transcribe_segment_rejects_oversize_window(monkeypatch):
+    """[M6] A window exceeding the sample cap is refused before model.transcribe."""
+    import openbird.meetings.transcribe as tr
+
+    transcribe_called = False
+
+    class _FakeModel:
+        def transcribe(self, audio, language=None):
+            nonlocal transcribe_called
+            transcribe_called = True
+            return ([], {})
+
+    t = Transcriber()
+    monkeypatch.setattr(tr, "whisper_available", lambda: True)
+    monkeypatch.setattr(t, "_load_model", lambda: _FakeModel())
+    # Shrink the cap so a tiny segment trips it without allocating millions.
+    monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 2)
+    seg = tr.SpeechSegment(
+        Track.SYSTEM, 0.0, 1.0, frames=[_frame(host_ts=0.0, loud=True)]
+    )
+    with pytest.raises(tr.MeetingsAudioTooLong):
+        t.transcribe_segment(seg)
+    assert transcribe_called is False  # guarded BEFORE inference
 
 
 # --------------------------------------------------------------------------- #
