@@ -19,6 +19,8 @@ from openbird.capture import adapters, redact
 from openbird.capture.daemon import (
     CaptureDaemon,
     CaptureStats,
+    CaptureSupervisorError,
+    HelperExitError,
     HelperUnavailableError,
     default_helper_cmd,
     parse_event,
@@ -995,6 +997,217 @@ def test_run_does_not_deadlock_on_large_stderr(allow_settings):
     stats = daemon.run()
     assert stats.received == 3
     assert stats.ingested == 3
+
+
+# ---------------------------------------------------------------------------
+# B1: supervised continuous-capture loop (run_forever)
+# ---------------------------------------------------------------------------
+
+
+def _oneshot_emitter(n: int) -> list[str]:
+    """A helper cmd: prints n events then EXITS (like the real one-shot helper)."""
+    code = (
+        "import json,sys\n"
+        f"for i in range({n}):\n"
+        "    sys.stdout.write(json.dumps({'app':'com.apple.mail','window':'w',"
+        "'text':'msg %d'%i,'ts':float(i)})+'\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    return [sys.executable, "-c", code]
+
+
+def test_run_forever_respawns_helper_each_cycle(allow_settings):
+    # [B1] The one-shot helper emits 2 events then exits; run_forever must
+    # re-spawn it each cycle, so 3 cycles ingest 3x the events.
+    store = FakeStore()
+    daemon = CaptureDaemon(
+        store,
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(2),
+        require_signed_helper=False,
+    )
+    stats = daemon.run_forever(poll_interval=0.0, max_cycles=3)
+    assert stats.received == 6  # 3 re-spawns x 2 events — proves continuity
+    assert stats.ingested == 6
+
+
+def test_run_forever_stops_when_event_already_set(allow_settings):
+    # [B1] A pre-set stop event means the loop body never runs (clean no-op).
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    store = FakeStore()
+    daemon = CaptureDaemon(
+        store,
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(2),
+        require_signed_helper=False,
+    )
+    stats = daemon.run_forever(poll_interval=0.0, stop_event=stop, max_cycles=99)
+    assert stats.received == 0
+
+
+def test_run_forever_circuit_breaker_trips_on_repeated_failure(
+    allow_settings, monkeypatch
+):
+    # [B1] Consecutive failing cycles must trip the breaker and stop, not spin.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)  # no real sleeps
+    store = FakeStore()
+    daemon = CaptureDaemon(
+        store,
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(1),
+        require_signed_helper=False,
+    )
+
+    calls = {"n": 0}
+
+    def _boom(*_a, **_k):
+        calls["n"] += 1
+        raise RuntimeError("transient helper failure")
+
+    monkeypatch.setattr(daemon, "run", _boom)
+    with pytest.raises(CaptureSupervisorError):
+        daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
+    assert calls["n"] == 3  # stopped exactly at the breaker threshold
+    assert daemon.error_count == 3
+
+
+def test_run_forever_propagates_helper_unavailable(allow_settings):
+    # [B1] A missing signed bundle is permanent, not transient: re-raise, don't
+    # retry forever.
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=["/nonexistent/openbird/capture-helper"],
+        require_signed_helper=True,
+    )
+    with pytest.raises(HelperUnavailableError):
+        daemon.run_forever(poll_interval=0.0, max_cycles=5)
+
+
+def test_run_forever_resets_failure_count_after_success(allow_settings, monkeypatch):
+    # [B1] A success between failures must reset the consecutive-failure counter
+    # so the breaker only trips on *consecutive* failures.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(1),
+        require_signed_helper=False,
+    )
+    seq = iter([RuntimeError("f1"), RuntimeError("f2"), None, RuntimeError("f3")])
+    real_run = daemon.run
+
+    def _maybe_boom(*a, **k):
+        try:
+            exc = next(seq)
+        except StopIteration:
+            return real_run(*a, **k)
+        if exc is not None:
+            raise exc
+        return real_run(*a, **k)
+
+    monkeypatch.setattr(daemon, "run", _maybe_boom)
+    # 2 fails, 1 success (resets), 1 fail, then clean cycles. Breaker=3 never trips.
+    stats = daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3, max_cycles=3)
+    assert stats.received >= 1  # at least the successful + subsequent cycles ran
+
+
+def test_run_forever_nonzero_helper_exit_trips_breaker(allow_settings, monkeypatch):
+    # [B1/P1a] A helper exiting non-zero ON ITS OWN (e.g. Accessibility denied=2)
+    # must count as a failure so the breaker trips — not be re-spawned forever.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", "import sys; sys.exit(2)"],
+        require_signed_helper=False,
+    )
+    with pytest.raises(CaptureSupervisorError):
+        daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
+    assert daemon.error_count == 3  # each non-zero exit counted, breaker tripped
+
+
+def test_run_clean_exit_zero_is_not_a_failure(allow_settings):
+    # [B1/P1a] A helper that exits 0 after emitting is a success, not a failure.
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(1),
+        require_signed_helper=False,
+    )
+    stats = daemon.run()  # must not raise HelperExitError
+    assert stats.received == 1
+
+
+def test_run_terminates_helper_when_stop_set(allow_settings):
+    # [B1/P1b] With stop set, an active/hung helper is terminated promptly so a
+    # clean shutdown isn't blocked on the stdout iterator (no hang, no raise).
+    import threading
+
+    code = (
+        "import json,sys,time\n"
+        "sys.stdout.write(json.dumps({'app':'com.apple.mail','window':'w',"
+        "'text':'x','ts':1.0})+'\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(3600)\n"  # hang forever unless terminated
+    )
+    stop = threading.Event()
+    stop.set()
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", code],
+        require_signed_helper=False,
+    )
+    stats = daemon.run(stop_event=stop)  # returns promptly; does not hang/raise
+    assert isinstance(stats, CaptureStats)
+
+
+def test_run_stop_initiated_exit_not_misclassified_as_failure(allow_settings):
+    # [B1/P1 race] A helper that traps SIGTERM and exits positive after WE stop
+    # it must NOT raise HelperExitError — the stop was our-initiated.
+    import threading
+
+    code = (
+        "import signal,sys,time\n"
+        "signal.signal(signal.SIGTERM, lambda *a: sys.exit(7))\n"
+        "sys.stdout.write('\\n'); sys.stdout.flush()\n"  # one blank line, then hang
+        "time.sleep(3600)\n"
+    )
+    stop = threading.Event()
+    stop.set()
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", code],
+        require_signed_helper=False,
+    )
+    # Must return cleanly (no HelperExitError) even though the child exits 7.
+    stats = daemon.run(stop_event=stop)
+    assert isinstance(stats, CaptureStats)
+
+
+def test_run_signal_killed_helper_is_a_failure(allow_settings):
+    # [B1/P1] A helper that dies by signal (negative returncode, e.g. SIGKILL=-9)
+    # during normal operation is a genuine failure, not a clean exit.
+    code = "import os,signal; os.kill(os.getpid(), signal.SIGKILL)"
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=[sys.executable, "-c", code],
+        require_signed_helper=False,
+    )
+    with pytest.raises(HelperExitError):
+        daemon.run()
 
 
 # ---------------------------------------------------------------------------

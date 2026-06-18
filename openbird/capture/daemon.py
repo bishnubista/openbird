@@ -67,6 +67,24 @@ class HelperUnavailableError(RuntimeError):
     """
 
 
+class HelperExitError(RuntimeError):
+    """Raised when the helper exits non-zero *on its own* (not terminated by us).
+
+    A non-zero exit signals a real helper-side failure — e.g. an Accessibility
+    denial or a privacy-boundary refusal — so the supervisor's backoff/circuit
+    breaker must apply rather than silently re-spawning forever. The message
+    carries only the integer exit code, never captured content.
+    """
+
+
+class CaptureSupervisorError(RuntimeError):
+    """Raised when the supervised loop aborts (circuit breaker tripped).
+
+    Surfaces sustained helper failure so the CLI exits non-zero instead of
+    reporting success. Message carries only the failure count, never content.
+    """
+
+
 def default_helper_cmd() -> tuple[str, ...]:
     """Resolve the default capture-helper command (signed bundle, fail-closed).
 
@@ -99,6 +117,13 @@ _MAX_TEXT_BYTES = 1_000_000
 # chatty helper can't deadlock capture by filling the pipe (PLAN subprocess
 # hygiene). We never log its contents — only a byte count.
 _MAX_STDERR_BYTES = 64 * 1024
+
+# Supervised-loop defaults [B1]. The Swift capture-helper captures the frontmost
+# window and exits, so continuous capture means re-spawning it on an interval.
+_DEFAULT_POLL_INTERVAL = 2.0  # seconds the supervisor idles between helper spawns
+_DEFAULT_MAX_CONSECUTIVE_FAILURES = 5  # circuit breaker: stop after this many
+_BACKOFF_BASE = 1.0  # first retry delay (seconds), doubled each consecutive fail
+_BACKOFF_MAX = 60.0  # cap on the exponential backoff delay
 
 
 class IngestSink(Protocol):
@@ -136,6 +161,15 @@ class CaptureStats:
             ingested=self.ingested + delta.get("ingested", 0),
             rejected=self.rejected + delta.get("rejected", 0),
             errors=self.errors + delta.get("errors", 0),
+        )
+
+    def _add(self, other: "CaptureStats") -> "CaptureStats":
+        """Sum two stats objects (used to aggregate across supervised cycles)."""
+        return CaptureStats(
+            received=self.received + other.received,
+            ingested=self.ingested + other.ingested,
+            rejected=self.rejected + other.rejected,
+            errors=self.errors + other.errors,
         )
 
 
@@ -463,21 +497,60 @@ class CaptureDaemon:
         assert proc.stdout is not None
         yield from proc.stdout
 
-    def run(self, *, max_events: int | None = None) -> CaptureStats:
+    def _terminate_on_stop(
+        self, proc: subprocess.Popen[str], stop_event: "threading.Event"
+    ) -> None:
+        """Watcher: terminate the helper promptly when ``stop_event`` is set.
+
+        Without this, a clean shutdown could block until a hung/long-lived helper
+        closed its stdout. We poll so we also exit when the helper ends on its own.
+        """
+        while proc.poll() is None:
+            if stop_event.wait(0.1):
+                if proc.poll() is None:
+                    proc.terminate()
+                return
+
+    def run(
+        self,
+        *,
+        max_events: int | None = None,
+        stop_event: "threading.Event | None" = None,
+    ) -> CaptureStats:
         """Spawn the helper and process its event stream until it exits.
 
         Args:
             max_events: If set, stop after this many *received* events and
                 terminate the helper (useful for bounded runs/tests against a
                 long-lived emitter).
+            stop_event: If set, a watcher terminates the helper when the event
+                fires so a clean shutdown isn't blocked by a hung helper [B1].
 
         Returns:
             Aggregate :class:`CaptureStats` for the run.
+
+        Raises:
+            HelperExitError: If the helper exits non-zero *on its own* (i.e. we
+                did not terminate it via max_events/stop), so the supervisor can
+                back off rather than hot-loop a failing helper.
         """
         proc = self._spawn()
         stats = CaptureStats()
+        stopped_by_us = False
+        watcher: threading.Thread | None = None
+        if stop_event is not None:
+            watcher = threading.Thread(
+                target=self._terminate_on_stop,
+                args=(proc, stop_event),
+                name="capture-stop-watch",
+                daemon=True,
+            )
+            watcher.start()
         try:
             for line in self._iter_stdout(proc):
+                if stop_event is not None and stop_event.is_set():
+                    stopped_by_us = True
+                    break
                 event = parse_event(line)
                 if event is None:
                     if line.strip():
@@ -485,10 +558,107 @@ class CaptureDaemon:
                     continue
                 stats = self.handle_event(event, stats)
                 if max_events is not None and stats.received >= max_events:
+                    stopped_by_us = True
                     break
         finally:
             self._shutdown(proc)
+            if watcher is not None:
+                watcher.join(timeout=1.0)
+        # A non-zero code only counts as a helper-side failure when the helper
+        # exited on its OWN. We initiate termination two ways: the max_events/stop
+        # break in the loop (``stopped_by_us``) AND the watcher thread, which
+        # terminates the child when ``stop_event`` fires without the loop ever
+        # observing it. A helper that *traps* SIGTERM can then exit with a
+        # positive code; that is still our-initiated, so treat any set stop_event
+        # as our-initiated to avoid a spurious HelperExitError on shutdown.
+        we_stopped = stopped_by_us or (stop_event is not None and stop_event.is_set())
+        if not we_stopped:
+            rc = proc.returncode
+            # Any non-zero code is a helper-side failure: positive = explicit
+            # exit (Accessibility denied=2, privacy refusal=3), negative = death
+            # by signal (e.g. SIGSEGV=-11). Both must reach the supervisor.
+            if rc is not None and rc != 0:
+                raise HelperExitError(f"capture helper exited with code {rc}")
         return stats
+
+    def run_forever(
+        self,
+        *,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        stop_event: "threading.Event | None" = None,
+        max_consecutive_failures: int = _DEFAULT_MAX_CONSECUTIVE_FAILURES,
+        max_cycles: int | None = None,
+    ) -> CaptureStats:
+        """Supervise the one-shot helper, re-spawning it until stopped [B1].
+
+        The Swift capture-helper captures the current frontmost window and exits,
+        so a single :meth:`run` yields one batch then EOF. Continuous capture
+        therefore means re-spawning it on a cadence. This loop runs one
+        :meth:`run` per cycle, then idles ``poll_interval`` seconds, until
+        ``stop_event`` is set (the CLI wires it to SIGINT/SIGTERM).
+
+        Resilience:
+          * A cycle that *raises* (helper crash, broken pipe) is counted as a
+            failure and retried with exponential backoff (capped). After
+            ``max_consecutive_failures`` consecutive failures the loop trips a
+            circuit breaker and returns — fail-closed, never a hot spin.
+          * A successful cycle resets the failure counter.
+          * :class:`HelperUnavailableError` is a *permanent* config error (no
+            signed bundle) and is re-raised immediately, not retried.
+
+        Args:
+            poll_interval: Seconds to idle between successful cycles.
+            stop_event: Set to request a clean stop; created if omitted.
+            max_consecutive_failures: Circuit-breaker threshold.
+            max_cycles: Stop after this many cycles (deterministic for tests).
+
+        Returns:
+            Aggregate :class:`CaptureStats` across all cycles.
+        """
+        stop = stop_event or threading.Event()
+        total = CaptureStats()
+        failures = 0
+        cycles = 0
+        logger.info("capture supervisor: starting (poll_interval=%.1fs)", poll_interval)
+        while not stop.is_set():
+            try:
+                total = total._add(self.run(stop_event=stop))
+            except HelperUnavailableError:
+                # Missing signed bundle is permanent, not transient: don't retry.
+                raise
+            except Exception as exc:  # noqa: BLE001 - one bad cycle must not kill the loop
+                failures += 1
+                self.error_count += 1
+                # Metadata only: class + consecutive count, never the message.
+                logger.warning(
+                    "capture cycle failed: error_class=%s consecutive=%d",
+                    type(exc).__name__,
+                    failures,
+                )
+                if failures >= max_consecutive_failures:
+                    logger.error(
+                        "capture supervisor: circuit breaker tripped after %d "
+                        "consecutive failures; stopping",
+                        failures,
+                    )
+                    # Surface sustained failure to the caller (CLI -> nonzero exit)
+                    # rather than returning as if the session ended normally.
+                    raise CaptureSupervisorError(
+                        f"capture helper failed {failures} consecutive times"
+                    )
+                delay = min(_BACKOFF_MAX, _BACKOFF_BASE * (2 ** (failures - 1)))
+                if stop.wait(delay):
+                    break
+                continue
+            failures = 0
+            cycles += 1
+            if max_cycles is not None and cycles >= max_cycles:
+                break
+            # Interruptible idle between cycles (returns True if stop was set).
+            if stop.wait(poll_interval):
+                break
+        logger.info("capture supervisor: stopped (cycles=%d)", cycles)
+        return total
 
     @staticmethod
     def _shutdown(proc: subprocess.Popen[str]) -> None:
@@ -513,6 +683,8 @@ __all__ = [
     "CaptureStats",
     "IngestSink",
     "HelperUnavailableError",
+    "HelperExitError",
+    "CaptureSupervisorError",
     "parse_event",
     "default_helper_cmd",
     "DEFAULT_HELPER_CMD",
