@@ -72,8 +72,10 @@ Clock = Callable[[], float]
 # effects. The daemon default is the content-safe no-op (:func:`null_deliverer`).
 Deliverer = Callable[[str, str], None]
 
-# Stable, content-safe error code recorded when a routine runner raises.
+# Stable, content-safe error codes recorded when a routine runner or delivery
+# sink raises.
 ERROR_CODE_RUNNER = "RUNNER_EXCEPTION"
+ERROR_CODE_DELIVERY = "DELIVERY_EXCEPTION"
 
 
 def null_deliverer(routine: str, text: str) -> None:
@@ -139,7 +141,7 @@ class RoutineScheduler:
                 ``<data_dir>/routines.db`` if omitted (never ``:memory:``).
             clock: Returns current unix time; defaults to :func:`time.time`.
                 Injecting a fake clock makes catchup/idempotency deterministic.
-            deliverer: Output sink; defaults to :func:`stdout_deliverer`.
+            deliverer: Output sink; defaults to :func:`null_deliverer`.
             scheduler: An APScheduler scheduler; a ``BackgroundScheduler`` is
                 created lazily if omitted (only needed for live operation).
             timezone: Timezone for wall-clock daily/weekly cadence; defaults to
@@ -279,7 +281,28 @@ class RoutineScheduler:
                 update={"output": f"{error_class}: {ERROR_CODE_RUNNER}"}
             )
 
-        self.deliverer(name, text)
+        try:
+            self.deliverer(name, text)
+        except Exception as exc:  # noqa: BLE001 - one sink must not strand a run
+            error_class = type(exc).__name__
+            persisted = self.run_store.finish(
+                run.id,
+                status=store_mod.STATUS_ERROR,
+                error_class=error_class,
+                error_code=ERROR_CODE_DELIVERY,
+            )
+            logger.warning(
+                "routine delivery error: name=%s scheduled_ts=%.0f "
+                "error_class=%s error_code=%s",
+                name,
+                sched,
+                error_class,
+                ERROR_CODE_DELIVERY,
+            )
+            return persisted.model_copy(
+                update={"output": f"{error_class}: {ERROR_CODE_DELIVERY}"}
+            )
+
         # Metadata only: output length, never the body.
         logger.info(
             "routine done: name=%s scheduled_ts=%.0f output_len=%d",
@@ -458,5 +481,6 @@ __all__ = [
     "stdout_deliverer",
     "null_deliverer",
     "ERROR_CODE_RUNNER",
+    "ERROR_CODE_DELIVERY",
     "DEFAULT_CATCHUP_LOOKBACK",
 ]

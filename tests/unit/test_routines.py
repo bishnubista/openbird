@@ -16,6 +16,7 @@ import pytest
 from openbird.routines import templates
 from openbird.routines.scheduler import (
     DEFAULT_CATCHUP_LOOKBACK,
+    ERROR_CODE_DELIVERY,
     ERROR_CODE_RUNNER,
     Routine,
     RoutineScheduler,
@@ -349,6 +350,42 @@ def test_error_message_never_persisted_to_store(run_store, clock):
     assert row["output"] is None
     assert "leak" not in (row["error_class"] or "")
     assert "captured page body" not in (row["error_code"] or "")
+
+
+def test_fire_records_delivery_error_without_stranding_lease(run_store, clock):
+    # A notification/stdout sink can fail after the runner succeeds. The run must
+    # still reach a terminal, content-safe state instead of staying leased.
+    def fail_delivery(_name, _text):
+        raise BrokenPipeError("leak: generated summary body")
+
+    sched = RoutineScheduler(
+        memory_store=FakeMemoryStore([_obs(clock() - 10)]),
+        provider=FakeProvider(),
+        routine_store=run_store,
+        clock=clock,
+        deliverer=fail_delivery,
+    )
+    sched.register("daily", "prompt", interval=100.0, runner=_runner)
+    run = sched.fire("daily", scheduled_ts=clock())
+
+    assert run is not None and run.status == STATUS_ERROR
+    assert "BrokenPipeError" in (run.output or "")
+    assert ERROR_CODE_DELIVERY in (run.output or "")
+    assert "generated summary body" not in (run.output or "")
+
+    row = run_store._conn().execute(
+        "SELECT status, finished_ts, lease_ts, error_class, error_code, output "
+        "FROM routine_runs WHERE id = ?",
+        (run.id,),
+    ).fetchone()
+    assert row["status"] == STATUS_ERROR
+    assert row["finished_ts"] is not None
+    assert row["lease_ts"] is None
+    assert row["error_class"] == "BrokenPipeError"
+    assert row["error_code"] == ERROR_CODE_DELIVERY
+    assert row["output"] is None
+    assert "leak" not in (row["error_class"] or "")
+    assert "generated summary body" not in (row["error_code"] or "")
 
 
 # -- scheduler: missed-job catchup with fake clock ---------------------------
