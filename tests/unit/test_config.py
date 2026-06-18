@@ -9,6 +9,8 @@ from openbird.config import (
     Settings,
     get_settings,
     is_loopback_host,
+    is_ollama_model,
+    ollama_bare_model,
     reset_settings_cache,
     resolved_ollama_host,
 )
@@ -117,6 +119,23 @@ def test_scheme_host_is_left_unchanged(monkeypatch):
 # --------------------------------------------------------------------------- #
 # loopback classification (H3 route-based)                                     #
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "model,is_ollama,bare",
+    [
+        ("ollama/llama3.2", True, "llama3.2"),
+        ("ollama/llama3.2:3b", True, "llama3.2:3b"),
+        ("ollama_chat/llama3.2", True, "llama3.2"),
+        ("OLLAMA_CHAT/Mistral", True, "Mistral"),  # case-insensitive prefix
+        ("gpt-4o-mini", False, None),
+        ("mlx/Qwen", False, None),
+        ("", False, None),
+    ],
+)
+def test_ollama_predicate_and_bare(model, is_ollama, bare):
+    assert is_ollama_model(model) is is_ollama
+    assert ollama_bare_model(model) == bare
 
 
 @pytest.mark.parametrize(

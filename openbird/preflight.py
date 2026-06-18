@@ -35,6 +35,8 @@ from openbird.config import (
 from openbird.config import (
     Settings,
     get_settings,
+    is_ollama_model,
+    ollama_bare_model,
     resolved_ollama_host,
 )
 
@@ -85,11 +87,9 @@ def _ollama_required_models(settings: Settings) -> tuple[str, ...]:
     """
     wanted: list[str] = []
     for model in (settings.llm_model, settings.embed_model):
-        name = (model or "").strip()
-        if name.lower().startswith("ollama/"):
-            bare = name.split("/", 1)[1]
-            if bare and bare not in wanted:
-                wanted.append(bare)
+        bare = ollama_bare_model(model)
+        if bare and bare not in wanted:
+            wanted.append(bare)
     return tuple(wanted) if wanted else _REQUIRED_MODELS
 
 
@@ -545,10 +545,9 @@ def run_preflight(
     remote_models = classify_models(settings)
     required_models = _ollama_required_models(settings)
     resolved_host = ollama_host or _ollama_host(settings)
-    # Does the active route depend on local Ollama at all (either model ollama/*)?
+    # Does the active route depend on local Ollama at all (either model ollama*)?
     uses_ollama = any(
-        (m or "").strip().lower().startswith("ollama/")
-        for m in (settings.llm_model, settings.embed_model)
+        is_ollama_model(m) for m in (settings.llm_model, settings.embed_model)
     )
 
     if probe_ollama:

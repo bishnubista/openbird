@@ -21,6 +21,7 @@ from openbird.config import (
     Settings,
     get_settings,
     is_loopback_host,
+    is_ollama_model,
     resolved_ollama_host,
 )
 from openbird.llm.base import LLMProviderProtocol
@@ -69,13 +70,13 @@ _LOCAL_MODEL_PREFIXES: tuple[str, ...] = ("mlx/", "mlx-community/", "mlx_communi
 def is_local_model(model: str, *, ollama_host: str | None = None) -> bool:
     """Return True if ``model`` runs on this machine (no data leaves the device).
 
-    ``ollama/*`` is local only when ``ollama_host`` is loopback (a remote Ollama
-    endpoint exfiltrates chunks just like a cloud API). ``mlx*`` is always local.
-    Everything else (gpt-*, claude-*, text-embedding-3-*, openai/*, anthropic/*,
-    gemini/*, …) is remote.
+    A LiteLLM Ollama model (``ollama/*`` or ``ollama_chat/*``) is local only when
+    ``ollama_host`` is loopback (a remote Ollama endpoint exfiltrates chunks just
+    like a cloud API). ``mlx*`` is always local. Everything else (gpt-*, claude-*,
+    text-embedding-3-*, openai/*, anthropic/*, gemini/*, …) is remote.
     """
     name = (model or "").strip().lower()
-    if name.startswith("ollama/"):
+    if is_ollama_model(name):
         host = ollama_host if ollama_host is not None else resolved_ollama_host()
         return is_loopback_host(host)
     return any(name.startswith(p) for p in _LOCAL_MODEL_PREFIXES)
@@ -206,7 +207,7 @@ class LiteLLMProvider:
         transport attempts per call = ``num_retries + 1``.
         """
         kwargs: dict[str, Any] = {"timeout": timeout, "num_retries": self.num_retries}
-        if (model or "").strip().lower().startswith("ollama/"):
+        if is_ollama_model(model):
             kwargs["api_base"] = self._ollama_host
         return kwargs
 

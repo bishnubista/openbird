@@ -310,6 +310,19 @@ def test_cloud_model_does_not_get_local_api_base(monkeypatch):
     assert "api_base" not in fake.completion_kwargs
 
 
+def test_ollama_chat_prefix_is_local_and_gets_api_base(monkeypatch):
+    # Regression: ollama_chat/* (LiteLLM local Ollama chat) must NOT be treated as
+    # cloud, and must get the resolved Ollama host as api_base.
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://127.0.0.1:7777")
+    fake = _FakeLiteLLM(completion_text="hi")
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    # No allow_cloud needed — constructor must accept this local route.
+    provider = LLMProvider(Settings(embed_dim=768, llm_model="ollama_chat/llama3.2"))
+    provider.complete([{"role": "user", "content": "hi"}])
+    assert fake.completion_kwargs["api_base"] == "http://127.0.0.1:7777"
+
+
 def test_provider_honors_both_ollama_env_vars(monkeypatch):
     # OPENBIRD_OLLAMA_HOST is honored when OLLAMA_HOST is unset. Use a loopback
     # host so the default ollama/* models stay local (no cloud opt-in needed).
@@ -331,6 +344,7 @@ def test_provider_honors_both_ollama_env_vars(monkeypatch):
     "model,expected_local",
     [
         ("ollama/llama3.2", True),
+        ("ollama_chat/llama3.2", True),  # LiteLLM local Ollama chat prefix
         ("ollama/nomic-embed-text", True),
         ("mlx/Qwen", True),
         ("mlx-community/whatever", True),

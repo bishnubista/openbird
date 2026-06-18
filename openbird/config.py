@@ -165,6 +165,31 @@ def _normalize_host_url(host: str) -> str:
     return f"http://{text}"
 
 
+# LiteLLM model-string prefixes that route to a local Ollama server. Both the
+# generate (``ollama/``) and chat (``ollama_chat/``) prefixes are valid; missing
+# the latter would misclassify a local chat model as cloud and skip api_base.
+_OLLAMA_PREFIXES: tuple[str, ...] = ("ollama/", "ollama_chat/")
+
+
+def is_ollama_model(model: str) -> bool:
+    """True if ``model`` is a LiteLLM Ollama model string (generate or chat)."""
+    name = (model or "").strip().lower()
+    return name.startswith(_OLLAMA_PREFIXES)
+
+
+def ollama_bare_model(model: str) -> str | None:
+    """Return the bare Ollama model name (prefix stripped), or None if not Ollama.
+
+    ``ollama/llama3.2:3b`` -> ``llama3.2:3b``; ``ollama_chat/llama3.2`` ->
+    ``llama3.2``. The ``:tag`` is preserved.
+    """
+    name = (model or "").strip()
+    for prefix in _OLLAMA_PREFIXES:
+        if name.lower().startswith(prefix):
+            return name[len(prefix):]
+    return None
+
+
 # Loopback host names that keep traffic on this machine. A non-loopback Ollama
 # host means captured chunks leave the device, so it is treated as remote even
 # for an ollama/* model (route-based cloud classification [H3]).
@@ -230,5 +255,7 @@ __all__ = [
     "reset_settings_cache",
     "resolved_ollama_host",
     "is_loopback_host",
+    "is_ollama_model",
+    "ollama_bare_model",
     "DEFAULT_OLLAMA_HOST",
 ]
