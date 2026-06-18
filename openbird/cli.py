@@ -443,14 +443,29 @@ def routine_start(
         )
         raise typer.Exit(code=1) from None
     finally:
-        # Run cleanup on every path; a failing scheduler.shutdown must not skip
-        # store.close().
-        try:
-            if scheduler is not None:
+        # Run cleanup on every path. Each step is attempted independently and its
+        # failure is logged content-safe (class only, no traceback) and swallowed,
+        # so a raising shutdown can't skip store.close() and no cleanup traceback
+        # escapes to the daemon log.
+        _log = logging.getLogger("openbird.routines")
+        if scheduler is not None:
+            try:
                 scheduler.shutdown(wait=True)
-        finally:
-            if store is not None:
+            except Exception as exc:  # noqa: BLE001 - content-safe cleanup
+                _log.error(
+                    "scheduler shutdown failed: error_class=%s",
+                    type(exc).__name__,
+                    exc_info=False,
+                )
+        if store is not None:
+            try:
                 store.close()
+            except Exception as exc:  # noqa: BLE001 - content-safe cleanup
+                _log.error(
+                    "store close failed: error_class=%s",
+                    type(exc).__name__,
+                    exc_info=False,
+                )
 
 
 @routine_app.command("install")
