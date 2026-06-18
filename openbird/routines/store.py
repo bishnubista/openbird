@@ -45,11 +45,15 @@ guaranteeing only one active execution at a time.
 from __future__ import annotations
 
 import hashlib
+import math
+import os
 import sqlite3
 import threading
 import time
 import uuid
+from datetime import date, datetime, time as dt_time, timedelta, tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from collections.abc import Callable
 
@@ -109,6 +113,105 @@ def default_idempotency_key(routine: str, scheduled_ts: float) -> str:
     nominally targeting the same occurrence map to the same key.
     """
     return f"{routine}@{int(scheduled_ts)}"
+
+
+def next_scheduled_occurrence(
+    interval: float,
+    *,
+    after: float,
+    timezone: tzinfo | str | None = None,
+) -> float:
+    """Return the next scheduled timestamp strictly after ``after``.
+
+    Sub-day intervals stay on a stable unix-second grid. Whole-day intervals are
+    calendar intervals in local wall-clock time, so daily/weekly routines keep
+    the same local clock slot across DST transitions.
+    """
+    if interval <= 0:
+        raise ValueError("interval must be positive")
+
+    days = _calendar_interval_days(interval)
+    if days is None:
+        return (math.floor(after / interval) + 1) * interval
+
+    tz = _coerce_timezone(timezone)
+    floor = _calendar_grid_floor(after, days=days, timezone=tz)
+    if floor > after:
+        return floor
+    return _add_calendar_days(floor, days=days, timezone=tz)
+
+
+def previous_scheduled_occurrence(
+    interval: float,
+    *,
+    at: float,
+    timezone: tzinfo | str | None = None,
+) -> float:
+    """Return the most recent scheduled timestamp at or before ``at``."""
+    if interval <= 0:
+        raise ValueError("interval must be positive")
+
+    days = _calendar_interval_days(interval)
+    if days is None:
+        return math.floor(at / interval) * interval
+
+    return _calendar_grid_floor(at, days=days, timezone=_coerce_timezone(timezone))
+
+
+def _calendar_interval_days(interval: float) -> int | None:
+    day = 86400.0
+    days = interval / day
+    if days >= 1 and math.isclose(days, round(days)):
+        return int(round(days))
+    return None
+
+
+def _coerce_timezone(value: tzinfo | str | None) -> tzinfo:
+    if isinstance(value, str):
+        return ZoneInfo(value)
+    if value is not None:
+        return value
+    return _local_timezone()
+
+
+def _local_timezone() -> tzinfo:
+    tz_env = os.environ.get("TZ")
+    if tz_env:
+        try:
+            return ZoneInfo(tz_env)
+        except ZoneInfoNotFoundError:
+            pass
+
+    try:
+        target = Path("/etc/localtime").resolve()
+        parts = target.parts
+        if "zoneinfo" in parts:
+            idx = parts.index("zoneinfo")
+            name = "/".join(parts[idx + 1 :])
+            if name:
+                return ZoneInfo(name)
+    except Exception:
+        pass
+
+    return datetime.now().astimezone().tzinfo or ZoneInfo("UTC")
+
+
+def _calendar_grid_floor(ts: float, *, days: int, timezone: tzinfo) -> float:
+    local = datetime.fromtimestamp(ts, timezone)
+    local_day = local.date()
+    epoch_day = date(1970, 1, 1)
+    offset = (local_day - epoch_day).days % days
+    scheduled_day = local_day - timedelta(days=offset)
+    scheduled = datetime.combine(scheduled_day, dt_time.min, tzinfo=timezone)
+    if scheduled.timestamp() > ts:
+        scheduled_day -= timedelta(days=days)
+        scheduled = datetime.combine(scheduled_day, dt_time.min, tzinfo=timezone)
+    return scheduled.timestamp()
+
+
+def _add_calendar_days(ts: float, *, days: int, timezone: tzinfo) -> float:
+    local = datetime.fromtimestamp(ts, timezone)
+    return (local + timedelta(days=days)).timestamp()
 
 
 class RoutineStore:
@@ -448,6 +551,7 @@ class RoutineStore:
         *,
         now: float,
         lookback: float | None = None,
+        timezone: tzinfo | str | None = None,
     ) -> list[float]:
         """Compute scheduled occurrences that elapsed but were never run.
 
@@ -472,6 +576,8 @@ class RoutineStore:
             lookback: Cap how far back to look for missed runs; occurrences
                 older than ``now - lookback`` are ignored. ``None`` = no cap
                 beyond the last recorded run.
+            timezone: Timezone used for whole-day calendar cadences. ``None``
+                uses the local system timezone.
 
         Returns:
             Ascending list of missed scheduled timestamps.
@@ -479,30 +585,38 @@ class RoutineStore:
         if interval <= 0:
             raise ValueError("interval must be positive")
 
+        tz = _coerce_timezone(timezone)
+
         # Anchor on the newest occurrence that has *settled* (a real completion),
         # so neither a stale ``running`` row nor a reclaimed crash pushes the
         # anchor past occurrences that still need to fire.
         anchor_run = self._last_anchorable(routine)
-        if anchor_run is None:
-            # Never settled: the single most-recent due occurrence is one
-            # interval ago (so a brand-new routine fires promptly on startup).
-            anchor = now - interval
-        else:
-            anchor = anchor_run.scheduled_ts
-
         global_floor = None if lookback is None else now - lookback
 
         missed: set[float] = set()
 
         # (1) Grid walk forward from the anchor.
-        floor = anchor if global_floor is None else max(anchor, global_floor)
-        candidate = anchor + interval
+        if anchor_run is None:
+            # Never settled: run the single most-recent due occurrence so a
+            # brand-new routine fires promptly without replaying history.
+            candidate = previous_scheduled_occurrence(
+                interval, at=now, timezone=tz
+            )
+            floor = candidate if global_floor is None else max(candidate, global_floor)
+        else:
+            anchor = anchor_run.scheduled_ts
+            floor = anchor if global_floor is None else max(anchor, global_floor)
+            candidate = next_scheduled_occurrence(
+                interval, after=anchor, timezone=tz
+            )
         while candidate <= now:
             if candidate >= floor and not self.has_run(
                 default_idempotency_key(routine, candidate)
             ):
                 missed.add(candidate)
-            candidate += interval
+            candidate = next_scheduled_occurrence(
+                interval, after=candidate, timezone=tz
+            )
 
         # (2) Reclaimed crashes whose grid key is free again.
         for sched_ts in self._reclaimed_occurrences(routine):
@@ -587,6 +701,8 @@ class RoutineStore:
 __all__ = [
     "RoutineStore",
     "default_idempotency_key",
+    "next_scheduled_occurrence",
+    "previous_scheduled_occurrence",
     "STATUS_PENDING",
     "STATUS_RUNNING",
     "STATUS_DONE",

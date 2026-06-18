@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import threading
 import time
+import datetime as dt
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -89,6 +91,22 @@ def _obs(ts: float, app: str = "Slack", window: str = "general") -> Observation:
         session_id=None,
         source="capture",
     )
+
+
+def _ts(
+    tz: ZoneInfo,
+    year: int,
+    month: int,
+    day: int,
+    hour: int = 0,
+    minute: int = 0,
+) -> float:
+    return dt.datetime(year, month, day, hour, minute, tzinfo=tz).timestamp()
+
+
+def _local_parts(ts: float, tz: ZoneInfo) -> tuple[int, int, int, int, int]:
+    local = dt.datetime.fromtimestamp(ts, tz)
+    return local.year, local.month, local.day, local.hour, local.minute
 
 
 # -- fixtures -----------------------------------------------------------------
@@ -226,9 +244,40 @@ def test_missed_occurrences_skips_already_run(run_store):
     assert missed == [1200.0]
 
 
+def test_missed_occurrences_resume_interval_grid_after_jittered_run(run_store):
+    run = run_store.claim("ticker", 1005.0)
+    run_store.finish(run.id, status=STATUS_DONE)
+
+    missed = run_store.missed_occurrences("ticker", interval=100.0, now=1350.0)
+
+    assert missed == [1100.0, 1200.0, 1300.0]
+
+
 def test_missed_occurrences_rejects_bad_interval(run_store):
     with pytest.raises(ValueError):
         run_store.missed_occurrences("daily", interval=0.0, now=1.0)
+
+
+def test_missed_occurrences_keep_daily_wall_clock_across_spring_dst(run_store):
+    tz = ZoneInfo("America/Los_Angeles")
+    first_ts = _ts(tz, 2026, 3, 8)
+    first = run_store.claim("daily", first_ts)
+    run_store.finish(first.id, status=STATUS_DONE)
+
+    missed = run_store.missed_occurrences(
+        "daily",
+        interval=templates.DAY,
+        now=_ts(tz, 2026, 3, 10, 10),
+        timezone=tz,
+    )
+
+    assert [_local_parts(ts, tz) for ts in missed] == [
+        (2026, 3, 9, 0, 0),
+        (2026, 3, 10, 0, 0),
+    ]
+    # The spring-forward interval is 23 elapsed hours, not a drift to 01:00.
+    assert missed[0] - first_ts == 23 * 3600.0
+    assert missed[1] - missed[0] == 24 * 3600.0
 
 
 # -- scheduler: idempotency on fire ------------------------------------------
@@ -359,6 +408,37 @@ def test_run_missed_fresh_routine_runs_once(run_store, clock):
     assert len(completed) == 1  # one due occurrence for a brand-new routine
     again = sched.run_missed()
     assert again == []
+
+
+def test_scheduled_fire_catches_up_without_duplicates_or_dst_drift(clock):
+    tz = ZoneInfo("America/Los_Angeles")
+    clock.t = _ts(tz, 2026, 11, 2, 10)
+    store = RoutineStore(db_path=":memory:", clock=clock)
+    deliveries: list[tuple[str, str]] = []
+    sched, _mem, _prov, deliveries = _make_scheduler(
+        store,
+        clock,
+        memory=FakeMemoryStore(),
+        deliveries=deliveries,
+    )
+    sched.timezone = tz
+    sched._scheduler = _FakeAPScheduler()
+    sched.register("daily", "prompt", interval=templates.DAY, runner=_runner)
+
+    scheduled = _ts(tz, 2026, 10, 31)
+    sched._scheduled_fire("daily", scheduled_ts=scheduled)
+    sched._scheduled_fire("daily", scheduled_ts=scheduled)
+
+    runs = sorted(store.list_runs("daily"), key=lambda r: r.scheduled_ts)
+    assert [_local_parts(r.scheduled_ts, tz) for r in runs] == [
+        (2026, 10, 31, 0, 0),
+        (2026, 11, 1, 0, 0),
+        (2026, 11, 2, 0, 0),
+    ]
+    assert len(deliveries) == 3
+    assert len({r.idempotency_key for r in runs}) == 3
+    # Fall-back day is 25 elapsed hours, but the wall-clock slot stays midnight.
+    assert runs[2].scheduled_ts - runs[1].scheduled_ts == 25 * 3600.0
 
 
 # -- templates ----------------------------------------------------------------
