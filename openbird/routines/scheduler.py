@@ -37,11 +37,18 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, tzinfo
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from openbird.routines import store as store_mod
-from openbird.routines.store import RoutineStore, default_idempotency_key
+from openbird.routines.store import (
+    RoutineStore,
+    default_idempotency_key,
+    next_scheduled_occurrence,
+    previous_scheduled_occurrence,
+)
 from openbird.routines.templates import BUILTIN_TEMPLATES, RoutineTemplate
 from openbird.types import RoutineRun
 
@@ -121,6 +128,7 @@ class RoutineScheduler:
         clock: Clock | None = None,
         deliverer: Deliverer | None = None,
         scheduler: BackgroundScheduler | None = None,
+        timezone: tzinfo | str | None = None,
     ) -> None:
         """Wire the scheduler to its memory store, provider, and run store.
 
@@ -134,10 +142,13 @@ class RoutineScheduler:
             deliverer: Output sink; defaults to :func:`stdout_deliverer`.
             scheduler: An APScheduler scheduler; a ``BackgroundScheduler`` is
                 created lazily if omitted (only needed for live operation).
+            timezone: Timezone for wall-clock daily/weekly cadence; defaults to
+                the local system timezone.
         """
         self.memory_store = memory_store
         self.provider = provider
         self.clock = clock or time.time
+        self.timezone = timezone
         # When we own the run store, default to the DURABLE file-backed routines DB
         # (<data_dir>/routines.db) — NOT :memory:, which would silently drop
         # routine_runs on every restart and defeat idempotency + missed-job
@@ -151,6 +162,7 @@ class RoutineScheduler:
         # ``stdout_deliverer`` (or a notification sink) explicitly.
         self.deliverer = deliverer or null_deliverer
         self._scheduler = scheduler
+        self._stopping = False
         self._routines: dict[str, Routine] = {}
 
     # -- registration ---------------------------------------------------------
@@ -313,7 +325,11 @@ class RoutineScheduler:
         completed: list[RoutineRun] = []
         for name, routine in self._routines.items():
             missed = self.run_store.missed_occurrences(
-                name, routine.interval, now=now, lookback=lookback
+                name,
+                routine.interval,
+                now=now,
+                lookback=lookback,
+                timezone=self.timezone,
             )
             if missed:
                 logger.info(
@@ -332,7 +348,8 @@ class RoutineScheduler:
 
     def _ensure_scheduler(self) -> BackgroundScheduler:
         if self._scheduler is None:
-            self._scheduler = BackgroundScheduler()
+            kwargs = {"timezone": self.timezone} if self.timezone is not None else {}
+            self._scheduler = BackgroundScheduler(**kwargs)
         return self._scheduler
 
     def start(
@@ -352,18 +369,10 @@ class RoutineScheduler:
         if catch_up:
             self.run_missed(lookback=lookback)
 
+        self._stopping = False
         scheduler = self._ensure_scheduler()
-        for name, routine in self._routines.items():
-            scheduler.add_job(
-                self._scheduled_fire,
-                trigger="interval",
-                seconds=routine.interval,
-                args=[name],
-                id=name,
-                replace_existing=True,
-                coalesce=True,
-                max_instances=1,
-            )
+        for name in self._routines:
+            self._schedule_next(name, after=self.clock())
         if not scheduler.running:
             scheduler.start()
         logger.info(
@@ -372,12 +381,62 @@ class RoutineScheduler:
             catch_up,
         )
 
-    def _scheduled_fire(self, name: str) -> None:
-        """APScheduler entrypoint: fire ``name`` at the current wall clock."""
-        self.fire(name)
+    def _schedule_next(self, name: str, *, after: float) -> None:
+        """Schedule the next wall-clock occurrence of ``name`` after ``after``."""
+        routine = self._routines[name]
+        scheduled_ts = next_scheduled_occurrence(
+            routine.interval,
+            after=after,
+            timezone=self.timezone,
+        )
+        self._schedule_at(name, scheduled_ts)
+
+    def _schedule_at(self, name: str, scheduled_ts: float) -> None:
+        """Install a one-shot APScheduler date job for an exact occurrence."""
+        if self._stopping:
+            return
+        scheduler = self._ensure_scheduler()
+        scheduler.add_job(
+            self._scheduled_fire,
+            trigger="date",
+            run_date=self._run_date(scheduled_ts),
+            args=[name, scheduled_ts],
+            id=name,
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=None,
+        )
+
+    def _run_date(self, scheduled_ts: float) -> datetime:
+        """Convert a scheduled timestamp into an APScheduler date."""
+        if isinstance(self.timezone, str):
+            return datetime.fromtimestamp(scheduled_ts, ZoneInfo(self.timezone))
+        if self.timezone is not None:
+            return datetime.fromtimestamp(scheduled_ts, self.timezone)
+        return datetime.fromtimestamp(scheduled_ts)
+
+    def _scheduled_fire(self, name: str, scheduled_ts: float | None = None) -> None:
+        """APScheduler entrypoint: fire exact wall-clock occurrences due now."""
+        routine = self._routines[name]
+        due = (
+            previous_scheduled_occurrence(
+                routine.interval, at=self.clock(), timezone=self.timezone
+            )
+            if scheduled_ts is None
+            else scheduled_ts
+        )
+        now = self.clock()
+        while due <= now:
+            self.fire(name, scheduled_ts=due)
+            due = next_scheduled_occurrence(
+                routine.interval, after=due, timezone=self.timezone
+            )
+        if not self._stopping:
+            self._schedule_at(name, due)
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Stop the background scheduler and close the run store if we own it."""
+        self._stopping = True
         if self._scheduler is not None and self._scheduler.running:
             self._scheduler.shutdown(wait=wait)
             logger.info("scheduler stopped")
