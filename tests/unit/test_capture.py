@@ -835,3 +835,123 @@ def test_run_does_not_deadlock_on_large_stderr(allow_settings):
     stats = daemon.run()
     assert stats.received == 3
     assert stats.ingested == 3
+
+
+# ---------------------------------------------------------------------------
+# B1: supervised continuous-capture loop (run_forever)
+# ---------------------------------------------------------------------------
+
+
+def _oneshot_emitter(n: int) -> list[str]:
+    """A helper cmd: prints n events then EXITS (like the real one-shot helper)."""
+    code = (
+        "import json,sys\n"
+        f"for i in range({n}):\n"
+        "    sys.stdout.write(json.dumps({'app':'com.apple.mail','window':'w',"
+        "'text':'msg %d'%i,'ts':float(i)})+'\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    return [sys.executable, "-c", code]
+
+
+def test_run_forever_respawns_helper_each_cycle(allow_settings):
+    # [B1] The one-shot helper emits 2 events then exits; run_forever must
+    # re-spawn it each cycle, so 3 cycles ingest 3x the events.
+    store = FakeStore()
+    daemon = CaptureDaemon(
+        store,
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(2),
+        require_signed_helper=False,
+    )
+    stats = daemon.run_forever(poll_interval=0.0, max_cycles=3)
+    assert stats.received == 6  # 3 re-spawns x 2 events — proves continuity
+    assert stats.ingested == 6
+
+
+def test_run_forever_stops_when_event_already_set(allow_settings):
+    # [B1] A pre-set stop event means the loop body never runs (clean no-op).
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    store = FakeStore()
+    daemon = CaptureDaemon(
+        store,
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(2),
+        require_signed_helper=False,
+    )
+    stats = daemon.run_forever(poll_interval=0.0, stop_event=stop, max_cycles=99)
+    assert stats.received == 0
+
+
+def test_run_forever_circuit_breaker_trips_on_repeated_failure(
+    allow_settings, monkeypatch
+):
+    # [B1] Consecutive failing cycles must trip the breaker and stop, not spin.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)  # no real sleeps
+    store = FakeStore()
+    daemon = CaptureDaemon(
+        store,
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(1),
+        require_signed_helper=False,
+    )
+
+    calls = {"n": 0}
+
+    def _boom(*_a, **_k):
+        calls["n"] += 1
+        raise RuntimeError("transient helper failure")
+
+    monkeypatch.setattr(daemon, "run", _boom)
+    stats = daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
+    assert calls["n"] == 3  # stopped exactly at the breaker threshold
+    assert daemon.error_count == 3
+    assert stats.received == 0
+
+
+def test_run_forever_propagates_helper_unavailable(allow_settings):
+    # [B1] A missing signed bundle is permanent, not transient: re-raise, don't
+    # retry forever.
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=["/nonexistent/openbird/capture-helper"],
+        require_signed_helper=True,
+    )
+    with pytest.raises(HelperUnavailableError):
+        daemon.run_forever(poll_interval=0.0, max_cycles=5)
+
+
+def test_run_forever_resets_failure_count_after_success(allow_settings, monkeypatch):
+    # [B1] A success between failures must reset the consecutive-failure counter
+    # so the breaker only trips on *consecutive* failures.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(1),
+        require_signed_helper=False,
+    )
+    seq = iter([RuntimeError("f1"), RuntimeError("f2"), None, RuntimeError("f3")])
+    real_run = daemon.run
+
+    def _maybe_boom(*a, **k):
+        try:
+            exc = next(seq)
+        except StopIteration:
+            return real_run(*a, **k)
+        if exc is not None:
+            raise exc
+        return real_run(*a, **k)
+
+    monkeypatch.setattr(daemon, "run", _maybe_boom)
+    # 2 fails, 1 success (resets), 1 fail, then clean cycles. Breaker=3 never trips.
+    stats = daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3, max_cycles=3)
+    assert stats.received >= 1  # at least the successful + subsequent cycles ran

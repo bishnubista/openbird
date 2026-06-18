@@ -100,6 +100,13 @@ _MAX_TEXT_BYTES = 1_000_000
 # hygiene). We never log its contents — only a byte count.
 _MAX_STDERR_BYTES = 64 * 1024
 
+# Supervised-loop defaults [B1]. The Swift capture-helper captures the frontmost
+# window and exits, so continuous capture means re-spawning it on an interval.
+_DEFAULT_POLL_INTERVAL = 2.0  # seconds the supervisor idles between helper spawns
+_DEFAULT_MAX_CONSECUTIVE_FAILURES = 5  # circuit breaker: stop after this many
+_BACKOFF_BASE = 1.0  # first retry delay (seconds), doubled each consecutive fail
+_BACKOFF_MAX = 60.0  # cap on the exponential backoff delay
+
 
 class IngestSink(Protocol):
     """Minimal structural type the daemon needs from a memory store.
@@ -136,6 +143,15 @@ class CaptureStats:
             ingested=self.ingested + delta.get("ingested", 0),
             rejected=self.rejected + delta.get("rejected", 0),
             errors=self.errors + delta.get("errors", 0),
+        )
+
+    def _add(self, other: "CaptureStats") -> "CaptureStats":
+        """Sum two stats objects (used to aggregate across supervised cycles)."""
+        return CaptureStats(
+            received=self.received + other.received,
+            ingested=self.ingested + other.ingested,
+            rejected=self.rejected + other.rejected,
+            errors=self.errors + other.errors,
         )
 
 
@@ -489,6 +505,81 @@ class CaptureDaemon:
         finally:
             self._shutdown(proc)
         return stats
+
+    def run_forever(
+        self,
+        *,
+        poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        stop_event: "threading.Event | None" = None,
+        max_consecutive_failures: int = _DEFAULT_MAX_CONSECUTIVE_FAILURES,
+        max_cycles: int | None = None,
+    ) -> CaptureStats:
+        """Supervise the one-shot helper, re-spawning it until stopped [B1].
+
+        The Swift capture-helper captures the current frontmost window and exits,
+        so a single :meth:`run` yields one batch then EOF. Continuous capture
+        therefore means re-spawning it on a cadence. This loop runs one
+        :meth:`run` per cycle, then idles ``poll_interval`` seconds, until
+        ``stop_event`` is set (the CLI wires it to SIGINT/SIGTERM).
+
+        Resilience:
+          * A cycle that *raises* (helper crash, broken pipe) is counted as a
+            failure and retried with exponential backoff (capped). After
+            ``max_consecutive_failures`` consecutive failures the loop trips a
+            circuit breaker and returns — fail-closed, never a hot spin.
+          * A successful cycle resets the failure counter.
+          * :class:`HelperUnavailableError` is a *permanent* config error (no
+            signed bundle) and is re-raised immediately, not retried.
+
+        Args:
+            poll_interval: Seconds to idle between successful cycles.
+            stop_event: Set to request a clean stop; created if omitted.
+            max_consecutive_failures: Circuit-breaker threshold.
+            max_cycles: Stop after this many cycles (deterministic for tests).
+
+        Returns:
+            Aggregate :class:`CaptureStats` across all cycles.
+        """
+        stop = stop_event or threading.Event()
+        total = CaptureStats()
+        failures = 0
+        cycles = 0
+        logger.info("capture supervisor: starting (poll_interval=%.1fs)", poll_interval)
+        while not stop.is_set():
+            try:
+                total = total._add(self.run())
+            except HelperUnavailableError:
+                # Missing signed bundle is permanent, not transient: don't retry.
+                raise
+            except Exception as exc:  # noqa: BLE001 - one bad cycle must not kill the loop
+                failures += 1
+                self.error_count += 1
+                # Metadata only: class + consecutive count, never the message.
+                logger.warning(
+                    "capture cycle failed: error_class=%s consecutive=%d",
+                    type(exc).__name__,
+                    failures,
+                )
+                if failures >= max_consecutive_failures:
+                    logger.error(
+                        "capture supervisor: circuit breaker tripped after %d "
+                        "consecutive failures; stopping",
+                        failures,
+                    )
+                    break
+                delay = min(_BACKOFF_MAX, _BACKOFF_BASE * (2 ** (failures - 1)))
+                if stop.wait(delay):
+                    break
+                continue
+            failures = 0
+            cycles += 1
+            if max_cycles is not None and cycles >= max_cycles:
+                break
+            # Interruptible idle between cycles (returns True if stop was set).
+            if stop.wait(poll_interval):
+                break
+        logger.info("capture supervisor: stopped (cycles=%d)", cycles)
+        return total
 
     @staticmethod
     def _shutdown(proc: subprocess.Popen[str]) -> None:

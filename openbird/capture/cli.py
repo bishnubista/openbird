@@ -23,7 +23,12 @@ def capture(
         True, "--once/--loop", help="Run a single bounded pass (default) or loop."
     ),
     max_events: int = typer.Option(
-        50, "--max-events", help="Stop after this many received events."
+        50, "--max-events", help="Stop after this many received events (--once)."
+    ),
+    poll_interval: float = typer.Option(
+        2.0,
+        "--poll-interval",
+        help="Seconds between helper re-spawns in --loop mode.",
     ),
     helper: Optional[str] = typer.Option(
         None,
@@ -51,6 +56,10 @@ def capture(
     )
     from openbird.memory.store import MemoryStore
 
+    import logging
+    import signal
+    import threading
+
     helper_cmd = _parse_helper_cmd(helper)
     settings = get_settings()
     store = MemoryStore(settings=settings)
@@ -62,16 +71,39 @@ def capture(
             require_signed_helper=not allow_unsigned,
         )
         try:
-            stats = daemon.run(max_events=None if not once else max_events)
+            if once:
+                stats = daemon.run(max_events=max_events)
+            else:
+                # Continuous capture: supervise the one-shot helper, re-spawning
+                # it on a cadence until SIGINT/SIGTERM requests a clean stop [B1].
+                logging.basicConfig(
+                    level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+                )
+                stop = threading.Event()
+
+                def _handle(signum, _frame) -> None:
+                    _err_console.print(
+                        f"[yellow]capture: signal {signum}, shutting down[/]"
+                    )
+                    stop.set()
+
+                signal.signal(signal.SIGINT, _handle)
+                signal.signal(signal.SIGTERM, _handle)
+                _console.print("[green]capture daemon started[/] (Ctrl-C to stop)")
+                stats = daemon.run_forever(
+                    poll_interval=poll_interval, stop_event=stop
+                )
         except HelperUnavailableError as exc:
             _err_console.print(f"[red]Capture helper unavailable:[/] {exc}")
-            raise typer.Exit(code=3)
+            raise typer.Exit(code=3) from None
     finally:
         store.close()
 
     _console.print(
-        f"[green]Capture pass complete.[/] received={stats.received} "
-        f"ingested={stats.ingested} rejected={stats.rejected} errors={stats.errors}"
+        f"[green]Capture {'pass' if once else 'session'} complete.[/] "
+        f"received={stats.received} ingested={stats.ingested} "
+        f"rejected={stats.rejected} errors={stats.errors}"
     )
 
 
