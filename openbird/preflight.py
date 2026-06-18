@@ -524,7 +524,7 @@ def _packaged_helper_probe(
         return None
 
     cache: dict[str, dict[str, str]] = {}
-    errors: dict[str, str] = {}
+    errors: dict[str, Exception] = {}
 
     def _probe(capability: str) -> str:
         if capability == "accessibility":
@@ -536,12 +536,12 @@ def _packaged_helper_probe(
                 raise FileNotFoundError(AUDIO_HELPER_PATH_ENV)
             key, path = "audio", audio_path
         if key in errors:
-            raise RuntimeError(errors[key])
+            raise errors[key]
         if key not in cache:
             try:
                 cache[key] = runner(path)
             except Exception as exc:
-                errors[key] = type(exc).__name__
+                errors[key] = exc
                 raise
         return _normalize_grant(cache[key].get(capability, GRANT_UNKNOWN))
 

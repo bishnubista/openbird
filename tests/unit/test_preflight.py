@@ -447,6 +447,11 @@ def test_helper_grant_subprocess_failure_surfaces_probe_error(tmp_path):
     assert res["probe_error"] == "RuntimeError"
     assert "probe was unavailable or failed" in res["note"]
 
+    # Cached helper failures should re-raise the original exception type.
+    assert probe("screen_recording") == GRANT_PASSED
+    with pytest.raises(RuntimeError):
+        probe("accessibility")
+
 
 def test_packaged_helper_probe_partial_helper_reports_unavailable(tmp_path):
     probe = _packaged_helper_probe(capture_helper=tmp_path / "capture-helper")
