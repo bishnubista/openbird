@@ -1,4 +1,7 @@
 import AppKit
+import ApplicationServices
+import AVFoundation
+import CoreGraphics
 import Foundation
 
 /// A decoded, UI-friendly slice of `openbird preflight --json`.
@@ -172,45 +175,44 @@ final class OpenBirdService: @unchecked Sendable {
         NSWorkspace.shared.open(url)
     }
 
-    /// Ask the capture-helper to request Accessibility. This triggers the native
-    /// TCC prompt AND registers the helper in the Accessibility list (a binary
-    /// never appears there until it requests once), then opens the pane as a
-    /// fallback. Without this, the pane is empty and there is nothing to toggle.
+    // MARK: - TCC checked/requested from the APP process
+    //
+    // macOS attributes a nested helper's TCC request to its containing app bundle
+    // (the "responsible process"), so grants land on OpenBird.app, not on the
+    // flat helper binary. We therefore check AND request these permissions from
+    // the app's own process — that is where the grant actually lives, and the
+    // capture daemon (launched as a descendant of the app) inherits it at runtime.
+
+    func accessibilityGranted() -> Bool {
+        AXIsProcessTrusted()
+    }
+
+    func screenRecordingGranted() -> Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    func microphoneGranted() -> Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
+
+    /// Trigger the Accessibility prompt for the APP (adds OpenBird to the list),
+    /// then open the pane as a fallback for when the prompt was already answered.
     func requestAccessibility() {
-        launchHelper("capture-helper", ["--request-accessibility"])
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
         openPrivacyPane(.accessibility)
     }
 
-    /// Ask the audio-helper to request Screen Recording (registers + prompts).
+    /// Trigger the Screen-Recording prompt for the APP, then open the pane.
     func requestScreenRecording() {
-        launchHelper("audio-helper", ["--request-screen"])
+        _ = CGRequestScreenCaptureAccess()
         openPrivacyPane(.screenRecording)
     }
 
-    /// Ask the audio-helper to request Microphone (registers + prompts).
+    /// Trigger the Microphone prompt for the APP, then open the pane.
     func requestMicrophone() {
-        launchHelper("audio-helper", ["--request-microphone"])
+        AVCaptureDevice.requestAccess(for: .audio) { _ in }
         openPrivacyPane(.microphone)
-    }
-
-    private func bundledHelperPath(_ name: String) -> String? {
-        let url = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS")
-            .appendingPathComponent(name)
-        return fileManager.isExecutableFile(atPath: url.path) ? url.path : nil
-    }
-
-    /// Launch a bundled helper detached (don't wait): the Accessibility request
-    /// returns immediately, while the mic/screen requests block in the helper
-    /// until the user answers the prompt — neither should block the app.
-    private func launchHelper(_ name: String, _ args: [String]) {
-        guard let path = bundledHelperPath(name) else { return }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = args
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
     }
 
     // MARK: - Allowlist (persisted in UserDefaults; injected into capture)
