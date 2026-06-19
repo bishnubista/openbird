@@ -52,13 +52,13 @@ class Openbird < Formula
     SH
     chmod 0755, app_macos/"openbird-cli"
 
-    # Sign the assembled bundle with a stable, self-signed local identity so macOS
-    # TCC grants (Accessibility / Screen Recording / Microphone) persist across
-    # rebuilds. Fail-soft: sign_local.sh degrades to ad-hoc signing if the
-    # self-signed identity cannot be created, so install never breaks. The script
-    # ships in the same archive as this formula (git ls-files), so the existence
-    # guard is purely defensive — it keeps install from hard-failing rather than
-    # leaving the app unsigned should the script ever be absent.
+    # Ad-hoc sign the assembled bundle with stable identifiers so macOS TCC grants
+    # (Accessibility / Screen Recording / Microphone) persist across launches.
+    # Ad-hoc needs no keychain, so it works inside the $HOME-redirected
+    # `brew install` environment (a self-signed keychain cert cannot — Homebrew
+    # isolates HOME, and it would also trigger GUI keychain prompts). The script
+    # ships in the same archive as this formula (git ls-files); the existence
+    # guard is purely defensive against the script ever being absent.
     system "./script/sign_local.sh", app if File.exist?("script/sign_local.sh")
 
     libexec.install app
@@ -90,12 +90,13 @@ class Openbird < Formula
       (uv pip install). It is not vendored/offline and is not pinned for
       reproducible offline installs; network access is required at install time.
 
-      OpenBird.app is signed at install time with a STABLE, SELF-SIGNED local
-      identity (stored in the openbird-codesign keychain). This gives the bundle a
-      consistent code-signing identity so macOS TCC grants persist across
-      rebuilds. The app and helpers are NOT notarized, so on first launch macOS
-      Gatekeeper may warn — right-click the app and choose Open, or approve it in
-      System Settings > Privacy & Security.
+      OpenBird.app is ad-hoc signed at install time with stable identifiers, so
+      macOS TCC grants (Accessibility / Screen Recording / Microphone) persist
+      across launches — you grant them once. A `brew upgrade` rebuilds the app and
+      changes its code hash, so you re-grant permissions once after an upgrade.
+      The app is NOT notarized, so on first launch macOS Gatekeeper may warn —
+      right-click the app and choose Open, or approve it in System Settings >
+      Privacy & Security.
 
       To enable screen/audio capture, open the app and follow Guided Setup: it
       walks you through Ollama, models, and granting Accessibility / Screen
