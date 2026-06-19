@@ -7,13 +7,13 @@ class Openbird < Formula
   # `export HOMEBREW_GITHUB_API_TOKEN=$(gh auth token)`) before installing. On
   # GitHub's redirect to pre-signed storage, Homebrew drops the Authorization
   # header automatically (different host), so the token never leaks downstream.
-  url "https://api.github.com/repos/bishnubista/openbird/releases/assets/451943683",
+  url "https://api.github.com/repos/bishnubista/openbird/releases/assets/451956085",
       headers: [
         "Accept: application/octet-stream",
         "Authorization: token #{ENV.fetch("HOMEBREW_GITHUB_API_TOKEN", "")}",
       ]
-  version "0.1.1"
-  sha256 "a1fff849e1fd4eb5ac235f15029b3998c65c559968f92e2b63c55e6e42cb8ef0"
+  version "0.1.2"
+  sha256 "2a98d329cf5fe9f8ccb713e1d2ff19b8f5ea6a1947ed81959f5ba757be2e96ff"
 
   depends_on "uv" => :build
   depends_on :macos
