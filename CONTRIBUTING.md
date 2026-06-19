@@ -28,7 +28,7 @@ Run these before opening a PR — they are exactly what the `lint` and `test`
 jobs run:
 
 ```bash
-uv run ruff check .          # lint (E/F/I + bugbear/pyupgrade/simplify)
+uv run ruff check .          # lint (see pyproject.toml for enabled rules)
 uv run ruff format --check . # formatting (apply with: uv run ruff format .)
 uv run pytest -q             # full suite (integration tests auto-skip)
 ```
