@@ -40,6 +40,9 @@ jobs:
     # OpenBird targets macOS (AX, ScreenCaptureKit, launchd, Keychain), so the
     # test suite runs on macOS — the only platform it is verified against.
     runs-on: macos-latest
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+      UV_PYTHON_PREFERENCE: only-managed
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +55,10 @@ jobs:
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install Python
+        # macOS runner system Python lacks sqlite3.enable_load_extension, which
+        # sqlite-vec-backed tests need. Use uv's managed Python consistently.
+        run: uv python install ${{ matrix.python-version }}
       - name: Install deps
         # Skip the torch-pulling extras (meetings, rerank): their heavy code
         # paths are behind try-imports and the tests that need them auto-skip.
