@@ -1071,6 +1071,123 @@ def _parse_since(value: str, *, option_name: str = "--since") -> float:
         ) from exc
 
 
+@app.command(name="debug-bundle")
+def debug_bundle(
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the bundle as JSON instead of a table."
+    ),
+    no_ollama: bool = typer.Option(False, "--no-ollama", help="Skip the Ollama network probe."),
+) -> None:
+    """Collect a redaction-aware diagnostics bundle for bug reports.
+
+    Gathers versions, environment, the active (non-secret) config, preflight
+    results, and on-disk file sizes. It deliberately NEVER includes captured
+    content, exception messages, API keys, log-file contents, or the
+    allow/block-list patterns (only their counts) — so the output is safe to
+    paste into a public issue. Same no-content posture as the capture paths.
+    """
+    import importlib.metadata as _md
+    import importlib.util as _ilu
+    import platform as _platform
+
+    from openbird.preflight import run_preflight
+
+    settings = get_settings()
+    home = str(Path.home())
+
+    def _redact(value: str | None) -> str | None:
+        # Strip the user's home prefix so paths don't leak the account name.
+        return value.replace(home, "~") if isinstance(value, str) else value
+
+    def _version() -> str:
+        try:
+            return _md.version("openbird")
+        except _md.PackageNotFoundError:
+            return "unknown"
+
+    def _file_stat(path: str | None) -> dict[str, object]:
+        if not path:
+            return {"path": None, "present": False}
+        p = Path(path)
+        if not p.exists():
+            return {"path": _redact(path), "present": False}
+        return {"path": _redact(path), "present": True, "size_bytes": p.stat().st_size}
+
+    # Reuse the preflight report, but drop the privacy block's raw allow/block
+    # lists (they reveal which apps/sites the user runs) down to counts.
+    report = run_preflight(settings, probe_ollama=not no_ollama)
+    privacy = dict(report.get("privacy") or {})
+    safe_preflight = {**report, "privacy": {
+        "allowlist_entries": len(privacy.get("allowlist") or []),
+        "blocklist_entries": len(privacy.get("blocklist") or []),
+        "ocr_enabled": privacy.get("ocr_enabled"),
+    }}
+
+    bundle: dict[str, object] = {
+        "openbird_version": _version(),
+        "python": _platform.python_version(),
+        "platform": _platform.platform(),
+        "extras": {
+            "meetings": _ilu.find_spec("faster_whisper") is not None,
+            "rerank": _ilu.find_spec("sentence_transformers") is not None,
+            "encryption": _ilu.find_spec("sqlcipher3") is not None,
+            "keyring": _ilu.find_spec("keyring") is not None,
+            "integrations": _ilu.find_spec("mcp") is not None,
+        },
+        "config": {
+            "data_dir": _redact(str(settings.data_dir)),
+            "llm_backend": settings.llm_backend,
+            "llm_model": settings.llm_model,
+            "embed_model": settings.embed_model,
+            "embed_dim": settings.embed_dim,
+            "allow_cloud": settings.allow_cloud,
+            "encryption_enabled": settings.encryption_enabled,
+            "require_encryption": settings.require_encryption,
+            "ocr_enabled": settings.ocr_enabled,
+            "retention_days": settings.retention_days,
+            "allowlist_entries": len(settings.allowlist),
+            "blocklist_entries": len(settings.blocklist),
+        },
+        "database": _file_stat(settings.db_path),
+        "preflight": safe_preflight,
+    }
+
+    if json_out:
+        _console.print_json(json.dumps(bundle, default=str))
+        return
+
+    _render_debug_bundle(bundle)
+
+
+def _render_debug_bundle(bundle: dict[str, object]) -> None:
+    """Pretty-print a debug bundle as key/value tables."""
+    env = Table(title="OpenBird debug bundle", show_header=False)
+    env.add_column("Field", style="bold")
+    env.add_column("Value")
+    env.add_row("openbird", str(bundle["openbird_version"]))
+    env.add_row("python", str(bundle["python"]))
+    env.add_row("platform", str(bundle["platform"]))
+    extras = bundle["extras"]
+    if isinstance(extras, dict):
+        present = ", ".join(name for name, ok in extras.items() if ok) or "none"
+        env.add_row("extras installed", present)
+    _console.print(env)
+
+    cfg = bundle["config"]
+    if isinstance(cfg, dict):
+        cfg_table = Table(title="config (non-secret)", show_header=False)
+        cfg_table.add_column("Key", style="bold")
+        cfg_table.add_column("Value")
+        for key, value in cfg.items():
+            cfg_table.add_row(key, str(value))
+        _console.print(cfg_table)
+
+    _console.print(
+        "[dim]No captured content, error messages, keys, or allow/block patterns "
+        "are included. Safe to share. Use --json for the full machine-readable bundle.[/]"
+    )
+
+
 def main() -> None:
     """Console-script entrypoint."""
     app()
