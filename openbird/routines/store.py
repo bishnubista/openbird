@@ -729,14 +729,14 @@ class RoutineStore:
         The anchor is the newest run that represents a *settled* occurrence:
 
           * terminal (``done``/``error``) — a run that actually completed, but
-          * **not** a reclaimed crash (``error_code = LEASE_EXPIRED``): those
-            occurrences still need retry, so they must remain *after* the anchor
-            rather than becoming it (otherwise reclamation would silently swallow
-            the very occurrence it just freed).
+          * **not** a freed-for-retry error (``LEASE_EXPIRED`` or
+            ``DELIVERY_EXCEPTION``): those occurrences still need retry, so they
+            must remain *after* the anchor rather than becoming it (otherwise
+            catch-up would silently swallow the very occurrence it just freed).
 
         This also ignores still-``running`` rows so a single stale lease left by
-        a crash does not advance the anchor past later occurrences. Falls back to
-        the most recent run of any status only if nothing settled exists.
+        a crash does not advance the anchor past later occurrences. Falls back
+        to the most recent run of any status only if nothing settled exists.
         """
         placeholders = ",".join("?" * len(_FREED_FOR_RETRY))
         with self._lock:
