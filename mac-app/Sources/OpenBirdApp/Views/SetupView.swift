@@ -60,27 +60,27 @@ struct SetupView: View {
                 StepRow(
                     state: model.accessibilityState,
                     title: "Accessibility permission",
-                    detail: "Lets the capture helper read active-window text.",
-                    actionLabel: model.accessibilityState == .ok ? nil : "Open Settings",
-                    action: { model.openAccessibilitySettings() }
+                    detail: "Lets the capture helper read active-window text. Click Grant, then approve OpenBird in the prompt.",
+                    actionLabel: model.accessibilityState == .ok ? nil : "Grant",
+                    action: { model.requestAccessibility() }
                 )
                 Divider()
                 StepRow(
                     state: model.screenRecordingState,
                     title: "Screen Recording permission",
                     detail: "Optional · needed only for meeting/system-audio capture.",
-                    actionLabel: model.screenRecordingState == .ok ? nil : "Open Settings",
+                    actionLabel: model.screenRecordingState == .ok ? nil : "Grant",
                     optional: true,
-                    action: { model.openScreenRecordingSettings() }
+                    action: { model.requestScreenRecording() }
                 )
                 Divider()
                 StepRow(
                     state: model.microphoneState,
                     title: "Microphone permission",
                     detail: "Optional · records your side of a meeting as a separate track.",
-                    actionLabel: model.microphoneState == .ok ? nil : "Open Settings",
+                    actionLabel: model.microphoneState == .ok ? nil : "Grant",
                     optional: true,
-                    action: { model.openMicrophoneSettings() }
+                    action: { model.requestMicrophone() }
                 )
             }
             .padding(.vertical, 4)

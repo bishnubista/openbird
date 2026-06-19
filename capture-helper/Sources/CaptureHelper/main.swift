@@ -401,6 +401,16 @@ private func run() {
         return
     }
 
+    // Trigger the Accessibility authorization prompt for THIS helper binary, so
+    // macOS registers it in System Settings > Privacy > Accessibility (a binary
+    // never appears there until it has requested the grant once). The system
+    // prompt's "Open System Settings" button lands the user on the right pane
+    // with this helper already listed — the prerequisite for granting capture.
+    if args.contains("--request-accessibility") {
+        _ = ensureAccessibilityTrust(prompt: true)
+        return
+    }
+
     let noPrompt = args.contains("--no-prompt")
     // Allowlist-first content policy, enforced before any AX text is read.
     let allow = listArg(args, "--allow")

@@ -172,6 +172,47 @@ final class OpenBirdService: @unchecked Sendable {
         NSWorkspace.shared.open(url)
     }
 
+    /// Ask the capture-helper to request Accessibility. This triggers the native
+    /// TCC prompt AND registers the helper in the Accessibility list (a binary
+    /// never appears there until it requests once), then opens the pane as a
+    /// fallback. Without this, the pane is empty and there is nothing to toggle.
+    func requestAccessibility() {
+        launchHelper("capture-helper", ["--request-accessibility"])
+        openPrivacyPane(.accessibility)
+    }
+
+    /// Ask the audio-helper to request Screen Recording (registers + prompts).
+    func requestScreenRecording() {
+        launchHelper("audio-helper", ["--request-screen"])
+        openPrivacyPane(.screenRecording)
+    }
+
+    /// Ask the audio-helper to request Microphone (registers + prompts).
+    func requestMicrophone() {
+        launchHelper("audio-helper", ["--request-microphone"])
+        openPrivacyPane(.microphone)
+    }
+
+    private func bundledHelperPath(_ name: String) -> String? {
+        let url = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS")
+            .appendingPathComponent(name)
+        return fileManager.isExecutableFile(atPath: url.path) ? url.path : nil
+    }
+
+    /// Launch a bundled helper detached (don't wait): the Accessibility request
+    /// returns immediately, while the mic/screen requests block in the helper
+    /// until the user answers the prompt — neither should block the app.
+    private func launchHelper(_ name: String, _ args: [String]) {
+        guard let path = bundledHelperPath(name) else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = args
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+    }
+
     // MARK: - Allowlist (persisted in UserDefaults; injected into capture)
 
     func allowlist() -> [String] {

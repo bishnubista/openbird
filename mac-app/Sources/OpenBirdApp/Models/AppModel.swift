@@ -123,9 +123,21 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
-    func openAccessibilitySettings() { service.openPrivacyPane(.accessibility) }
-    func openScreenRecordingSettings() { service.openPrivacyPane(.screenRecording) }
-    func openMicrophoneSettings() { service.openPrivacyPane(.microphone) }
+    // These trigger the native TCC prompt via the helper (registering it in the
+    // relevant System Settings list) and also open the pane. After granting,
+    // the user taps Re-check to refresh status.
+    func requestAccessibility() {
+        service.requestAccessibility()
+        lastActionMessage = "Approve OpenBird in the prompt (or System Settings), then Re-check."
+    }
+    func requestScreenRecording() {
+        service.requestScreenRecording()
+        lastActionMessage = "Approve OpenBird in the prompt (or System Settings), then Re-check."
+    }
+    func requestMicrophone() {
+        service.requestMicrophone()
+        lastActionMessage = "Approve OpenBird in the prompt (or System Settings), then Re-check."
+    }
 
     func toggleCapturePause() {
         do {

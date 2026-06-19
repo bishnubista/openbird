@@ -406,6 +406,26 @@ private func run() {
         return
     }
 
+    // Trigger the Screen-Recording authorization prompt for THIS helper binary so
+    // macOS registers it in System Settings > Privacy > Screen & System Audio
+    // Recording (it never appears there until it requests the grant once).
+    if CommandLine.arguments.contains("--request-screen") {
+        if #available(macOS 11.0, *) {
+            _ = CGRequestScreenCaptureAccess()
+        }
+        return
+    }
+
+    // Trigger the Microphone authorization prompt (registers the helper in the
+    // Microphone list). Needs NSMicrophoneUsageDescription, which is embedded in
+    // this binary's __info_plist section.
+    if CommandLine.arguments.contains("--request-microphone") {
+        let sem = DispatchSemaphore(value: 0)
+        AVCaptureDevice.requestAccess(for: .audio) { _ in sem.signal() }
+        sem.wait()
+        return
+    }
+
     guard #available(macOS 13.0, *) else {
         diag("audio: requires_macos_13+")
         exit(2)
