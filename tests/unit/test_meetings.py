@@ -57,9 +57,7 @@ def _frame(
         samples = tuple(0.5 * math.sin(2 * math.pi * 220 * i / SR) for i in range(n))
     else:
         samples = tuple(0.0 for _ in range(n))
-    return AudioFrame(
-        samples=samples, sample_rate=SR, host_ts=host_ts, track=track, seq=seq
-    )
+    return AudioFrame(samples=samples, sample_rate=SR, host_ts=host_ts, track=track, seq=seq)
 
 
 # --------------------------------------------------------------------------- #
@@ -299,7 +297,7 @@ def test_transcribe_segment_uses_loaded_model(monkeypatch):
 
 
 def test_transcribe_segment_rejects_oversize_window(monkeypatch):
-    """ A window exceeding the sample cap is refused before the model loads.
+    """A window exceeding the sample cap is refused before the model loads.
 
     The cap must fire ahead of both ``model.transcribe`` AND ``_load_model``, so an
     oversized/hostile window never pays the lazy WhisperModel construction cost.
@@ -325,9 +323,7 @@ def test_transcribe_segment_rejects_oversize_window(monkeypatch):
     monkeypatch.setattr(t, "_load_model", _fake_load)
     # Shrink the cap so a tiny segment trips it without allocating millions.
     monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 2)
-    seg = tr.SpeechSegment(
-        Track.SYSTEM, 0.0, 1.0, frames=[_frame(host_ts=0.0, loud=True)]
-    )
+    seg = tr.SpeechSegment(Track.SYSTEM, 0.0, 1.0, frames=[_frame(host_ts=0.0, loud=True)])
     with pytest.raises(tr.MeetingsAudioTooLong):
         t.transcribe_segment(seg)
     assert transcribe_called is False  # guarded BEFORE inference
@@ -338,8 +334,9 @@ def test_resample_rejects_oversize_before_allocation(monkeypatch):
     # A malformed low src_sr makes n_out = n_in * 16000 / src_sr explode;
     # the cap must fire BEFORE allocating the output, not after. The guard sits
     # ahead of the numpy/pure-Python split, so it holds for both paths.
-    import openbird.meetings.transcribe as tr
     from array import array as _array
+
+    import openbird.meetings.transcribe as tr
 
     monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 100)
     # 4000 samples @ src_sr=1 -> projected 64,000,000 output samples >> cap.
@@ -350,8 +347,9 @@ def test_resample_rejects_oversize_before_allocation(monkeypatch):
 def test_resample_rejects_oversize_pure_python_path(monkeypatch):
     # Same guard with numpy import forced to fail (the pure-Python branch).
     import builtins
-    import openbird.meetings.transcribe as tr
     from array import array as _array
+
+    import openbird.meetings.transcribe as tr
 
     real_import = builtins.__import__
 
@@ -586,9 +584,7 @@ def test_clock_sync_flags_abrupt_timestamp_jump_as_device_switch():
     # Abrupt 5s jump (e.g. Bluetooth device switch).
     c = _frame(host_ts=5.0, loud=True, track=Track.SYSTEM)
     cs.observe(c)
-    switch_events = [
-        ev for ev in cs.events if ev.kind == ClockEventKind.DEVICE_SWITCH
-    ]
+    switch_events = [ev for ev in cs.events if ev.kind == ClockEventKind.DEVICE_SWITCH]
     assert len(switch_events) == 1
     assert switch_events[0].track == Track.SYSTEM
     assert switch_events[0].magnitude > 1.0
@@ -607,9 +603,7 @@ def test_pipeline_realigns_window_on_device_switch_jump():
     emitted.extend(pipe.flush())
     # The jump must have forced a realign: pre-jump and post-jump audio are not
     # stitched into one bogus window spanning the gap.
-    assert any(
-        ev.kind == ClockEventKind.DEVICE_SWITCH for ev in pipe.clock_events
-    )
+    assert any(ev.kind == ClockEventKind.DEVICE_SWITCH for ev in pipe.clock_events)
     assert len(emitted) >= 2
     spans_gap = [s for s in emitted if s.start_ts < 1.0 and s.end_ts > 4.0]
     assert spans_gap == []

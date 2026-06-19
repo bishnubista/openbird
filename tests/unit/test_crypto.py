@@ -7,8 +7,8 @@ import sqlite3
 import stat
 import sys
 import threading
-import types
 import time
+import types
 from pathlib import Path
 
 from openbird.config import Settings

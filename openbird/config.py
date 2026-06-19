@@ -12,8 +12,6 @@ from dataclasses import dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
 
-import platformdirs
-
 # Apps excluded from capture until the user explicitly enables them:
 # terminals, code editors, browsers, password managers, finance/health apps.
 _DEFAULT_BLOCKLIST: list[str] = [
@@ -202,16 +200,14 @@ def ollama_bare_model(model: str) -> str | None:
     name = (model or "").strip()
     for prefix in _OLLAMA_PREFIXES:
         if name.lower().startswith(prefix):
-            return name[len(prefix):]
+            return name[len(prefix) :]
     return None
 
 
 # Loopback host names that keep traffic on this machine. A non-loopback Ollama
 # host means captured chunks leave the device, so it is treated as remote even
 # for an ollama/* model (route-based cloud classification).
-_LOOPBACK_HOSTS: frozenset[str] = frozenset(
-    {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
-)
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"})
 
 
 def is_loopback_host(host_url: str) -> bool:

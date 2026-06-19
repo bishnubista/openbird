@@ -162,8 +162,7 @@ class MeetingPipeline:
             realign_tracks = {
                 ev.track
                 for ev in new_events
-                if ev.kind
-                in (ClockEventKind.DEVICE_SWITCH, ClockEventKind.INTRA_GAP)
+                if ev.kind in (ClockEventKind.DEVICE_SWITCH, ClockEventKind.INTRA_GAP)
             }
             for ev_track in realign_tracks:
                 # Only realign the track that jumped; its open window predates the
@@ -182,9 +181,7 @@ class MeetingPipeline:
         if speech:
             self._silence_since[track] = None
             if open_seg is None:
-                open_seg = SpeechSegment(
-                    track=track, start_ts=frame.host_ts, end_ts=frame.end_ts
-                )
+                open_seg = SpeechSegment(track=track, start_ts=frame.host_ts, end_ts=frame.end_ts)
                 self._open[track] = open_seg
             open_seg.frames.append(frame)
             open_seg.end_ts = frame.end_ts

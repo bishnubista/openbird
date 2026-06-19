@@ -8,7 +8,6 @@ Ollama is unavailable.
 
 from __future__ import annotations
 
-import json
 import shutil
 
 import pytest
@@ -17,7 +16,6 @@ from openbird.chat import rag as rag_mod
 from openbird.chat.rag import RAG, AnswerResult, answer
 from openbird.memory.store import MemoryStore
 from openbird.types import Citation, Observation, SearchHit
-
 
 # -- fakes ----------------------------------------------------------------------
 
@@ -124,9 +122,7 @@ def test_hallucinated_citations_are_rejected():
     hit = _hit(obs, "Buy milk and eggs.")
     store = StubStore([hit])
     # Model cites a real (composite) id plus a made-up one.
-    llm = FakeLLM(
-        {"answer": "Milk and eggs.", "citations": ["S1", "ghost-99"]}
-    )
+    llm = FakeLLM({"answer": "Milk and eggs.", "citations": ["S1", "ghost-99"]})
 
     result = answer("groceries?", store=store, provider=llm)
 
@@ -151,12 +147,18 @@ def test_distinct_chunks_from_same_observation_are_separately_citable():
     # on observation id alone would collapse them to one.
     obs = _obs("multi-1", app="Doc")
     h1 = SearchHit(
-        chunk_id="chunkA", content_hash=obs.content_hash,
-        text="First distinct passage about budgets.", score=2.0, observation=obs,
+        chunk_id="chunkA",
+        content_hash=obs.content_hash,
+        text="First distinct passage about budgets.",
+        score=2.0,
+        observation=obs,
     )
     h2 = SearchHit(
-        chunk_id="chunkB", content_hash=obs.content_hash,
-        text="Second distinct passage about timelines.", score=1.0, observation=obs,
+        chunk_id="chunkB",
+        content_hash=obs.content_hash,
+        text="Second distinct passage about timelines.",
+        score=1.0,
+        observation=obs,
     )
     store = StubStore([h1, h2])
     result = answer("q", store=store, provider=EchoCiteAllLLM())
@@ -337,7 +339,7 @@ def test_schema_is_passed_to_provider():
 
 
 def test_temporal_query_routes_to_time_range(mem_settings, fake_provider):
-    """"what did I do yesterday?" uses the observation time-range scan, not semantic.
+    """ "what did I do yesterday?" uses the observation time-range scan, not semantic.
 
     The observations' text contains none of the query's words, so a semantic-only
     path would not reliably select yesterday's entry — proving temporal routing.
@@ -350,11 +352,15 @@ def test_temporal_query_routes_to_time_range(mem_settings, fake_provider):
         yday = dt.datetime(2026, 6, 12, 10, 0, 0).timestamp()
         store.add_observation(
             "Reviewed the budget spreadsheet and emailed finance.",
-            source="capture", app="Numbers", ts=yday,
+            source="capture",
+            app="Numbers",
+            ts=yday,
         )
         store.add_observation(
             "Wrote the launch announcement draft.",
-            source="capture", app="Docs", ts=now,
+            source="capture",
+            app="Docs",
+            ts=now,
         )
 
         chatter = RAG(store, EchoCiteAllLLM())
@@ -468,14 +474,10 @@ def test_live_ollama_round_trip(tmp_path):
             window="Falcon",
             ts=1.0,
         )
-        result = answer(
-            "When does Project Falcon ship?", store=store, provider=provider, k=5
-        )
+        result = answer("When does Project Falcon ship?", store=store, provider=provider, k=5)
         assert isinstance(result.answer, str) and result.answer
         # Any citations returned must be real observation ids from the store.
-        valid_ids = {
-            o.id for o in store.time_range(0.0, 2.0)
-        }
+        valid_ids = {o.id for o in store.time_range(0.0, 2.0)}
         for c in result.citations:
             assert c.observation_id in valid_ids
     finally:

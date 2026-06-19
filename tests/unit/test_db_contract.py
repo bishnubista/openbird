@@ -11,23 +11,20 @@ import sqlite3
 import sys
 import threading
 import time
-import types
 
 import pytest
 
 from openbird.config import Settings
 from openbird.memory import migrations
 from openbird.memory.migrations import (
-    Migration,
     SCHEMA_VERSION,
+    Migration,
     ensure_schema_version,
 )
 from openbird.memory.store import MemoryStore
 from openbird.storage import crypto
 from openbird.storage.crypto import EncryptionUnavailableError, open_db_verified
-
 from tests.unit.conftest import FakeProvider
-
 
 # --------------------------------------------------------------------------- #
 # embed runs OUTSIDE the write txn; busy_timeout queues, no lock-during-IO #
@@ -167,8 +164,11 @@ def test_busy_timeout_set_on_plaintext_and_sqlcipher_paths(monkeypatch, tmp_path
 
 def test_fresh_db_is_stamped_to_current_version(tmp_path):
     db = str(tmp_path / "fresh.db")
-    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
-                    provider=FakeProvider(embed_dim=64))
+    s = MemoryStore(
+        db_path=db,
+        settings=Settings(data_dir=tmp_path, embed_dim=64),
+        provider=FakeProvider(embed_dim=64),
+    )
     try:
         ver = s.conn.execute("PRAGMA user_version").fetchone()
         # mapping_row_factory -> dict; value is the single column.
@@ -229,6 +229,7 @@ def test_newer_than_supported_db_is_refused(tmp_path):
 
 def test_migration_rolls_back_on_failure(tmp_path, monkeypatch):
     """A failing migration leaves user_version unchanged (atomic step)."""
+
     def _bad(conn):
         conn.execute("ALTER TABLE observations ADD COLUMN ok TEXT")
         raise RuntimeError("boom mid-migration")
@@ -267,6 +268,7 @@ def test_require_encryption_raises_when_key_unavailable(monkeypatch, tmp_path):
     assert "REQUIRE_ENCRYPTION" in str(exc.value)
     # Crucially: no plaintext DB file was created.
     import os
+
     assert not os.path.exists(db)
 
 
@@ -340,7 +342,9 @@ def test_delete_leaves_no_orphans_and_integrity_ok(tmp_path):
     s = MemoryStore(db_path=db, settings=settings, provider=FakeProvider(embed_dim=64))
     try:
         for i in range(20):
-            s.add_observation(f"observation number {i} with distinct content", source="t", ts=float(i))
+            s.add_observation(
+                f"observation number {i} with distinct content", source="t", ts=float(i)
+            )
         s.delete(since_ts=10.0)
         assert _count_orphans(s.conn) == 0
         ic = s.conn.execute("PRAGMA integrity_check").fetchone()
@@ -414,9 +418,7 @@ def test_vacuum_reclaims_space(tmp_path):
     try:
         # Insert a lot of distinct content to grow the file.
         for i in range(200):
-            s.add_observation(
-                f"distinct content block number {i} " * 20, source="t", ts=float(i)
-            )
+            s.add_observation(f"distinct content block number {i} " * 20, source="t", ts=float(i))
         s.delete(all=True)
         result = s.vacuum()
         # After deleting everything + VACUUM, the file is smaller than before.

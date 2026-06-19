@@ -666,9 +666,7 @@ def run_preflight(
     remote_models = classify_models(settings, ollama_host=resolved_host)
     required_models = _ollama_required_models(settings)
     # Does the active route depend on local Ollama at all (either model ollama*)?
-    uses_ollama = any(
-        is_ollama_model(m) for m in (settings.llm_model, settings.embed_model)
-    )
+    uses_ollama = any(is_ollama_model(m) for m in (settings.llm_model, settings.embed_model))
 
     if not uses_ollama:
         # Cloud-only / mlx-only route never touches local Ollama: skip the probe

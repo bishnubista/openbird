@@ -233,10 +233,10 @@ def _bundle_matches(app: str | None, entry: str) -> bool:
     app_l = app.lower()
     entry = entry.strip()
     if entry.startswith("glob:"):
-        return fnmatch.fnmatch(app_l, entry[len("glob:"):].strip().lower())
+        return fnmatch.fnmatch(app_l, entry[len("glob:") :].strip().lower())
     if entry.startswith("re:"):
         try:
-            return re.fullmatch(entry[len("re:"):].strip(), app, re.IGNORECASE) is not None
+            return re.fullmatch(entry[len("re:") :].strip(), app, re.IGNORECASE) is not None
         except re.error:
             # A malformed user regex must fail closed (never silently match).
             return False
@@ -252,9 +252,7 @@ def _bundle_matches_any(app: str | None, entries: Iterable[str]) -> bool:
 
 def is_incognito(app: str | None, window: str | None) -> bool:
     """Return True if app/window signals a private/incognito browsing context."""
-    return _substring_any(window, _INCOGNITO_MARKERS) or _substring_any(
-        app, _INCOGNITO_MARKERS
-    )
+    return _substring_any(window, _INCOGNITO_MARKERS) or _substring_any(app, _INCOGNITO_MARKERS)
 
 
 def _is_blocklisted(app: str | None, blocklist) -> bool:
@@ -608,17 +606,13 @@ def apply(
     text is the scrubbed version and ``decision.matched_rules`` lists the rules
     that fired.
     """
-    decision = decide(
-        app=app, window=window, text=text, incognito=incognito, settings=settings
-    )
+    decision = decide(app=app, window=window, text=text, incognito=incognito, settings=settings)
     if not decision.capture:
         return decision, None
 
     assert text is not None  # guaranteed by decide() "no_text" path
     scrubbed, matched = scrub(text)
-    decision = RedactionDecision(
-        capture=True, reason=decision.reason, matched_rules=matched
-    )
+    decision = RedactionDecision(capture=True, reason=decision.reason, matched_rules=matched)
     return decision, scrubbed
 
 

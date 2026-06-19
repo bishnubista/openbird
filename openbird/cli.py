@@ -78,9 +78,7 @@ def _resolve_cloud_opt_in(remote_models: dict[str, str]) -> bool:
             "to opt in, or use a local ollama/* model on a loopback host."
         )
         return False
-    return typer.confirm(
-        "Send captured memory to this remote model?", default=False
-    )
+    return typer.confirm("Send captured memory to this remote model?", default=False)
 
 
 def _provider():
@@ -167,9 +165,7 @@ def _peek_cohort(settings) -> str | None:
 
     conn = open_encrypted_db(settings.db_path, settings=settings)
     try:
-        row = conn.execute(
-            "SELECT value FROM embedding_meta WHERE key = 'cohort_key'"
-        ).fetchone()
+        row = conn.execute("SELECT value FROM embedding_meta WHERE key = 'cohort_key'").fetchone()
         if row is None:
             return None
         # row may be a tuple or a mapping depending on row_factory (default tuple).
@@ -211,9 +207,7 @@ def preflight(
     probe_embedding: bool = typer.Option(
         False, "--probe-embedding", help="Request a real embedding to confirm dim."
     ),
-    no_ollama: bool = typer.Option(
-        False, "--no-ollama", help="Skip the Ollama network probe."
-    ),
+    no_ollama: bool = typer.Option(False, "--no-ollama", help="Skip the Ollama network probe."),
 ) -> None:
     """Report whether this environment can actually run OpenBird.
 
@@ -251,9 +245,7 @@ def _render_preflight(report: dict) -> None:
     if reachable is True:
         o_status = "ok" if not missing else "degraded"
         o_detail = (
-            "all required models present"
-            if not missing
-            else f"missing: {', '.join(missing)}"
+            "all required models present" if not missing else f"missing: {', '.join(missing)}"
         )
     elif reachable == "unknown":
         o_status, o_detail = "unknown", "probe skipped"
@@ -396,9 +388,7 @@ def ingest(
     finally:
         store.close()
 
-    _console.print(
-        f"[green]Ingested[/] {ingested} file(s); skipped {skipped}."
-    )
+    _console.print(f"[green]Ingested[/] {ingested} file(s); skipped {skipped}.")
 
 
 def _collect_files(path: Path, *, glob: str, max_bytes: int) -> list[Path]:
@@ -502,18 +492,14 @@ def routine_run(
     from openbird.routines.templates import BUILTIN_TEMPLATES
 
     if name not in BUILTIN_TEMPLATES:
-        _err_console.print(
-            f"[red]Unknown routine:[/] {name}. Try `openbird routine list`."
-        )
+        _err_console.print(f"[red]Unknown routine:[/] {name}. Try `openbird routine list`.")
         raise typer.Exit(code=2)
 
     provider = _provider()
     store = _store(provider=provider)
     try:
         deliverer = stdout_deliverer if show_output else None
-        scheduler = RoutineScheduler(
-            memory_store=store, provider=provider, deliverer=deliverer
-        )
+        scheduler = RoutineScheduler(memory_store=store, provider=provider, deliverer=deliverer)
         scheduler.register_template(BUILTIN_TEMPLATES[name])
         run = scheduler.fire(name)
     finally:
@@ -588,8 +574,7 @@ def routine_start(
             scheduler.register_template(template)
         scheduler.start(catch_up=catch_up, lookback=lookback)
         _console.print(
-            f"[green]routine daemon started[/] routines={len(scheduler.routines)} "
-            f"(Ctrl-C to stop)"
+            f"[green]routine daemon started[/] routines={len(scheduler.routines)} (Ctrl-C to stop)"
         )
         stop.wait()
     except Exception as exc:  # noqa: BLE001 - daemon must not dump content to logs
@@ -740,9 +725,7 @@ def meeting() -> None:
         "and manual start are required by design."
     )
     if not available:
-        _console.print(
-            "[dim]Install with `uv sync --extra meetings` to enable transcription.[/]"
-        )
+        _console.print("[dim]Install with `uv sync --extra meetings` to enable transcription.[/]")
 
 
 # --------------------------------------------------------------------------- #
@@ -932,8 +915,7 @@ def reindex(
         current_cohort = cohort_row["value"] if cohort_row else None
 
         chunk_rows = conn.execute(
-            "SELECT rowid_int, text FROM chunks WHERE rowid_int IS NOT NULL "
-            "ORDER BY rowid_int"
+            "SELECT rowid_int, text FROM chunks WHERE rowid_int IS NOT NULL ORDER BY rowid_int"
         ).fetchall()
         total = len(chunk_rows)
 
@@ -1085,8 +1067,7 @@ def _parse_since(value: str, *, option_name: str = "--since") -> float:
         return dt.timestamp()
     except ValueError as exc:
         raise typer.BadParameter(
-            f"could not parse {option_name} {value!r}; use a unix ts, ISO date, "
-            "or span like '7d'."
+            f"could not parse {option_name} {value!r}; use a unix ts, ISO date, or span like '7d'."
         ) from exc
 
 

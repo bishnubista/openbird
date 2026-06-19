@@ -52,9 +52,7 @@ HELPER_PATH_ENV = "OPENBIRD_CAPTURE_HELPER"
 #: bundle. Used only when the env override is unset. There is intentionally NO
 #: dev-build fallback: if neither resolves to a real binary, capture fails
 #: closed rather than running an unsigned binary that will lose TCC grants.
-DEFAULT_SIGNED_HELPER_PATH = (
-    "/Applications/OpenBird.app/Contents/MacOS/capture-helper"
-)
+DEFAULT_SIGNED_HELPER_PATH = "/Applications/OpenBird.app/Contents/MacOS/capture-helper"
 
 
 class HelperUnavailableError(RuntimeError):
@@ -321,9 +319,7 @@ class CaptureDaemon:
         # Scrub metadata too: URLs embed auth codes/tokens/emails/doc
         # ids in their query/fragment, and window titles can carry full message
         # content. Body text alone going through scrub() is insufficient.
-        safe_window, safe_url, title_rules = redact.scrub_metadata(
-            window=window, url=url
-        )
+        safe_window, safe_url, title_rules = redact.scrub_metadata(window=window, url=url)
 
         try:
             self.store.add_observation(

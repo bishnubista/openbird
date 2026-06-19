@@ -52,11 +52,11 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import date, datetime, time as dt_time, timedelta, tzinfo
+from collections.abc import Callable
+from datetime import date, datetime, timedelta, tzinfo
+from datetime import time as dt_time
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-from collections.abc import Callable
 
 from openbird.config import Settings, get_settings
 from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
@@ -379,8 +379,7 @@ class RoutineStore:
                         " output_hash, error_code, error_class, idempotency_key)"
                         " VALUES (?, ?, ?, ?, NULL, ?, ?, 1, NULL, NULL, NULL,"
                         " NULL, NULL, ?)",
-                        (run_id, routine, scheduled_ts, now, now,
-                         STATUS_RUNNING, key),
+                        (run_id, routine, scheduled_ts, now, now, STATUS_RUNNING, key),
                     )
             except sqlite3.IntegrityError:
                 # Idempotency key already present -> someone else owns this run.
@@ -446,8 +445,7 @@ class RoutineStore:
                         " SET status = ?, error_code = ?, finished_ts = ?,"
                         " lease_ts = NULL, idempotency_key = ?"
                         " WHERE id = ?",
-                        (STATUS_ERROR, ERROR_CODE_LEASE_EXPIRED, end,
-                         archived_key, r["id"]),
+                        (STATUS_ERROR, ERROR_CODE_LEASE_EXPIRED, end, archived_key, r["id"]),
                     )
         return [r["id"] for r in rows]
 
@@ -506,8 +504,16 @@ class RoutineStore:
                     " output_hash = ?, error_code = ?, error_class = ?,"
                     " finished_ts = ?, lease_ts = NULL"
                     " WHERE id = ?",
-                    (status, stored_output, output_len, output_hash,
-                     error_code, error_class, end, run_id),
+                    (
+                        status,
+                        stored_output,
+                        output_len,
+                        output_hash,
+                        error_code,
+                        error_class,
+                        end,
+                        run_id,
+                    ),
                 )
                 if cur.rowcount == 0:
                     raise KeyError(f"unknown routine run id: {run_id!r}")
@@ -519,9 +525,7 @@ class RoutineStore:
         """Fetch a single run by id, raising :class:`KeyError` if absent."""
         with self._lock:
             conn = self._conn()
-            row = conn.execute(
-                "SELECT * FROM routine_runs WHERE id = ?", (run_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM routine_runs WHERE id = ?", (run_id,)).fetchone()
         if row is None:
             raise KeyError(f"unknown routine run id: {run_id!r}")
         return self._row_to_run(row)
@@ -531,8 +535,7 @@ class RoutineStore:
         with self._lock:
             conn = self._conn()
             row = conn.execute(
-                "SELECT * FROM routine_runs WHERE routine = ?"
-                " ORDER BY scheduled_ts DESC LIMIT 1",
+                "SELECT * FROM routine_runs WHERE routine = ? ORDER BY scheduled_ts DESC LIMIT 1",
                 (routine,),
             ).fetchone()
         return self._row_to_run(row) if row is not None else None
@@ -547,8 +550,7 @@ class RoutineStore:
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM routine_runs WHERE routine = ?"
-                    " ORDER BY scheduled_ts DESC",
+                    "SELECT * FROM routine_runs WHERE routine = ? ORDER BY scheduled_ts DESC",
                     (routine,),
                 ).fetchall()
         return [self._row_to_run(r) for r in rows]
@@ -610,24 +612,16 @@ class RoutineStore:
         if anchor_run is None:
             # Never settled: run the single most-recent due occurrence so a
             # brand-new routine fires promptly without replaying history.
-            candidate = previous_scheduled_occurrence(
-                interval, at=now, timezone=tz
-            )
+            candidate = previous_scheduled_occurrence(interval, at=now, timezone=tz)
             floor = candidate if global_floor is None else max(candidate, global_floor)
         else:
             anchor = anchor_run.scheduled_ts
             floor = anchor if global_floor is None else max(anchor, global_floor)
-            candidate = next_scheduled_occurrence(
-                interval, after=anchor, timezone=tz
-            )
+            candidate = next_scheduled_occurrence(interval, after=anchor, timezone=tz)
         while candidate <= now:
-            if candidate >= floor and not self.has_run(
-                default_idempotency_key(routine, candidate)
-            ):
+            if candidate >= floor and not self.has_run(default_idempotency_key(routine, candidate)):
                 missed.add(candidate)
-            candidate = next_scheduled_occurrence(
-                interval, after=candidate, timezone=tz
-            )
+            candidate = next_scheduled_occurrence(interval, after=candidate, timezone=tz)
 
         # (2) Reclaimed crashes whose grid key is free again.
         for sched_ts in self._reclaimed_occurrences(routine):

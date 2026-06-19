@@ -28,7 +28,6 @@ from openbird.capture.daemon import (
 from openbird.config import Settings
 from openbird.types import Observation
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / fakes
 # ---------------------------------------------------------------------------
@@ -93,17 +92,13 @@ def _line(**fields) -> str:
 
 
 def test_decide_rejects_when_not_allowlisted(allow_settings):
-    d = redact.decide(
-        app="com.unknown.app", window="w", text="hello", settings=allow_settings
-    )
+    d = redact.decide(app="com.unknown.app", window="w", text="hello", settings=allow_settings)
     assert not d.capture
     assert d.reason == "not_allowlisted"
 
 
 def test_decide_accepts_allowlisted(allow_settings):
-    d = redact.decide(
-        app="com.apple.mail", window="Inbox", text="hi", settings=allow_settings
-    )
+    d = redact.decide(app="com.apple.mail", window="Inbox", text="hi", settings=allow_settings)
     assert d.capture
     assert d.reason == "allowlisted"
 
@@ -134,9 +129,7 @@ def test_decide_dangerous_app_backstop(tmp_path):
         allowlist=["com.1password.1password"],
         blocklist=[],
     )
-    d = redact.decide(
-        app="com.1password.1password", window="Vault", text="secret", settings=s
-    )
+    d = redact.decide(app="com.1password.1password", window="Vault", text="secret", settings=s)
     assert not d.capture
     assert d.reason == "dangerous_app"
 
@@ -218,12 +211,12 @@ def test_scrub_jwt_and_pem():
 @pytest.mark.parametrize(
     "pan",
     [
-        "4111 1111 1111 1111",        # valid 16-digit Visa (separated)
-        "4111111111111111",           # valid 16-digit Visa (continuous)
-        "4000000000006",              # valid 13-digit
-        "378282246310005",            # valid 15-digit Amex
-        "6045632000000000120",        # valid 19-digit (Maestro range)
-        "6045 6320 0000 0000 120",    # valid 19-digit, separated
+        "4111 1111 1111 1111",  # valid 16-digit Visa (separated)
+        "4111111111111111",  # valid 16-digit Visa (continuous)
+        "4000000000006",  # valid 13-digit
+        "378282246310005",  # valid 15-digit Amex
+        "6045632000000000120",  # valid 19-digit (Maestro range)
+        "6045 6320 0000 0000 120",  # valid 19-digit, separated
     ],
 )
 def test_scrub_masks_valid_pans(pan):
@@ -237,11 +230,11 @@ def test_scrub_masks_valid_pans(pan):
 @pytest.mark.parametrize(
     "not_a_pan",
     [
-        "1234567890123456",            # 16-digit run that FAILS Luhn (phone-like)
-        "1234 5678 9012 3456",         # same, separated, fails Luhn
-        "123456789012345678",          # 18-digit legit order/account ID (fails Luhn)
-        "12345678901234567890",        # 20-digit run: not a card length at all
-        "order 30000000000004567 ref", # long ID; never inner-scanned
+        "1234567890123456",  # 16-digit run that FAILS Luhn (phone-like)
+        "1234 5678 9012 3456",  # same, separated, fails Luhn
+        "123456789012345678",  # 18-digit legit order/account ID (fails Luhn)
+        "12345678901234567890",  # 20-digit run: not a card length at all
+        "order 30000000000004567 ref",  # long ID; never inner-scanned
     ],
 )
 def test_scrub_preserves_non_pans(not_a_pan):
@@ -326,12 +319,12 @@ def test_scrub_token_after_underscore_redacts():
 @pytest.mark.parametrize(
     "wrapped",
     [
-        "-sk-abcdefghijklmnop1234567890",          # leading dash boundary
-        "sk-abcdefghijklmnop1234567890-",          # trailing dash boundary
-        "ghp_0123456789abcdefghijABCDEFGHIJ-",     # trailing dash, no-dash body
-        "(ghp_0123456789abcdefghijABCDEFGHIJ)",    # punctuation boundaries
-        "AKIAIOSFODNN7EXAMPLE-",                   # trailing dash, AWS key
-        "x-sk-abcdefghijklmnop1234567890-y",       # dash-delimited within text
+        "-sk-abcdefghijklmnop1234567890",  # leading dash boundary
+        "sk-abcdefghijklmnop1234567890-",  # trailing dash boundary
+        "ghp_0123456789abcdefghijABCDEFGHIJ-",  # trailing dash, no-dash body
+        "(ghp_0123456789abcdefghijABCDEFGHIJ)",  # punctuation boundaries
+        "AKIAIOSFODNN7EXAMPLE-",  # trailing dash, AWS key
+        "x-sk-abcdefghijklmnop1234567890-y",  # dash-delimited within text
     ],
 )
 def test_scrub_token_dash_punctuated_redacts(wrapped):
@@ -501,9 +494,7 @@ def test_daemon_rejects_all_events_when_paused(allow_settings):
     pause_file.write_text("")
     store = FakeStore()
     daemon = CaptureDaemon(store, settings=allow_settings)
-    lines = [
-        _line(app="com.apple.mail", window="Inbox", text="allowed text", ts=1.0)
-    ]
+    lines = [_line(app="com.apple.mail", window="Inbox", text="allowed text", ts=1.0)]
     stats = daemon.run_lines(lines)
     assert stats.received == 1
     assert stats.ingested == 0
@@ -700,9 +691,7 @@ def test_scrub_env_name_does_not_overmatch_plain_words():
 def test_allowlist_is_exact_not_substring(tmp_path):
     # An app whose id merely CONTAINS an allowlisted id must NOT pass.
     s = Settings(data_dir=tmp_path, allowlist=["com.apple.mail"])
-    d = redact.decide(
-        app="com.evil.com.apple.mail.spoof", window="w", text="hi", settings=s
-    )
+    d = redact.decide(app="com.evil.com.apple.mail.spoof", window="w", text="hi", settings=s)
     assert not d.capture
     assert d.reason == "not_allowlisted"
     # Exact id still passes.
@@ -723,9 +712,7 @@ def test_blocklist_is_exact_not_substring(tmp_path):
 
 def test_allowlist_glob_entry(tmp_path):
     s = Settings(data_dir=tmp_path, allowlist=["glob:com.acme.*"])
-    assert redact.decide(
-        app="com.acme.editor", window="w", text="hi", settings=s
-    ).capture
+    assert redact.decide(app="com.acme.editor", window="w", text="hi", settings=s).capture
     # Glob matches the whole id; a different vendor with the prefix elsewhere
     # is rejected (see test_allowlist_glob_does_not_match_other_vendor).
     assert redact.decide(
@@ -735,22 +722,14 @@ def test_allowlist_glob_entry(tmp_path):
 
 def test_allowlist_glob_does_not_match_other_vendor(tmp_path):
     s = Settings(data_dir=tmp_path, allowlist=["glob:com.acme.*"])
-    assert not redact.decide(
-        app="com.other.acme", window="w", text="hi", settings=s
-    ).capture
+    assert not redact.decide(app="com.other.acme", window="w", text="hi", settings=s).capture
 
 
 def test_allowlist_regex_entry(tmp_path):
     s = Settings(data_dir=tmp_path, allowlist=[r"re:com\.acme\.(mail|notes)"])
-    assert redact.decide(
-        app="com.acme.mail", window="w", text="hi", settings=s
-    ).capture
-    assert redact.decide(
-        app="com.acme.notes", window="w", text="hi", settings=s
-    ).capture
-    assert not redact.decide(
-        app="com.acme.terminal", window="w", text="hi", settings=s
-    ).capture
+    assert redact.decide(app="com.acme.mail", window="w", text="hi", settings=s).capture
+    assert redact.decide(app="com.acme.notes", window="w", text="hi", settings=s).capture
+    assert not redact.decide(app="com.acme.terminal", window="w", text="hi", settings=s).capture
 
 
 def test_malformed_regex_entry_fails_closed(tmp_path):
@@ -837,9 +816,7 @@ def test_store_failure_does_not_log_content(allow_settings, caplog):
             raise RuntimeError(f"db error while indexing: {text}")
 
     daemon = CaptureDaemon(LeakyStore(), settings=allow_settings)
-    lines = [
-        _line(app="com.apple.mail", window="Inbox", text=captured_text, ts=1.0)
-    ]
+    lines = [_line(app="com.apple.mail", window="Inbox", text=captured_text, ts=1.0)]
     with caplog.at_level("DEBUG", logger="openbird.capture"):
         stats = daemon.run_lines(lines)
     assert stats.errors == 1
@@ -847,9 +824,7 @@ def test_store_failure_does_not_log_content(allow_settings, caplog):
     # The captured text must appear NOWHERE in any emitted log record, including
     # exception messages / tracebacks.
     blob = "\n".join(r.getMessage() for r in caplog.records)
-    blob += "\n".join(
-        (r.exc_text or "") for r in caplog.records if r.exc_text is not None
-    )
+    blob += "\n".join((r.exc_text or "") for r in caplog.records if r.exc_text is not None)
     assert captured_text not in blob
     # A safe diagnostic (error type) is still present.
     assert any("RuntimeError" in r.getMessage() for r in caplog.records)
@@ -889,9 +864,7 @@ def test_run_fails_closed_when_helper_not_executable(allow_settings, tmp_path):
     not_exec = tmp_path / "helper"
     not_exec.write_text("data")
     not_exec.chmod(0o644)
-    daemon = CaptureDaemon(
-        FakeStore(), settings=allow_settings, helper_cmd=[str(not_exec)]
-    )
+    daemon = CaptureDaemon(FakeStore(), settings=allow_settings, helper_cmd=[str(not_exec)])
     with pytest.raises(HelperUnavailableError):
         daemon.run()
 
@@ -1051,9 +1024,7 @@ def test_run_forever_stops_when_event_already_set(allow_settings):
     assert stats.received == 0
 
 
-def test_run_forever_circuit_breaker_trips_on_repeated_failure(
-    allow_settings, monkeypatch
-):
+def test_run_forever_circuit_breaker_trips_on_repeated_failure(allow_settings, monkeypatch):
     # Consecutive failing cycles must trip the breaker and stop, not spin.
     import openbird.capture.daemon as daemon_mod
 
@@ -1223,9 +1194,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DANGEROUS_JSON = (
     _REPO_ROOT / "capture-helper" / "Sources" / "CaptureHelper" / "dangerous_apps.json"
 )
-_CAPTURE_SWIFT = (
-    _REPO_ROOT / "capture-helper" / "Sources" / "CaptureHelper" / "main.swift"
-)
+_CAPTURE_SWIFT = _REPO_ROOT / "capture-helper" / "Sources" / "CaptureHelper" / "main.swift"
 
 
 def _json_dangerous_set() -> set[str]:
@@ -1256,8 +1225,7 @@ def test_dangerous_list_parity_json_swift_python():
         f"only-python={python_set - json_set}"
     )
     assert json_set == swift_set, (
-        f"JSON vs Swift drift: only-json={json_set - swift_set} "
-        f"only-swift={swift_set - json_set}"
+        f"JSON vs Swift drift: only-json={json_set - swift_set} only-swift={swift_set - json_set}"
     )
     assert swift_set == python_set, (
         f"Swift vs Python drift: only-swift={swift_set - python_set} "

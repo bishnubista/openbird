@@ -71,7 +71,9 @@ def _assert_extensions_disabled(conn: sqlite3.Connection, root: Path) -> None:
         message = str(exc).lower()
         if "not authorized" in message or "disabled" in message:
             return
-        raise GateFailure(f"extension loading is not cleanly disabled: {type(exc).__name__}: {exc}") from exc
+        raise GateFailure(
+            f"extension loading is not cleanly disabled: {type(exc).__name__}: {exc}"
+        ) from exc
     raise GateFailure("extension loading unexpectedly allowed a direct load")
 
 
@@ -79,7 +81,9 @@ def _open_sqlcipher(path: Path, key: str) -> sqlite3.Connection:
     try:
         import sqlcipher3  # type: ignore
     except ImportError as exc:
-        raise GateFailure("sqlcipher3 is missing; run with `uv run --extra encryption ...`") from exc
+        raise GateFailure(
+            "sqlcipher3 is missing; run with `uv run --extra encryption ...`"
+        ) from exc
 
     conn = sqlcipher3.connect(str(path))  # type: ignore[attr-defined]
     conn.execute(f"PRAGMA key = \"x'{key}'\"")
@@ -90,7 +94,9 @@ def _open_sqlcipher(path: Path, key: str) -> sqlite3.Connection:
     return conn
 
 
-def _verify_encrypted_backup(source: sqlite3.Connection, backup_path: Path, key: str) -> dict[str, Any]:
+def _verify_encrypted_backup(
+    source: sqlite3.Connection, backup_path: Path, key: str
+) -> dict[str, Any]:
     target = _open_sqlcipher(backup_path, key)
     try:
         source.backup(target)
@@ -195,20 +201,26 @@ def run_gate(*, rows: int, max_seconds: float, keep: bool = False) -> dict[str, 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the OpenBird SQLCipher encryption gate.")
-    parser.add_argument("--rows", type=_positive_int, default=1000, help="Rows to write through SQLCipher.")
+    parser.add_argument(
+        "--rows", type=_positive_int, default=1000, help="Rows to write through SQLCipher."
+    )
     parser.add_argument(
         "--max-seconds",
         type=_positive_float,
         default=10.0,
         help="Maximum allowed gate runtime.",
     )
-    parser.add_argument("--keep", action="store_true", help="Keep the temporary workspace for inspection.")
+    parser.add_argument(
+        "--keep", action="store_true", help="Keep the temporary workspace for inspection."
+    )
     args = parser.parse_args()
 
     try:
         report = run_gate(rows=args.rows, max_seconds=args.max_seconds, keep=args.keep)
     except Exception as exc:
-        print(json.dumps({"ok": False, "error": str(exc), "error_type": type(exc).__name__}, indent=2))
+        print(
+            json.dumps({"ok": False, "error": str(exc), "error_type": type(exc).__name__}, indent=2)
+        )
         return 1
 
     print(json.dumps(report, indent=2, sort_keys=True))

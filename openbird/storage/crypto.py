@@ -239,7 +239,9 @@ def _try_sqlcipher(path: str, key: str) -> sqlite3.Connection | None:
         _chmod_private_db_files(path)
         return conn
     except Exception as exc:
-        logger.warning("SQLCipher path unusable (%s); falling back to plaintext", type(exc).__name__)
+        logger.warning(
+            "SQLCipher path unusable (%s); falling back to plaintext", type(exc).__name__
+        )
         # Don't leak the connection if a later step (sqlite-vec, WAL) failed.
         if conn is not None:
             try:

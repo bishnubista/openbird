@@ -172,9 +172,7 @@ class Transcriber:
             text=text,
         )
 
-    def transcribe_all(
-        self, segments: Iterable[SpeechSegment]
-    ) -> list[TranscriptSegment]:
+    def transcribe_all(self, segments: Iterable[SpeechSegment]) -> list[TranscriptSegment]:
         """Transcribe many windows, then stitch overlaps into a clean transcript.
 
         Raises :class:`MeetingsExtraNotInstalled` if faster-whisper is absent
@@ -213,11 +211,7 @@ def _resample_to_16k(samples: list[float], src_sr: int):
     # → 16000x), so a post-resample length check would allocate the very thing the
     # cap exists to prevent. This guard sits ahead of the numpy/pure-Python split,
     # so it protects both paths by construction.
-    projected = (
-        n_in
-        if not need_resample
-        else max(1, int(round(n_in * WHISPER_SR / float(src_sr))))
-    )
+    projected = n_in if not need_resample else max(1, int(round(n_in * WHISPER_SR / float(src_sr))))
     if max(n_in, projected) > _MAX_TRANSCRIBE_SAMPLES:
         raise MeetingsAudioTooLong(
             f"resample of {n_in} samples @ {src_sr} Hz would produce {projected} "
@@ -383,9 +377,7 @@ def _normalize_summary(obj: object) -> dict:
                     }
                 )
             elif isinstance(item, str) and item.strip():
-                out["action_items"].append(
-                    {"task": item.strip(), "owner": None, "due": None}
-                )
+                out["action_items"].append({"task": item.strip(), "owner": None, "due": None})
     decisions = obj.get("decisions") or []
     if isinstance(decisions, list):
         out["decisions"] = [str(d).strip() for d in decisions if str(d).strip()]

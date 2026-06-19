@@ -31,7 +31,6 @@ from openbird.config import Settings
 from openbird.memory.store import MemoryStore
 from openbird.preflight import check_ollama
 
-
 # --------------------------------------------------------------------------- #
 # Fakes                                                                        #
 # --------------------------------------------------------------------------- #
@@ -105,8 +104,11 @@ def settings(tmp_path) -> Settings:
 
 @pytest.fixture
 def store(settings) -> MemoryStore:
-    s = MemoryStore(db_path=str(settings.data_dir / "e2e.db"), settings=settings,
-                    provider=FakeProvider(embed_dim=768))
+    s = MemoryStore(
+        db_path=str(settings.data_dir / "e2e.db"),
+        settings=settings,
+        provider=FakeProvider(embed_dim=768),
+    )
     yield s
     s.close()
 
@@ -171,17 +173,20 @@ def test_cli_ingest_chat_purge_roundtrip(tmp_path, monkeypatch):
         return provider
 
     def fake_store(*, provider=None):
-        return MemoryStore(db_path=db_path, settings=settings,
-                           provider=provider or FakeProvider(embed_dim=768))
+        return MemoryStore(
+            db_path=db_path, settings=settings, provider=provider or FakeProvider(embed_dim=768)
+        )
 
     monkeypatch.setattr(cli, "get_settings", fake_get_settings)
     monkeypatch.setattr(cli, "_provider", fake_provider)
     monkeypatch.setattr(cli, "_store", fake_store)
     # purge/stats use the maintenance store (no cloud gate); same fake DB here.
     monkeypatch.setattr(
-        cli, "_store_maintenance",
-        lambda: MemoryStore(db_path=db_path, settings=settings,
-                            provider=FakeProvider(embed_dim=768)),
+        cli,
+        "_store_maintenance",
+        lambda: MemoryStore(
+            db_path=db_path, settings=settings, provider=FakeProvider(embed_dim=768)
+        ),
     )
 
     sample = tmp_path / "sample.txt"
@@ -236,8 +241,9 @@ def test_cli_prune_and_vacuum_roundtrip(tmp_path, monkeypatch):
     settings = Settings(data_dir=tmp_path, embed_dim=768)
 
     def fake_store(*, provider=None):
-        return MemoryStore(db_path=db_path, settings=settings,
-                           provider=provider or FakeProvider(embed_dim=768))
+        return MemoryStore(
+            db_path=db_path, settings=settings, provider=provider or FakeProvider(embed_dim=768)
+        )
 
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
     monkeypatch.setattr(cli, "_store", fake_store)
@@ -322,7 +328,8 @@ def test_cli_capture_then_chat_roundtrip_with_fake_helper(tmp_path, monkeypatch)
     # purge/stats use the maintenance store (no cloud gate); use the fake here too
     # so its cohort matches the FakeProvider-built store.
     monkeypatch.setattr(
-        cli, "_store_maintenance",
+        cli,
+        "_store_maintenance",
         lambda: MemoryStore(db_path=db_path, settings=settings, provider=provider),
     )
 
@@ -464,8 +471,7 @@ def test_ingest_then_chat_with_real_ollama(tmp_path):
 
     settings = Settings(data_dir=tmp_path, embed_dim=768)
     provider = LLMProvider(settings)
-    store = MemoryStore(db_path=str(tmp_path / "ollama.db"), settings=settings,
-                        provider=provider)
+    store = MemoryStore(db_path=str(tmp_path / "ollama.db"), settings=settings, provider=provider)
     try:
         obs = store.add_observation(
             SAMPLE_TEXT, app="Notes", window="OpenBird overview", source="ingest"

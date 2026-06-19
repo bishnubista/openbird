@@ -143,9 +143,7 @@ class MemoryStore:
             # Tolerate a cohort change ONLY when the store holds no vectors (e.g.
             # after a full purge): there is nothing to mix, so adopt the new
             # provider's cohort. Otherwise refuse to mix incompatible embeddings.
-            vec_count = self.conn.execute(
-                "SELECT COUNT(*) AS c FROM vec_chunks"
-            ).fetchone()["c"]
+            vec_count = self.conn.execute("SELECT COUNT(*) AS c FROM vec_chunks").fetchone()["c"]
             if vec_count == 0:
                 # Adopt the new cohort AND rebuild the vector table at the new
                 # provider's dimension — the old vec_chunks was created FLOAT[old]
@@ -220,8 +218,17 @@ class MemoryStore:
         try:
             self._begin()
             obs = self._write_observation(
-                blob_hash, norm, chunks, chunk_hashes, embeddings, ts,
-                app=app, window=window, url=url, session_id=session_id, source=source,
+                blob_hash,
+                norm,
+                chunks,
+                chunk_hashes,
+                embeddings,
+                ts,
+                app=app,
+                window=window,
+                url=url,
+                session_id=session_id,
+                source=source,
             )
             self.conn.commit()
             return obs
@@ -289,9 +296,7 @@ class MemoryStore:
                     "UPDATE chunks SET rowid_int = ? WHERE chunk_hash = ?",
                     (rowid_int, chunk_hash),
                 )
-                cur.execute(
-                    "INSERT INTO fts_chunks(rowid, text) VALUES (?, ?)", (rowid_int, ctext)
-                )
+                cur.execute("INSERT INTO fts_chunks(rowid, text) VALUES (?, ?)", (rowid_int, ctext))
                 vector = embeddings.get(chunk_hash)
                 if vector is None:
                     # Defensive: a chunk we created but didn't pre-embed (e.g. it
@@ -347,7 +352,7 @@ class MemoryStore:
             return []
 
         fused = rrf(rankings)
-        fused = fused[: pool]
+        fused = fused[:pool]
 
         hits = [self._build_hit(rowid_int, score) for rowid_int, score in fused]
         hits = [h for h in hits if h is not None]
@@ -377,8 +382,7 @@ class MemoryStore:
         """Return chunk rowids ranked by vector similarity (best first)."""
         vector = self.provider.embed([query])[0]
         rows = self.conn.execute(
-            "SELECT chunk_rowid FROM vec_chunks WHERE embedding MATCH ? "
-            "ORDER BY distance LIMIT ?",
+            "SELECT chunk_rowid FROM vec_chunks WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
             (_serialize_f32(vector), limit),
         ).fetchall()
         return [str(r["chunk_rowid"]) for r in rows]
@@ -490,17 +494,13 @@ class MemoryStore:
         """
         selectors = [all, since_ts is not None, before_ts is not None]
         if sum(1 for s in selectors if s) != 1:
-            raise ValueError(
-                "delete() requires exactly one of all=True, since_ts, or before_ts"
-            )
+            raise ValueError("delete() requires exactly one of all=True, since_ts, or before_ts")
 
         cur = self.conn
         try:
             self._begin()
             if all:
-                count = cur.execute(
-                    "SELECT COUNT(*) AS c FROM observations"
-                ).fetchone()["c"]
+                count = cur.execute("SELECT COUNT(*) AS c FROM observations").fetchone()["c"]
                 cur.execute("DELETE FROM observations")
                 cur.execute("DELETE FROM blob_chunks")
                 cur.execute("DELETE FROM chunks")
@@ -548,8 +548,7 @@ class MemoryStore:
                 cur.execute("DELETE FROM fts_chunks WHERE rowid = ?", (rid,))
                 cur.execute("DELETE FROM vec_chunks WHERE chunk_rowid = ?", (rid,))
             cur.execute(
-                "DELETE FROM chunks WHERE chunk_hash NOT IN "
-                "(SELECT chunk_hash FROM blob_chunks)"
+                "DELETE FROM chunks WHERE chunk_hash NOT IN (SELECT chunk_hash FROM blob_chunks)"
             )
 
             cur.commit()
@@ -595,6 +594,7 @@ class MemoryStore:
         VACUUM cannot run inside a transaction; this method must not be called
         with an open txn (it manages its own autocommit statements).
         """
+
         def _pragma_int(name: str) -> int:
             row = self.conn.execute(f"PRAGMA {name}").fetchone()
             if row is None:
@@ -641,6 +641,7 @@ class MemoryStore:
 
     def stats(self) -> dict:
         """Return row counts and the recorded embedding cohort key."""
+
         def count(table: str) -> int:
             return int(self.conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"])
 

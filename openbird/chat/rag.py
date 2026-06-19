@@ -110,17 +110,13 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
 class _Completer(Protocol):
     """Structural type for the slice of LLMProvider that RAG depends on."""
 
-    def complete(
-        self, messages: list[dict], *, json_schema: dict | None = None
-    ) -> str | dict: ...
+    def complete(self, messages: list[dict], *, json_schema: dict | None = None) -> str | dict: ...
 
 
 class _Searcher(Protocol):
     """Structural type for the slice of MemoryStore that RAG depends on."""
 
-    def search(
-        self, query: str, k: int = ..., *, semantic: bool = ...
-    ) -> list[SearchHit]: ...
+    def search(self, query: str, k: int = ..., *, semantic: bool = ...) -> list[SearchHit]: ...
 
 
 @dataclass
@@ -231,9 +227,7 @@ class RAG:
             return None
         now = self._now()
         phrase = m.group(0).lower()
-        today = _dt.datetime.fromtimestamp(now).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        today = _dt.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
         if phrase == "yesterday":
             start = today - _dt.timedelta(days=1)
             end = today - _dt.timedelta(microseconds=1)
@@ -250,7 +244,9 @@ class RAG:
         if not rows:
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
-                citations=[], used_hits=[], grounded=False,
+                citations=[],
+                used_hits=[],
+                grounded=False,
             )
         # Build context from occurrences, collapsing repeats of the same content.
         context: list[_ContextItem] = []
@@ -260,8 +256,11 @@ class RAG:
                 continue
             seen.add(obs.content_hash)
             hit = SearchHit(
-                chunk_id=f"obs:{obs.id}", content_hash=obs.content_hash,
-                text=text, score=0.0, observation=obs,
+                chunk_id=f"obs:{obs.id}",
+                content_hash=obs.content_hash,
+                text=text,
+                score=0.0,
+                observation=obs,
             )
             context.append(_ContextItem(source_id=f"S{len(context) + 1}", hit=hit))
             if len(context) >= self.max_context:
@@ -275,8 +274,10 @@ class RAG:
         if not grounded:
             answer_text = _UNGROUNDED_MESSAGE
         return AnswerResult(
-            answer=answer_text, citations=citations,
-            used_hits=[i.hit for i in context], grounded=grounded,
+            answer=answer_text,
+            citations=citations,
+            used_hits=[i.hit for i in context],
+            grounded=grounded,
         )
 
     # -- retrieval / dedup ----------------------------------------------------
@@ -355,9 +356,7 @@ class RAG:
             # field (text, app, window) is neutralized before insertion so it
             # cannot forge a fence/close delimiter or a source header.
             snippet = _neutralize(_truncate(item.hit.text, _CONTEXT_LEN))
-            blocks.append(
-                f"{_SOURCE_HEADER}{item.source_id}]{meta}\n{snippet}"
-            )
+            blocks.append(f"{_SOURCE_HEADER}{item.source_id}]{meta}\n{snippet}")
 
         context_payload = "\n\n".join(blocks)
         user_content = (
@@ -405,9 +404,7 @@ class RAG:
         return str(raw).strip(), []
 
     @staticmethod
-    def _validate_citations(
-        claimed_ids: list[str], context: list[_ContextItem]
-    ) -> list[Citation]:
+    def _validate_citations(claimed_ids: list[str], context: list[_ContextItem]) -> list[Citation]:
         """Drop hallucinated ids; build occurrence-level Citations for valid ones.
 
         Only ids present in the assembled context are accepted. Each accepted id
@@ -501,9 +498,7 @@ def answer(
     Returns:
         An :class:`AnswerResult` with the answer text and validated citations.
     """
-    return RAG(store, provider, max_context=max_context).answer(
-        query, k=k, semantic=semantic
-    )
+    return RAG(store, provider, max_context=max_context).answer(query, k=k, semantic=semantic)
 
 
 __all__ = ["RAG", "AnswerResult", "answer"]

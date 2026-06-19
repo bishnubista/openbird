@@ -47,7 +47,6 @@ def test_data_purge_not_gated_by_cloud(monkeypatch):
 def test_purge_works_after_embed_model_switch(monkeypatch, tmp_path):
     # Regression: a populated store + a switched embed model/dim must still purge
     # (the maintenance path must not hit the cohort-mismatch guard).
-    from openbird.config import Settings
     from openbird.memory.store import MemoryStore
 
     class _FakeP:
@@ -101,9 +100,7 @@ def test_capture_refuses_cloud_without_opt_in(monkeypatch):
     monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "text-embedding-3-small")
     monkeypatch.setenv("OPENBIRD_EMBED_DIM", "1536")
     reset_settings_cache()
-    res = CliRunner().invoke(
-        cli.app, ["capture", "--helper", "echo noop", "--allow-unsigned"]
-    )
+    res = CliRunner().invoke(cli.app, ["capture", "--helper", "echo noop", "--allow-unsigned"])
     assert res.exit_code == 2
     assert "CLOUD MODEL CONFIGURED" in res.output
 

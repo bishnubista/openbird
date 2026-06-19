@@ -197,9 +197,7 @@ class FilesystemMCPConnector:
                 is given.
         """
         if config.kind != "filesystem":
-            raise ValueError(
-                f"FilesystemMCPConnector cannot serve kind={config.kind!r}"
-            )
+            raise ValueError(f"FilesystemMCPConnector cannot serve kind={config.kind!r}")
         if not config.root:
             raise ValueError(f"connector {config.name!r} requires a 'root'")
         return cls(
@@ -301,9 +299,7 @@ class FilesystemMCPConnector:
             try:
                 file_fd = os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=dir_fd)
             except OSError as exc:
-                raise ValueError(
-                    f"path component is a symlink: {parts[-1]!r}"
-                ) from exc
+                raise ValueError(f"path component is a symlink: {parts[-1]!r}") from exc
         finally:
             os.close(dir_fd)
         return file_fd
@@ -313,9 +309,7 @@ class FilesystemMCPConnector:
         resources: list[MCPResource] = []
         for path in self._iter_files():
             rel = path.relative_to(self.root).as_posix()
-            resources.append(
-                MCPResource(uri=path.as_uri(), name=rel, kind=self.kind)
-            )
+            resources.append(MCPResource(uri=path.as_uri(), name=rel, kind=self.kind))
         return resources
 
     def read_resource(self, uri: str) -> str:
@@ -379,9 +373,7 @@ class FilesystemMCPConnector:
 
     def write(self, *args: object, **kwargs: object) -> None:
         """Write actions are disabled in the MVP."""
-        raise MCPWriteDisabledError(
-            "MCP write actions are disabled in OpenBird (read-only MVP)."
-        )
+        raise MCPWriteDisabledError("MCP write actions are disabled in OpenBird (read-only MVP).")
 
 
 class MCPRegistry:

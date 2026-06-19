@@ -50,6 +50,10 @@ def capture(
     signed bundle is missing (TCC grants are bound to a signed path). For local
     testing you can point ``--helper`` at a fake emitter with ``--allow-unsigned``.
     """
+    import logging
+    import signal
+    import threading
+
     from openbird.capture.daemon import (
         CaptureDaemon,
         CaptureSupervisorError,
@@ -57,10 +61,6 @@ def capture(
     )
     from openbird.cli import _provider
     from openbird.memory.store import MemoryStore
-
-    import logging
-    import signal
-    import threading
 
     helper_cmd = _parse_helper_cmd(helper)
     settings = get_settings()
@@ -89,17 +89,13 @@ def capture(
                 stop = threading.Event()
 
                 def _handle(signum, _frame) -> None:
-                    _err_console.print(
-                        f"[yellow]capture: signal {signum}, shutting down[/]"
-                    )
+                    _err_console.print(f"[yellow]capture: signal {signum}, shutting down[/]")
                     stop.set()
 
                 signal.signal(signal.SIGINT, _handle)
                 signal.signal(signal.SIGTERM, _handle)
                 _console.print("[green]capture daemon started[/] (Ctrl-C to stop)")
-                stats = daemon.run_forever(
-                    poll_interval=poll_interval, stop_event=stop
-                )
+                stats = daemon.run_forever(poll_interval=poll_interval, stop_event=stop)
         except HelperUnavailableError as exc:
             _err_console.print(f"[red]Capture helper unavailable:[/] {exc}")
             raise typer.Exit(code=3) from None

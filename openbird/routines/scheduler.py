@@ -193,9 +193,7 @@ class RoutineScheduler:
         if resolved is None:
             template: RoutineTemplate | None = BUILTIN_TEMPLATES.get(name)
             if template is None:
-                raise ValueError(
-                    f"no runner given and no built-in template named {name!r}"
-                )
+                raise ValueError(f"no runner given and no built-in template named {name!r}")
             resolved = template.run
 
         routine = Routine(name=name, prompt=prompt, interval=interval, runner=resolved)
@@ -275,9 +273,7 @@ class RoutineScheduler:
                 ERROR_CODE_RUNNER,
             )
             # Surface a content-safe marker to the immediate caller (not stored).
-            return persisted.model_copy(
-                update={"output": f"{error_class}: {ERROR_CODE_RUNNER}"}
-            )
+            return persisted.model_copy(update={"output": f"{error_class}: {ERROR_CODE_RUNNER}"})
 
         self.deliverer(name, text)
         # Metadata only: output length, never the body.
@@ -290,9 +286,7 @@ class RoutineScheduler:
         # ``output`` is content derived from captured data; the store only
         # persists the body when the DB is encrypted at rest, otherwise it keeps
         # metadata (length + hash) only.
-        persisted = self.run_store.finish(
-            run.id, status=store_mod.STATUS_DONE, output=text
-        )
+        persisted = self.run_store.finish(run.id, status=store_mod.STATUS_DONE, output=text)
         # Hand the live text back to the immediate caller without depending on
         # whether the durable store retained it (it does not when unencrypted).
         return persisted.model_copy(update={"output": text})
@@ -419,18 +413,14 @@ class RoutineScheduler:
         """APScheduler entrypoint: fire exact wall-clock occurrences due now."""
         routine = self._routines[name]
         due = (
-            previous_scheduled_occurrence(
-                routine.interval, at=self.clock(), timezone=self.timezone
-            )
+            previous_scheduled_occurrence(routine.interval, at=self.clock(), timezone=self.timezone)
             if scheduled_ts is None
             else scheduled_ts
         )
         now = self.clock()
         while due <= now:
             self.fire(name, scheduled_ts=due)
-            due = next_scheduled_occurrence(
-                routine.interval, after=due, timezone=self.timezone
-            )
+            due = next_scheduled_occurrence(routine.interval, after=due, timezone=self.timezone)
         if not self._stopping:
             self._schedule_at(name, due)
 

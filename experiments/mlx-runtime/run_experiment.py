@@ -25,7 +25,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_MLX_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 DEFAULT_OLLAMA_MODEL = "llama3.2"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
@@ -131,9 +130,10 @@ class MlxBackend(Backend):
                 )
             except TypeError:
                 return apply_chat_template(messages, add_generation_prompt=True)
-        return "\n".join(
-            f"{message['role'].upper()}: {message['content']}" for message in messages
-        ) + "\nASSISTANT:"
+        return (
+            "\n".join(f"{message['role'].upper()}: {message['content']}" for message in messages)
+            + "\nASSISTANT:"
+        )
 
 
 class OllamaBackend(Backend):
@@ -155,8 +155,7 @@ class OllamaBackend(Backend):
             info["server_ok"] = True
             info["installed_models"] = models
             info["model_installed"] = any(
-                name == self.model_name or name == f"{self.model_name}:latest"
-                for name in models
+                name == self.model_name or name == f"{self.model_name}:latest" for name in models
             )
             if not info["model_installed"]:
                 info["hint"] = f"Run: ollama pull {self.model_name}"
@@ -236,8 +235,7 @@ def build_cases() -> list[Case]:
         ]
     )
     routine_observations = "\n".join(
-        f"- 2026-06-15 {8 + i // 2:02d}:{(i % 2) * 30:02d} "
-        f"[{app}] {text}"
+        f"- 2026-06-15 {8 + i // 2:02d}:{(i % 2) * 30:02d} [{app}] {text}"
         for i, (app, text) in enumerate(
             [
                 ("Calendar", "Reviewed launch checklist and confirmed signed helper gate."),
@@ -433,12 +431,12 @@ def evaluate(
     haystack = json.dumps(parsed) if parsed is not None else text
     lower = haystack.lower()
 
-    required_hits = [
-        term for term in case.required_terms if term.lower() in lower
-    ]
+    required_hits = [term for term in case.required_terms if term.lower() in lower]
     banned_hits = [term for term in case.banned_terms if term.lower() in lower]
     if case.required_terms and len(required_hits) < max(1, len(case.required_terms) // 2):
-        notes.append(f"missed expected terms: {sorted(set(case.required_terms) - set(required_hits))}")
+        notes.append(
+            f"missed expected terms: {sorted(set(case.required_terms) - set(required_hits))}"
+        )
     if banned_hits:
         notes.append(f"repeated banned/injected terms: {banned_hits}")
     if case.expected_json and parsed is None:
@@ -466,12 +464,8 @@ def citation_validity(case: Case, parsed: dict[str, Any] | None) -> bool | None:
 
 def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
     completed = [item for item in results if not item.get("error")]
-    json_cases = [
-        item for item in completed if item.get("json_parse_success") is not None
-    ]
-    citation_cases = [
-        item for item in completed if item.get("citation_validity") is not None
-    ]
+    json_cases = [item for item in completed if item.get("json_parse_success") is not None]
+    citation_cases = [item for item in completed if item.get("citation_validity") is not None]
     useful = [item for item in completed if item["evaluation"].get("useful")]
     latencies = [item["latency_seconds"] for item in completed]
     return {
@@ -645,7 +639,9 @@ class time_limit:
 
 
 def hf_model_cache_path(model_name: str) -> Path:
-    return Path.home() / ".cache" / "huggingface" / "hub" / f"models--{model_name.replace('/', '--')}"
+    return (
+        Path.home() / ".cache" / "huggingface" / "hub" / f"models--{model_name.replace('/', '--')}"
+    )
 
 
 def dir_size_mb(path: Path) -> float | None:
@@ -762,7 +758,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=int(os.getenv("OPENBIRD_MLX_LOAD_TIMEOUT", "360")),
         help="Seconds to allow MLX-LM model load/download before recording setup failure.",
     )
-    parser.add_argument("--ollama-model", default=os.getenv("OPENBIRD_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
+    parser.add_argument(
+        "--ollama-model", default=os.getenv("OPENBIRD_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+    )
     parser.add_argument("--ollama-url", default=os.getenv("OLLAMA_HOST", DEFAULT_OLLAMA_URL))
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument(

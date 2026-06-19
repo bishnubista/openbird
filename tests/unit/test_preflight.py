@@ -7,6 +7,7 @@ import sqlite3
 
 import pytest
 
+from openbird.config import Settings
 from openbird.preflight import (
     GRANT_FAILED,
     GRANT_PASSED,
@@ -20,15 +21,15 @@ from openbird.preflight import (
     check_sqlite_vec,
     run_preflight,
 )
-from openbird.config import Settings
-
 
 # --------------------------------------------------------------------------- #
 # Fakes                                                                       #
 # --------------------------------------------------------------------------- #
 
 
-def make_http_get(*, status=200, models=("llama3.2:latest", "nomic-embed-text:latest"), raise_exc=None):
+def make_http_get(
+    *, status=200, models=("llama3.2:latest", "nomic-embed-text:latest"), raise_exc=None
+):
     """Build a fake http_get(url, timeout) -> (status, body)."""
 
     def _get(url, timeout):
@@ -436,8 +437,8 @@ def test_helper_grant_subprocess_failure_surfaces_probe_error(tmp_path):
     audio = tmp_path / "audio-helper"
     audio.write_text(
         "#!/bin/sh\n"
-        "printf '{\"screen_recording\":\"passed\","
-        "\"microphone\":\"passed\",\"system_audio\":\"passed\"}\\n'\n"
+        'printf \'{"screen_recording":"passed",'
+        '"microphone":"passed","system_audio":"passed"}\\n\'\n'
     )
     audio.chmod(0o700)
     probe = _packaged_helper_probe(capture_helper=helper, audio_helper=audio)
@@ -624,9 +625,7 @@ def test_run_preflight_reflects_privacy_config(tmp_path):
 
 
 def test_cloud_section_local_default(settings):
-    report = run_preflight(
-        settings, http_get=make_http_get(), db_opener=plaintext_handle_opener()
-    )
+    report = run_preflight(settings, http_get=make_http_get(), db_opener=plaintext_handle_opener())
     assert report["cloud"]["active"] is False
     assert report["cloud"]["blocked"] is False
     assert report["cloud"]["remote_models"] == {}
@@ -634,9 +633,7 @@ def test_cloud_section_local_default(settings):
 
 def test_cloud_section_blocked_without_opt_in(tmp_path):
     s = Settings(data_dir=tmp_path, embed_dim=768, llm_model="gpt-4o-mini")
-    report = run_preflight(
-        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
-    )
+    report = run_preflight(s, http_get=make_http_get(), db_opener=plaintext_handle_opener())
     assert report["cloud"]["active"] is True
     assert report["cloud"]["blocked"] is True
     assert report["cloud"]["remote_models"] == {"llm": "gpt-4o-mini"}
@@ -868,18 +865,14 @@ def test_mlx_model_strings_under_litellm_not_ready(tmp_path):
         llm_model="mlx/Qwen",
         embed_model="mlx/embed",
     )
-    report = run_preflight(
-        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
-    )
+    report = run_preflight(s, http_get=make_http_get(), db_opener=plaintext_handle_opener())
     assert report["backend"]["supported"] is False
     assert report["runtime_ok"] is False
 
 
 def test_litellm_backend_supported(tmp_path):
     s = Settings(data_dir=tmp_path, embed_dim=768)  # default litellm
-    report = run_preflight(
-        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
-    )
+    report = run_preflight(s, http_get=make_http_get(), db_opener=plaintext_handle_opener())
     assert report["backend"]["supported"] is True
     assert report["runtime_ok"] is True
 
@@ -893,9 +886,7 @@ def test_cloud_only_route_reports_no_ollama_requirements(tmp_path):
         embed_model="text-embedding-3-small",
         allow_cloud=True,
     )
-    report = run_preflight(
-        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
-    )
+    report = run_preflight(s, http_get=make_http_get(), db_opener=plaintext_handle_opener())
     assert report["cloud"]["uses_local_ollama"] is False
     assert report["ollama"]["required_models"] == []
     assert report["ollama"]["missing_models"] == []
@@ -911,9 +902,7 @@ def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_OLLAMA_HOST", "http://127.0.0.1:4242")
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
     s = Settings(data_dir=tmp_path, embed_dim=768)
-    report = run_preflight(
-        s, http_get=make_http_get(), db_opener=plaintext_handle_opener()
-    )
+    report = run_preflight(s, http_get=make_http_get(), db_opener=plaintext_handle_opener())
     preflight_host = report["ollama"]["host"]
 
     # Build the runtime provider and capture the api_base it would use.
@@ -927,9 +916,7 @@ def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):
         self.embedding_kwargs = kw
         return {"data": [{"embedding": [0.0] * 768} for _ in texts]}
 
-    fake = type(
-        "F", (), {"embedding_kwargs": None, "embedding": _fake_embedding}
-    )()
+    fake = type("F", (), {"embedding_kwargs": None, "embedding": _fake_embedding})()
     monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
     LLMProvider(s).embed(["x"])
     assert preflight_host == "http://127.0.0.1:4242"

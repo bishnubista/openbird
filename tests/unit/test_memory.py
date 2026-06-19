@@ -110,7 +110,7 @@ def test_shared_chunk_resolves_to_most_recent_occurrence(store):
 
     hits = store.search("identical shared note text", k=5)
     assert hits and hits[0].observation is not None
-    assert hits[0].observation.app == "AppB"   # most-recent occurrence
+    assert hits[0].observation.app == "AppB"  # most-recent occurrence
     assert hits[0].observation.ts == 200.0
 
 
@@ -241,7 +241,9 @@ def test_purge_all_allows_reopen_with_different_dimension(mem_settings, fake_pro
 
     # Reopen with a 512-dim provider + matching settings, then ingest (insert path).
     small = fake_provider.__class__(embed_dim=512)
-    s2 = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=512), provider=small)
+    s2 = MemoryStore(
+        db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=512), provider=small
+    )
     obs = s2.add_observation("a brand new note", source="capture", ts=2.0)
     assert obs.id
     assert s2.stats()["embed_dim"] == 512

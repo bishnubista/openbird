@@ -8,9 +8,9 @@ from openbird.config import Settings, get_settings, reset_settings_cache
 from openbird.llm.base import LLMProviderProtocol
 from openbird.llm.provider import (
     CloudOptInRequired,
+    LiteLLMProvider,
     LLMProvider,
     LLMTimeoutError,
-    LiteLLMProvider,
     classify_models,
     cloud_active,
     cloud_banner,
@@ -303,9 +303,7 @@ def test_cloud_model_does_not_get_local_api_base(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
     # A remote chat model must NOT be pointed at the local Ollama host
     # (allow_cloud=True since the gate now lives in the constructor).
-    provider = LLMProvider(
-        Settings(embed_dim=768, llm_model="gpt-4o-mini"), allow_cloud=True
-    )
+    provider = LLMProvider(Settings(embed_dim=768, llm_model="gpt-4o-mini"), allow_cloud=True)
     provider.complete([{"role": "user", "content": "hi"}])
     assert "api_base" not in fake.completion_kwargs
 
@@ -416,7 +414,5 @@ def test_direct_constructor_also_enforces_cloud_opt_in():
     with pytest.raises(CloudOptInRequired):
         LiteLLMProvider(Settings(embed_dim=768, llm_model="gpt-4o-mini"))
     # Opt-in argument lets it through.
-    p = LLMProvider(
-        Settings(embed_dim=768, llm_model="gpt-4o-mini"), allow_cloud=True
-    )
+    p = LLMProvider(Settings(embed_dim=768, llm_model="gpt-4o-mini"), allow_cloud=True)
     assert p.llm_model == "gpt-4o-mini"

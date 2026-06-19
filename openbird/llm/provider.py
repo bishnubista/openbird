@@ -279,9 +279,7 @@ class LiteLLMProvider:
         if json_schema is None:
             kwargs = self._model_kwargs(self.llm_model, timeout=self.llm_timeout)
             resp = self._call_with_timeout(
-                lambda: litellm.completion(
-                    model=self.llm_model, messages=messages, **kwargs
-                ),
+                lambda: litellm.completion(model=self.llm_model, messages=messages, **kwargs),
                 timeout=self.llm_timeout,
             )
             return self._content(resp)
@@ -429,8 +427,7 @@ def create_llm_provider(
             "its JSON, citation, latency, and setup gates pass."
         )
     raise ValueError(
-        f"Unsupported LLM backend {selected!r}; expected 'litellm' "
-        "or reserved backend 'mlx'."
+        f"Unsupported LLM backend {selected!r}; expected 'litellm' or reserved backend 'mlx'."
     )
 
 

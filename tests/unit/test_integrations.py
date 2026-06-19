@@ -41,8 +41,7 @@ class FakeConnector:
 
     def list_resources(self) -> list[MCPResource]:
         return [
-            MCPResource(uri=uri, name=uri.rsplit("/", 1)[-1], kind=self.kind)
-            for uri in self._docs
+            MCPResource(uri=uri, name=uri.rsplit("/", 1)[-1], kind=self.kind) for uri in self._docs
         ]
 
     def read_resource(self, uri: str) -> str:
@@ -165,9 +164,7 @@ def test_filesystem_lists_recursively(fs_root):
 
 
 def test_filesystem_include_exclude(fs_root):
-    conn = FilesystemMCPConnector(
-        "files", fs_root, include=["*.txt", "*.md"], exclude=["ignore.*"]
-    )
+    conn = FilesystemMCPConnector("files", fs_root, include=["*.txt", "*.md"], exclude=["ignore.*"])
     names = sorted(r.name for r in conn.list_resources())
     assert names == ["a.txt", "b.md", "sub/c.txt"]
 
@@ -201,9 +198,7 @@ def test_filesystem_blocks_path_traversal(fs_root, tmp_path):
 def test_read_resource_rejects_excluded_file_via_direct_uri(fs_root):
     # A caller must not be able to read a file that the connector's include/
     # exclude policy hides from list_resources() just by constructing its URI.
-    conn = FilesystemMCPConnector(
-        "files", fs_root, include=["*.txt", "*.md"], exclude=["ignore.*"]
-    )
+    conn = FilesystemMCPConnector("files", fs_root, include=["*.txt", "*.md"], exclude=["ignore.*"])
     listed = {r.name for r in conn.list_resources()}
     assert "ignore.log" not in listed
     excluded_uri = (fs_root / "ignore.log").as_uri()
@@ -282,8 +277,15 @@ def test_filesystem_label_is_present():
 # --------------------------------------------------------------------------- #
 def test_ingest_filesystem_into_store(fs_root, store):
     reg = MCPRegistry.from_configs(
-        [{"name": "files", "kind": "filesystem", "root": str(fs_root),
-          "include": ["*.txt", "*.md"], "exclude": ["ignore.*"]}]
+        [
+            {
+                "name": "files",
+                "kind": "filesystem",
+                "root": str(fs_root),
+                "include": ["*.txt", "*.md"],
+                "exclude": ["ignore.*"],
+            }
+        ]
     )
     created = reg.ingest(store)
     assert created == 3  # a.txt, b.md, sub/c.txt
