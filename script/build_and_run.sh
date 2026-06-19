@@ -101,11 +101,11 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
-# Sign the assembled bundle with a stable local identity so macOS TCC grants
-# (Accessibility / Screen Recording / Microphone) persist across rebuilds. This
-# is fail-soft: sign_local.sh falls back to ad-hoc signing if the self-signed
-# identity is unavailable, so a signing problem never blocks the build. Set
-# OPENBIRD_SKIP_SIGN=1 to skip entirely (e.g. a build host with no codesign).
+# Ad-hoc sign the assembled bundle with stable identifiers so macOS TCC grants
+# (Accessibility / Screen Recording / Microphone) persist across launches once
+# installed. Ad-hoc needs no keychain, so this also works inside the
+# $HOME-redirected `brew install` environment. Set OPENBIRD_SKIP_SIGN=1 to skip
+# (e.g. a build host with no codesign).
 if [[ "${OPENBIRD_SKIP_SIGN:-0}" != "1" ]] && command -v codesign >/dev/null 2>&1; then
   "$ROOT_DIR/script/sign_local.sh" "$APP_BUNDLE" || \
     echo "warning: signing failed; the app may not retain TCC grants" >&2
