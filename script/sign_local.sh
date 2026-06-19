@@ -78,7 +78,32 @@ identity_hash() {
     | head -n1
 }
 
+# Make an existing keychain usable for non-interactive signing: no auto-lock,
+# unlocked, in the user search list, and with codesign authorized to use the key.
+# This MUST run on every invocation (not just when minting): a prior run leaves
+# the keychain locked, and a sanitized environment like `brew install` cannot sign
+# with a locked keychain — which would otherwise force an ad-hoc fallback and lose
+# the stable identity.
+prepare_keychain() {
+  [[ -f "$KEYCHAIN_PATH" ]] || return 0
+  security set-keychain-settings "$KEYCHAIN_PATH" 2>/dev/null || true
+  security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH" 2>/dev/null || true
+  # Keep the keychain in the user search list so codesign/Gatekeeper can resolve
+  # the identity even when --keychain is also passed explicitly.
+  local existing
+  existing="$(security list-keychains -d user | sed -e 's/[[:space:]]*"//' -e 's/"[[:space:]]*$//')"
+  if ! printf '%s\n' "$existing" | grep -qF "$KEYCHAIN_PATH"; then
+    # shellcheck disable=SC2086
+    security list-keychains -d user -s "$KEYCHAIN_PATH" $existing 2>/dev/null || true
+  fi
+  # Re-authorize codesign to use the private key without prompting (idempotent).
+  security set-key-partition-list -S apple-tool:,apple:,codesign: \
+    -s -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+}
+
 ensure_identity() {
+  prepare_keychain
+
   # Already present? Reuse it (this is what makes the identity STABLE).
   [[ -n "$(identity_hash)" ]] && return 0
 

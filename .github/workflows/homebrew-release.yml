@@ -100,6 +100,22 @@ jobs:
             fi
           fi
 
+          # The formula downloads the tarball from the API asset endpoint (private
+          # repo), which is keyed by the NUMERIC REST asset id. Use `gh api` (REST)
+          # rather than `gh release view --json assets` — the latter returns the
+          # GraphQL node id (e.g. RA_...), which is not valid for
+          # /releases/assets/<id> and would fail the integer asset-id parse.
+          asset_id="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+              --jq ".assets[] | select(.name == \"$archive\") | .id" \
+            | head -n1
+          )"
+          if [[ -z "$asset_id" ]]; then
+            echo "Could not resolve asset id for $archive on $TAG." >&2
+            exit 1
+          fi
+          echo "archive_asset_id=$asset_id" >> "$GITHUB_ENV"
+
       - name: Checkout default branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -116,7 +132,8 @@ jobs:
           set -euo pipefail
           python3 scripts/update_homebrew_formula.py \
             --version "${{ steps.release.outputs.version }}" \
-            --sha256 "$archive_sha256"
+            --sha256 "$archive_sha256" \
+            --asset-id "$archive_asset_id"
 
       - name: Open formula-bump pull request
         env:
