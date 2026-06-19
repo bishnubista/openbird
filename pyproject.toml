@@ -25,7 +25,7 @@ rerank = ["sentence-transformers>=3.0"]
 encryption = ["sqlcipher3-wheels>=0.5.7", "keyring>=25.7"]
 # MCP integration clients.
 integrations = ["mcp>=1.0"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6", "mypy>=1.11"]
 
 [project.scripts]
 openbird = "openbird.cli:app"
@@ -43,6 +43,19 @@ testpaths = ["tests"]
 markers = [
     "integration: tests that require external services (e.g. a running Ollama); auto-skip when unavailable",
 ]
+
+[tool.mypy]
+# Advisory baseline while annotations are added incrementally — NOT a hard gate
+# yet (the CI mypy job is non-blocking). Tighten over time toward strict.
+python_version = "3.11"
+files = ["openbird"]
+# Most runtime deps (litellm, sqlite_vec, sqlcipher3, mcp, faster_whisper) ship
+# no type stubs; don't fail on their missing imports.
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+no_implicit_optional = true
+check_untyped_defs = true
 
 [tool.ruff]
 # 100 matches the existing codebase: only 2 lines exceed it today, vs 59 over 88.

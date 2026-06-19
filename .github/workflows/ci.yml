@@ -27,6 +27,12 @@ jobs:
         run: uv run ruff check .
       - name: ruff format --check
         run: uv run ruff format --check .
+      - name: mypy (advisory)
+        # Non-blocking while type annotations are added incrementally. Surfaces
+        # type errors without failing the build; remove continue-on-error to
+        # promote to a hard gate once the baseline is clean.
+        continue-on-error: true
+        run: uv run mypy
 
   test:
     # OpenBird targets macOS (AX, ScreenCaptureKit, launchd, Keychain), so the
