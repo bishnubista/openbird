@@ -388,14 +388,14 @@ def test_fire_records_delivery_error_without_stranding_lease(run_store, clock):
     assert "generated summary body" not in (row["error_code"] or "")
 
 
-def test_delivery_failure_preserves_body_and_frees_occurrence(clock):
+def test_delivery_failure_preserves_body_and_frees_occurrence(clock, tmp_path):
     # Option (b): a delivery failure must NOT silently drop the generated work.
     # Content-safe metadata is always recorded, and the body is retained inside
     # the encrypted boundary (exactly like a successful run). The occurrence's
     # grid key is also freed so a retry can re-claim it (option a).
     from openbird.config import Settings
 
-    settings = Settings(data_dir="/tmp/openbird-routines-test")
+    settings = Settings(data_dir=tmp_path)
     settings.encryption_enabled = True
     store = RoutineStore(db_path=":memory:", settings=settings, clock=clock)
     run = store.claim("daily", clock())
