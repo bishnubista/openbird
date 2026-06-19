@@ -44,8 +44,11 @@ class Openbird < Formula
     # Sign the assembled bundle with a stable, self-signed local identity so macOS
     # TCC grants (Accessibility / Screen Recording / Microphone) persist across
     # rebuilds. Fail-soft: sign_local.sh degrades to ad-hoc signing if the
-    # self-signed identity cannot be created, so install never breaks.
-    system "./script/sign_local.sh", app
+    # self-signed identity cannot be created, so install never breaks. The script
+    # ships in the same archive as this formula (git ls-files), so the existence
+    # guard is purely defensive — it keeps install from hard-failing rather than
+    # leaving the app unsigned should the script ever be absent.
+    system "./script/sign_local.sh", app if File.exist?("script/sign_local.sh")
 
     libexec.install app
 
