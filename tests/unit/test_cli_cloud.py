@@ -87,6 +87,50 @@ def test_data_stats_not_gated_by_cloud(monkeypatch):
     assert "CLOUD MODEL CONFIGURED" not in res.output
 
 
+def test_data_vacuum_not_gated_by_cloud(monkeypatch):
+    # Vacuum never embeds — it must stay available for local cleanup even when
+    # the configured embed model is cloud-backed and not opted in.
+    monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("OPENBIRD_EMBED_DIM", "1536")
+    reset_settings_cache()
+    res = CliRunner().invoke(cli.app, ["data", "vacuum"])
+    assert res.exit_code == 0, res.output
+    assert "CLOUD MODEL CONFIGURED" not in res.output
+    assert "Vacuumed" in res.output
+
+
+def test_vacuum_works_after_embed_model_switch(monkeypatch, tmp_path):
+    # Regression: a populated store + a switched embed model/dim must still
+    # vacuum. Maintenance must not hit the cohort-mismatch guard.
+    from openbird.memory.store import MemoryStore
+
+    class _FakeP:
+        def __init__(self, dim=768, tag="a"):
+            self.embed_dim = dim
+            self.tag = tag
+
+        def embed(self, texts):
+            return [[0.1] * self.embed_dim for _ in texts]
+
+        def cohort_key(self):
+            return f"fake:{self.tag}:{self.embed_dim}:x"
+
+    s = Settings(data_dir=tmp_path, embed_dim=768)
+    st = MemoryStore(settings=s, provider=_FakeP(768, "a"))
+    st.add_observation("switch test", source="ingest", window="t")
+    st.close()
+
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "ollama/other-embed")
+    monkeypatch.setenv("OPENBIRD_EMBED_DIM", "1536")
+    reset_settings_cache()
+
+    res = CliRunner().invoke(cli.app, ["data", "vacuum"])
+    assert res.exit_code == 0, res.output
+    assert "Embedding cohort mismatch" not in res.output
+    assert "Vacuumed" in res.output
+
+
 def test_local_default_has_no_cloud_banner():
     res = CliRunner().invoke(cli.app, ["data", "stats"])
     assert res.exit_code == 0, res.output

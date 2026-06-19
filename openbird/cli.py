@@ -176,9 +176,9 @@ def _peek_cohort(settings) -> str | None:
 
 
 def _store_maintenance():
-    """Open the store for delete-only ops (purge/stats) WITHOUT a cloud gate.
+    """Open the store for local maintenance ops WITHOUT a cloud gate.
 
-    Purge and stats never embed or send captured content to a model, so:
+    Purge/prune/vacuum/stats never embed or send captured content to a model, so:
       * they must NOT require ``OPENBIRD_ALLOW_CLOUD`` (deleting local data on a
         privacy tool can't depend on cloud opt-in), AND
       * they must NOT be blocked by an embedding-cohort mismatch after the user
@@ -818,7 +818,9 @@ def data_vacuum() -> None:
     Deletes/prunes only mark pages free; the file shrinks only after VACUUM
     rewrites it. Prints the bytes reclaimed.
     """
-    store = _store()
+    # Vacuum is local maintenance: it must keep working even if the configured
+    # embed model is cloud-backed or no longer matches the stored cohort.
+    store = _store_maintenance()
     try:
         result = store.vacuum()
     finally:

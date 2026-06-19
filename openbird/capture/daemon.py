@@ -6,9 +6,10 @@ later) that emits one JSON object per capture event on stdout:
     {"app": "...", "window": "...", "url": "...", "text": "...", "ts": 1700000000.0,
      "incognito": false}
 
-``app`` is the frontmost app's bundle id, ``window`` its title, ``url`` the
-browser URL (if any), ``text`` the AX-extracted active-window text, ``ts`` an
-epoch seconds timestamp, and an optional ``incognito`` flag. This daemon:
+``app`` is the frontmost app's bundle id, ``window`` its title, ``url`` a
+browser URL if a helper supplies one (the MVP Swift helper emits ``null``),
+``text`` the AX-extracted active-window text, ``ts`` an epoch seconds timestamp,
+and an optional ``incognito`` flag. This daemon:
 
   1. spawns the helper (an injectable command, so tests use a fake emitter),
   2. parses each JSON line,

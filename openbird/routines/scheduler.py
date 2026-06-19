@@ -44,6 +44,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from openbird.routines import store as store_mod
 from openbird.routines.store import (
+    ERROR_CODE_DELIVERY,
     RoutineStore,
     default_idempotency_key,
     next_scheduled_occurrence,
@@ -72,7 +73,9 @@ Clock = Callable[[], float]
 # effects. The daemon default is the content-safe no-op (:func:`null_deliverer`).
 Deliverer = Callable[[str, str], None]
 
-# Stable, content-safe error code recorded when a routine runner raises.
+# Stable, content-safe error code recorded when a routine runner raises. The
+# delivery-sink counterpart (``ERROR_CODE_DELIVERY``) is owned by the store,
+# which also frees the occurrence for retry — see ``RoutineStore.fail_delivery``.
 ERROR_CODE_RUNNER = "RUNNER_EXCEPTION"
 
 
@@ -139,7 +142,7 @@ class RoutineScheduler:
                 ``<data_dir>/routines.db`` if omitted (never ``:memory:``).
             clock: Returns current unix time; defaults to :func:`time.time`.
                 Injecting a fake clock makes catchup/idempotency deterministic.
-            deliverer: Output sink; defaults to :func:`stdout_deliverer`.
+            deliverer: Output sink; defaults to :func:`null_deliverer`.
             scheduler: An APScheduler scheduler; a ``BackgroundScheduler`` is
                 created lazily if omitted (only needed for live operation).
             timezone: Timezone for wall-clock daily/weekly cadence; defaults to
@@ -275,7 +278,30 @@ class RoutineScheduler:
             # Surface a content-safe marker to the immediate caller (not stored).
             return persisted.model_copy(update={"output": f"{error_class}: {ERROR_CODE_RUNNER}"})
 
-        self.deliverer(name, text)
+        try:
+            self.deliverer(name, text)
+        except Exception as exc:  # noqa: BLE001 - one sink must not strand a run
+            # Generation succeeded; only delivery failed. Record a terminal,
+            # content-safe error BUT keep the generated body and free the
+            # occurrence for retry (a transient sink must not drop output) —
+            # ``fail_delivery`` persists ``text`` and re-keys the run, up to the
+            # store's max-attempts cap (after which it settles permanently).
+            error_class = type(exc).__name__
+            persisted = self.run_store.fail_delivery(
+                run.id,
+                output=text,
+                error_class=error_class,
+            )
+            error_code = self.run_store.run_error_code(run.id) or ERROR_CODE_DELIVERY
+            logger.warning(
+                "routine delivery error: name=%s scheduled_ts=%.0f error_class=%s error_code=%s",
+                name,
+                sched,
+                error_class,
+                error_code,
+            )
+            return persisted.model_copy(update={"output": f"{error_class}: {error_code}"})
+
         # Metadata only: output length, never the body.
         logger.info(
             "routine done: name=%s scheduled_ts=%.0f output_len=%d",
@@ -448,5 +474,6 @@ __all__ = [
     "stdout_deliverer",
     "null_deliverer",
     "ERROR_CODE_RUNNER",
+    "ERROR_CODE_DELIVERY",
     "DEFAULT_CATCHUP_LOOKBACK",
 ]

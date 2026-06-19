@@ -3,7 +3,7 @@
 // Emits one JSON object per capture on stdout, matching the schema the Python
 // capture daemon parses (`openbird/capture/daemon.py`):
 //
-//     {"app": "<bundle id>", "window": "<title>", "url": "<url|null>",
+//     {"app": "<bundle id>", "window": "<title>", "url": null,
 //      "text": "<AX text>", "ts": <epoch seconds>, "incognito": false}
 //
 // Privacy by prevention:
@@ -367,7 +367,7 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>) {
     let event = CaptureEvent(
         app: bundleId,
         window: windowTitle,
-        url: nil, // URL extraction is per-app (Safari/Chrome AX) — out of MVP scope here.
+        url: nil, // URL extraction is per-app (Safari/Chrome AX) and not in the MVP helper.
         text: text,
         ts: Date().timeIntervalSince1970,
         incognito: false
