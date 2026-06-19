@@ -16,6 +16,7 @@ import pytest
 from openbird.routines import templates
 from openbird.routines.scheduler import (
     DEFAULT_CATCHUP_LOOKBACK,
+    ERROR_CODE_DELIVERY,
     ERROR_CODE_RUNNER,
     Routine,
     RoutineScheduler,
@@ -349,6 +350,111 @@ def test_error_message_never_persisted_to_store(run_store, clock):
     assert row["output"] is None
     assert "leak" not in (row["error_class"] or "")
     assert "captured page body" not in (row["error_code"] or "")
+
+
+def test_fire_records_delivery_error_without_stranding_lease(run_store, clock):
+    # A notification/stdout sink can fail after the runner succeeds. The run must
+    # still reach a terminal, content-safe state instead of staying leased.
+    def fail_delivery(_name, _text):
+        raise BrokenPipeError("leak: generated summary body")
+
+    sched = RoutineScheduler(
+        memory_store=FakeMemoryStore([_obs(clock() - 10)]),
+        provider=FakeProvider(),
+        routine_store=run_store,
+        clock=clock,
+        deliverer=fail_delivery,
+    )
+    sched.register("daily", "prompt", interval=100.0, runner=_runner)
+    run = sched.fire("daily", scheduled_ts=clock())
+
+    assert run is not None and run.status == STATUS_ERROR
+    assert "BrokenPipeError" in (run.output or "")
+    assert ERROR_CODE_DELIVERY in (run.output or "")
+    assert "generated summary body" not in (run.output or "")
+
+    row = run_store._conn().execute(
+        "SELECT status, finished_ts, lease_ts, error_class, error_code, output "
+        "FROM routine_runs WHERE id = ?",
+        (run.id,),
+    ).fetchone()
+    assert row["status"] == STATUS_ERROR
+    assert row["finished_ts"] is not None
+    assert row["lease_ts"] is None
+    assert row["error_class"] == "BrokenPipeError"
+    assert row["error_code"] == ERROR_CODE_DELIVERY
+    assert row["output"] is None
+    assert "leak" not in (row["error_class"] or "")
+    assert "generated summary body" not in (row["error_code"] or "")
+
+
+def test_delivery_failure_preserves_body_and_frees_occurrence(clock, tmp_path):
+    # Option (b): a delivery failure must NOT silently drop the generated work.
+    # Content-safe metadata is always recorded, and the body is retained inside
+    # the encrypted boundary (exactly like a successful run). The occurrence's
+    # grid key is also freed so a retry can re-claim it (option a).
+    from openbird.config import Settings
+
+    settings = Settings(data_dir=tmp_path)
+    settings.encryption_enabled = True
+    store = RoutineStore(db_path=":memory:", settings=settings, clock=clock)
+    run = store.claim("daily", clock())
+    failed = store.fail_delivery(
+        run.id, output="generated body", error_class="BrokenPipeError"
+    )
+
+    assert failed.status == STATUS_ERROR
+    assert failed.output == "generated body"  # retained inside encrypted boundary
+
+    row = store._conn().execute(
+        "SELECT output_len, output_hash, error_code, error_class, lease_ts,"
+        " finished_ts, idempotency_key FROM routine_runs WHERE id = ?",
+        (run.id,),
+    ).fetchone()
+    assert row["output_len"] == len("generated body")
+    assert row["output_hash"] is not None and "generated body" not in row["output_hash"]
+    assert row["error_code"] == ERROR_CODE_DELIVERY
+    assert row["error_class"] == "BrokenPipeError"
+    assert row["lease_ts"] is None and row["finished_ts"] is not None
+    # The default grid key is freed: a later claim/catch-up can retry it.
+    default_key = default_idempotency_key("daily", clock())
+    assert row["idempotency_key"] != default_key
+    assert store.has_run(default_key) is False
+    store.close()
+
+
+def test_delivery_failure_is_retried_on_next_catchup(run_store, clock):
+    # Option (a): a sink that fails once must not permanently drop the
+    # occurrence. The run is recorded terminally, but the occurrence is freed
+    # for retry and the next catch-up re-runs it (succeeding once the sink heals).
+    attempts = {"n": 0}
+
+    def flaky_delivery(_name, _text):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise BrokenPipeError("transient sink failure")
+
+    sched = RoutineScheduler(
+        memory_store=FakeMemoryStore([_obs(clock() - 10)]),
+        provider=FakeProvider(),
+        routine_store=run_store,
+        clock=clock,
+        deliverer=flaky_delivery,
+    )
+    sched.register("daily", "prompt", interval=100.0, runner=_runner)
+
+    first = sched.fire("daily", scheduled_ts=clock())
+    assert first is not None and first.status == STATUS_ERROR
+    assert ERROR_CODE_DELIVERY in (first.output or "")
+
+    # No lease is stranded, yet the occurrence is eligible for retry.
+    missed = run_store.missed_occurrences("daily", interval=100.0, now=clock())
+    assert clock() in missed, "delivery-failed occurrence was not freed for retry"
+
+    completed = sched.run_missed()
+    assert any(r.scheduled_ts == clock() for r in completed)
+    assert all(r.status == STATUS_DONE for r in completed)
+    assert attempts["n"] == 2, "delivery was not actually re-attempted"
 
 
 # -- scheduler: missed-job catchup with fake clock ---------------------------
