@@ -142,6 +142,11 @@ def default_idempotency_key(routine: str, scheduled_ts: float) -> str:
     return f"{routine}@{int(scheduled_ts)}"
 
 
+def _escape_like_pattern(value: str) -> str:
+    """Escape SQLite LIKE wildcards while leaving the trailing wildcard usable."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def next_scheduled_occurrence(
     interval: float,
     *,
@@ -395,6 +400,7 @@ class RoutineStore:
         :meth:`finish` can be detected and reclaimed by :meth:`reclaim_stale`.
         """
         key = idempotency_key or default_idempotency_key(routine, scheduled_ts)
+        archived_key_pattern = f"{_escape_like_pattern(key)}#%"
         now = self._clock()
         run_id = uuid.uuid4().hex
         with self._lock:
@@ -414,10 +420,11 @@ class RoutineStore:
                         " output_hash, error_code, error_class, idempotency_key)"
                         " VALUES (?, ?, ?, ?, NULL, ?, ?,"
                         "   (SELECT COUNT(*) + 1 FROM routine_runs"
-                        "    WHERE routine = ? AND idempotency_key LIKE ?),"
+                        "    WHERE routine = ?"
+                        "    AND idempotency_key LIKE ? ESCAPE '\\'),"
                         "   NULL, NULL, NULL, NULL, NULL, ?)",
                         (run_id, routine, scheduled_ts, now, now,
-                         STATUS_RUNNING, routine, f"{key}#%", key),
+                         STATUS_RUNNING, routine, archived_key_pattern, key),
                     )
             except conn.IntegrityError:
                 # Idempotency key already present -> someone else owns this run.

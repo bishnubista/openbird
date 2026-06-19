@@ -511,6 +511,32 @@ def test_claim_records_increasing_attempt_per_occurrence(clock):
     store.close()
 
 
+def test_claim_attempt_count_escapes_custom_key_like_wildcards(clock):
+    store = RoutineStore(db_path=":memory:", clock=clock)
+
+    archived = store.claim("daily", clock(), idempotency_key="jobA1")
+    store.reclaim_stale(now=clock() + store.lease_timeout + 1.0)
+    assert archived is not None
+
+    # Without escaping, LIKE 'job_1#%' matches the unrelated 'jobA1#...' archive.
+    claimed = store.claim("daily", clock() + 1.0, idempotency_key="job_1")
+    row = store._conn().execute(
+        "SELECT attempt FROM routine_runs WHERE id = ?",
+        (claimed.id,),
+    ).fetchone()
+
+    assert row["attempt"] == 1
+
+    claimed = store.claim("daily", clock() + 2.0, idempotency_key="job%1")
+    row = store._conn().execute(
+        "SELECT attempt FROM routine_runs WHERE id = ?",
+        (claimed.id,),
+    ).fetchone()
+
+    assert row["attempt"] == 1
+    store.close()
+
+
 def test_delivery_failure_gives_up_after_max_attempts(clock):
     # The retry budget is bounded: a sink that fails every time must eventually
     # be given up on — a permanent terminal error with NO further retries (so a
