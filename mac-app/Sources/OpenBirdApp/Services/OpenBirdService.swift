@@ -1,8 +1,41 @@
 import AppKit
 import Foundation
 
+/// A decoded, UI-friendly slice of `openbird preflight --json`.
+struct PreflightReport: Equatable {
+    var ollamaReachable: Bool?           // nil = unknown / not probed
+    var requiredModels: [String] = []
+    var missingModels: [String] = []
+    var encryptionStatus: String = "unknown"
+    var encryptionEnabled: Bool = false
+    /// capability -> "passed" | "failed" | "unknown"
+    var grants: [String: String] = [:]
+    var helperPresent: Bool = false
+    var runtimeOK: Bool = false
+    var releaseOK: Bool = false
+    var error: String?
+
+    func grant(_ capability: String) -> String { grants[capability] ?? "unknown" }
+}
+
+/// macOS privacy panes the setup flow can deep-link into.
+enum PrivacyPane: String {
+    case accessibility = "Privacy_Accessibility"
+    case screenRecording = "Privacy_ScreenCapture"
+    case microphone = "Privacy_Microphone"
+
+    var url: URL? {
+        URL(string: "x-apple.systempreferences:com.apple.preference.security?\(rawValue)")
+    }
+}
+
 final class OpenBirdService {
     private let fileManager = FileManager.default
+    private let defaults = UserDefaults.standard
+    private let allowlistKey = "openbird.captureAllowlist"
+
+    /// The capture daemon launched by the app (if any), so it can be stopped.
+    private var captureProcess: Process?
 
     private var dataDirectory: URL {
         if let override = ProcessInfo.processInfo.environment["OPENBIRD_DATA_DIR"],
@@ -15,6 +48,8 @@ final class OpenBirdService {
     private var pauseFile: URL {
         dataDirectory.appendingPathComponent("capture.paused")
     }
+
+    // MARK: - Pause / capture lifecycle
 
     func isCapturePaused() -> Bool {
         fileManager.fileExists(atPath: pauseFile.path)
@@ -36,6 +71,57 @@ final class OpenBirdService {
         return isCapturePaused()
     }
 
+    /// Whether a capture daemon launched by this app is still running.
+    func isCaptureRunning() -> Bool {
+        if let proc = captureProcess, proc.isRunning { return true }
+        // Also treat an externally running helper as "capturing" for status.
+        return Self.run("/usr/bin/pgrep", arguments: ["-x", "capture-helper"]).exitCode == 0
+    }
+
+    /// Launch `openbird capture --loop` via the bundled wrapper, injecting the
+    /// saved allowlist as OPENBIRD_ALLOWLIST so the daemon captures only the apps
+    /// the user opted into. Returns false if the CLI cannot be resolved.
+    @discardableResult
+    func startCapture() -> Bool {
+        guard captureProcess?.isRunning != true, let cli = resolveOpenBirdCLI() else {
+            return captureProcess?.isRunning == true
+        }
+        // Resuming also clears any pause gate so capture actually records.
+        _ = try? setCapturePaused(false)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cli)
+        process.arguments = ["capture", "--loop"]
+        var env = ProcessInfo.processInfo.environment
+        let allow = allowlist()
+        if !allow.isEmpty {
+            env["OPENBIRD_ALLOWLIST"] = allow.joined(separator: ",")
+        }
+        process.environment = env
+        // Discard helper stdout/stderr from the app: captured content must never
+        // flow into the app's logs. The daemon persists to the local DB itself.
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            captureProcess = process
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Stop the app-launched capture daemon and any stray helper processes.
+    func stopCapture() {
+        if let proc = captureProcess, proc.isRunning {
+            proc.terminate()
+        }
+        captureProcess = nil
+        _ = stopHelperProcesses()
+    }
+
+    // MARK: - Helpers
+
     func helperStatuses() -> [HelperStatus] {
         [
             helperStatus(id: "capture", label: "Capture helper", executable: "capture-helper"),
@@ -44,16 +130,13 @@ final class OpenBirdService {
     }
 
     func stopHelperProcesses() -> Bool {
-        let processNames = [
-            "capture-helper",
-            "audio-helper",
-            "CaptureHelper",
-            "AudioHelper"
-        ]
+        let processNames = ["capture-helper", "audio-helper", "CaptureHelper", "AudioHelper"]
         return processNames
             .map { Self.run("/usr/bin/pkill", arguments: ["-x", $0]).exitCode == 0 }
             .contains(true)
     }
+
+    // MARK: - Folders & panes
 
     func openDataFolder() {
         try? fileManager.createDirectory(
@@ -68,32 +151,80 @@ final class OpenBirdService {
         NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
     }
 
-    func preflightSummary() async -> PreflightSummary {
-        guard let cli = resolveOpenBirdCLI() else {
-            return PreflightSummary(
-                status: "CLI Missing",
-                detail: "Install the openbird command or use the bundled app wrapper."
-            )
-        }
-
-        let result = await runAsync(
-            cli,
-            arguments: ["preflight", "--json", "--no-ollama"],
-            timeout: 20
-        )
-        guard result.exitCode == 0 || result.exitCode == 1 else {
-            return PreflightSummary(
-                status: "Preflight Error",
-                detail: result.stderr.isEmpty ? "openbird exited with \(result.exitCode)." : result.stderr
-            )
-        }
-        return parsePreflight(result.stdout)
+    /// Open the given macOS privacy pane in System Settings so the user can grant
+    /// the permission. macOS does not allow an app to grant TCC itself; deep-link
+    /// + re-check is the closest to "no manual work" the platform permits.
+    func openPrivacyPane(_ pane: PrivacyPane) {
+        guard let url = pane.url else { return }
+        NSWorkspace.shared.open(url)
     }
+
+    // MARK: - Allowlist (persisted in UserDefaults; injected into capture)
+
+    func allowlist() -> [String] {
+        defaults.stringArray(forKey: allowlistKey) ?? []
+    }
+
+    func setAllowlist(_ bundleIDs: [String]) {
+        // De-dupe, trim, drop empties; keep stable order.
+        var seen = Set<String>()
+        let cleaned = bundleIDs
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        defaults.set(cleaned, forKey: allowlistKey)
+    }
+
+    /// Bundle IDs of other apps currently running with a regular UI, useful as
+    /// allowlist suggestions.
+    func runningAppBundleIDs() -> [String] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != nil }
+            .compactMap { $0.bundleIdentifier }
+            .filter { $0 != Bundle.main.bundleIdentifier }
+            .sorted()
+    }
+
+    // MARK: - Ollama
+
+    func ollamaPath() -> String? {
+        let candidates = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama", "/usr/bin/ollama"]
+        return candidates.first { fileManager.isExecutableFile(atPath: $0) }
+    }
+
+    /// Pull a model via the Ollama CLI. This can take minutes (multi-GB), so it
+    /// runs with a generous timeout and reports a concise outcome string.
+    func pullModel(_ model: String) async -> (ok: Bool, message: String) {
+        guard let ollama = ollamaPath() else {
+            return (false, "Ollama CLI not found. Install Ollama from ollama.com.")
+        }
+        let result = await runAsync(ollama, arguments: ["pull", model], timeout: 1800)
+        if result.exitCode == 0 {
+            return (true, "Pulled \(model).")
+        }
+        let detail = result.stderr.isEmpty ? "exit \(result.exitCode)" : result.stderr
+        return (false, "Could not pull \(model): \(detail)")
+    }
+
+    // MARK: - Preflight
+
+    func preflightReport() async -> PreflightReport {
+        guard let cli = resolveOpenBirdCLI() else {
+            return PreflightReport(error: "openbird CLI not found in app bundle or PATH.")
+        }
+        let result = await runAsync(cli, arguments: ["preflight", "--json"], timeout: 30)
+        guard result.exitCode == 0 || result.exitCode == 1 else {
+            return PreflightReport(error: result.stderr.isEmpty
+                ? "openbird preflight exited with \(result.exitCode)."
+                : result.stderr)
+        }
+        return Self.parsePreflight(result.stdout)
+    }
+
+    // MARK: - Internals
 
     private func helperStatus(id: String, label: String, executable: String) -> HelperStatus {
         let url = Bundle.main.bundleURL
-            .appendingPathComponent("Contents")
-            .appendingPathComponent("MacOS")
+            .appendingPathComponent("Contents/MacOS")
             .appendingPathComponent(executable)
         return HelperStatus(
             id: id,
@@ -105,37 +236,41 @@ final class OpenBirdService {
 
     private func resolveOpenBirdCLI() -> String? {
         let bundled = Bundle.main.bundleURL
-            .appendingPathComponent("Contents")
-            .appendingPathComponent("MacOS")
-            .appendingPathComponent("openbird-cli")
-        let candidates = [
-            bundled.path,
-            "/opt/homebrew/bin/openbird",
-            "/usr/local/bin/openbird"
-        ]
+            .appendingPathComponent("Contents/MacOS/openbird-cli")
+        let candidates = [bundled.path, "/opt/homebrew/bin/openbird", "/usr/local/bin/openbird"]
         return candidates.first { fileManager.isExecutableFile(atPath: $0) }
     }
 
-    private func parsePreflight(_ output: String) -> PreflightSummary {
+    static func parsePreflight(_ output: String) -> PreflightReport {
         guard let data = output.data(using: .utf8),
               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return PreflightSummary(status: "Unknown", detail: "Could not parse preflight JSON.")
+            return PreflightReport(error: "Could not parse preflight JSON.")
         }
+        var report = PreflightReport()
+        report.runtimeOK = payload["runtime_ok"] as? Bool ?? false
+        report.releaseOK = payload["release_gate_ok"] as? Bool ?? false
 
-        let runtimeOK = payload["runtime_ok"] as? Bool ?? false
-        let releaseOK = payload["release_gate_ok"] as? Bool ?? false
-        let encryption = (payload["encryption"] as? [String: Any])?["status"] as? String ?? "unknown"
-        let macos = payload["macos"] as? [String: Any]
-        let accessibility = macos?["accessibility"] as? String ?? "unknown"
-        let systemAudio = macos?["system_audio"] as? String ?? "unknown"
-
-        let status = runtimeOK ? "Runtime Ready" : "Needs Setup"
-        let release = releaseOK ? "release gate OK" : "release gate pending"
-        let detail = "encryption=\(encryption), ax=\(accessibility), system-audio=\(systemAudio), \(release)"
-        return PreflightSummary(status: status, detail: detail)
+        if let ollama = payload["ollama"] as? [String: Any] {
+            report.ollamaReachable = ollama["reachable"] as? Bool   // nil if "unknown"/"n/a"
+            report.requiredModels = ollama["required_models"] as? [String] ?? []
+            report.missingModels = ollama["missing_models"] as? [String] ?? []
+        }
+        if let enc = payload["encryption"] as? [String: Any] {
+            report.encryptionStatus = enc["status"] as? String ?? "unknown"
+            report.encryptionEnabled = enc["enabled"] as? Bool ?? false
+        }
+        if let macos = payload["macos"] as? [String: Any] {
+            report.helperPresent = macos["helper_present"] as? Bool ?? false
+            for cap in ["accessibility", "screen_recording", "microphone", "system_audio"] {
+                report.grants[cap] = macos[cap] as? String ?? "unknown"
+            }
+        }
+        return report
     }
 
-    private static func run(_ path: String, arguments: [String], timeout: TimeInterval = 4) -> ProcessResult {
+    private static func run(
+        _ path: String, arguments: [String], timeout: TimeInterval = 4
+    ) -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
@@ -144,6 +279,22 @@ final class OpenBirdService {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
+
+        // Read pipes on background queues so a child that fills the 64 KB pipe
+        // buffer cannot deadlock against our wait loop.
+        var outData = Data()
+        var errData = Data()
+        let ioGroup = DispatchGroup()
+        let lock = NSLock()
+        for (pipe, append) in [(stdout, { (d: Data) in outData.append(d) }),
+                               (stderr, { (d: Data) in errData.append(d) })] {
+            ioGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                let d = pipe.fileHandleForReading.readDataToEndOfFile()
+                lock.lock(); append(d); lock.unlock()
+                ioGroup.leave()
+            }
+        }
 
         do {
             try process.run()
@@ -159,9 +310,10 @@ final class OpenBirdService {
             process.terminate()
         }
         process.waitUntilExit()
+        ioGroup.wait()
 
-        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let out = String(data: outData, encoding: .utf8) ?? ""
+        let err = String(data: errData, encoding: .utf8) ?? ""
         return ProcessResult(
             exitCode: Int(process.terminationStatus),
             stdout: out.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -170,15 +322,11 @@ final class OpenBirdService {
     }
 
     private func runAsync(
-        _ path: String,
-        arguments: [String],
-        timeout: TimeInterval
+        _ path: String, arguments: [String], timeout: TimeInterval
     ) async -> ProcessResult {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                continuation.resume(
-                    returning: Self.run(path, arguments: arguments, timeout: timeout)
-                )
+                continuation.resume(returning: Self.run(path, arguments: arguments, timeout: timeout))
             }
         }
     }

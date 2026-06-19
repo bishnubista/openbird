@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The audio-helper opens the microphone via AVAudioEngine. Under the hardened
+    runtime, microphone access requires this entitlement in addition to the
+    NSMicrophoneUsageDescription string embedded in the helper binary.
+  -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <!-- Helpers link only system frameworks, but keep parity with the app so a
+       future bundled dylib does not trip hardened-runtime validation. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

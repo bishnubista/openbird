@@ -93,9 +93,23 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>OpenBird records meeting audio from your microphone to transcribe it locally on this Mac.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>OpenBird opens System Settings panes to help you grant capture permissions.</string>
 </dict>
 </plist>
 PLIST
+
+# Sign the assembled bundle with a stable local identity so macOS TCC grants
+# (Accessibility / Screen Recording / Microphone) persist across rebuilds. This
+# is fail-soft: sign_local.sh falls back to ad-hoc signing if the self-signed
+# identity is unavailable, so a signing problem never blocks the build. Set
+# OPENBIRD_SKIP_SIGN=1 to skip entirely (e.g. a build host with no codesign).
+if [[ "${OPENBIRD_SKIP_SIGN:-0}" != "1" ]] && command -v codesign >/dev/null 2>&1; then
+  "$ROOT_DIR/script/sign_local.sh" "$APP_BUNDLE" || \
+    echo "warning: signing failed; the app may not retain TCC grants" >&2
+fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

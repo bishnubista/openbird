@@ -28,7 +28,18 @@ let package = Package(
             // via `Bundle.module` would `fatalError`. The list is baked into
             // `main.swift` instead; a Python parity test keeps the JSON, the
             // Swift literal, and the Python tuple in lockstep. See main.swift.
-            exclude: ["dangerous_apps.json"]
+            // Info.plist is embedded into __TEXT,__info_plist (see linkerSettings)
+            // to give the bare helper a stable CFBundleIdentifier for TCC; exclude
+            // it (and the canonical JSON) from the source/resource list.
+            exclude: ["dangerous_apps.json", "Info.plist"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/CaptureHelper/Info.plist",
+                ])
+            ]
         )
     ]
 )
