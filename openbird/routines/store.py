@@ -96,6 +96,19 @@ ERROR_CODE_DELIVERY = "DELIVERY_EXCEPTION"
 # occurrence they freed.
 _FREED_FOR_RETRY = (ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_DELIVERY)
 
+# Content-safe error code recorded when an occurrence has burned through its
+# retry budget (see ``DEFAULT_MAX_ATTEMPTS``). Unlike the freed-for-retry codes
+# above, this is a *settled* terminal failure: the grid key is kept (not
+# re-keyed) so catch-up never retries it again, and it anchors the grid normally.
+ERROR_CODE_MAX_ATTEMPTS = "MAX_ATTEMPTS_EXCEEDED"
+
+# How many times a single occurrence may be attempted before a still-failing
+# crash/delivery is given up on permanently. Bounds the otherwise-unbounded
+# retry of a persistently broken sink or a routine that crashes every run (each
+# retry can re-run the model). The current attempt is recorded per row in the
+# ``attempt`` column.
+DEFAULT_MAX_ATTEMPTS = 3
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS routine_runs (
     id              TEXT PRIMARY KEY,
@@ -127,6 +140,11 @@ def default_idempotency_key(routine: str, scheduled_ts: float) -> str:
     nominally targeting the same occurrence map to the same key.
     """
     return f"{routine}@{int(scheduled_ts)}"
+
+
+def _escape_like_pattern(value: str) -> str:
+    """Escape SQLite LIKE wildcards while leaving the trailing wildcard usable."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def next_scheduled_occurrence(
@@ -249,6 +267,7 @@ class RoutineStore:
         *,
         settings: Settings | None = None,
         lease_timeout: float = DEFAULT_LEASE_TIMEOUT,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         clock: Clock | None = None,
     ) -> None:
         """Open (or create) the routine-runs database.
@@ -260,12 +279,16 @@ class RoutineStore:
             settings: Settings; defaults to :func:`get_settings`.
             lease_timeout: Seconds after which a ``running`` row is considered
                 stale (its worker presumed crashed) and reclaimable.
+            max_attempts: How many times one occurrence may be (re-)attempted
+                before a still-failing crash/delivery is given up on (recorded
+                terminally as ``MAX_ATTEMPTS_EXCEEDED`` and never retried again).
             clock: Returns current unix time, used for lease timestamps and the
                 default reclamation ``now``. Defaults to :func:`time.time`.
                 Injecting a fake clock keeps lease/reclaim comparisons coherent.
         """
         self.settings = settings or get_settings()
         self.lease_timeout = lease_timeout
+        self.max_attempts = max(1, max_attempts)
         self._clock: Clock = clock or time.time
         if db_path is not None:
             self._resolved = db_path
@@ -377,24 +400,37 @@ class RoutineStore:
         :meth:`finish` can be detected and reclaimed by :meth:`reclaim_stale`.
         """
         key = idempotency_key or default_idempotency_key(routine, scheduled_ts)
+        archived_key_pattern = f"{_escape_like_pattern(key)}#%"
         now = self._clock()
         run_id = uuid.uuid4().hex
         with self._lock:
             conn = self._conn()
             try:
                 with conn:
+                    # Single-statement INSERT (keeps the original write-lock
+                    # profile under concurrent claims). The ``attempt`` is
+                    # computed inline: this occurrence's prior attempts were
+                    # re-keyed to ``<key>#<reason>-<id>`` when freed for retry, so
+                    # counting them gives the true retry depth that the cap in
+                    # reclaim_stale/fail_delivery checks.
                     conn.execute(
                         "INSERT INTO routine_runs"
                         "(id, routine, scheduled_ts, started_ts, finished_ts,"
                         " lease_ts, status, attempt, output, output_len,"
                         " output_hash, error_code, error_class, idempotency_key)"
-                        " VALUES (?, ?, ?, ?, NULL, ?, ?, 1, NULL, NULL, NULL,"
-                        " NULL, NULL, ?)",
+                        " VALUES (?, ?, ?, ?, NULL, ?, ?,"
+                        "   (SELECT COUNT(*) + 1 FROM routine_runs"
+                        "    WHERE routine = ?"
+                        "    AND idempotency_key LIKE ? ESCAPE '\\'),"
+                        "   NULL, NULL, NULL, NULL, NULL, ?)",
                         (run_id, routine, scheduled_ts, now, now,
-                         STATUS_RUNNING, key),
+                         STATUS_RUNNING, routine, archived_key_pattern, key),
                     )
-            except sqlite3.IntegrityError:
+            except conn.IntegrityError:
                 # Idempotency key already present -> someone else owns this run.
+                # Use the connection's own IntegrityError so this catches the
+                # active driver (stdlib sqlite3 OR sqlcipher3, whose exception is
+                # NOT a subclass of sqlite3.IntegrityError).
                 return None
         return RoutineRun(
             id=run_id,
@@ -437,8 +473,15 @@ class RoutineStore:
         ever ``running`` for a given key at a time (single active execution),
         but a crashed attempt no longer blocks a retry of the occurrence.
 
+        Retries are bounded by :attr:`max_attempts`: a stale row that has already
+        burned the budget is settled as a permanent ``MAX_ATTEMPTS_EXCEEDED``
+        error with its grid key **kept** (not re-keyed), so a routine that
+        crashes every run does not retry forever.
+
         Returns:
-            The ids of the rows that were reclaimed.
+            The ids of rows whose occurrence key was freed for retry. Rows that
+            exhaust the attempt budget are settled permanently and are not
+            included.
         """
         cutoff = (self._clock() if now is None else now) - self.lease_timeout
         end = self._clock() if now is None else now
@@ -446,11 +489,27 @@ class RoutineStore:
             conn = self._conn()
             with conn:
                 rows = conn.execute(
-                    "SELECT id, idempotency_key FROM routine_runs"
+                    "SELECT id, idempotency_key, attempt FROM routine_runs"
                     " WHERE status = ? AND lease_ts IS NOT NULL AND lease_ts < ?",
                     (STATUS_RUNNING, cutoff),
                 ).fetchall()
+                freed_ids: list[str] = []
                 for r in rows:
+                    if r["attempt"] >= self.max_attempts:
+                        # Budget exhausted: settle permanently, keep the grid key
+                        # so this occurrence is never retried again.
+                        conn.execute(
+                            "UPDATE routine_runs"
+                            " SET status = ?, error_code = ?, finished_ts = ?,"
+                            " lease_ts = NULL"
+                            " WHERE id = ?",
+                            (STATUS_ERROR, ERROR_CODE_MAX_ATTEMPTS, end, r["id"]),
+                        )
+                        logger.warning(
+                            "routine crash gave up: attempt=%d max=%d error_code=%s",
+                            r["attempt"], self.max_attempts, ERROR_CODE_MAX_ATTEMPTS,
+                        )
+                        continue
                     archived_key = f"{r['idempotency_key']}#crashed-{r['id']}"
                     conn.execute(
                         "UPDATE routine_runs"
@@ -460,7 +519,8 @@ class RoutineStore:
                         (STATUS_ERROR, ERROR_CODE_LEASE_EXPIRED, end,
                          archived_key, r["id"]),
                     )
-        return [r["id"] for r in rows]
+                    freed_ids.append(r["id"])
+        return freed_ids
 
     # -- completion -----------------------------------------------------------
 
@@ -553,6 +613,12 @@ class RoutineStore:
         The exception *message* is never stored: only ``error_class`` and the
         content-safe :data:`ERROR_CODE_DELIVERY` are recorded.
 
+        Retries are bounded by :attr:`max_attempts`: once the budget is spent the
+        body is still preserved, but the run is settled as a permanent
+        ``MAX_ATTEMPTS_EXCEEDED`` error with its grid key **kept** (not re-keyed)
+        so a persistently broken sink does not re-deliver (and re-generate)
+        forever.
+
         Raises:
             KeyError: If ``run_id`` does not exist.
         """
@@ -563,23 +629,40 @@ class RoutineStore:
             conn = self._conn()
             with conn:
                 row = conn.execute(
-                    "SELECT idempotency_key FROM routine_runs WHERE id = ?",
+                    "SELECT idempotency_key, attempt FROM routine_runs WHERE id = ?",
                     (run_id,),
                 ).fetchone()
                 if row is None:
                     raise KeyError(f"unknown routine run id: {run_id!r}")
-                # Free the occurrence's grid key so a later claim can retry it,
-                # while preserving the audit trail of the failed attempt.
-                freed_key = f"{row['idempotency_key']}#delivery-failed-{run_id}"
-                conn.execute(
-                    "UPDATE routine_runs"
-                    " SET status = ?, output = ?, output_len = ?, output_hash = ?,"
-                    " error_code = ?, error_class = ?, finished_ts = ?,"
-                    " lease_ts = NULL, idempotency_key = ?"
-                    " WHERE id = ?",
-                    (STATUS_ERROR, stored_output, output_len, output_hash,
-                     ERROR_CODE_DELIVERY, error_class, end, freed_key, run_id),
-                )
+                if row["attempt"] >= self.max_attempts:
+                    # Budget exhausted: keep the body but settle permanently,
+                    # keeping the grid key so this occurrence is not retried.
+                    conn.execute(
+                        "UPDATE routine_runs"
+                        " SET status = ?, output = ?, output_len = ?,"
+                        " output_hash = ?, error_code = ?, error_class = ?,"
+                        " finished_ts = ?, lease_ts = NULL"
+                        " WHERE id = ?",
+                        (STATUS_ERROR, stored_output, output_len, output_hash,
+                         ERROR_CODE_MAX_ATTEMPTS, error_class, end, run_id),
+                    )
+                    logger.warning(
+                        "routine delivery gave up: attempt=%d max=%d error_code=%s",
+                        row["attempt"], self.max_attempts, ERROR_CODE_MAX_ATTEMPTS,
+                    )
+                else:
+                    # Free the occurrence's grid key so a later claim can retry
+                    # it, while preserving the audit trail of the failed attempt.
+                    freed_key = f"{row['idempotency_key']}#delivery-failed-{run_id}"
+                    conn.execute(
+                        "UPDATE routine_runs"
+                        " SET status = ?, output = ?, output_len = ?,"
+                        " output_hash = ?, error_code = ?, error_class = ?,"
+                        " finished_ts = ?, lease_ts = NULL, idempotency_key = ?"
+                        " WHERE id = ?",
+                        (STATUS_ERROR, stored_output, output_len, output_hash,
+                         ERROR_CODE_DELIVERY, error_class, end, freed_key, run_id),
+                    )
         return self.get(run_id)
 
     # -- reads ----------------------------------------------------------------
@@ -594,6 +677,18 @@ class RoutineStore:
         if row is None:
             raise KeyError(f"unknown routine run id: {run_id!r}")
         return self._row_to_run(row)
+
+    def run_error_code(self, run_id: str) -> str | None:
+        """Return the persisted content-safe error code for ``run_id``."""
+        with self._lock:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT error_code FROM routine_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown routine run id: {run_id!r}")
+        return row["error_code"]
 
     def last_run(self, routine: str) -> RoutineRun | None:
         """Return the most recent run (by scheduled time) for ``routine``."""
@@ -794,5 +889,7 @@ __all__ = [
     "STATUS_MISSED",
     "ERROR_CODE_LEASE_EXPIRED",
     "ERROR_CODE_DELIVERY",
+    "ERROR_CODE_MAX_ATTEMPTS",
     "DEFAULT_LEASE_TIMEOUT",
+    "DEFAULT_MAX_ATTEMPTS",
 ]
