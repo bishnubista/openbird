@@ -21,7 +21,21 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "AudioHelper",
-            path: "Sources/AudioHelper"
+            path: "Sources/AudioHelper",
+            // Info.plist is embedded into the Mach-O __TEXT,__info_plist section
+            // (see linkerSettings) so the bare helper carries
+            // NSMicrophoneUsageDescription + a stable CFBundleIdentifier for TCC.
+            // Exclude it from the source list so SwiftPM does not treat it as an
+            // unhandled resource.
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/AudioHelper/Info.plist",
+                ])
+            ]
         )
     ]
 )

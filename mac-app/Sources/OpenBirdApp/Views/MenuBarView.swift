@@ -11,42 +11,40 @@ struct MenuBarView: View {
             NSApp.activate(ignoringOtherApps: true)
         }
 
+        Divider()
+
+        if model.captureRunning {
+            Button("Stop Capture") { model.stopCapture() }
+        } else {
+            Button("Start Capture") { model.startCapture() }
+                .disabled(model.allowlist.isEmpty)
+        }
+
         Button(model.capturePaused ? "Resume Capture" : "Pause Capture") {
             model.toggleCapturePause()
         }
 
-        Button("Refresh Status") {
+        Button("Re-check Setup") {
             Task { await model.refresh() }
         }
 
         Divider()
 
-        Text(shortStatus)
+        Text(statusLine)
         ForEach(model.helpers) { helper in
             Text(helper.isBundled ? "\(helper.label): OK" : "\(helper.label): Missing")
         }
 
         Divider()
 
-        Button("Stop Helpers") {
-            model.stopHelpers()
-        }
-
-        Button("Data Folder") {
-            model.openDataFolder()
-        }
-
-        Divider()
-
-        Button("Quit") {
-            NSApplication.shared.terminate(nil)
-        }
+        Button("Data Folder") { model.openDataFolder() }
+        Button("Quit") { model.quit() }
     }
 
-    private var shortStatus: String {
-        if model.preflight.status.count <= 30 {
-            return model.preflight.status
+    private var statusLine: String {
+        if model.isFullyConfigured {
+            return model.captureRunning ? "Capturing" : "Ready"
         }
-        return String(model.preflight.status.prefix(27)) + "..."
+        return "Setup incomplete"
     }
 }

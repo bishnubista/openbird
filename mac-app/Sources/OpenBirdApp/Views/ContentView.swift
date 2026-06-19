@@ -4,23 +4,16 @@ struct ContentView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                Label("Status", systemImage: "bird")
-                Label("Helpers", systemImage: "wrench.and.screwdriver")
-                Label("Privacy", systemImage: "lock.shield")
-            }
-            .listStyle(.sidebar)
-            .navigationTitle("OpenBird")
-        } detail: {
+        ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HeaderView(model: model)
+                SetupView(model: model)
                 HelperListView(helpers: model.helpers)
-                PrivacyControlsView(model: model)
-                Spacer()
+                TrustControlsView(model: model)
             }
             .padding(24)
         }
+        .frame(minWidth: 560, minHeight: 560)
     }
 }
 
@@ -29,25 +22,19 @@ private struct HeaderView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Image(systemName: "bird")
+                    .font(.largeTitle)
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
                     Text("OpenBird")
                         .font(.title)
-                    Text(model.preflight.status)
-                        .foregroundStyle(model.preflight.status == "Runtime Ready" ? .green : .secondary)
+                    Text(model.isFullyConfigured ? "Ready to capture" : "Finish setup below")
+                        .font(.subheadline)
+                        .foregroundStyle(model.isFullyConfigured ? .green : .secondary)
                 }
                 Spacer()
-                Button {
-                    Task { await model.refresh() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(model.isRefreshing)
             }
-
-            Text(model.preflight.detail)
-                .foregroundStyle(.secondary)
-
             if let lastRefresh = model.lastRefresh {
                 Text("Last checked \(lastRefresh.formatted(date: .omitted, time: .shortened))")
                     .font(.caption)
@@ -83,7 +70,7 @@ private struct HelperListView: View {
     }
 }
 
-private struct PrivacyControlsView: View {
+private struct TrustControlsView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
@@ -101,20 +88,10 @@ private struct PrivacyControlsView: View {
                     Label("Stop Helpers", systemImage: "stop.fill")
                 }
                 Button {
-                    model.openDataFolder()
-                } label: {
-                    Label("Data Folder", systemImage: "folder")
-                }
-                Button {
                     model.openBundleFolder()
                 } label: {
                     Label("App Bundle", systemImage: "app")
                 }
-            }
-            if !model.lastActionMessage.isEmpty {
-                Text(model.lastActionMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
     }

@@ -23,6 +23,9 @@ class Openbird < Formula
     system "uv", "pip", "install", "--python", venv/"bin/python", ".[encryption]"
 
     ENV["OPENBIRD_SWIFTPM_DISABLE_SANDBOX"] = "1"
+    # Build the bundle but defer signing: we rewrite openbird-cli below, and
+    # signing must happen AFTER that rewrite or the app's seal would be invalid.
+    ENV["OPENBIRD_SKIP_SIGN"] = "1"
     system "./script/build_and_run.sh", "--no-launch"
     app = buildpath/"dist/OpenBird.app"
     app_macos = app/"Contents/MacOS"
@@ -37,6 +40,15 @@ class Openbird < Formula
       exec "#{bin}/openbird" "$@"
     SH
     chmod 0755, app_macos/"openbird-cli"
+
+    # Sign the assembled bundle with a stable, self-signed local identity so macOS
+    # TCC grants (Accessibility / Screen Recording / Microphone) persist across
+    # rebuilds. Fail-soft: sign_local.sh degrades to ad-hoc signing if the
+    # self-signed identity cannot be created, so install never breaks. The script
+    # ships in the same archive as this formula (git ls-files), so the existence
+    # guard is purely defensive — it keeps install from hard-failing rather than
+    # leaving the app unsigned should the script ever be absent.
+    system "./script/sign_local.sh", app if File.exist?("script/sign_local.sh")
 
     libexec.install app
 
@@ -67,13 +79,19 @@ class Openbird < Formula
       (uv pip install). It is not vendored/offline and is not pinned for
       reproducible offline installs; network access is required at install time.
 
-      The bundled OpenBird.app is UNSIGNED and not notarized, so it cannot obtain
-      macOS Screen Recording / Accessibility (TCC) permissions: screen and audio
-      capture will NOT work from this Homebrew install. Functional capture/audio
-      requires a signed bundle with a stable identity plus manually granted macOS
-      permissions (the signed-bundle/TCC release gates).
+      OpenBird.app is signed at install time with a STABLE, SELF-SIGNED local
+      identity (stored in the openbird-codesign keychain). This gives the bundle a
+      consistent code-signing identity so macOS TCC grants persist across
+      rebuilds. The app and helpers are NOT notarized, so on first launch macOS
+      Gatekeeper may warn — right-click the app and choose Open, or approve it in
+      System Settings > Privacy & Security.
 
-      The CLI memory features (openbird ingest / chat / routine) work fully.
+      To enable screen/audio capture, open the app and follow Guided Setup: it
+      walks you through Ollama, models, and granting Accessibility / Screen
+      Recording / Microphone permissions. macOS requires you to toggle those
+      permissions yourself in System Settings; the app deep-links you to the right
+      pane and re-checks. The CLI memory features (openbird ingest / chat /
+      routine) work immediately without any permissions.
     EOS
   end
 

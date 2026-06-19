@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>ai.openbird.OpenBird.audio-helper</string>
+  <key>CFBundleName</key>
+  <string>OpenBird Audio Helper</string>
+  <!-- Shown in the macOS microphone-permission prompt the helper triggers. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>OpenBird records meeting audio from your microphone to transcribe it locally on this Mac.</string>
+</dict>
+</plist>
