@@ -220,4 +220,4 @@ TCC permissions, a signed helper, Ollama, or network access.
 
 ## License
 
-License to be selected before public release.
+[Apache License 2.0](LICENSE) — permissive, with an explicit patent grant.
