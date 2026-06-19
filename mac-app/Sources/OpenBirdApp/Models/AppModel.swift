@@ -23,6 +23,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var captureRunning = false
     @Published private(set) var helpers: [HelperStatus] = []
     @Published private(set) var allowlist: [String] = []
+    // TCC grants are checked from the APP's own process (that is where macOS
+    // records them — a nested helper's request is attributed to the app bundle).
+    @Published private(set) var accessibilityGranted = false
+    @Published private(set) var screenRecordingGranted = false
+    @Published private(set) var microphoneGranted = false
     @Published private(set) var lastRefresh: Date?
     @Published private(set) var isRefreshing = false
     @Published private(set) var workingMessage: String?
@@ -36,6 +41,9 @@ final class AppModel: ObservableObject {
         self.helpers = service.helperStatuses()
         self.allowlist = service.allowlist()
         self.captureRunning = service.isCaptureRunning()
+        self.accessibilityGranted = service.accessibilityGranted()
+        self.screenRecordingGranted = service.screenRecordingGranted()
+        self.microphoneGranted = service.microphoneGranted()
 
         // Safety net: if the app is quit by any path (Cmd-Q, menu, dock), stop the
         // capture daemon WE launched so it is never orphaned past app lifetime.
@@ -56,12 +64,13 @@ final class AppModel: ObservableObject {
         return capturePaused ? "pause.circle" : "bird"
     }
 
-    /// True when the CORE text-capture path is ready: local models, encrypted
-    /// memory, and Accessibility. Screen Recording and Microphone are meetings-only
-    /// (optional) capabilities and intentionally do NOT gate this — otherwise the
-    /// "Ready" badge would contradict an optional, un-granted checklist row.
+    /// True when the CORE text-capture path is ready: local models + Accessibility.
+    /// Encryption is a data-at-rest enhancement (the product runs plaintext-0600 +
+    /// FileVault by design), and Screen Recording / Microphone are meetings-only —
+    /// none of them gate "Ready", so the badge never contradicts an optional or
+    /// informational checklist row.
     var isFullyConfigured: Bool {
-        modelsState == .ok && encryptionState == .ok && accessibilityState == .ok
+        modelsState == .ok && accessibilityState == .ok
     }
 
     // MARK: - Derived step states
@@ -85,17 +94,9 @@ final class AppModel: ObservableObject {
         return .attention   // plaintext-0600
     }
 
-    func grantState(_ capability: String) -> StepState {
-        switch report.grant(capability) {
-        case "passed": return .ok
-        case "failed": return .attention
-        default: return report.helperPresent ? .attention : .unknown
-        }
-    }
-
-    var accessibilityState: StepState { grantState("accessibility") }
-    var screenRecordingState: StepState { grantState("screen_recording") }
-    var microphoneState: StepState { grantState("microphone") }
+    var accessibilityState: StepState { accessibilityGranted ? .ok : .attention }
+    var screenRecordingState: StepState { screenRecordingGranted ? .ok : .attention }
+    var microphoneState: StepState { microphoneGranted ? .ok : .attention }
 
     // MARK: - Actions
 
@@ -106,6 +107,9 @@ final class AppModel: ObservableObject {
         captureRunning = service.isCaptureRunning()
         helpers = service.helperStatuses()
         allowlist = service.allowlist()
+        accessibilityGranted = service.accessibilityGranted()
+        screenRecordingGranted = service.screenRecordingGranted()
+        microphoneGranted = service.microphoneGranted()
         report = await service.preflightReport()
         lastRefresh = Date()
     }

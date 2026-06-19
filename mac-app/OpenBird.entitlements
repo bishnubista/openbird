@@ -13,5 +13,13 @@
   <!-- Allow spawning the helper/CLI child processes under the hardened runtime. -->
   <key>com.apple.security.cs.allow-dyld-environment-variables</key>
   <true/>
+  <!--
+    The app requests Microphone access from its own process (macOS attributes a
+    nested helper's TCC request to the app bundle anyway). Under the hardened
+    runtime the app therefore needs the audio-input entitlement, not just the
+    helper. Paired with NSMicrophoneUsageDescription in the app Info.plist.
+  -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
 </dict>
 </plist>
