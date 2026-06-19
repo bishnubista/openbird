@@ -296,16 +296,17 @@ class RoutineScheduler:
                 output=text,
                 error_class=error_class,
             )
+            error_code = self.run_store.run_error_code(run.id) or ERROR_CODE_DELIVERY
             logger.warning(
                 "routine delivery error: name=%s scheduled_ts=%.0f "
                 "error_class=%s error_code=%s",
                 name,
                 sched,
                 error_class,
-                ERROR_CODE_DELIVERY,
+                error_code,
             )
             return persisted.model_copy(
-                update={"output": f"{error_class}: {ERROR_CODE_DELIVERY}"}
+                update={"output": f"{error_class}: {error_code}"}
             )
 
         # Metadata only: output length, never the body.

@@ -9,6 +9,7 @@ from __future__ import annotations
 import threading
 import time
 import datetime as dt
+import sqlite3
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -208,6 +209,31 @@ def test_custom_idempotency_key(run_store):
     a = run_store.claim("r", 10.0, idempotency_key="fixed")
     b = run_store.claim("r", 99.0, idempotency_key="fixed")
     assert a is not None and b is None
+
+
+def test_claim_catches_active_driver_integrity_error(clock, monkeypatch):
+    class DriverIntegrityError(Exception):
+        pass
+
+    assert not issubclass(DriverIntegrityError, sqlite3.IntegrityError)
+
+    class FakeDriverConnection:
+        IntegrityError = DriverIntegrityError
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            raise DriverIntegrityError("duplicate idempotency key")
+
+    store = RoutineStore(db_path=":memory:", clock=clock)
+    monkeypatch.setattr(store, "_conn", lambda: FakeDriverConnection())
+
+    assert store.claim("daily", clock()) is None
+    store.close()
 
 
 # -- store: missed-occurrence computation ------------------------------------
@@ -511,8 +537,11 @@ def test_delivery_failure_gives_up_after_max_attempts(clock):
     assert occ in store.missed_occurrences("daily", interval=100.0, now=occ)
 
     # Attempt 2 fails -> budget (max_attempts=2) spent -> given up.
-    sched.run_missed()
+    capped_runs = sched.run_missed()
     assert attempts["n"] == 2
+    assert len(capped_runs) == 1
+    assert ERROR_CODE_MAX_ATTEMPTS in (capped_runs[0].output or "")
+    assert ERROR_CODE_DELIVERY not in (capped_runs[0].output or "")
     assert occ not in store.missed_occurrences("daily", interval=100.0, now=occ)
     assert store.has_run(default_idempotency_key("daily", occ))  # grid key kept
 
@@ -540,13 +569,15 @@ def test_crashed_occurrence_gives_up_after_max_attempts(clock):
     default_key = default_idempotency_key("daily", occ)
 
     # Attempt 1 crashes (claim, never finish) -> reclaimed & freed for retry.
-    store.claim("daily", occ)
-    store.reclaim_stale(now=clock() + store.lease_timeout + 1.0)
+    r1 = store.claim("daily", occ)
+    reclaimed = store.reclaim_stale(now=clock() + store.lease_timeout + 1.0)
+    assert reclaimed == [r1.id]
     assert store.has_run(default_key) is False  # freed
 
     # Attempt 2 crashes -> budget spent -> given up, key kept, not retried.
     r2 = store.claim("daily", occ)
-    store.reclaim_stale(now=clock() + store.lease_timeout + 1.0)
+    reclaimed = store.reclaim_stale(now=clock() + store.lease_timeout + 1.0)
+    assert reclaimed == []  # settled permanently; not freed for retry
     assert store.has_run(default_key) is True  # kept
 
     row = store._conn().execute(

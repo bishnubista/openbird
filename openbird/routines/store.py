@@ -472,7 +472,9 @@ class RoutineStore:
         crashes every run does not retry forever.
 
         Returns:
-            The ids of the rows that were reclaimed.
+            The ids of rows whose occurrence key was freed for retry. Rows that
+            exhaust the attempt budget are settled permanently and are not
+            included.
         """
         cutoff = (self._clock() if now is None else now) - self.lease_timeout
         end = self._clock() if now is None else now
@@ -484,6 +486,7 @@ class RoutineStore:
                     " WHERE status = ? AND lease_ts IS NOT NULL AND lease_ts < ?",
                     (STATUS_RUNNING, cutoff),
                 ).fetchall()
+                freed_ids: list[str] = []
                 for r in rows:
                     if r["attempt"] >= self.max_attempts:
                         # Budget exhausted: settle permanently, keep the grid key
@@ -509,7 +512,8 @@ class RoutineStore:
                         (STATUS_ERROR, ERROR_CODE_LEASE_EXPIRED, end,
                          archived_key, r["id"]),
                     )
-        return [r["id"] for r in rows]
+                    freed_ids.append(r["id"])
+        return freed_ids
 
     # -- completion -----------------------------------------------------------
 
@@ -666,6 +670,18 @@ class RoutineStore:
         if row is None:
             raise KeyError(f"unknown routine run id: {run_id!r}")
         return self._row_to_run(row)
+
+    def run_error_code(self, run_id: str) -> str | None:
+        """Return the persisted content-safe error code for ``run_id``."""
+        with self._lock:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT error_code FROM routine_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown routine run id: {run_id!r}")
+        return row["error_code"]
 
     def last_run(self, routine: str) -> RoutineRun | None:
         """Return the most recent run (by scheduled time) for ``routine``."""
