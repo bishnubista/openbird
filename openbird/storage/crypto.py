@@ -10,6 +10,7 @@ app-encrypted" state). The chosen result is logged, never silently faked.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import queue
@@ -244,10 +245,8 @@ def _try_sqlcipher(path: str, key: str) -> sqlite3.Connection | None:
         )
         # Don't leak the connection if a later step (sqlite-vec, WAL) failed.
         if conn is not None:
-            try:
+            with contextlib.suppress(Exception):
                 conn.close()
-            except Exception:
-                pass
         return None
 
 

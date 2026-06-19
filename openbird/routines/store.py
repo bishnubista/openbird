@@ -44,6 +44,7 @@ guaranteeing only one active execution at a time.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import math
@@ -333,10 +334,8 @@ class RoutineStore:
             conns = list(self._all_conns)
             self._all_conns.clear()
         for conn in conns:
-            try:
+            with contextlib.suppress(Exception):
                 conn.close()
-            except Exception:
-                pass
         self._local.conn = None
 
     def __enter__(self) -> RoutineStore:

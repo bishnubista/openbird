@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import fnmatch
 import os
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Iterator, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from openbird.memory.store import MemoryStore
@@ -105,7 +106,7 @@ class ConnectorConfig:
     enabled: bool = True
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ConnectorConfig":
+    def from_dict(cls, data: dict) -> ConnectorConfig:
         """Build a config from a plain dict (e.g. parsed JSON/TOML).
 
         Unknown keys are ignored so config files can carry forward-compatible
@@ -189,7 +190,7 @@ class FilesystemMCPConnector:
         self.max_file_bytes = max_file_bytes
 
     @classmethod
-    def from_config(cls, config: ConnectorConfig) -> "FilesystemMCPConnector":
+    def from_config(cls, config: ConnectorConfig) -> FilesystemMCPConnector:
         """Build a connector from a :class:`ConnectorConfig`.
 
         Raises:
@@ -214,9 +215,7 @@ class FilesystemMCPConnector:
         """Return whether a file name passes the include/exclude globs."""
         if self.include and not any(fnmatch.fnmatch(name, p) for p in self.include):
             return False
-        if any(fnmatch.fnmatch(name, p) for p in self.exclude):
-            return False
-        return True
+        return not any(fnmatch.fnmatch(name, p) for p in self.exclude)
 
     def _iter_files(self) -> Iterator[Path]:
         """Yield matching, in-tree, regular files under the root."""
@@ -421,7 +420,7 @@ class MCPRegistry:
     # -- config loading -------------------------------------------------------
 
     @classmethod
-    def from_configs(cls, configs: Iterable[ConnectorConfig | dict]) -> "MCPRegistry":
+    def from_configs(cls, configs: Iterable[ConnectorConfig | dict]) -> MCPRegistry:
         """Build a registry from connector configs (dataclasses or dicts).
 
         Disabled and unsupported-kind connectors are skipped (the latter so an
@@ -445,7 +444,7 @@ class MCPRegistry:
 
     def ingest(
         self,
-        store: "MemoryStore",
+        store: MemoryStore,
         *,
         names: Iterable[str] | None = None,
     ) -> int:

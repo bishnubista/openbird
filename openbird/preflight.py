@@ -20,6 +20,7 @@ aggregation can be unit-tested with fakes and no live services.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
@@ -27,8 +28,9 @@ import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 from urllib.parse import urljoin
 
 from openbird.config import (
@@ -389,10 +391,8 @@ def check_encryption(
                 wal = bool(_wal_enabled(conn)) if encrypted else False
                 cipher = live_cipher
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 conn.close()
-            except Exception:
-                pass
 
         result["enabled"] = encrypted
         result["verified"] = True
@@ -630,7 +630,7 @@ def run_preflight(
     provider_factory: ProviderFactory | None = None,
     db_opener: DbOpener | None = None,
     system: str | None = None,
-    helper_probe: "HelperProbe | None" = None,
+    helper_probe: HelperProbe | None = None,
     ollama_host: str | None = None,
     ollama_timeout: float = 2.0,
 ) -> dict[str, Any]:
@@ -827,9 +827,10 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
         return False
 
     # Local Ollama half of the route (if used) must be reachable with its models.
-    if cloud.get("uses_local_ollama", True):
-        if not (ollama.get("reachable") is True and not ollama.get("missing_models")):
-            return False
+    if cloud.get("uses_local_ollama", True) and not (
+        ollama.get("reachable") is True and not ollama.get("missing_models")
+    ):
+        return False
 
     # Each remote role must be verified by ITS OWN probe (covers cloud-only,
     # cloud-embed-only, cloud-chat-only, and mixed routes).
@@ -861,10 +862,7 @@ def _release_gate_ok(report: dict[str, Any]) -> bool:
         return False
 
     macos = report["macos"]
-    if macos.get("is_macos"):
-        if not macos.get("all_passed"):
-            return False
-    return True
+    return not (macos.get("is_macos") and not macos.get("all_passed"))
 
 
 __all__ = [

@@ -29,7 +29,6 @@ import datetime as _dt
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -393,10 +392,7 @@ def ingest(
 
 def _collect_files(path: Path, *, glob: str, max_bytes: int) -> list[Path]:
     """Resolve PATH to a sorted list of regular files under the size cap."""
-    if path.is_file():
-        candidates = [path]
-    else:
-        candidates = sorted(p for p in path.rglob(glob) if p.is_file())
+    candidates = [path] if path.is_file() else sorted(p for p in path.rglob(glob) if p.is_file())
     out: list[Path] = []
     for p in candidates:
         try:
@@ -738,7 +734,7 @@ app.add_typer(data_app, name="data")
 
 @data_app.command("purge")
 def data_purge(
-    since: Optional[str] = typer.Option(
+    since: str | None = typer.Option(
         None,
         "--since",
         help="Delete observations at/after this time. Accepts a unix timestamp, "
@@ -961,7 +957,7 @@ def reindex(
                 for start in range(0, total, max(1, batch_size)):
                     batch = chunk_rows[start : start + max(1, batch_size)]
                     vectors = provider.embed([r["text"] for r in batch])
-                    for row, vec in zip(batch, vectors):
+                    for row, vec in zip(batch, vectors, strict=False):
                         conn.execute(
                             "INSERT INTO vec_chunks(chunk_rowid, embedding) VALUES (?, ?)",
                             (int(row["rowid_int"]), _serialize_f32(vec)),
@@ -1117,11 +1113,14 @@ def debug_bundle(
     # lists (they reveal which apps/sites the user runs) down to counts.
     report = run_preflight(settings, probe_ollama=not no_ollama)
     privacy = dict(report.get("privacy") or {})
-    safe_preflight = {**report, "privacy": {
-        "allowlist_entries": len(privacy.get("allowlist") or []),
-        "blocklist_entries": len(privacy.get("blocklist") or []),
-        "ocr_enabled": privacy.get("ocr_enabled"),
-    }}
+    safe_preflight = {
+        **report,
+        "privacy": {
+            "allowlist_entries": len(privacy.get("allowlist") or []),
+            "blocklist_entries": len(privacy.get("blocklist") or []),
+            "ocr_enabled": privacy.get("ocr_enabled"),
+        },
+    }
 
     bundle: dict[str, object] = {
         "openbird_version": _version(),

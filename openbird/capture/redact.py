@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from openbird.config import Settings, get_settings

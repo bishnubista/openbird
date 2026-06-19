@@ -24,6 +24,7 @@ leaves memory except into the (encrypted-at-rest) store.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -153,7 +154,7 @@ class CaptureStats:
     rejected: int = 0
     errors: int = 0
 
-    def _with(self, **delta: int) -> "CaptureStats":
+    def _with(self, **delta: int) -> CaptureStats:
         return CaptureStats(
             received=self.received + delta.get("received", 0),
             ingested=self.ingested + delta.get("ingested", 0),
@@ -161,7 +162,7 @@ class CaptureStats:
             errors=self.errors + delta.get("errors", 0),
         )
 
-    def _add(self, other: "CaptureStats") -> "CaptureStats":
+    def _add(self, other: CaptureStats) -> CaptureStats:
         """Sum two stats objects (used to aggregate across supervised cycles)."""
         return CaptureStats(
             received=self.received + other.received,
@@ -493,9 +494,7 @@ class CaptureDaemon:
         assert proc.stdout is not None
         yield from proc.stdout
 
-    def _terminate_on_stop(
-        self, proc: subprocess.Popen[str], stop_event: "threading.Event"
-    ) -> None:
+    def _terminate_on_stop(self, proc: subprocess.Popen[str], stop_event: threading.Event) -> None:
         """Watcher: terminate the helper promptly when ``stop_event`` is set.
 
         Without this, a clean shutdown could block until a hung/long-lived helper
@@ -511,7 +510,7 @@ class CaptureDaemon:
         self,
         *,
         max_events: int | None = None,
-        stop_event: "threading.Event | None" = None,
+        stop_event: threading.Event | None = None,
     ) -> CaptureStats:
         """Spawn the helper and process its event stream until it exits.
 
@@ -581,7 +580,7 @@ class CaptureDaemon:
         self,
         *,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
-        stop_event: "threading.Event | None" = None,
+        stop_event: threading.Event | None = None,
         max_consecutive_failures: int = _DEFAULT_MAX_CONSECUTIVE_FAILURES,
         max_cycles: int | None = None,
     ) -> CaptureStats:
@@ -641,7 +640,7 @@ class CaptureDaemon:
                     # rather than returning as if the session ended normally.
                     raise CaptureSupervisorError(
                         f"capture helper failed {failures} consecutive times"
-                    )
+                    ) from None
                 delay = min(_BACKOFF_MAX, _BACKOFF_BASE * (2 ** (failures - 1)))
                 if stop.wait(delay):
                     break
@@ -668,10 +667,8 @@ class CaptureDaemon:
                 proc.wait()
         for stream in (proc.stdout, proc.stderr):
             if stream is not None:
-                try:
+                with contextlib.suppress(OSError):
                     stream.close()
-                except OSError:
-                    pass
 
 
 __all__ = [

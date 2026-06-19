@@ -13,6 +13,7 @@ resolves every hit back to a concrete observation for occurrence-aware citations
 
 from __future__ import annotations
 
+import contextlib
 import struct
 import time
 import uuid
@@ -80,12 +81,10 @@ class MemoryStore:
         # call happens OUTSIDE the write lock and multi-statement deletes are
         # atomic. autocommit (isolation_level=None) disables sqlite3's implicit
         # BEGIN-before-DML so a stray write can't silently open a long txn.
-        try:
+        # sqlcipher3's dbapi2 connection also exposes isolation_level; if a
+        # backend doesn't, fall back to manual COMMIT (still correct).
+        with contextlib.suppress(AttributeError):
             self.conn.isolation_level = None
-        except AttributeError:
-            # sqlcipher3's dbapi2 connection also exposes isolation_level; if a
-            # backend doesn't, fall back to manual COMMIT (still correct).
-            pass
         self.conn.execute("PRAGMA foreign_keys = ON")
         try:
             self._apply_schema()
@@ -199,7 +198,7 @@ class MemoryStore:
         chunk_hashes = [ingest.content_hash(ctext) for _span, ctext in chunks]
         # Map each unique new chunk_hash -> its text (dedup within THIS document).
         unique_new: dict[str, str] = {}
-        for (_span, ctext), chash in zip(chunks, chunk_hashes):
+        for (_span, ctext), chash in zip(chunks, chunk_hashes, strict=False):
             if chash in unique_new:
                 continue
             existing = self.conn.execute(
@@ -212,7 +211,7 @@ class MemoryStore:
         if unique_new:
             new_hashes = list(unique_new)
             vectors = self.provider.embed([unique_new[h] for h in new_hashes])
-            embeddings = {h: _serialize_f32(v) for h, v in zip(new_hashes, vectors)}
+            embeddings = {h: _serialize_f32(v) for h, v in zip(new_hashes, vectors, strict=False)}
 
         # -- Phase 2: short INSERT-only write transaction -----------------------
         try:
@@ -280,7 +279,7 @@ class MemoryStore:
         # 3) Chunks: deduped GLOBALLY by chunk_hash (normalized chunk text), so an
         #    identical chunk recurring across different windows is stored, embedded,
         #    and indexed exactly once. blob_chunks records the occurrence + span.
-        for ((start, end), ctext), chunk_hash in zip(chunks, chunk_hashes):
+        for ((start, end), ctext), chunk_hash in zip(chunks, chunk_hashes, strict=False):
             # Atomically create-or-skip the chunk row. rowcount tells us whether
             # WE inserted it (1) or it already existed / a concurrent writer won (0).
             ins = cur.execute(
@@ -611,20 +610,16 @@ class MemoryStore:
 
         before_pages, before_free = _gauge()
         # Best-effort WAL checkpoint+truncate (no-op on non-WAL / :memory:).
-        try:
+        with contextlib.suppress(Exception):
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except Exception:
-            pass
         # VACUUM requires autocommit (no open transaction). isolation_level is
         # None for this store, so a bare execute runs outside any txn.
         self.conn.execute("VACUUM")
         # In WAL mode VACUUM writes the compacted image into the WAL, so the main
         # DB file is not physically truncated until the next checkpoint. Force one
         # so `openbird data vacuum` reclaims space on disk, not just logically.
-        try:
+        with contextlib.suppress(Exception):
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except Exception:
-            pass
         after_pages, after_free = _gauge()
         return {
             "page_size": page_size,

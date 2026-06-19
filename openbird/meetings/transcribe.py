@@ -92,7 +92,7 @@ class TranscriptSegment:
         )
 
     @classmethod
-    def from_piece(cls, piece: TranscriptPiece) -> "TranscriptSegment":
+    def from_piece(cls, piece: TranscriptPiece) -> TranscriptSegment:
         return cls(
             track=piece.track,
             start_ts=piece.start_ts,

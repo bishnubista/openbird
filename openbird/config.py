@@ -7,6 +7,7 @@ environment overrides.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass, field, fields
 from functools import lru_cache
@@ -95,10 +96,8 @@ class Settings:
             self.db_path = str(self.data_dir / "openbird.db")
         # Ensure the data directory exists with private (0700) permissions.
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(self.data_dir, 0o700)
-        except OSError:
-            pass
 
 
 def _coerce(name: str, raw: str, default: object) -> object:
@@ -138,7 +137,7 @@ _COERCE_DEFAULTS: dict[str, object] = {
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
 
-def resolved_ollama_host(settings: "Settings | None" = None) -> str:
+def resolved_ollama_host(settings: Settings | None = None) -> str:
     """Resolve the Ollama base URL with a single precedence used everywhere.
 
     Precedence (highest first):

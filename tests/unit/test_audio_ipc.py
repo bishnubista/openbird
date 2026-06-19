@@ -40,7 +40,7 @@ def test_roundtrip_preserves_frames():
 
     decoded = list(decode_frames(io.BytesIO(blob)))
     assert len(decoded) == 3
-    for original, got in zip(frames, decoded):
+    for original, got in zip(frames, decoded, strict=False):
         assert got.track == original.track
         assert got.sample_rate == original.sample_rate
         assert got.host_ts == pytest.approx(original.host_ts)

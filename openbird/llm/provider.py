@@ -15,7 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from openbird.config import (
     Settings,

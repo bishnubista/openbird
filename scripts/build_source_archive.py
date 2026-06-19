@@ -51,14 +51,16 @@ def add_file(tar: tarfile.TarFile, repo: Path, relpath: str, prefix: str) -> Non
 def build_archive(repo: Path, version: str, output: Path) -> None:
     prefix = f"openbird-{version}"
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("wb") as raw:
-        # filename="" suppresses the gzip FNAME field; without it, GzipFile
-        # embeds the output file's basename in the header, making the archive
-        # bytes depend on the output path rather than purely on content.
-        with gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as gz:
-            with tarfile.open(fileobj=gz, mode="w") as tar:
-                for relpath in tracked_files(repo):
-                    add_file(tar, repo, relpath, prefix)
+    # filename="" suppresses the gzip FNAME field; without it, GzipFile
+    # embeds the output file's basename in the header, making the archive
+    # bytes depend on the output path rather than purely on content.
+    with (
+        output.open("wb") as raw,
+        gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w") as tar,
+    ):
+        for relpath in tracked_files(repo):
+            add_file(tar, repo, relpath, prefix)
 
 
 def main() -> None:

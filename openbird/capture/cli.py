@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import typer
 from rich.console import Console
 
@@ -30,7 +28,7 @@ def capture(
         "--poll-interval",
         help="Seconds between helper re-spawns in --loop mode.",
     ),
-    helper: Optional[str] = typer.Option(
+    helper: str | None = typer.Option(
         None,
         "--helper",
         help="Path to a capture helper binary or emitter command. Defaults to the "
@@ -114,7 +112,7 @@ def capture(
     )
 
 
-def _parse_helper_cmd(helper: Optional[str]) -> Optional[tuple[str, ...]]:
+def _parse_helper_cmd(helper: str | None) -> tuple[str, ...] | None:
     """Split a helper command string into argv, or None to use the default."""
     if helper is None:
         return None

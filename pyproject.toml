@@ -51,9 +51,11 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-# First-adoption set: real errors only, no style opinions that would churn
-# working code. E/F = pycodestyle + pyflakes (undefined names, unused imports),
-# I = import sorting. Opinionated families (B/UP/SIM) are a deliberate follow-up.
-select = ["E", "F", "I"]
-# E501 (line too long) is enforced by the formatter, not the linter.
-ignore = ["E501"]
+# E/F = pycodestyle + pyflakes, I = import sorting, B = flake8-bugbear,
+# UP = pyupgrade, SIM = flake8-simplify.
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = [
+    "E501",   # line length is enforced by the formatter, not the linter
+    "B008",   # function-call default is Typer's Option()/Argument() pattern
+    "UP042",  # str-Enum -> StrEnum changes str()/f-string semantics; not worth the risk
+]

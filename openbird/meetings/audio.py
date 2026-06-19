@@ -89,7 +89,7 @@ class AudioFrame:
         seq: Monotonic per-source sequence number, for gap/drop detection.
     """
 
-    samples: "array[float]" = field(repr=False)
+    samples: array[float] = field(repr=False)
     sample_rate: int
     host_ts: float
     track: Track = Track.SYSTEM
