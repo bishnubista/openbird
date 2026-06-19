@@ -101,10 +101,12 @@ jobs:
           fi
 
           # The formula downloads the tarball from the API asset endpoint (private
-          # repo), which is keyed by the numeric asset id, so resolve it here.
+          # repo), which is keyed by the NUMERIC REST asset id. Use `gh api` (REST)
+          # rather than `gh release view --json assets` — the latter returns the
+          # GraphQL node id (e.g. RA_...), which is not valid for
+          # /releases/assets/<id> and would fail the integer asset-id parse.
           asset_id="$(
-            gh release view "$TAG" \
-              --json assets \
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
               --jq ".assets[] | select(.name == \"$archive\") | .id" \
             | head -n1
           )"
