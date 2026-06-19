@@ -38,7 +38,7 @@ struct MenuBarView: View {
         Divider()
 
         Button("Data Folder") { model.openDataFolder() }
-        Button("Quit") { NSApplication.shared.terminate(nil) }
+        Button("Quit") { model.quit() }
     }
 
     private var statusLine: String {

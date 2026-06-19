@@ -29,7 +29,12 @@ enum PrivacyPane: String {
     }
 }
 
-final class OpenBirdService {
+/// `@unchecked Sendable`: the only mutable instance state is `captureProcess`,
+/// which is touched solely on the main actor (AppModel actions and the main-queue
+/// willTerminate handler). The static `run`/`runAsync` helpers operate on locals
+/// guarded by their own lock. This lets the main-queue termination handler capture
+/// the service without a strict-concurrency violation.
+final class OpenBirdService: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let defaults = UserDefaults.standard
     private let allowlistKey = "openbird.captureAllowlist"
@@ -113,11 +118,19 @@ final class OpenBirdService {
 
     /// Stop the app-launched capture daemon and any stray helper processes.
     func stopCapture() {
+        terminateLaunchedCapture()
+        _ = stopHelperProcesses()
+    }
+
+    /// Terminate ONLY the capture daemon this app launched (no pkill), so quitting
+    /// the app never orphans a long-running `openbird capture --loop` child. Kept
+    /// distinct from `stopCapture()` so app-quit cleanup does not also kill a
+    /// capture daemon the user started independently of the app.
+    func terminateLaunchedCapture() {
         if let proc = captureProcess, proc.isRunning {
             proc.terminate()
         }
         captureProcess = nil
-        _ = stopHelperProcesses()
     }
 
     // MARK: - Helpers

@@ -68,16 +68,18 @@ struct SetupView: View {
                 StepRow(
                     state: model.screenRecordingState,
                     title: "Screen Recording permission",
-                    detail: "Required for meeting/system-audio capture.",
+                    detail: "Optional · needed only for meeting/system-audio capture.",
                     actionLabel: model.screenRecordingState == .ok ? nil : "Open Settings",
+                    optional: true,
                     action: { model.openScreenRecordingSettings() }
                 )
                 Divider()
                 StepRow(
                     state: model.microphoneState,
                     title: "Microphone permission",
-                    detail: "Records your side of a meeting as a separate track.",
+                    detail: "Optional · records your side of a meeting as a separate track.",
                     actionLabel: model.microphoneState == .ok ? nil : "Open Settings",
+                    optional: true,
                     action: { model.openMicrophoneSettings() }
                 )
             }
@@ -130,6 +132,7 @@ private struct StepRow: View {
     let title: String
     let detail: String
     let actionLabel: String?
+    var optional: Bool = false
     let action: () -> Void
 
     var body: some View {
@@ -156,16 +159,18 @@ private struct StepRow: View {
     private var glyph: String {
         switch state {
         case .ok: return "checkmark.circle.fill"
-        case .attention: return "exclamationmark.triangle.fill"
+        // Optional steps that aren't done are not problems — show a neutral glyph
+        // so they never read as an error next to a "Ready" badge.
+        case .attention: return optional ? "circle" : "exclamationmark.triangle.fill"
         case .working: return "clock.fill"
-        case .unknown: return "questionmark.circle"
+        case .unknown: return optional ? "circle" : "questionmark.circle"
         }
     }
 
     private var color: Color {
         switch state {
         case .ok: return .green
-        case .attention: return .orange
+        case .attention: return optional ? .secondary : .orange
         case .working: return .blue
         case .unknown: return .secondary
         }

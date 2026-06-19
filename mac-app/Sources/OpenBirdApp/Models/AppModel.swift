@@ -36,6 +36,19 @@ final class AppModel: ObservableObject {
         self.helpers = service.helperStatuses()
         self.allowlist = service.allowlist()
         self.captureRunning = service.isCaptureRunning()
+
+        // Safety net: if the app is quit by any path (Cmd-Q, menu, dock), stop the
+        // capture daemon WE launched so it is never orphaned past app lifetime.
+        // Capture the (non-actor-isolated) service directly so the synchronous
+        // termination handler does not hop the main actor while the app is exiting.
+        let service = self.service
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            service.terminateLaunchedCapture()
+        }
     }
 
     var menuBarSymbol: String {
@@ -43,10 +56,12 @@ final class AppModel: ObservableObject {
         return capturePaused ? "pause.circle" : "bird"
     }
 
-    /// True when every setup step is satisfied — the app is fully configured.
+    /// True when the CORE text-capture path is ready: local models, encrypted
+    /// memory, and Accessibility. Screen Recording and Microphone are meetings-only
+    /// (optional) capabilities and intentionally do NOT gate this — otherwise the
+    /// "Ready" badge would contradict an optional, un-granted checklist row.
     var isFullyConfigured: Bool {
-        modelsState == .ok && encryptionState == .ok
-            && accessibilityState == .ok && screenRecordingState == .ok
+        modelsState == .ok && encryptionState == .ok && accessibilityState == .ok
     }
 
     // MARK: - Derived step states
@@ -139,6 +154,13 @@ final class AppModel: ObservableObject {
         service.stopCapture()
         captureRunning = false
         lastActionMessage = "Capture stopped."
+    }
+
+    /// Stop the app-launched capture daemon, then terminate the app. Used by the
+    /// Quit menu item so an explicit quit never leaves capture orphaned.
+    func quit() {
+        service.terminateLaunchedCapture()
+        NSApplication.shared.terminate(nil)
     }
 
     func stopHelpers() {
