@@ -288,7 +288,8 @@ class RoutineScheduler:
             # Generation succeeded; only delivery failed. Record a terminal,
             # content-safe error BUT keep the generated body and free the
             # occurrence for retry (a transient sink must not drop output) —
-            # ``fail_delivery`` persists ``text`` and re-keys the run.
+            # ``fail_delivery`` persists ``text`` and re-keys the run, up to the
+            # store's max-attempts cap (after which it settles permanently).
             error_class = type(exc).__name__
             persisted = self.run_store.fail_delivery(
                 run.id,
@@ -296,7 +297,7 @@ class RoutineScheduler:
                 error_class=error_class,
             )
             logger.warning(
-                "routine delivery error (will retry): name=%s scheduled_ts=%.0f "
+                "routine delivery error: name=%s scheduled_ts=%.0f "
                 "error_class=%s error_code=%s",
                 name,
                 sched,

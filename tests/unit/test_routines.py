@@ -25,6 +25,7 @@ from openbird.routines.scheduler import (
 )
 from openbird.routines.store import (
     ERROR_CODE_LEASE_EXPIRED,
+    ERROR_CODE_MAX_ATTEMPTS,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_RUNNING,
@@ -383,7 +384,13 @@ def test_fire_records_delivery_error_without_stranding_lease(run_store, clock):
     assert row["lease_ts"] is None
     assert row["error_class"] == "BrokenPipeError"
     assert row["error_code"] == ERROR_CODE_DELIVERY
-    assert row["output"] is None
+    # The generated body persists only inside the encrypted boundary; with
+    # encryption off only metadata is kept. Either way the exception *message*
+    # is never stored — that is the privacy invariant under test.
+    if run_store.encryption_enabled:
+        assert row["output"] == "SUMMARY"
+    else:
+        assert row["output"] is None
     assert "leak" not in (row["error_class"] or "")
     assert "generated summary body" not in (row["error_code"] or "")
 
@@ -455,6 +462,106 @@ def test_delivery_failure_is_retried_on_next_catchup(run_store, clock):
     assert any(r.scheduled_ts == clock() for r in completed)
     assert all(r.status == STATUS_DONE for r in completed)
     assert attempts["n"] == 2, "delivery was not actually re-attempted"
+
+
+def test_claim_records_increasing_attempt_per_occurrence(clock):
+    # The ``attempt`` column tracks retry depth: each freed-and-reclaimed attempt
+    # of the SAME occurrence increments it. This is what bounds the retry budget.
+    store = RoutineStore(db_path=":memory:", clock=clock)
+    occ = clock()
+
+    r1 = store.claim("daily", occ)
+    a1 = store._conn().execute(
+        "SELECT attempt FROM routine_runs WHERE id = ?", (r1.id,)
+    ).fetchone()["attempt"]
+    store.reclaim_stale(now=clock() + store.lease_timeout + 1.0)  # frees occ
+
+    r2 = store.claim("daily", occ)
+    a2 = store._conn().execute(
+        "SELECT attempt FROM routine_runs WHERE id = ?", (r2.id,)
+    ).fetchone()["attempt"]
+
+    assert a1 == 1 and a2 == 2
+    store.close()
+
+
+def test_delivery_failure_gives_up_after_max_attempts(clock):
+    # The retry budget is bounded: a sink that fails every time must eventually
+    # be given up on — a permanent terminal error with NO further retries (so a
+    # broken notifier does not re-generate the summary forever).
+    store = RoutineStore(db_path=":memory:", clock=clock, max_attempts=2)
+    attempts = {"n": 0}
+
+    def always_fail(_name, _text):
+        attempts["n"] += 1
+        raise BrokenPipeError("sink is down")
+
+    sched = RoutineScheduler(
+        memory_store=FakeMemoryStore([_obs(clock() - 10)]),
+        provider=FakeProvider(),
+        routine_store=store,
+        clock=clock,
+        deliverer=always_fail,
+    )
+    sched.register("daily", "prompt", interval=100.0, runner=_runner)
+    occ = clock()
+
+    # Attempt 1 fails -> freed for retry.
+    sched.fire("daily", scheduled_ts=occ)
+    assert occ in store.missed_occurrences("daily", interval=100.0, now=occ)
+
+    # Attempt 2 fails -> budget (max_attempts=2) spent -> given up.
+    sched.run_missed()
+    assert attempts["n"] == 2
+    assert occ not in store.missed_occurrences("daily", interval=100.0, now=occ)
+    assert store.has_run(default_idempotency_key("daily", occ))  # grid key kept
+
+    rows = store._conn().execute(
+        "SELECT status, error_code, attempt, idempotency_key FROM routine_runs"
+        " WHERE routine = ? ORDER BY attempt",
+        ("daily",),
+    ).fetchall()
+    capped = [r for r in rows if r["error_code"] == ERROR_CODE_MAX_ATTEMPTS]
+    assert len(capped) == 1
+    assert capped[0]["attempt"] == 2 and capped[0]["status"] == STATUS_ERROR
+    assert "#" not in capped[0]["idempotency_key"]  # NOT re-keyed
+
+    # Further catch-up is a no-op — no more delivery attempts / regeneration.
+    sched.run_missed()
+    assert attempts["n"] == 2
+    store.close()
+
+
+def test_crashed_occurrence_gives_up_after_max_attempts(clock):
+    # A routine that crashes on every run must not be reclaimed-and-retried
+    # forever: after the budget is spent the occurrence settles permanently.
+    store = RoutineStore(db_path=":memory:", clock=clock, max_attempts=2)
+    occ = clock()
+    default_key = default_idempotency_key("daily", occ)
+
+    # Attempt 1 crashes (claim, never finish) -> reclaimed & freed for retry.
+    store.claim("daily", occ)
+    store.reclaim_stale(now=clock() + store.lease_timeout + 1.0)
+    assert store.has_run(default_key) is False  # freed
+
+    # Attempt 2 crashes -> budget spent -> given up, key kept, not retried.
+    r2 = store.claim("daily", occ)
+    store.reclaim_stale(now=clock() + store.lease_timeout + 1.0)
+    assert store.has_run(default_key) is True  # kept
+
+    row = store._conn().execute(
+        "SELECT status, error_code, attempt, idempotency_key FROM routine_runs"
+        " WHERE id = ?",
+        (r2.id,),
+    ).fetchone()
+    assert row["status"] == STATUS_ERROR
+    assert row["error_code"] == ERROR_CODE_MAX_ATTEMPTS
+    assert row["attempt"] == 2
+    assert "#crashed" not in row["idempotency_key"]  # NOT re-keyed
+
+    # The exhausted occurrence is no longer reported for retry.
+    assert occ not in store.missed_occurrences("daily", interval=100.0, now=clock())
+    store.close()
 
 
 # -- scheduler: missed-job catchup with fake clock ---------------------------
