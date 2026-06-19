@@ -44,6 +44,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from openbird.routines import store as store_mod
 from openbird.routines.store import (
+    ERROR_CODE_DELIVERY,
     RoutineStore,
     default_idempotency_key,
     next_scheduled_occurrence,
@@ -72,10 +73,10 @@ Clock = Callable[[], float]
 # effects. The daemon default is the content-safe no-op (:func:`null_deliverer`).
 Deliverer = Callable[[str, str], None]
 
-# Stable, content-safe error codes recorded when a routine runner or delivery
-# sink raises.
+# Stable, content-safe error code recorded when a routine runner raises. The
+# delivery-sink counterpart (``ERROR_CODE_DELIVERY``) is owned by the store,
+# which also frees the occurrence for retry — see ``RoutineStore.fail_delivery``.
 ERROR_CODE_RUNNER = "RUNNER_EXCEPTION"
-ERROR_CODE_DELIVERY = "DELIVERY_EXCEPTION"
 
 
 def null_deliverer(routine: str, text: str) -> None:
@@ -284,15 +285,18 @@ class RoutineScheduler:
         try:
             self.deliverer(name, text)
         except Exception as exc:  # noqa: BLE001 - one sink must not strand a run
+            # Generation succeeded; only delivery failed. Record a terminal,
+            # content-safe error BUT keep the generated body and free the
+            # occurrence for retry (a transient sink must not drop output) —
+            # ``fail_delivery`` persists ``text`` and re-keys the run.
             error_class = type(exc).__name__
-            persisted = self.run_store.finish(
+            persisted = self.run_store.fail_delivery(
                 run.id,
-                status=store_mod.STATUS_ERROR,
+                output=text,
                 error_class=error_class,
-                error_code=ERROR_CODE_DELIVERY,
             )
             logger.warning(
-                "routine delivery error: name=%s scheduled_ts=%.0f "
+                "routine delivery error (will retry): name=%s scheduled_ts=%.0f "
                 "error_class=%s error_code=%s",
                 name,
                 sched,

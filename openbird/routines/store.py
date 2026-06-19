@@ -85,6 +85,17 @@ DEFAULT_LEASE_TIMEOUT = 900.0
 # Content-safe error code recorded when a stale lease is reclaimed.
 ERROR_CODE_LEASE_EXPIRED = "LEASE_EXPIRED"
 
+# Content-safe error code for a delivery-sink failure that occurred AFTER the
+# runner produced output. The run is recorded terminally, but (like a reclaimed
+# crash) the occurrence is freed for a later retry — see :meth:`RoutineStore.fail_delivery`.
+ERROR_CODE_DELIVERY = "DELIVERY_EXCEPTION"
+
+# Error codes whose rows represent an occurrence that was NOT durably completed:
+# the grid attempt was freed (re-keyed) and the occurrence is eligible for retry.
+# These rows must never anchor the catch-up grid or they would swallow the very
+# occurrence they freed.
+_FREED_FOR_RETRY = (ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_DELIVERY)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS routine_runs (
     id              TEXT PRIMARY KEY,
@@ -485,17 +496,7 @@ class RoutineStore:
             KeyError: If ``run_id`` does not exist.
         """
         end = self._clock() if finished_ts is None else finished_ts
-
-        # Always record content-safe metadata about the output.
-        output_len: int | None = None
-        output_hash: str | None = None
-        stored_output: str | None = None
-        if output is not None:
-            output_len = len(output)
-            output_hash = hashlib.sha256(output.encode("utf-8")).hexdigest()
-            # Only persist the full body inside the encrypted boundary.
-            if self.encryption_enabled:
-                stored_output = output
+        stored_output, output_len, output_hash = self._content_safe_output(output)
 
         with self._lock:
             conn = self._conn()
@@ -511,6 +512,74 @@ class RoutineStore:
                 )
                 if cur.rowcount == 0:
                     raise KeyError(f"unknown routine run id: {run_id!r}")
+        return self.get(run_id)
+
+    def _content_safe_output(
+        self, output: str | None
+    ) -> tuple[str | None, int | None, str | None]:
+        """Derive ``(stored_output, output_len, output_hash)`` for ``output``.
+
+        The body itself is only persisted inside the encrypted boundary; with
+        encryption off we keep non-content metadata (length + sha256) only.
+        Shared by :meth:`finish` and :meth:`fail_delivery` so the privacy rule
+        is expressed in exactly one place.
+        """
+        if output is None:
+            return None, None, None
+        output_len = len(output)
+        output_hash = hashlib.sha256(output.encode("utf-8")).hexdigest()
+        stored_output = output if self.encryption_enabled else None
+        return stored_output, output_len, output_hash
+
+    def fail_delivery(
+        self,
+        run_id: str,
+        *,
+        output: str | None,
+        error_class: str,
+        finished_ts: float | None = None,
+    ) -> RoutineRun:
+        """Record a *retryable* delivery failure for a claimed run.
+
+        The runner already produced ``output`` (generation succeeded); only the
+        delivery sink raised. Unlike :meth:`finish`, this method:
+
+          * **persists the generated body** (within the encrypted boundary,
+            exactly like a successful run) so the work is not silently lost, and
+          * **re-keys** the row's idempotency key (``<key>#delivery-failed-<id>``)
+            so the occurrence's grid key is freed and :meth:`missed_occurrences`
+            re-detects it — identical to crash reclamation (:meth:`reclaim_stale`).
+
+        The exception *message* is never stored: only ``error_class`` and the
+        content-safe :data:`ERROR_CODE_DELIVERY` are recorded.
+
+        Raises:
+            KeyError: If ``run_id`` does not exist.
+        """
+        end = self._clock() if finished_ts is None else finished_ts
+        stored_output, output_len, output_hash = self._content_safe_output(output)
+
+        with self._lock:
+            conn = self._conn()
+            with conn:
+                row = conn.execute(
+                    "SELECT idempotency_key FROM routine_runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown routine run id: {run_id!r}")
+                # Free the occurrence's grid key so a later claim can retry it,
+                # while preserving the audit trail of the failed attempt.
+                freed_key = f"{row['idempotency_key']}#delivery-failed-{run_id}"
+                conn.execute(
+                    "UPDATE routine_runs"
+                    " SET status = ?, output = ?, output_len = ?, output_hash = ?,"
+                    " error_code = ?, error_class = ?, finished_ts = ?,"
+                    " lease_ts = NULL, idempotency_key = ?"
+                    " WHERE id = ?",
+                    (STATUS_ERROR, stored_output, output_len, output_hash,
+                     ERROR_CODE_DELIVERY, error_class, end, freed_key, run_id),
+                )
         return self.get(run_id)
 
     # -- reads ----------------------------------------------------------------
@@ -571,11 +640,13 @@ class RoutineStore:
           1. **Grid walk** — from the last *settled* run (or ``now - interval``
              if the routine has never run) forward to ``now``, every grid point
              whose idempotency key is not yet present in the store.
-          2. **Reclaimed crashes** — occurrences whose in-flight attempt crashed
-             and was freed by :meth:`reclaim_stale` (status ``error`` /
-             ``LEASE_EXPIRED``), provided the occurrence's grid key is now free
-             (no later attempt has run). This guarantees a crash between
-             ``claim`` and ``finish`` does not permanently lose the occurrence.
+          2. **Freed-for-retry attempts** — occurrences whose in-flight attempt
+             crashed and was freed by :meth:`reclaim_stale` (``LEASE_EXPIRED``),
+             or whose delivery sink failed after generation
+             (:meth:`fail_delivery`, ``DELIVERY_EXCEPTION``), provided the
+             occurrence's grid key is now free (no later attempt has run). This
+             guarantees neither a crash between ``claim`` and ``finish`` nor a
+             transient delivery failure permanently loses the occurrence.
 
         Callers should invoke :meth:`reclaim_stale` before this so crashed
         in-flight runs become eligible for retry.
@@ -641,13 +712,14 @@ class RoutineStore:
         return sorted(missed)
 
     def _reclaimed_occurrences(self, routine: str) -> list[float]:
-        """Scheduled times of crash-reclaimed (LEASE_EXPIRED) attempts."""
+        """Scheduled times of freed-for-retry attempts (crash or delivery)."""
+        placeholders = ",".join("?" * len(_FREED_FOR_RETRY))
         with self._lock:
             conn = self._conn()
             rows = conn.execute(
                 "SELECT DISTINCT scheduled_ts FROM routine_runs"
-                " WHERE routine = ? AND status = ? AND error_code = ?",
-                (routine, STATUS_ERROR, ERROR_CODE_LEASE_EXPIRED),
+                f" WHERE routine = ? AND status = ? AND error_code IN ({placeholders})",
+                (routine, STATUS_ERROR, *_FREED_FOR_RETRY),
             ).fetchall()
         return [r["scheduled_ts"] for r in rows]
 
@@ -666,24 +738,25 @@ class RoutineStore:
         a crash does not advance the anchor past later occurrences. Falls back to
         the most recent run of any status only if nothing settled exists.
         """
+        placeholders = ",".join("?" * len(_FREED_FOR_RETRY))
         with self._lock:
             conn = self._conn()
             row = conn.execute(
                 "SELECT * FROM routine_runs"
                 " WHERE routine = ? AND status IN (?, ?)"
-                " AND (error_code IS NULL OR error_code != ?)"
+                f" AND (error_code IS NULL OR error_code NOT IN ({placeholders}))"
                 " ORDER BY scheduled_ts DESC LIMIT 1",
-                (routine, STATUS_DONE, STATUS_ERROR, ERROR_CODE_LEASE_EXPIRED),
+                (routine, STATUS_DONE, STATUS_ERROR, *_FREED_FOR_RETRY),
             ).fetchone()
             if row is None:
-                # Fall back to the newest run that is NOT a reclaimed crash, so a
-                # crash-only history does not anchor on (and thus swallow) the
-                # very occurrence that still needs retry.
+                # Fall back to the newest run that is NOT freed-for-retry, so a
+                # crash/delivery-only history does not anchor on (and thus
+                # swallow) the very occurrence that still needs retry.
                 row = conn.execute(
                     "SELECT * FROM routine_runs WHERE routine = ?"
-                    " AND (error_code IS NULL OR error_code != ?)"
+                    f" AND (error_code IS NULL OR error_code NOT IN ({placeholders}))"
                     " ORDER BY scheduled_ts DESC LIMIT 1",
-                    (routine, ERROR_CODE_LEASE_EXPIRED),
+                    (routine, *_FREED_FOR_RETRY),
                 ).fetchone()
         return self._row_to_run(row) if row is not None else None
 
@@ -720,5 +793,6 @@ __all__ = [
     "STATUS_ERROR",
     "STATUS_MISSED",
     "ERROR_CODE_LEASE_EXPIRED",
+    "ERROR_CODE_DELIVERY",
     "DEFAULT_LEASE_TIMEOUT",
 ]
