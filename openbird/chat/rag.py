@@ -135,6 +135,27 @@ class AnswerResult:
     def __str__(self) -> str:  # pragma: no cover - convenience only
         return self.answer
 
+    def to_public_dict(self) -> dict:
+        """Serialize for ``chat --json`` / the menu-bar UI: the answer, whether it
+        is grounded, and occurrence-level citations (app / window / ts / snippet
+        + ids) so the UI can render and link each source."""
+        return {
+            "answer": self.answer,
+            "grounded": self.grounded,
+            "citations": [
+                {
+                    "index": i,
+                    "observation_id": c.observation_id,
+                    "chunk_id": c.chunk_id,
+                    "app": c.app,
+                    "window": c.window,
+                    "ts": c.ts,
+                    "snippet": c.snippet,
+                }
+                for i, c in enumerate(self.citations, start=1)
+            ],
+        }
+
 
 @dataclass
 class _ContextItem:
