@@ -58,6 +58,33 @@ def test_invalid_float_timeout_raises(monkeypatch):
         get_settings()
 
 
+def test_empty_db_path_env_falls_back_to_default(tmp_path, monkeypatch):
+    # An empty OPENBIRD_DB_PATH must be treated as unset (not a degenerate empty
+    # path), so it resolves to <data dir>/openbird.db. This keeps the signed
+    # Swift app's DB-path resolution (which skips empty values) in lockstep so
+    # both inspect the SAME file before the app mints/injects an encryption key.
+    monkeypatch.setenv("OPENBIRD_DB_PATH", "")
+    assert get_settings().db_path == str(tmp_path / "openbird.db")
+
+
+def test_non_empty_db_path_env_is_honored(monkeypatch):
+    monkeypatch.setenv("OPENBIRD_DB_PATH", "/tmp/custom-openbird.db")
+    assert get_settings().db_path == "/tmp/custom-openbird.db"
+
+
+def test_empty_blocklist_env_clears_to_empty(monkeypatch):
+    # Empty is MEANINGFUL for list fields: OPENBIRD_BLOCKLIST="" must explicitly
+    # clear the default blocklist to [] (NOT be skipped as "no override").
+    monkeypatch.setenv("OPENBIRD_BLOCKLIST", "")
+    assert get_settings().blocklist == []
+
+
+def test_blocklist_defaults_when_env_unset(monkeypatch):
+    # With no env var at all, the non-empty default blocklist stands.
+    monkeypatch.delenv("OPENBIRD_BLOCKLIST", raising=False)
+    assert get_settings().blocklist != []
+
+
 def test_defaults_are_sane():
     s = Settings()
     assert s.llm_timeout == 60.0

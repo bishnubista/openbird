@@ -83,11 +83,66 @@ final class OpenBirdService: @unchecked Sendable {
     private var captureProcess: Process?
 
     private var dataDirectory: URL {
+        Self.dataDirectoryURL()
+    }
+
+    /// The OpenBird data directory (`~/.openbird` or `$OPENBIRD_DATA_DIR`). Static
+    /// so the launch-time DB-key bootstrap can resolve paths before any instance
+    /// exists.
+    static func dataDirectoryURL() -> URL {
         if let override = ProcessInfo.processInfo.environment["OPENBIRD_DATA_DIR"],
            !override.isEmpty {
             return URL(fileURLWithPath: NSString(string: override).expandingTildeInPath)
         }
-        return fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".openbird")
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openbird")
+    }
+
+    /// The resolved DB file, mirroring Python `Settings` precedence (`config.py`):
+    /// `OPENBIRD_DB_PATH` wins if set; otherwise `<data dir>/openbird.db`. The
+    /// fail-closed key check MUST inspect this exact file — checking only the
+    /// data-dir default could mint a fresh key while a custom-path encrypted DB
+    /// elsewhere gets stranded.
+    static func databaseURL() -> URL {
+        if let override = ProcessInfo.processInfo.environment["OPENBIRD_DB_PATH"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: NSString(string: override).expandingTildeInPath)
+        }
+        return dataDirectoryURL().appendingPathComponent("openbird.db")
+    }
+
+    // MARK: - DB encryption key (app-owned; injected into CLI children)
+    //
+    // The signed app resolves the DB key from its own Keychain item (stable
+    // Developer-ID DR -> prompt reads "OpenBird", "Always Allow" persists) and
+    // overlays it as OPENBIRD_DB_KEY into every CLI child, so the Python layer
+    // never touches the Keychain itself. See docs/design/keychain-app-attribution.md.
+
+    /// Resolved once at launch; nil when no key could be safely provided.
+    private static var injectedDBKey: String?
+
+    /// Resolve the app-owned DB key and make it available to all CLI children.
+    /// Idempotent; call once at launch (applicationDidFinishLaunching) BEFORE any
+    /// child process is spawned.
+    static func bootstrapDBKey() {
+        let dbPath = databaseURL().path
+        let (key, _) = KeychainKeyProvider.resolveKey(dbPath: dbPath)  // outcome logged by provider
+        guard let key else { return }
+        injectedDBKey = key
+        // Belt-and-suspenders: also export into our own environment so a child
+        // that inherits env without an explicit overlay still receives the key.
+        setenv("OPENBIRD_DB_KEY", key, 1)
+    }
+
+    /// Base environment for a CLI child with OPENBIRD_DB_KEY explicitly overlaid
+    /// (Codex finding #3 — never rely on inherited env / setenv timing alone).
+    static func childEnvironment(
+        base: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var env = base
+        if let key = injectedDBKey {
+            env["OPENBIRD_DB_KEY"] = key
+        }
+        return env
     }
 
     private var pauseFile: URL {
@@ -140,7 +195,7 @@ final class OpenBirdService: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cli)
         process.arguments = ["capture", "--loop"]
-        var env = ProcessInfo.processInfo.environment
+        var env = Self.childEnvironment()
         let allow = allowlist()
         if !allow.isEmpty {
             env["OPENBIRD_ALLOWLIST"] = allow.joined(separator: ",")
@@ -369,6 +424,7 @@ final class OpenBirdService: @unchecked Sendable {
         // The question goes via STDIN, never argv — chat text must not be visible
         // to local process inspection (consistent with the capture pipeline).
         process.arguments = ["chat", "--json", "--stdin"]
+        process.environment = Self.childEnvironment()
 
         let stdinPipe = Pipe()
         let outPipe = Pipe()
@@ -496,6 +552,9 @@ final class OpenBirdService: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
+        // Overlay OPENBIRD_DB_KEY so preflight/data-stats children read the
+        // app-owned key and never raise their own Keychain prompt.
+        process.environment = childEnvironment()
 
         let stdout = Pipe()
         let stderr = Pipe()

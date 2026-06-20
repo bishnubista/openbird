@@ -246,6 +246,16 @@ def _settings_from_env() -> Settings:
         raw = os.environ.get(env_key)
         if raw is None:
             continue
+        # For SCALAR fields, an empty value means "no override": a stray
+        # ``OPENBIRD_DB_PATH=""`` must fall back to ``<data dir>/openbird.db``
+        # rather than becoming a degenerate empty path — and this keeps the
+        # signed Swift app's DB-path resolution (which skips empty values) in
+        # lockstep. For LIST fields (``_COERCE_DEFAULTS`` value is a list, e.g.
+        # allowlist/blocklist), empty is MEANINGFUL: it explicitly clears to
+        # ``[]`` (e.g. ``OPENBIRD_BLOCKLIST=""`` drops the default blocklist), so
+        # it must NOT be skipped.
+        if raw == "" and not isinstance(_COERCE_DEFAULTS.get(f.name), list):
+            continue
         # Determine a sensible default for type coercion without constructing
         # a full Settings (which would touch the filesystem).
         default_val = _COERCE_DEFAULTS.get(f.name, "")
