@@ -16,6 +16,12 @@ enum StepState: Equatable {
     case working     // an action is in progress
 }
 
+enum MemoryStatsState: Equatable {
+    case unknown
+    case loaded(MemoryStats)
+    case failed
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var report = PreflightReport()
@@ -29,6 +35,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var screenRecordingGranted = false
     @Published private(set) var microphoneGranted = false
     @Published private(set) var memoryStats = MemoryStats.empty
+    @Published private(set) var memoryStatsState = MemoryStatsState.unknown
     @Published private(set) var lastMemoryRefresh: Date?
     @Published private(set) var lastRefresh: Date?
     @Published private(set) var isRefreshing = false
@@ -83,11 +90,27 @@ final class AppModel: ObservableObject {
         return "\(memoryStats.observations) \(noun) stored"
     }
 
+    var askUnavailableReason: String? {
+        switch memoryStatsState {
+        case .loaded(let stats) where stats.observations == 0:
+            return "No memory stored yet. Start capture or ingest notes before asking."
+        case .failed:
+            return "Could not check local memory. Re-check setup before asking."
+        case .unknown, .loaded:
+            return nil
+        }
+    }
+
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off
     /// the main actor and publishes the answer + citations (or a friendly error).
     func ask(_ question: String) {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !chatBusy else { return }
+        if let askUnavailableReason {
+            chatResult = nil
+            chatError = askUnavailableReason
+            return
+        }
         chatBusy = true
         chatError = nil
         let service = self.service
@@ -109,8 +132,8 @@ final class AppModel: ObservableObject {
         switch error {
         case ChatError.cliMissing:
             return "OpenBird CLI not found in the app bundle."
-        case ChatError.failed:
-            return "Chat failed — is Ollama running and memory set up? Try `openbird doctor`."
+        case ChatError.failed(let message):
+            return message
         case ChatError.decode:
             return "Could not read the chat response."
         default:
@@ -171,7 +194,13 @@ final class AppModel: ObservableObject {
 
     /// Refresh local DB counters so capture status is grounded in stored memory.
     func refreshMemoryStats() async {
-        memoryStats = await service.memoryStats()
+        if let stats = await service.memoryStats() {
+            memoryStats = stats
+            memoryStatsState = .loaded(stats)
+        } else {
+            memoryStats = .empty
+            memoryStatsState = .failed
+        }
         lastMemoryRefresh = Date()
     }
 

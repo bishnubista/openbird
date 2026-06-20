@@ -55,7 +55,7 @@ struct ChatResult: Codable, Equatable {
     let citations: [ChatCitation]
 }
 
-enum ChatError: Error { case cliMissing, failed, decode }
+enum ChatError: Error { case cliMissing, failed(String), decode }
 
 /// Local memory DB counters decoded from `openbird data stats`.
 struct MemoryStats: Codable, Equatable {
@@ -313,12 +313,12 @@ final class OpenBirdService: @unchecked Sendable {
         return Self.parsePreflight(result.stdout)
     }
 
-    func memoryStats() async -> MemoryStats {
-        guard let cli = resolveOpenBirdCLI() else { return .empty }
+    func memoryStats() async -> MemoryStats? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
         let result = await runAsync(cli, arguments: ["data", "stats"], timeout: 10)
         guard result.exitCode == 0,
               let decoded = Self.parseMemoryStats(result.stdout) else {
-            return .empty
+            return nil
         }
         return decoded
     }
@@ -374,11 +374,12 @@ final class OpenBirdService: @unchecked Sendable {
         // Launch FIRST. Starting the pipe-drain readers before run() would leak
         // them (blocked on readDataToEndOfFile waiting for an EOF that never comes)
         // if run() throws.
-        do { try process.run() } catch { throw ChatError.failed }
+        do { try process.run() } catch { throw ChatError.failed("Could not launch chat.") }
 
         // Drain stdout/stderr on background queues so a full pipe buffer cannot
         // deadlock against our wait loop. Started only after a successful launch.
         var outData = Data()
+        var errData = Data()
         let lock = NSLock()
         let group = DispatchGroup()
         for pipe in [outPipe, errPipe] {
@@ -386,7 +387,13 @@ final class OpenBirdService: @unchecked Sendable {
             let isOut = pipe === outPipe
             DispatchQueue.global(qos: .utility).async {
                 let d = pipe.fileHandleForReading.readDataToEndOfFile()
-                if isOut { lock.lock(); outData = d; lock.unlock() }
+                lock.lock()
+                if isOut {
+                    outData = d
+                } else {
+                    errData = d
+                }
+                lock.unlock()
                 group.leave()
             }
         }
@@ -407,17 +414,39 @@ final class OpenBirdService: @unchecked Sendable {
             if process.isRunning { kill(process.processIdentifier, SIGKILL) }
             process.waitUntilExit()
             group.wait()
-            throw ChatError.failed
+            throw ChatError.failed("Chat timed out while waiting for the local model.")
         }
 
         process.waitUntilExit()
         group.wait()
-        guard process.terminationStatus == 0 else { throw ChatError.failed }
-        lock.lock(); let data = outData; lock.unlock()
+        lock.lock()
+        let data = outData
+        let stderr = String(data: errData, encoding: .utf8) ?? ""
+        lock.unlock()
+        guard process.terminationStatus == 0 else {
+            throw ChatError.failed(Self.chatFailureSummary(
+                exitCode: process.terminationStatus,
+                stderr: stderr
+            ))
+        }
         guard let decoded = try? JSONDecoder().decode(ChatResult.self, from: data) else {
             throw ChatError.decode
         }
         return decoded
+    }
+
+    static func chatFailureSummary(exitCode: Int32, stderr: String) -> String {
+        let lower = stderr.lowercased()
+        if lower.contains("openbird_allow_cloud") || lower.contains("cloud model configured") {
+            return "Chat blocked because a cloud model is configured without opt-in."
+        }
+        if lower.contains("model") && (lower.contains("not found") || lower.contains("missing")) {
+            return "Chat failed because a required local model is missing."
+        }
+        if lower.contains("connection refused") || lower.contains("ollama") {
+            return "Chat failed because the local Ollama model request did not complete."
+        }
+        return "Chat failed (exit \(exitCode)). Run openbird doctor for details."
     }
 
     static func parsePreflight(_ output: String) -> PreflightReport {

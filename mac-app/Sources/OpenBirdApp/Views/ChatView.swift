@@ -26,7 +26,14 @@ struct ChatView: View {
                     }
                 }
                 .disabled(model.chatBusy
-                    || question.trimmingCharacters(in: .whitespaces).isEmpty)
+                    || question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || model.askUnavailableReason != nil)
+            }
+
+            if let reason = model.askUnavailableReason {
+                Label(reason, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if let err = model.chatError {
