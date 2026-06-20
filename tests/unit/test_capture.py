@@ -485,6 +485,91 @@ def test_daemon_ingests_allowlisted_event(allow_settings):
     assert "Quarterly report" in call["text"]
 
 
+def test_daemon_coalesces_unchanged_recent_capture(allow_settings):
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings, duplicate_window=60.0)
+    lines = [
+        _line(app="com.apple.mail", window="Inbox", text="same report", ts=10.0),
+        _line(app="com.apple.mail", window="Inbox", text="same report", ts=12.0),
+    ]
+
+    stats = daemon.run_lines(lines)
+
+    assert stats.received == 2
+    assert stats.ingested == 1
+    assert stats.coalesced == 1
+    assert stats.rejected == 0
+    assert len(store.calls) == 1
+
+
+def test_daemon_keeps_heartbeat_for_unchanged_capture(allow_settings):
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings, duplicate_window=60.0)
+    lines = [
+        _line(app="com.apple.mail", window="Inbox", text="same report", ts=10.0),
+        _line(app="com.apple.mail", window="Inbox", text="same report", ts=69.0),
+        _line(app="com.apple.mail", window="Inbox", text="same report", ts=70.0),
+    ]
+
+    stats = daemon.run_lines(lines)
+
+    assert stats.ingested == 2
+    assert stats.coalesced == 1
+    assert [call["ts"] for call in store.calls] == [10.0, 70.0]
+
+
+def test_daemon_does_not_coalesce_backward_timestamps(allow_settings):
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings, duplicate_window=60.0)
+    lines = [
+        _line(app="com.apple.mail", window="Inbox", text="same report", ts=10.0),
+        _line(app="com.apple.mail", window="Inbox", text="same report", ts=9.0),
+    ]
+
+    stats = daemon.run_lines(lines)
+
+    assert stats.ingested == 2
+    assert stats.coalesced == 0
+
+
+def test_daemon_ingests_changed_capture_immediately(allow_settings):
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings, duplicate_window=60.0)
+    lines = [
+        _line(app="com.apple.mail", window="Inbox", text="first report", ts=10.0),
+        _line(app="com.apple.mail", window="Inbox", text="updated report", ts=12.0),
+        _line(app="com.apple.mail", window="Thread", text="updated report", ts=14.0),
+    ]
+
+    stats = daemon.run_lines(lines)
+
+    assert stats.ingested == 3
+    assert stats.coalesced == 0
+    assert [call["text"] for call in store.calls] == [
+        "first report",
+        "updated report",
+        "updated report",
+    ]
+    assert [call["window"] for call in store.calls] == ["Inbox", "Inbox", "Thread"]
+
+
+def test_daemon_resets_coalescing_after_rejected_event(allow_settings):
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings, duplicate_window=60.0)
+    lines = [
+        _line(app="com.apple.mail", window="Inbox", text="same report", ts=10.0),
+        _line(app="com.unknown.app", window="Other", text="not captured", ts=11.0),
+        _line(app="com.apple.mail", window="Inbox", text="same report", ts=12.0),
+    ]
+
+    stats = daemon.run_lines(lines)
+
+    assert stats.ingested == 2
+    assert stats.rejected == 1
+    assert stats.coalesced == 0
+    assert [call["ts"] for call in store.calls] == [10.0, 12.0]
+
+
 def test_daemon_rejects_non_allowlisted(allow_settings):
     store = FakeStore()
     daemon = CaptureDaemon(store, settings=allow_settings)
@@ -1028,6 +1113,7 @@ def test_run_forever_respawns_helper_each_cycle(allow_settings):
         settings=allow_settings,
         helper_cmd=_oneshot_emitter(2),
         require_signed_helper=False,
+        duplicate_window=0,
     )
     stats = daemon.run_forever(poll_interval=0.0, max_cycles=3)
     assert stats.received == 6  # 3 re-spawns x 2 events — proves continuity

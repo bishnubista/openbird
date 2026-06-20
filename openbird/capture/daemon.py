@@ -31,8 +31,10 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
 
@@ -122,6 +124,7 @@ _MAX_STDERR_BYTES = 64 * 1024
 # Supervised-loop defaults. The Swift capture-helper captures the frontmost
 # window and exits, so continuous capture means re-spawning it on an interval.
 _DEFAULT_POLL_INTERVAL = 2.0  # seconds the supervisor idles between helper spawns
+_DEFAULT_DUPLICATE_WINDOW = 60.0  # keep one unchanged snapshot per minute
 _DEFAULT_MAX_CONSECUTIVE_FAILURES = 5  # circuit breaker: stop after this many
 _BACKOFF_BASE = 1.0  # first retry delay (seconds), doubled each consecutive fail
 _BACKOFF_MAX = 60.0  # cap on the exponential backoff delay
@@ -153,6 +156,7 @@ class CaptureStats:
 
     received: int = 0
     ingested: int = 0
+    coalesced: int = 0
     rejected: int = 0
     errors: int = 0
 
@@ -160,6 +164,7 @@ class CaptureStats:
         return CaptureStats(
             received=self.received + delta.get("received", 0),
             ingested=self.ingested + delta.get("ingested", 0),
+            coalesced=self.coalesced + delta.get("coalesced", 0),
             rejected=self.rejected + delta.get("rejected", 0),
             errors=self.errors + delta.get("errors", 0),
         )
@@ -169,9 +174,20 @@ class CaptureStats:
         return CaptureStats(
             received=self.received + other.received,
             ingested=self.ingested + other.ingested,
+            coalesced=self.coalesced + other.coalesced,
             rejected=self.rejected + other.rejected,
             errors=self.errors + other.errors,
         )
+
+
+@dataclass(frozen=True)
+class _CaptureSignature:
+    """Content-free identity for deciding whether a capture is unchanged."""
+
+    app: str | None
+    window: str | None
+    url: str | None
+    text_hash: str
 
 
 def _truncate(text: str) -> str:
@@ -238,6 +254,7 @@ class CaptureDaemon:
         helper_cmd: Iterable[str] | None = None,
         source: str = "capture",
         require_signed_helper: bool = True,
+        duplicate_window: float = _DEFAULT_DUPLICATE_WINDOW,
     ) -> None:
         """Construct the daemon.
 
@@ -256,6 +273,9 @@ class CaptureDaemon:
                 never be launched (TCC grants are per signed path). Tests that
                 inject an explicit ``helper_cmd`` (e.g. a python emitter) pass
                 ``False`` to opt out of the bundle-path requirement.
+            duplicate_window: Seconds to suppress unchanged app/window/url/text
+                repeats after an ingest. A fresh heartbeat is still stored once
+                the window elapses, preserving duration without 2-second copies.
         """
         self.store = store
         self.settings = settings or get_settings()
@@ -265,6 +285,9 @@ class CaptureDaemon:
             self.helper_cmd = default_helper_cmd()
         self.source = source
         self.require_signed_helper = require_signed_helper
+        self.duplicate_window = max(0.0, duplicate_window)
+        self._last_ingested_signature: _CaptureSignature | None = None
+        self._last_ingested_at: float | None = None
         self._stderr_thread: threading.Thread | None = None
         # Safe, content-free error counter for the whole-data-path privacy gate:
         # store/embed failures bump this instead of emitting tracebacks that
@@ -279,6 +302,44 @@ class CaptureDaemon:
         """Whether capture ingestion is currently paused by the trust surface."""
         return self._pause_file().exists()
 
+    def _reset_coalescing(self) -> None:
+        """Forget the previous accepted foreground state after capture leaves it."""
+        self._last_ingested_signature = None
+        self._last_ingested_at = None
+
+    @staticmethod
+    def _event_clock(ts: object) -> float:
+        """Return a comparison timestamp without trusting malformed helper values."""
+        try:
+            return float(ts) if ts is not None else time.time()
+        except (TypeError, ValueError):
+            return time.time()
+
+    @staticmethod
+    def _signature(
+        *,
+        app: str | None,
+        window: str | None,
+        url: str | None,
+        text: str,
+    ) -> _CaptureSignature:
+        """Build a non-content signature for unchanged-capture suppression."""
+        text_hash = sha256(text.encode("utf-8")).hexdigest()
+        return _CaptureSignature(app=app, window=window, url=url, text_hash=text_hash)
+
+    def _is_recent_duplicate(self, signature: _CaptureSignature, event_at: float) -> bool:
+        if self.duplicate_window <= 0:
+            return False
+        if self._last_ingested_signature != signature or self._last_ingested_at is None:
+            return False
+        if event_at < self._last_ingested_at:
+            return False
+        return event_at - self._last_ingested_at < self.duplicate_window
+
+    def _mark_ingested(self, signature: _CaptureSignature, event_at: float) -> None:
+        self._last_ingested_signature = signature
+        self._last_ingested_at = event_at
+
     # -- per-event handling ---------------------------------------------------
 
     def handle_event(self, event: dict, stats: CaptureStats) -> CaptureStats:
@@ -290,6 +351,7 @@ class CaptureDaemon:
         """
         stats = stats._with(received=1)
         if self.is_paused():
+            self._reset_coalescing()
             logger.debug("capture: rejected event reason=paused")
             return stats._with(rejected=1)
 
@@ -308,12 +370,14 @@ class CaptureDaemon:
             settings=self.settings,
         )
         if not decision.capture or scrubbed is None:
+            self._reset_coalescing()
             logger.debug("capture: rejected event app=%s reason=%s", app, decision.reason)
             return stats._with(rejected=1)
 
         normalized = adapters.normalize_for_app(scrubbed, app)
         if not normalized.strip():
             # Everything was chrome/boilerplate -> nothing worth storing.
+            self._reset_coalescing()
             logger.debug("capture: event reduced to empty after normalization app=%s", app)
             return stats._with(rejected=1)
 
@@ -325,6 +389,16 @@ class CaptureDaemon:
         safe_window, safe_url, title_rules = redact.scrub_metadata(
             window=window, url=url
         )
+        event_at = self._event_clock(ts)
+        signature = self._signature(
+            app=app,
+            window=safe_window,
+            url=safe_url,
+            text=normalized,
+        )
+        if self._is_recent_duplicate(signature, event_at):
+            logger.debug("capture: coalesced unchanged event app=%s", app)
+            return stats._with(coalesced=1)
 
         try:
             self.store.add_observation(
@@ -359,8 +433,10 @@ class CaptureDaemon:
                 self.error_count,
                 exc_info=False,
             )
+            self._reset_coalescing()
             return stats._with(errors=1)
 
+        self._mark_ingested(signature, event_at)
         matched = tuple(decision.matched_rules) + tuple(title_rules)
         if matched:
             logger.debug(
