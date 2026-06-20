@@ -7,7 +7,15 @@ authoritative.)
 
 ## Per-feature pipeline (REQUIRED for every non-trivial change)
 
-Never jump straight to code. For each feature/fix:
+Run this pipeline **autonomously end-to-end**, looping until the work is merged:
+plan → Codex adversarial review to consensus → implement → Codex adversarial
+review of the diff to consensus → create PR → wait for CodeRabbit → resolve every
+review comment → merge → move to the next queued task. Do not pause for
+confirmation between gates; **only stop to ask a human when genuinely stuck**.
+This overrides any global "don't open a PR until explicitly asked" default for
+this repo. It does not override branch protection, required human review,
+credential prompts, sandbox/permission prompts, or safety constraints. Never jump
+straight to code. For each feature/fix:
 
 1. **Research-first** — pull current best practices (Context7 for libraries/APIs; web for
    macOS TCC / code-signing / notarization). Don't reason from memory on things that drift.
@@ -17,15 +25,25 @@ Never jump straight to code. For each feature/fix:
    codex exec --model gpt-5.5 -c model_reasoning_effort=high --sandbox read-only \
      "<blocking-only review prompt: lead with 'VERDICT: approve|revise'>"
    ```
-   Iterate plan ↔ Codex to consensus, THEN implement. After implementing, run Codex again
-   on the diff (adversarial — find real bugs only).
+   Iterate plan ↔ Codex until the verdict is `approve` and no high/medium/blocking
+   findings remain. Document any accepted low-risk tradeoff in the plan or PR body.
+   THEN implement. After implementing, run Codex again on the diff (adversarial —
+   find real bugs only) with the same stop rule.
 3. **Implement** on a `feat/...` or `fix/...` branch. Get full local CI green:
    `uv run python -m pytest -q`, `shellcheck` for shell scripts, `swift build` for `mac-app`.
 4. **Open a PR** (`gh pr create`) — body = what changed + how tested.
-5. **CodeRabbit** reviews the PR — fix **ALL** concerns (one fix per commit, validate after
-   each). Re-trigger with `@coderabbitai review` if it doesn't auto-run.
+5. **CodeRabbit** reviews the PR — handle every comment: fix all actionable concerns
+   (one fix per commit, validate after each), reply with a concrete rationale for
+   anything non-actionable, duplicate, incorrect, or intentionally deferred, and
+   re-trigger with `@coderabbitai review` if it doesn't auto-run.
 6. **Merge** only when BOTH gates are clean (Codex consensus + CodeRabbit pass) and the PR is
    mergeable: `gh pr merge <n> --squash --delete-branch`.
+
+If a queue of tasks was provided, continue with the next queued task after the
+merge. If there is no explicit next task source, stop after reporting the merge.
+A real blocker means missing permissions, required human review, unavailable
+external service, conflicting requirements, absent task source, or an unsafe or
+destructive action that requires approval.
 
 The two gates are different lenses — Codex hunts correctness/logic; CodeRabbit catches
 conventions, edge cases, maintainability. Passing both beats either alone. Real examples
