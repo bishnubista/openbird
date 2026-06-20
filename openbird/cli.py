@@ -342,6 +342,38 @@ def _render_preflight(report: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# doctor                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+@app.command()
+def doctor(
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the redacted diagnostic as JSON."
+    ),
+    no_ollama: bool = typer.Option(
+        False, "--no-ollama", help="Skip the Ollama network probe."
+    ),
+) -> None:
+    """Print a content-safe diagnostic to share when reporting an issue.
+
+    Reuses preflight and adds code-signing identity, quarantine state, and
+    allowlist status. Home paths are redacted, secrets scrubbed, and allow/block
+    lists reduced to counts; the report never contains captured text. Never raises.
+    """
+    from openbird.doctor import build_doctor_report, render
+
+    # Resolve settings INSIDE build_doctor_report's never-crash boundary (a bad
+    # env or unwritable data dir must still yield a diagnostic, not a traceback).
+    report = build_doctor_report(probe_ollama=not no_ollama)
+    if json_out:
+        _console.print_json(json.dumps(report))
+    else:
+        _console.print(render(report))
+    raise typer.Exit(code=0 if report.get("runtime_ok") else 1)
+
+
+# --------------------------------------------------------------------------- #
 # ingest                                                                      #
 # --------------------------------------------------------------------------- #
 
