@@ -40,21 +40,11 @@ enum KeychainKeyProvider {
     ///   to an existing item's ACL instead.
     /// - Generates a new key only when provably safe (Codex finding #2).
     static func resolveKey(dbPath: String) -> (key: String?, outcome: Outcome) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let (existing, status) = readKey()
 
         switch status {
         case errSecSuccess:
-            if let data = item as? Data,
-               let key = String(data: data, encoding: .utf8),
-               !key.isEmpty {
+            if let key = existing, !key.isEmpty {
                 log.info("db key resolved (\(Outcome.loaded.rawValue, privacy: .public))")
                 return (key, .loaded)
             }
@@ -76,6 +66,26 @@ enum KeychainKeyProvider {
         }
     }
 
+    /// Read the existing key item. Returns the decoded key (when the payload is
+    /// present and valid UTF-8) plus the raw `SecItemCopyMatching` status so the
+    /// caller can distinguish not-found / denied / error.
+    private static func readKey() -> (key: String?, status: OSStatus) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess else { return (nil, status) }
+        if let data = item as? Data, let key = String(data: data, encoding: .utf8) {
+            return (key, status)
+        }
+        return (nil, status)  // success but payload missing / not UTF-8
+    }
+
     /// Generate + store a fresh key, but only when no encrypted DB would be
     /// stranded. Otherwise fail closed.
     private static func generateIfSafe(dbPath: String) -> (key: String?, outcome: Outcome) {
@@ -95,6 +105,18 @@ enum KeychainKeyProvider {
             kSecValueData as String: Data(key.utf8),
         ]
         let status = SecItemAdd(attrs as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            // A concurrent writer created the item between our not-found read and
+            // this add. Re-read and use that key rather than failing bootstrap —
+            // the item now exists and is the authoritative key.
+            let (existing, readStatus) = readKey()
+            if readStatus == errSecSuccess, let key = existing, !key.isEmpty {
+                log.info("db key loaded after concurrent create (\(Outcome.loaded.rawValue, privacy: .public))")
+                return (key, .loaded)
+            }
+            log.error("db key duplicate-add but re-read failed (\(Outcome.error.rawValue, privacy: .public)) status=\(readStatus, privacy: .public)")
+            return (nil, .error)
+        }
         guard status == errSecSuccess else {
             log.error("db key SecItemAdd failed (\(Outcome.error.rawValue, privacy: .public)) status=\(status, privacy: .public)")
             return (nil, .error)
