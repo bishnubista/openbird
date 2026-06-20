@@ -36,6 +36,7 @@ struct MenuBarView: View {
         Divider()
 
         Text(statusLine)
+        Text(model.memorySummary)
         ForEach(model.helpers) { helper in
             Text(helper.isBundled ? "\(helper.label): OK" : "\(helper.label): Missing")
         }
@@ -48,7 +49,7 @@ struct MenuBarView: View {
 
     private var statusLine: String {
         if model.isFullyConfigured {
-            return model.captureRunning ? "Capturing" : "Ready"
+            return model.captureRunning ? "Capture running" : "Ready"
         }
         return "Setup incomplete"
     }

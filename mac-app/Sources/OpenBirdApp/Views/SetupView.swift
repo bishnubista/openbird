@@ -271,6 +271,9 @@ private struct CaptureControls: View {
                 .disabled(model.allowlist.isEmpty)
             }
             Spacer()
+            Text(model.memorySummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Button {
                 model.openDataFolder()
             } label: {
