@@ -31,3 +31,6 @@ dist/
 
 # SwiftPM scratch cache (from sandboxed builds)
 .swift-cache/
+
+# Playwright MCP scratch (screenshots, uploads)
+.playwright-mcp/

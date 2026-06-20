@@ -35,7 +35,7 @@ if [[ "${OPENBIRD_SWIFTPM_DISABLE_SANDBOX:-}" == "1" ]]; then
   swift_build_args+=(--disable-sandbox)
 fi
 
-(cd "$ROOT_DIR/mac-app" && swift build ${swift_build_args[@]+"${swift_build_args[@]}"} )
+(cd "$ROOT_DIR/mac-app" && swift build ${swift_build_args[@]+"${swift_build_args[@]}"} >&2)
 app_build_dir="$(cd "$ROOT_DIR/mac-app" && swift build ${swift_build_args[@]+"${swift_build_args[@]}"} --show-bin-path)"
 capture_helper="$(build_swiftpm_product "$ROOT_DIR/capture-helper" CaptureHelper)"
 audio_helper="$(build_swiftpm_product "$ROOT_DIR/audio-helper" AudioHelper)"
@@ -68,6 +68,10 @@ if [[ ! -f "\$REPO_ROOT/pyproject.toml" ]]; then
   echo "OpenBird dev bundle cannot find the source checkout at \$REPO_ROOT" >&2
   exit 127
 fi
+# Point the daemon at THIS bundle's signed helper (matches OPENBIRD_CAPTURE_HELPER
+# contract in openbird/capture/daemon.py). Without this the daemon would look under
+# /Applications/OpenBird.app and fail-closed / probe the wrong path for a dist build.
+export OPENBIRD_CAPTURE_HELPER="\$BIN_DIR/capture-helper"
 exec "\$UV_BIN" --directory "\$REPO_ROOT" run openbird "\$@"
 WRAPPER
 chmod +x "$APP_MACOS/openbird-cli"
@@ -94,6 +98,62 @@ cat >"$INFO_PLIST" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# ---- Code signing (Tier 1: local signed dev bundle) ----
+# Sign inside-out (helpers first, then the .app) so the app signature seals all
+# nested content — the helpers, the openbird-cli shim, and Info.plist. Anything
+# edited after this point breaks the seal, so signing is the LAST build step.
+#
+# Identity comes from OPENBIRD_SIGN_IDENTITY. Default is ad-hoc ("-"), which is
+# fine for CI/test builds that never request macOS TCC. For the responsible-process
+# probe and any real capture run, export a stable Developer ID, e.g.:
+#   export OPENBIRD_SIGN_IDENTITY="Developer ID Application: bishnu bista (SB26BAMXJM)"
+# Only a stable signing identity makes TCC grants persist across rebuilds.
+SIGN_IDENTITY="${OPENBIRD_SIGN_IDENTITY:--}"
+
+# A secure Apple timestamp is required for Developer ID *distribution* (notarization),
+# but not for local TCC testing — and depending on Apple's TS server would make local
+# builds fail offline. Default off; opt in with OPENBIRD_SIGN_TIMESTAMP=1.
+if [[ "${OPENBIRD_SIGN_TIMESTAMP:-0}" == "1" ]]; then
+  ts_flag=(--timestamp)
+else
+  ts_flag=(--timestamp=none)
+fi
+
+sign_macho() {
+  local path="$1"; shift
+  codesign --force --options runtime "${ts_flag[@]}" --sign "$SIGN_IDENTITY" "$@" "$path" >&2
+}
+
+echo "Signing bundle (identity: $SIGN_IDENTITY)" >&2
+# Bare helper executables have no Info.plist, so give each an explicit identifier.
+sign_macho "$APP_MACOS/capture-helper" --identifier dev.openbird.capture-helper
+sign_macho "$APP_MACOS/audio-helper"   --identifier dev.openbird.audio-helper
+# The openbird-cli shim is a shell script, not a Mach-O, but it lives in
+# Contents/MacOS so `codesign --verify --strict` requires it to carry its own
+# signature (stored in an extended attribute) before the app seal. Sign it WITHOUT
+# --options runtime, which is a Mach-O-only concept.
+codesign --force "${ts_flag[@]}" --identifier dev.openbird.cli \
+  --sign "$SIGN_IDENTITY" "$APP_MACOS/openbird-cli" >&2
+# App last: signs the main executable and seals the whole bundle.
+sign_macho "$APP_BUNDLE"
+
+echo "Verifying signature..." >&2
+codesign --verify --strict --verbose=2 "$APP_BUNDLE" >&2
+codesign -dvv "$APP_BUNDLE" 2>&1 | sed 's/^/  /' >&2
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+  signed_team="$(codesign -dvv "$APP_BUNDLE" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  expected_team="${OPENBIRD_EXPECTED_TEAM_ID:-}"
+  if [[ -n "$expected_team" && "$signed_team" != "$expected_team" ]]; then
+    echo "  WARNING: TeamIdentifier '$signed_team' != expected '$expected_team'" >&2
+  else
+    echo "  TeamIdentifier: ${signed_team:-<none>}" >&2
+  fi
+fi
+# Gatekeeper assessment is informational in Tier 1 — the dev bundle is intentionally
+# NOT notarized yet, so a rejection here is expected and must not fail the build.
+spctl -a -vv "$APP_BUNDLE" 2>&1 | sed 's/^/  /' >&2 || \
+  echo "  spctl: not accepted (expected — Tier 1 dev bundle is not notarized)" >&2
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
