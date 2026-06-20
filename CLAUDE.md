@@ -62,9 +62,10 @@ guardrails so they can't silently hang the pipeline:
   EOF, so a hung run looks identical to a slow one.
 - **Bound each command with an explicit, per-command wall-clock deadline** — Codex review,
   Swift build, and pytest get *different* values, not one magic number. A deadline beats a
-  poller: it is scoped to the command and self-terminates a hang. macOS has no GNU `timeout`
-  by default — use `gtimeout` (coreutils) if present, or a wrapper that kills the whole
-  **process group**, not just the parent PID.
+  poller: it is scoped to the command and self-terminates a hang. Use `timeout` / `gtimeout`
+  from GNU coreutils (`brew install coreutils` — already installed in this dev env) and prefer
+  `--signal=KILL` after a grace period so it reaps the whole **process group**, not just the
+  parent PID.
 - On a killed/timed-out gate, **cap retries and log why each retry happened** — never retry
   endlessly.
 - **Distinguish hangs from blockers:** credential/permission prompts, merge conflicts, and
