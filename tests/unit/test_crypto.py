@@ -150,3 +150,45 @@ def test_keyring_set_timeout_returns_none(monkeypatch):
         assert time.perf_counter() - started < 0.5
     finally:
         blocked.set()
+
+
+class _CountingKeyring:
+    """Records calls so a test can prove the Keychain was NOT touched.
+
+    Crucially it does NOT raise — `_get_or_create_key` swallows keyring
+    exceptions and returns None, so a raising stub couldn't distinguish
+    'never called' from 'called and failed'. The call counter can.
+    """
+
+    calls: list[str] = []
+
+    @classmethod
+    def reset(cls):
+        cls.calls = []
+
+    @classmethod
+    def get_password(cls, *_a, **_k):
+        cls.calls.append("get")
+        return "keychain-value-that-must-not-be-used"
+
+    @classmethod
+    def set_password(cls, *_a, **_k):
+        cls.calls.append("set")
+
+
+def test_env_db_key_bypasses_keychain(monkeypatch):
+    _CountingKeyring.reset()
+    monkeypatch.setitem(sys.modules, "keyring", _CountingKeyring)
+    monkeypatch.delenv("OPENBIRD_DISABLE_KEYRING", raising=False)
+    monkeypatch.setenv("OPENBIRD_DB_KEY", "deadbeef" * 8)
+    assert crypto._get_or_create_key() == "deadbeef" * 8  # env key, not the keychain value
+    assert _CountingKeyring.calls == []  # Keychain never touched
+
+
+def test_disable_keyring_skips_keychain(monkeypatch):
+    _CountingKeyring.reset()
+    monkeypatch.setitem(sys.modules, "keyring", _CountingKeyring)
+    monkeypatch.delenv("OPENBIRD_DB_KEY", raising=False)
+    monkeypatch.setenv("OPENBIRD_DISABLE_KEYRING", "1")
+    assert crypto._get_or_create_key() is None
+    assert _CountingKeyring.calls == []  # proves bypass, not a swallowed failure
