@@ -462,6 +462,9 @@ def chat(
     no_semantic: bool = typer.Option(
         False, "--no-semantic", help="BM25-only retrieval (skip the embedding call)."
     ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the answer + citations as JSON (used by the app UI)."
+    ),
 ) -> None:
     """Answer a question grounded in your captured memory, with citations.
 
@@ -478,6 +481,10 @@ def chat(
         result = rag.answer(question, k=k, semantic=not no_semantic)
     finally:
         store.close()
+
+    if json_out:
+        _console.print_json(json.dumps(result.to_public_dict()))
+        raise typer.Exit(code=0)
 
     if not result.grounded and result.answer:
         # Surface the grounding gate up front so an ungrounded answer is never

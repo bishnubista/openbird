@@ -480,3 +480,88 @@ def test_live_ollama_round_trip(tmp_path):
             assert c.observation_id in valid_ids
     finally:
         store.close()
+
+
+def test_answer_result_to_public_dict_shape():
+    from openbird.chat.rag import AnswerResult
+    from openbird.types import Citation
+
+    result = AnswerResult(
+        answer="Storage uses SQLite.",
+        citations=[
+            Citation(
+                observation_id="o1",
+                chunk_id="c1",
+                app="Notes",
+                window="Plan",
+                ts=123.0,
+                snippet="store in sqlite",
+            )
+        ],
+        grounded=True,
+    )
+    d = result.to_public_dict()
+    assert d["answer"] == "Storage uses SQLite."
+    assert d["grounded"] is True
+    assert d["citations"] == [
+        {
+            "index": 1,
+            "observation_id": "o1",
+            "chunk_id": "c1",
+            "app": "Notes",
+            "window": "Plan",
+            "ts": 123.0,
+            "snippet": "store in sqlite",
+        }
+    ]
+
+
+def test_answer_result_to_public_dict_empty():
+    from openbird.chat.rag import AnswerResult
+
+    d = AnswerResult(answer="", citations=[], grounded=False).to_public_dict()
+    assert d == {"answer": "", "grounded": False, "citations": []}
+
+
+def test_chat_cli_json_output(monkeypatch):
+    """`chat --json` emits only the JSON payload (no human Sources/grounding text)."""
+    import json as _json
+
+    from typer.testing import CliRunner
+
+    from openbird import cli
+    from openbird.chat.rag import AnswerResult
+    from openbird.types import Citation
+
+    fake = AnswerResult(
+        answer="Use SQLite.",
+        citations=[
+            Citation(observation_id="o1", chunk_id="c1", app="Notes", window="W", ts=1.0, snippet="sqlite")
+        ],
+        grounded=True,
+    )
+
+    class _FakeRAG:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def answer(self, *_a, **_k):
+            return fake
+
+    class _FakeStore:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "_provider", lambda: object())
+    monkeypatch.setattr(cli, "_store", lambda **_k: _FakeStore())
+    monkeypatch.setattr("openbird.chat.rag.RAG", _FakeRAG)
+
+    res = CliRunner().invoke(cli.app, ["chat", "q", "--json"])
+    assert res.exit_code == 0
+    payload = _json.loads(res.output)
+    assert payload["answer"] == "Use SQLite."
+    assert payload["grounded"] is True
+    assert payload["citations"][0]["app"] == "Notes"
+    # human-only rendering must not appear in --json mode
+    assert "Sources" not in res.output
+    assert "ungrounded" not in res.output
