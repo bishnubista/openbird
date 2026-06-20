@@ -14,7 +14,7 @@ struct OpenBirdApp: App {
     @StateObject private var model = AppModel(service: OpenBirdService())
 
     var body: some Scene {
-        WindowGroup("OpenBird", id: "main") {
+        Window("OpenBird", id: "main") {
             ContentView(model: model)
                 .frame(minWidth: 560, minHeight: 420)
                 .task {
