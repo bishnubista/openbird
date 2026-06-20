@@ -28,6 +28,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var accessibilityGranted = false
     @Published private(set) var screenRecordingGranted = false
     @Published private(set) var microphoneGranted = false
+    @Published private(set) var memoryStats = MemoryStats.empty
+    @Published private(set) var lastMemoryRefresh: Date?
     @Published private(set) var lastRefresh: Date?
     @Published private(set) var isRefreshing = false
     @Published private(set) var workingMessage: String?
@@ -39,6 +41,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var chatError: String?
 
     private let service: OpenBirdService
+    private var captureStopRequested = false
+    /// Delayed post-start check that confirms capture is actually storing memory.
+    private var captureHealthCheckTask: Task<Void, Never>?
 
     init(service: OpenBirdService) {
         self.service = service
@@ -67,6 +72,15 @@ final class AppModel: ObservableObject {
     var menuBarSymbol: String {
         if captureRunning && !capturePaused { return "bird.fill" }
         return capturePaused ? "pause.circle" : "bird"
+    }
+
+    /// User-facing summary of how many local memory observations are currently stored.
+    var memorySummary: String {
+        let noun = memoryStats.observations == 1 ? "observation" : "observations"
+        if let lastMemoryRefresh {
+            return "\(memoryStats.observations) \(noun) stored · checked \(lastMemoryRefresh.formatted(date: .omitted, time: .shortened))"
+        }
+        return "\(memoryStats.observations) \(noun) stored"
     }
 
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off
@@ -151,7 +165,14 @@ final class AppModel: ObservableObject {
         screenRecordingGranted = service.screenRecordingGranted()
         microphoneGranted = service.microphoneGranted()
         report = await service.preflightReport()
+        await refreshMemoryStats()
         lastRefresh = Date()
+    }
+
+    /// Refresh local DB counters so capture status is grounded in stored memory.
+    func refreshMemoryStats() async {
+        memoryStats = await service.memoryStats()
+        lastMemoryRefresh = Date()
     }
 
     func pullMissingModels() async {
@@ -197,19 +218,57 @@ final class AppModel: ObservableObject {
             lastActionMessage = "Add at least one app to the capture allowlist first."
             return
         }
-        if service.startCapture() {
+        lastActionMessage = "Starting capture..."
+        Task { await startCaptureAfterRefreshingStats() }
+    }
+
+    /// Start capture after recording the current observation count for health comparison.
+    private func startCaptureAfterRefreshingStats() async {
+        await refreshMemoryStats()
+        captureHealthCheckTask?.cancel()
+        captureStopRequested = false
+        let observationsBeforeStart = memoryStats.observations
+        if service.startCapture(onExit: { [weak self] code in
+            Task { @MainActor in
+                guard let self else { return }
+                self.captureRunning = self.service.isCaptureRunning()
+                self.captureHealthCheckTask?.cancel()
+                self.captureHealthCheckTask = nil
+                await self.refreshMemoryStats()
+                if self.captureStopRequested {
+                    self.captureStopRequested = false
+                } else {
+                    self.lastActionMessage = code == 0
+                        ? "Capture stopped."
+                        : "Capture stopped unexpectedly (exit \(code)). Re-check setup."
+                }
+            }
+        }) {
             captureRunning = true
             capturePaused = false
-            lastActionMessage = "Capture started for \(allowlist.count) app(s)."
+            lastActionMessage = "Capture started for \(allowlist.count) app(s). Waiting for memory updates."
+            captureHealthCheckTask = Task {
+                await refreshMemoryStats()
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                guard !Task.isCancelled, captureRunning else { return }
+                await refreshMemoryStats()
+                if memoryStats.observations <= observationsBeforeStart {
+                    lastActionMessage = "Capture is running, but no new memory is stored yet. Bring an allowed app to the front or re-check setup."
+                }
+            }
         } else {
             lastActionMessage = "Could not start capture (CLI not found)."
         }
     }
 
     func stopCapture() {
+        captureStopRequested = true
+        captureHealthCheckTask?.cancel()
+        captureHealthCheckTask = nil
         service.stopCapture()
         captureRunning = false
         lastActionMessage = "Capture stopped."
+        Task { await refreshMemoryStats() }
     }
 
     /// Stop the app-launched capture daemon, then terminate the app. Used by the
@@ -220,9 +279,13 @@ final class AppModel: ObservableObject {
     }
 
     func stopHelpers() {
+        captureStopRequested = true
+        captureHealthCheckTask?.cancel()
+        captureHealthCheckTask = nil
         let stopped = service.stopHelperProcesses()
         captureRunning = service.isCaptureRunning()
         lastActionMessage = stopped ? "Stopped helper processes." : "No helper processes were running."
+        Task { await refreshMemoryStats() }
     }
 
     func addToAllowlist(_ bundleID: String) {

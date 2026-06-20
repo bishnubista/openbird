@@ -57,6 +57,16 @@ struct ChatResult: Codable, Equatable {
 
 enum ChatError: Error { case cliMissing, failed, decode }
 
+/// Local memory DB counters decoded from `openbird data stats`.
+struct MemoryStats: Codable, Equatable {
+    let observations: Int
+    let blobs: Int
+    let chunks: Int
+    let vectors: Int
+
+    static let empty = MemoryStats(observations: 0, blobs: 0, chunks: 0, vectors: 0)
+}
+
 
 final class OpenBirdService: @unchecked Sendable {
     private let fileManager = FileManager.default
@@ -102,7 +112,10 @@ final class OpenBirdService: @unchecked Sendable {
 
     /// Whether a capture daemon launched by this app is still running.
     func isCaptureRunning() -> Bool {
-        if let proc = captureProcess, proc.isRunning { return true }
+        if let proc = captureProcess {
+            if proc.isRunning { return true }
+            captureProcess = nil
+        }
         // Also treat an externally running helper as "capturing" for status.
         return Self.run("/usr/bin/pgrep", arguments: ["-x", "capture-helper"]).exitCode == 0
     }
@@ -111,7 +124,7 @@ final class OpenBirdService: @unchecked Sendable {
     /// saved allowlist as OPENBIRD_ALLOWLIST so the daemon captures only the apps
     /// the user opted into. Returns false if the CLI cannot be resolved.
     @discardableResult
-    func startCapture() -> Bool {
+    func startCapture(onExit: (@Sendable (Int32) -> Void)? = nil) -> Bool {
         guard captureProcess?.isRunning != true, let cli = resolveOpenBirdCLI() else {
             return captureProcess?.isRunning == true
         }
@@ -131,6 +144,9 @@ final class OpenBirdService: @unchecked Sendable {
         // flow into the app's logs. The daemon persists to the local DB itself.
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { proc in
+            onExit?(proc.terminationStatus)
+        }
         do {
             try process.run()
             captureProcess = process
@@ -295,6 +311,22 @@ final class OpenBirdService: @unchecked Sendable {
                 : result.stderr)
         }
         return Self.parsePreflight(result.stdout)
+    }
+
+    func memoryStats() async -> MemoryStats {
+        guard let cli = resolveOpenBirdCLI() else { return .empty }
+        let result = await runAsync(cli, arguments: ["data", "stats"], timeout: 10)
+        guard result.exitCode == 0,
+              let decoded = Self.parseMemoryStats(result.stdout) else {
+            return .empty
+        }
+        return decoded
+    }
+
+    /// Decode the JSON emitted by `openbird data stats` into UI counters.
+    static func parseMemoryStats(_ output: String) -> MemoryStats? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(MemoryStats.self, from: data)
     }
 
     // MARK: - Internals
