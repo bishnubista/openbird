@@ -38,14 +38,20 @@ final class TodayTimelineDecodingTests: XCTestCase {
     }
 }
 
-final class TodayFormattingTests: XCTestCase {
-    func testAppNameStripsBundlePrefix() {
-        XCTAssertEqual(TodayView.appName("com.google.Chrome"), "Chrome")
-        XCTAssertEqual(TodayView.appName("Code"), "Code")
-        XCTAssertEqual(TodayView.appName(nil), "Unknown")
-        XCTAssertEqual(TodayView.appName(""), "Unknown")
+final class AppDisplayTests: XCTestCase {
+    func testNilOrEmptyBundleIsUnknown() {
+        XCTAssertEqual(AppDisplay.name(nil), "Unknown")
+        XCTAssertEqual(AppDisplay.name(""), "Unknown")
     }
 
+    func testFallbackCapitalizesLastComponent() {
+        // Deterministic (machine-independent) path for an unresolvable bundle id.
+        XCTAssertEqual(AppDisplay.fallbackName("com.example.someApp"), "SomeApp")
+        XCTAssertEqual(AppDisplay.fallbackName("widget"), "Widget")
+    }
+}
+
+final class TodayFormattingTests: XCTestCase {
     func testDurationLabel() {
         XCTAssertEqual(TodayView.durationLabel(30), "30s")
         XCTAssertEqual(TodayView.durationLabel(90), "1m")
