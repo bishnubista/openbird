@@ -152,7 +152,9 @@ if [[ "$SIGN_IDENTITY" != "-" ]]; then
 fi
 # Gatekeeper assessment is informational in Tier 1 — the dev bundle is intentionally
 # NOT notarized yet, so a rejection here is expected and must not fail the build.
-spctl -a -vv "$APP_BUNDLE" 2>&1 | sed 's/^/  /' >&2 || \
+# Local pipefail so the fallback keys off spctl's exit (not sed's), independent of
+# the script-wide `set -o pipefail` above.
+(set -o pipefail; spctl -a -vv "$APP_BUNDLE" 2>&1 | sed 's/^/  /' >&2) || \
   echo "  spctl: not accepted (expected — Tier 1 dev bundle is not notarized)" >&2
 
 open_app() {
