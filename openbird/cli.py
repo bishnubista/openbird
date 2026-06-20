@@ -897,6 +897,28 @@ def data_stats() -> None:
     _console.print_json(json.dumps(stats))
 
 
+@data_app.command("integrity")
+def data_integrity(
+    quick: bool = typer.Option(
+        False, "--quick", help="Faster quick_check (skips some cross-page/index checks)."
+    ),
+) -> None:
+    """Verify the on-disk database is not corrupt (SQLite integrity check)."""
+    # Open the DB raw (not via MemoryStore) so a corrupt DB — exactly what this
+    # command diagnoses — is reported rather than crashing in schema/migrations.
+    from openbird.memory.store import check_database_integrity
+
+    settings = get_settings()
+    result = check_database_integrity(settings.db_path, settings=settings, quick=quick)
+    if result["ok"]:
+        _console.print("[green]integrity: ok[/]")
+    else:
+        _console.print("[red]integrity: PROBLEMS DETECTED[/]")
+        for problem in result["problems"]:
+            _console.print(f"  - {problem}")
+    raise typer.Exit(code=0 if result["ok"] else 1)
+
+
 # --------------------------------------------------------------------------- #
 # reindex                                                                     #
 # --------------------------------------------------------------------------- #
