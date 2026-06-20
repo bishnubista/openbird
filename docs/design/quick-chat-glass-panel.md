@@ -91,7 +91,7 @@ Changed:
 `glassSurface(cornerRadius:)` — compile-time gate first, runtime guard inside
 (Codex #1). The material path is the unconditional fallback so the symbol
 `.glassEffect` is only ever compiled against an SDK that defines it:
-```
+```swift
 @ViewBuilder func glassSurface(_ r: CGFloat) -> some View {
   #if compiler(>=6.2)            // toolchain new enough to KNOW about glassEffect
   if #available(macOS 26, *) {
@@ -192,6 +192,7 @@ NSPanel/hotkey/`canBecomeKey`/focus are AppKit-integration glue — covered by b
 
 ## Definition of done
 
+```text
 Codex consensus on this plan → implement → `swift build` green +
 `uv run python -m pytest -q` green (no Python change expected) → manual smoke
 (⌥Space toggles panel; ask returns a cited answer; light/dark both legible;
