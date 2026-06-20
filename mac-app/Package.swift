@@ -13,6 +13,11 @@ let package = Package(
         .executableTarget(
             name: "OpenBirdApp",
             path: "Sources/OpenBirdApp"
+        ),
+        .testTarget(
+            name: "OpenBirdAppTests",
+            dependencies: ["OpenBirdApp"],
+            path: "Tests/OpenBirdAppTests"
         )
     ]
 )

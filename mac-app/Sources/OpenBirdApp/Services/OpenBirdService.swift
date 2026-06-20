@@ -317,11 +317,15 @@ final class OpenBirdService: @unchecked Sendable {
         guard let cli = resolveOpenBirdCLI() else { return .empty }
         let result = await runAsync(cli, arguments: ["data", "stats"], timeout: 10)
         guard result.exitCode == 0,
-              let data = result.stdout.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode(MemoryStats.self, from: data) else {
+              let decoded = Self.parseMemoryStats(result.stdout) else {
             return .empty
         }
         return decoded
+    }
+
+    static func parseMemoryStats(_ output: String) -> MemoryStats? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(MemoryStats.self, from: data)
     }
 
     // MARK: - Internals
