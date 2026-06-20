@@ -167,11 +167,27 @@ def _call_keyring(label: str, func: Any, *args: Any) -> Any:
 
 
 def _get_or_create_key() -> str | None:
-    """Fetch the DB key from the Keychain, creating one if needed.
+    """Fetch the DB key, creating one if needed.
 
-    Returns ``None`` if ``keyring`` is unavailable, signalling that encryption
-    cannot proceed.
+    Resolution order:
+      1. ``OPENBIRD_DB_KEY`` env — use it directly, bypassing the Keychain.
+      2. ``OPENBIRD_DISABLE_KEYRING`` truthy — skip the Keychain (returns ``None``,
+         so encryption degrades per the usual fallback / ``OPENBIRD_REQUIRE_ENCRYPTION``).
+      3. otherwise the macOS Keychain via ``keyring``.
+
+    (1) and (2) exist because in development each ``uv run python`` is a different,
+    unsigned interpreter, so the key's Keychain ACL never matches and macOS
+    re-prompts on every run — "Always Allow" cannot stick. The signed ``.app`` has
+    a stable identity and does not hit this, so these env opt-outs are dev/CI-only.
+
+    Returns ``None`` when no key is available (signalling encryption cannot proceed).
     """
+    env_key = os.environ.get("OPENBIRD_DB_KEY")
+    if env_key:
+        return env_key
+    if os.environ.get("OPENBIRD_DISABLE_KEYRING", "").strip().lower() in {"1", "true", "yes", "on"}:
+        logger.info("OPENBIRD_DISABLE_KEYRING set; skipping Keychain (no DB key from keyring)")
+        return None
     try:
         import keyring
     except ImportError:
