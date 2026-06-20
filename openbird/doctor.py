@@ -258,7 +258,14 @@ def render(report: dict[str, Any]) -> str:
             lines.append(f"allowlist: {priv.get('allowlist_count', '?')} app(s)")
         ollama = pf.get("ollama", {})
         if isinstance(ollama, dict) and "reachable" in ollama:
-            lines.append(f"ollama  : {'reachable' if ollama.get('reachable') else 'unreachable'}")
+            reachable = ollama.get("reachable")
+            if reachable is True:
+                label = "reachable"
+            elif reachable is False:
+                label = "unreachable"
+            else:  # preserve tri-state (e.g. "unknown") instead of coercing to truthy
+                label = str(reachable) if reachable is not None else "unknown"
+            lines.append(f"ollama  : {label}")
     if report.get("error"):
         lines.append(f"error   : {report['error']}")
     return "\n".join(lines)

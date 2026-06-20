@@ -216,3 +216,15 @@ def test_settings_resolution_failure_does_not_crash(monkeypatch):
     assert report["preflight"] == {"error": "RuntimeError"}
     assert report["runtime_ok"] is False
     assert "unwritable" not in json.dumps(report)
+
+
+def test_render_preserves_ollama_tristate():
+    base = {
+        "system": _SYS,
+        "runtime_ok": False,
+        "signing": {"signed": "n/a"},
+        "quarantine": "n/a",
+    }
+    for value, expect in ((True, "reachable"), (False, "unreachable"), ("unknown", "unknown")):
+        report = {**base, "preflight": {"privacy": {"allowlist_empty": True}, "ollama": {"reachable": value}}}
+        assert f"ollama  : {expect}" in doc.render(report)
