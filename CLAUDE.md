@@ -34,12 +34,13 @@ ambiguous signing-identity selection, a leaked-reader deadlock, a weak test.
 
 ## Hard rules
 
-- **NEVER push directly to `main`.** Always a reviewed PR. (A pre-commit hook enforces being
-  on a branch.) Merging a reviewed PR is allowed once it passes the pipeline.
+- **NEVER push directly to `main`.** Always a reviewed PR; merging a reviewed PR is allowed
+  once it passes the pipeline. (Some local dev setups add a branch-guard git hook, but the
+  repo does not ship one — treat this as a rule, not something enforced for you.)
 - **Sync before planning:** `git fetch origin && git log --oneline origin/main -20`, and branch
   off `origin/main` — the local checkout can be stale (this once caused a whole duplicated PR).
-- **Stage files by name**, not `git add -A`. The secret-scan pre-commit hook must pass; use
-  placeholders in docs.
+- **Stage files by name**, not `git add -A`. **Never commit secrets** — use placeholders in
+  docs (a local secret-scan hook may help, but don't rely on the repo having one).
 - **Observability / privacy:** privacy-safe structured logging only — reason codes, metadata,
   counts; **never** captured text, window titles, or URLs.
 - **Secrets** stay in the macOS Keychain / `~/openbird-codesign/` (not the repo). The signing
@@ -47,10 +48,12 @@ ambiguous signing-identity selection, a leaked-reader deadlock, a weak test.
 
 ## Release (beta .dmg)
 
-Invoke the **`/release-dmg`** skill — it drives `script/package_dmg.sh` (self-contained
-embedded Python → Developer ID sign every nested Mach-O → notarize → staple → publish to
-GitHub Releases). The signing identity auto-derives from the keychain; override via a
-gitignored `script/release.env`. See `.claude/skills/release-dmg/SKILL.md`.
+Invoke the **`/release-dmg`** skill. `script/package_dmg.sh` builds the self-contained bundle
+→ Developer ID-signs every nested Mach-O → notarizes → staples → and produces
+`dist/OpenBird.dmg` (it does NOT publish). The skill then **publishes** that dmg to GitHub
+Releases as a separate `gh release create` step. The signing identity auto-derives from the
+keychain; override via a gitignored `script/release.env`. See
+`.claude/skills/release-dmg/SKILL.md`.
 
 ## Handy commands
 
