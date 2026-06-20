@@ -114,7 +114,7 @@ def capture(
     _console.print(
         f"[green]Capture {'pass' if once else 'session'} complete.[/] "
         f"received={stats.received} ingested={stats.ingested} "
-        f"rejected={stats.rejected} errors={stats.errors}"
+        f"coalesced={stats.coalesced} rejected={stats.rejected} errors={stats.errors}"
     )
 
 
