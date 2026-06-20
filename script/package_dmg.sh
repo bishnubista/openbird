@@ -48,15 +48,17 @@ die() { echo "package_dmg: ERROR: $*" >&2; exit 1; }
 # "Developer ID Application" identity from the keychain.
 DEVID="${OPENBIRD_SIGN_IDENTITY:-}"
 if [ -z "$DEVID" ]; then
-  _ids="$(security find-identity -v -p codesigning 2>/dev/null \
-    | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | sort -u)"
-  _n="$(printf '%s\n' "$_ids" | grep -c . || true)"
+  # Count RAW identity lines (not deduped): two distinct certs can share the same
+  # CN string (e.g. a renewed + old one), and `sort -u` would collapse them to one,
+  # auto-selecting ambiguously. Counting lines makes any duplicate a hard error.
+  _lines="$(security find-identity -v -p codesigning 2>/dev/null | grep "Developer ID Application" || true)"
+  _n="$(printf '%s\n' "$_lines" | grep -c . || true)"
   if [ "$_n" -eq 1 ]; then
-    DEVID="$_ids"
+    DEVID="$(printf '%s\n' "$_lines" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p')"
   elif [ "$_n" -eq 0 ]; then
     die "no 'Developer ID Application' identity in the keychain — create one, or set OPENBIRD_SIGN_IDENTITY (env or script/release.env)."
   else
-    printf '%s\n' "$_ids" >&2
+    printf '%s\n' "$_lines" >&2
     die "multiple Developer ID Application identities found — set OPENBIRD_SIGN_IDENTITY to choose one."
   fi
 fi

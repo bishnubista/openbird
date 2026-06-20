@@ -17,12 +17,14 @@ and publishes the result.
 
 - On `main`, synced and clean: `git fetch origin && git checkout main && git pull --ff-only`.
   Releasing builds from `main`, so all merged features are included.
-- Developer ID identity present:
+- Exactly one Developer ID identity present (the build auto-derives it):
   `security find-identity -v -p codesigning | grep "Developer ID Application"`
-  (expected: `Developer ID Application: bishnu bista (SB26BAMXJM)`).
-- notarytool profile present: the build uses `--keychain-profile openbird-notary`.
-  If missing, recreate with `xcrun notarytool store-credentials` (key in
-  `~/openbird-codesign/`, iCloud-backed). See `memory/openbird-signing.md`.
+  should print a single `Developer ID Application: <Name> (<TEAMID>)` line. If there
+  are several, set `OPENBIRD_SIGN_IDENTITY` (env or `script/release.env`).
+- notarytool profile present (default `openbird-notary`, override via
+  `OPENBIRD_NOTARY_PROFILE`). If missing, recreate with `xcrun notarytool
+  store-credentials <profile>` (key material in `~/openbird-codesign/`,
+  iCloud-backed). See `memory/openbird-signing.md`.
 - `gh auth status` is authenticated for `bishnubista/openbird`.
 
 ## 1. Pick the version
@@ -36,8 +38,10 @@ asset — a new tag gives testers a version + changelog anchor.
 ```bash
 export OPENBIRD_SWIFTPM_DISABLE_SANDBOX=1
 unset OPENBIRD_DMG_SKIP_NOTARIZE
-./script/package_dmg.sh    # run in the BACKGROUND — notarization is minutes
+./script/package_dmg.sh
 ```
+Run this so it doesn't block the session — it takes several minutes, mostly Apple
+notarization — then poll for completion (e.g. start it as a background task).
 The signing identity is **auto-derived** from the single "Developer ID Application"
 identity in the keychain, and the notary profile defaults to `openbird-notary`.
 Override only if needed via env or a gitignored `script/release.env` (see
@@ -50,8 +54,8 @@ success (`dist/OpenBird.dmg`). First notarization for a brand-new app can take ~
 subsequent ones are minutes.
 
 If it fails: the script surfaces `xcrun notarytool log <id> --keychain-profile
-openbird-notary` to pinpoint a rejected binary. Fix, rebuild — do NOT hand-edit the
-signed bundle.
+"<your profile>"` (the configured profile — default `openbird-notary`) to pinpoint a
+rejected binary. Fix, rebuild — do NOT hand-edit the signed bundle.
 
 ## 3. Verify the artifact
 
