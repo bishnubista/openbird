@@ -42,5 +42,6 @@ struct OpenBirdApp: App {
         MenuBarExtra("OpenBird", systemImage: model.menuBarSymbol) {
             MenuBarView(model: model, openAskPanel: { askPanel.show() })
         }
+        .menuBarExtraStyle(.window)   // render the dropdown as a glass SwiftUI surface
     }
 }
