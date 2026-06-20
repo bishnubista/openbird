@@ -313,12 +313,12 @@ final class OpenBirdService: @unchecked Sendable {
         return Self.parsePreflight(result.stdout)
     }
 
-    func memoryStats() async -> MemoryStats {
-        guard let cli = resolveOpenBirdCLI() else { return .empty }
+    func memoryStats() async -> MemoryStats? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
         let result = await runAsync(cli, arguments: ["data", "stats"], timeout: 10)
         guard result.exitCode == 0,
               let decoded = Self.parseMemoryStats(result.stdout) else {
-            return .empty
+            return nil
         }
         return decoded
     }
@@ -440,11 +440,11 @@ final class OpenBirdService: @unchecked Sendable {
         if lower.contains("openbird_allow_cloud") || lower.contains("cloud model configured") {
             return "Chat blocked because a cloud model is configured without opt-in."
         }
-        if lower.contains("connection refused") || lower.contains("ollama") {
-            return "Chat failed because the local Ollama model request did not complete."
-        }
         if lower.contains("model") && (lower.contains("not found") || lower.contains("missing")) {
             return "Chat failed because a required local model is missing."
+        }
+        if lower.contains("connection refused") || lower.contains("ollama") {
+            return "Chat failed because the local Ollama model request did not complete."
         }
         return "Chat failed (exit \(exitCode)). Run openbird doctor for details."
     }

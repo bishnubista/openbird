@@ -46,6 +46,13 @@ final class MemoryStatsTests: XCTestCase {
         )
     }
 
+    func testChatFailureSummaryPrefersMissingModelOverGenericOllama() {
+        XCTAssertEqual(
+            OpenBirdService.chatFailureSummary(exitCode: 5, stderr: "ollama error: model not found"),
+            "Chat failed because a required local model is missing."
+        )
+    }
+
     func testChatFailureSummaryAvoidsRawUnknownStderr() {
         XCTAssertEqual(
             OpenBirdService.chatFailureSummary(exitCode: 4, stderr: "private traceback with captured text"),

@@ -26,7 +26,7 @@ struct ChatView: View {
                     }
                 }
                 .disabled(model.chatBusy
-                    || question.trimmingCharacters(in: .whitespaces).isEmpty
+                    || question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     || model.askUnavailableReason != nil)
             }
 
