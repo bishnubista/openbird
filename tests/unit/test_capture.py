@@ -1659,13 +1659,15 @@ def test_ansi_split_secret_is_scrubbed_after_deflicker(allow_settings):
     # the rejoined key — so a de-flickered secret can never be stored.
     store = FakeStore()
     daemon = CaptureDaemon(store, settings=allow_settings)
-    secret = "sk-abcdefghijklmnop1234567890"
+    # Named ``key`` (not ``secret``) to match the existing test fixtures in this
+    # file and avoid Ruff S105 (hardcoded-password) on an intentional fixture.
+    key = "sk-abcdefghijklmnop1234567890"
     split = "sk-abcdefgh\x1b[31mijklmnop1234567890"  # ESC SGR mid-token
     lines = [_line(app="com.apple.mail", window="Inbox", text=f"key {split} end", ts=1.0)]
     daemon.run_lines(lines)
     assert len(store.calls) == 1
     stored = store.calls[0]["text"]
-    assert secret not in stored
+    assert key not in stored
     assert "ijklmnop1234567890" not in stored
     assert "REDACTED" in stored
 
