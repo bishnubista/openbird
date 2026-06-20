@@ -18,6 +18,10 @@ final class TodayModel: ObservableObject {
     /// the relative offset) so a session left open across midnight doesn't serve a
     /// stale briefing for what is now a different calendar day.
     private var briefingCache: [String: String] = [:]
+    /// Bumped on every `load()`; an in-flight fetch only commits its result if this
+    /// is still the current generation when it resumes — so switching days (or a
+    /// second refresh) mid-load can't let a stale response overwrite the new day.
+    private var loadGeneration = 0
 
     init(service: OpenBirdService) {
         self.service = service
@@ -53,31 +57,34 @@ final class TodayModel: ObservableObject {
     }
 
     func load() async {
-        await loadTimeline()
-        await loadBriefing()
+        loadGeneration += 1
+        let generation = loadGeneration
+        let day = dayOffset
+        await loadTimeline(day: day, generation: generation)
+        await loadBriefing(day: day, generation: generation)
     }
 
-    func loadTimeline() async {
+    private func loadTimeline(day: Int, generation: Int) async {
         loadingTimeline = true
-        defer { loadingTimeline = false }
-        let result = await service.dayTimeline(dayOffset: dayOffset)
+        defer { if generation == loadGeneration { loadingTimeline = false } }
+        let result = await service.dayTimeline(dayOffset: day)
+        guard generation == loadGeneration else { return }   // superseded → drop
         timeline = result
         timelineError = result == nil ? "Could not load the timeline." : nil
     }
 
-    func loadBriefing() async {
-        let day = dayOffset
+    private func loadBriefing(day: Int, generation: Int) async {
         let key = dayKey(day)
         if let cached = briefingCache[key] {
-            briefing = cached
+            if generation == loadGeneration { briefing = cached }
             return
         }
         loadingBriefing = true
-        defer { loadingBriefing = false }
+        defer { if generation == loadGeneration { loadingBriefing = false } }
         briefing = nil
         if let text = await service.dailyBriefing(dayOffset: day) {
-            briefingCache[key] = text
-            briefing = text
+            briefingCache[key] = text   // cache regardless (keyed by absolute day)
+            if generation == loadGeneration { briefing = text }
         }
     }
 
