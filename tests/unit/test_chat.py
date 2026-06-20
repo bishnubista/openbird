@@ -565,3 +565,43 @@ def test_chat_cli_json_output(monkeypatch):
     # human-only rendering must not appear in --json mode
     assert "Sources" not in res.output
     assert "ungrounded" not in res.output
+
+
+def test_chat_cli_reads_question_from_stdin(monkeypatch):
+    """`chat --stdin` reads the question from stdin (keeps it out of argv)."""
+    from typer.testing import CliRunner
+
+    from openbird import cli
+    from openbird.chat.rag import AnswerResult
+
+    captured = {}
+
+    class _FakeRAG:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def answer(self, q, **_k):
+            captured["q"] = q
+            return AnswerResult(answer="ok", citations=[], grounded=False)
+
+    class _FakeStore:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "_provider", lambda: object())
+    monkeypatch.setattr(cli, "_store", lambda **_k: _FakeStore())
+    monkeypatch.setattr("openbird.chat.rag.RAG", _FakeRAG)
+
+    res = CliRunner().invoke(cli.app, ["chat", "--json", "--stdin"], input="what is up?\n")
+    assert res.exit_code == 0
+    assert captured["q"] == "what is up?"  # came from stdin, not argv
+
+
+def test_chat_cli_blank_question_exits_2():
+    """A whitespace-only question is stripped and rejected before any provider/store."""
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    res = CliRunner().invoke(cli.app, ["chat", "   ", "--json"])
+    assert res.exit_code == 2
