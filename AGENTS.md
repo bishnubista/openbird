@@ -6,7 +6,7 @@ aligned when changing repo workflow rules.
 ## Per-feature pipeline (REQUIRED for every non-trivial change)
 
 Run this pipeline **autonomously end-to-end**, looping until the work is merged:
-plan -> Codex adversarial review to consensus -> implement -> Codex adversarial
+plan -> Claude adversarial review to consensus -> implement -> Claude adversarial
 review of the diff to consensus -> create PR -> wait for CodeRabbit -> resolve
 every review comment -> merge -> move to the next queued task. Do not pause for
 confirmation between gates; **only stop to ask a human when genuinely stuck**.
@@ -18,16 +18,16 @@ straight to code. For each feature/fix:
 1. **Research-first** - pull current best practices when the topic drifts
    (libraries/APIs, macOS TCC, code-signing, notarization). Do not reason from
    memory on unstable facts.
-2. **Codex adversarial review -> consensus** - draft the plan/design, then review
-   with Codex as a blocking-only second opinion before coding:
+2. **Claude adversarial review -> consensus** - draft the plan/design, then review
+   with Claude as a cross-family, blocking-only second opinion before coding:
    ```bash
-   codex exec --model gpt-5.5 -c model_reasoning_effort=high --sandbox read-only \
-     "<blocking-only review prompt: lead with 'VERDICT: approve|revise'>" \
+   claude -p --model opus --effort high \
+     "<blocking-only review prompt: lead with 'VERDICT: approve|revise'; review only, do not implement or run the repo pipeline>" \
      < /dev/null > review.log 2>&1   # stdin + logfile are mandatory - see "Running gates safely"
    ```
-   Iterate plan <-> Codex until the verdict is `approve` and no
+   Iterate plan <-> Claude until the verdict is `approve` and no
    high/medium/blocking findings remain. Document any accepted low-risk tradeoff
-   in the plan or PR body. THEN implement. After implementing, run Codex again on
+   in the plan or PR body. THEN implement. After implementing, run Claude again on
    the diff (adversarial - find real bugs only) with the same stop rule.
 3. **Implement** on a `feat/...` or `fix/...` branch. Get full local CI green:
    `uv run python -m pytest -q`, `shellcheck` for shell scripts, `swift build` for
@@ -37,7 +37,7 @@ straight to code. For each feature/fix:
    concerns (one fix per commit, validate after each), reply with a concrete
    rationale for anything non-actionable, duplicate, incorrect, or intentionally
    deferred, and re-trigger with `@coderabbitai review` if it does not auto-run.
-6. **Merge** only when BOTH gates are clean (Codex consensus + CodeRabbit pass) and
+6. **Merge** only when BOTH gates are clean (Claude consensus + CodeRabbit pass) and
    the PR is mergeable: `gh pr merge <n> --squash --delete-branch`.
 
 If a queue of tasks was provided, continue with the next queued task after the
@@ -48,14 +48,15 @@ destructive action that requires approval.
 
 ## Running gates safely (background review/build/test commands)
 
-The gates (Codex review, `swift build`, `pytest`) run as long background commands.
+The gates (Claude review, `swift build`, `pytest`) run as long background commands.
 Standing guardrails so they cannot silently hang the pipeline:
 
-- **`codex exec` MUST redirect stdin from `/dev/null`** in any background / non-TTY
-  context - otherwise it blocks forever on `Reading additional input from stdin...`.
+- **`claude -p` and `codex exec` MUST redirect stdin from `/dev/null`** in any
+  background / non-TTY context - otherwise interactive input reads can block
+  forever.
 - **Redirect output to a logfile; never `cmd | tail`** - `tail` withholds all
   output until EOF, so a hung run looks identical to a slow one.
-- **Bound each command with an explicit, per-command wall-clock deadline** - Codex
+- **Bound each command with an explicit, per-command wall-clock deadline** - Claude
   review, Swift build, and pytest get different values, not one magic number. A
   deadline beats a poller: it is scoped to the command and self-terminates a hang.
   Use `timeout` / `gtimeout` from GNU coreutils (`brew install coreutils` - already
