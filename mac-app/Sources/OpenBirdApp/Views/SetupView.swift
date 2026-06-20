@@ -6,6 +6,7 @@ import SwiftUI
 /// and then re-check via the bundled helper probe.
 struct SetupView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -83,8 +84,8 @@ struct SetupView: View {
                     action: { model.requestMicrophone() }
                 )
             }
-            .padding(.vertical, 4)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
+            .padding(.vertical, OB.Space.xs)
+            .background(RoundedRectangle(cornerRadius: OB.Radius.card).fill(OB.fieldFill(scheme)))
 
             AllowlistEditor(model: model)
             CaptureControls(model: model)
@@ -94,6 +95,14 @@ struct SetupView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            // Privacy footer (handoff §4 lock line).
+            HStack(spacing: OB.Space.s) {
+                Image(systemName: "lock.fill").font(.caption2)
+                Text("Nothing leaves your device. Pause anytime from the menu bar.")
+                    .font(.caption)
+            }
+            .foregroundStyle(OB.textTertiary(scheme))
         }
     }
 
@@ -135,25 +144,35 @@ private struct StepRow: View {
     var optional: Bool = false
     let action: () -> Void
 
+    @Environment(\.colorScheme) private var scheme
+
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: glyph)
-                .foregroundStyle(color)
-                .font(.title3)
-                .frame(width: 22)
+        HStack(spacing: OB.Space.m) {
+            // Accent-tinted icon tile (handoff §4: icon tile in rgba(47,127,242,0.14)).
+            ZStack {
+                RoundedRectangle(cornerRadius: OB.Radius.control)
+                    .fill(OB.accent.opacity(0.14))
+                Image(systemName: glyph)
+                    .foregroundStyle(color)
+            }
+            .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(OB.textPrimary(scheme))
                 Text(detail)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OB.textSecondary(scheme))
             }
             Spacer()
             if let label = actionLabel {
                 Button(label, action: action)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, OB.Space.m)
+        .padding(.vertical, OB.Space.m)
     }
 
     private var glyph: String {
@@ -182,6 +201,7 @@ private struct StepRow: View {
 private struct AllowlistEditor: View {
     @ObservedObject var model: AppModel
     @State private var newBundleID = ""
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -237,8 +257,8 @@ private struct AllowlistEditor: View {
                 }
             }
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
+        .padding(OB.Space.m)
+        .background(RoundedRectangle(cornerRadius: OB.Radius.card).fill(OB.fieldFill(scheme)))
     }
 
     private func addEntry() {
