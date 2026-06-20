@@ -31,3 +31,10 @@ dist/
 
 # SwiftPM scratch cache (from sandboxed builds)
 .swift-cache/
+
+# Local dmg-release overrides (non-secret config; auto-derived by default)
+script/release.env
+
+# Claude Code runtime artifacts
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json

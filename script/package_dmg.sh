@@ -20,7 +20,12 @@ set -euo pipefail
 
 APP_NAME="OpenBird"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEVID="${OPENBIRD_SIGN_IDENTITY:?set OPENBIRD_SIGN_IDENTITY to your Developer ID Application identity}"
+# Optional, gitignored local overrides (signing identity / notary profile / etc.).
+# Neither the identity nor the profile name is a secret — the identity is public
+# (it's in every signed binary) and the profile is just a keychain label; the real
+# signing/notary credentials live in the macOS keychain. So these are CONFIG.
+# shellcheck source=/dev/null
+[ -f "$ROOT_DIR/script/release.env" ] && . "$ROOT_DIR/script/release.env"
 NOTARY_PROFILE="${OPENBIRD_NOTARY_PROFILE:-openbird-notary}"
 PY_VERSION="${OPENBIRD_DMG_PY_VERSION:-3.13}"
 EXTRAS="${OPENBIRD_DMG_EXTRAS:-encryption,integrations}"
@@ -37,6 +42,28 @@ ENT_PYTHON="$ROOT_DIR/mac-app/Python.entitlements"
 
 log() { echo "package_dmg: $*" >&2; }
 die() { echo "package_dmg: ERROR: $*" >&2; exit 1; }
+
+# Resolve the Developer ID signing identity: an explicit OPENBIRD_SIGN_IDENTITY
+# (env or script/release.env) wins; otherwise auto-derive the single
+# "Developer ID Application" identity from the keychain.
+DEVID="${OPENBIRD_SIGN_IDENTITY:-}"
+if [ -z "$DEVID" ]; then
+  # Count RAW identity lines (not deduped): two distinct certs can share the same
+  # CN string (e.g. a renewed + old one), and `sort -u` would collapse them to one,
+  # auto-selecting ambiguously. Counting lines makes any duplicate a hard error.
+  _lines="$(security find-identity -v -p codesigning 2>/dev/null | grep "Developer ID Application" || true)"
+  _n="$(printf '%s\n' "$_lines" | grep -c . || true)"
+  if [ "$_n" -eq 1 ]; then
+    DEVID="$(printf '%s\n' "$_lines" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p')"
+  elif [ "$_n" -eq 0 ]; then
+    die "no 'Developer ID Application' identity in the keychain — create one, or set OPENBIRD_SIGN_IDENTITY (env or script/release.env)."
+  else
+    printf '%s\n' "$_lines" >&2
+    die "multiple Developer ID Application identities found — set OPENBIRD_SIGN_IDENTITY to choose one."
+  fi
+fi
+log "Signing identity: $DEVID"
+log "Notary profile: $NOTARY_PROFILE"
 
 # ---------------------------------------------------------------------------
 log "[1/8] Build unsigned app bundle (brew path untouched; OPENBIRD_SKIP_SIGN=1)"
