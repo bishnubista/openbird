@@ -16,6 +16,7 @@ from __future__ import annotations
 import struct
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from openbird.config import Settings, get_settings
@@ -26,6 +27,22 @@ from openbird.memory.migrations import ensure_schema_version
 from openbird.memory.search import mmr, rrf
 from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
 from openbird.types import Observation, SearchHit
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    """One capture session within a day's timeline (for the Today/day view).
+
+    ``session_id`` is the real (nullable) episodic id — legacy rows captured
+    before episodic sessions have ``None`` and are NOT collapsed together (each
+    falls in its own bucket; see :meth:`MemoryStore.day_sessions`).
+    """
+
+    session_id: str | None
+    app: str | None
+    start_ts: float
+    end_ts: float
+    count: int
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # Wait up to this long on a busy lock for the :memory: branch too; on-disk
@@ -413,6 +430,58 @@ class MemoryStore:
 
     # -- time-range -----------------------------------------------------------
 
+    def day_sessions(
+        self, start_ts: float, end_ts: float, *, source: str = "capture"
+    ) -> list[SessionSummary]:
+        """Per-session activity summary for the ``[start_ts, end_ts]`` window.
+
+        Powers the Today/day-view timeline: one row per capture session with its
+        app, span, and observation count. Restricted to ``source`` (default
+        ``"capture"``) so ingested files / MCP reads don't masquerade as capture
+        sessions. Grouped by a coalesced key so legacy rows with a ``NULL``
+        session_id each bucket on their own ``id`` (SQLite groups NULLs together,
+        which would otherwise merge a whole day into one false session). Pure
+        indexed read — no embedding.
+        """
+        rows = self.conn.execute(
+            "SELECT session_id, app, MIN(ts) AS start_ts, MAX(ts) AS end_ts, "
+            "COUNT(*) AS cnt FROM observations "
+            "WHERE ts >= ? AND ts <= ? AND source = ? "
+            "GROUP BY (CASE WHEN session_id IS NULL THEN id ELSE session_id END), app "
+            "ORDER BY start_ts ASC",
+            (start_ts, end_ts, source),
+        ).fetchall()
+        return [
+            SessionSummary(
+                session_id=r["session_id"],
+                app=r["app"],
+                start_ts=r["start_ts"],
+                end_ts=r["end_ts"],
+                count=r["cnt"],
+            )
+            for r in rows
+        ]
+
+    def active_seconds(
+        self, start_ts: float, end_ts: float, gap_seconds: float, *, source: str = "capture"
+    ) -> float:
+        """Gap-capped active time across the window: the sum of deltas between
+        consecutive observations, each clipped to ``gap_seconds`` so idle gaps
+        don't inflate it. A lone observation contributes 0 (no engaged span). This
+        is a better "active" stat than ``sum(session end - start)``, which
+        undercounts singletons and can overlap. Restricted to ``source`` (default
+        ``"capture"``) so it measures capture activity, matching the timeline.
+        """
+        row = self.conn.execute(
+            "WITH ordered AS ("
+            "  SELECT ts, LAG(ts) OVER (ORDER BY ts) AS prev "
+            "  FROM observations WHERE ts >= ? AND ts <= ? AND source = ?"
+            ") SELECT COALESCE(SUM(MIN(ts - prev, ?)), 0) AS active "
+            "FROM ordered WHERE prev IS NOT NULL",
+            (start_ts, end_ts, source, gap_seconds),
+        ).fetchone()
+        return float(row["active"]) if row and row["active"] is not None else 0.0
+
     def time_range(self, start_ts: float, end_ts: float) -> list[Observation]:
         """Return observations with ``start_ts <= ts <= end_ts`` (range scan).
 
@@ -426,21 +495,34 @@ class MemoryStore:
         return [self._row_to_observation(r) for r in rows]
 
     def time_range_text(
-        self, start_ts: float, end_ts: float, *, max_chars: int = 2000
+        self,
+        start_ts: float,
+        end_ts: float,
+        *,
+        max_chars: int = 2000,
+        source: str | None = None,
     ) -> list[tuple[Observation, str]]:
         """Like :meth:`time_range`, but also returns each observation's blob text.
 
         Joins observations to their deduped ``content_blobs`` body so routines and
         activity summaries can ground in actual captured text (not just app/window
-        titles). Each body is truncated to ``max_chars``. The returned text is
-        **untrusted captured content** and must be fenced as data by callers.
+        titles). Each body is truncated to ``max_chars``. When ``source`` is given,
+        restricts to that source (the Today briefing passes ``"capture"`` to match
+        its timeline; scheduled routines pass ``None`` for all sources). The
+        returned text is **untrusted captured content** and must be fenced as data
+        by callers.
         """
-        rows = self.conn.execute(
+        sql = (
             "SELECT o.*, b.text AS blob_text FROM observations o "
             "JOIN content_blobs b ON b.content_hash = o.content_hash "
-            "WHERE o.ts >= ? AND o.ts <= ? ORDER BY o.ts ASC",
-            (start_ts, end_ts),
-        ).fetchall()
+            "WHERE o.ts >= ? AND o.ts <= ?"
+        )
+        params: list[object] = [start_ts, end_ts]
+        if source is not None:
+            sql += " AND o.source = ?"
+            params.append(source)
+        sql += " ORDER BY o.ts ASC"
+        rows = self.conn.execute(sql, params).fetchall()
         out: list[tuple[Observation, str]] = []
         for r in rows:
             text = r["blob_text"] or ""
