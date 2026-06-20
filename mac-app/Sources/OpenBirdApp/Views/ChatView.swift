@@ -12,6 +12,10 @@ struct ChatView: View {
             Text("Ask your memory")
                 .font(.headline)
 
+            Label(model.localModelStatusSummary, systemImage: statusIcon)
+                .font(.caption)
+                .foregroundStyle(statusColor)
+
             HStack {
                 TextField("e.g. what did we decide about storage?", text: $question)
                     .textFieldStyle(.roundedBorder)
@@ -81,5 +85,23 @@ struct ChatView: View {
 
     private func timeLabel(_ ts: Double) -> String {
         Date(timeIntervalSince1970: ts).formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private var statusIcon: String {
+        switch model.localModelStatusState {
+        case .ok: return "checkmark.circle.fill"
+        case .attention: return "exclamationmark.triangle.fill"
+        case .working: return "arrow.clockwise.circle.fill"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
+    private var statusColor: Color {
+        switch model.localModelStatusState {
+        case .ok: return .green
+        case .attention: return .orange
+        case .working: return .blue
+        case .unknown: return .secondary
+        }
     }
 }

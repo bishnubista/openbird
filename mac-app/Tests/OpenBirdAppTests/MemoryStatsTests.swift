@@ -25,6 +25,38 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertNil(OpenBirdService.parseMemoryStats("not json"))
     }
 
+    func testParsePreflightDecodesLocalModelRoute() {
+        let report = OpenBirdService.parsePreflight("""
+        {
+          "runtime_ok": true,
+          "release_gate_ok": false,
+          "ollama": {
+            "reachable": true,
+            "host": "http://localhost:11434",
+            "required_models": ["llama3.2", "nomic-embed-text"],
+            "missing_models": []
+          },
+          "cloud": {
+            "llm_model": "ollama/llama3.2",
+            "embed_model": "ollama/nomic-embed-text",
+            "remote_models": [],
+            "uses_local_ollama": true,
+            "blocked": false
+          }
+        }
+        """)
+
+        XCTAssertTrue(report.ollamaReachable == true)
+        XCTAssertEqual(report.ollamaHost, "http://localhost:11434")
+        XCTAssertEqual(report.requiredModels, ["llama3.2", "nomic-embed-text"])
+        XCTAssertEqual(report.missingModels, [])
+        XCTAssertEqual(report.llmModel, "ollama/llama3.2")
+        XCTAssertEqual(report.embedModel, "ollama/nomic-embed-text")
+        XCTAssertEqual(report.remoteModels, [])
+        XCTAssertTrue(report.usesLocalOllama)
+        XCTAssertFalse(report.cloudBlocked)
+    }
+
     func testChatFailureSummaryClassifiesMissingModel() {
         XCTAssertEqual(
             OpenBirdService.chatFailureSummary(exitCode: 1, stderr: "model missing: llama3.2"),

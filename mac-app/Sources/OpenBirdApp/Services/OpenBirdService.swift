@@ -7,8 +7,14 @@ import Foundation
 /// A decoded, UI-friendly slice of `openbird preflight --json`.
 struct PreflightReport: Equatable {
     var ollamaReachable: Bool?           // nil = unknown / not probed
+    var ollamaHost: String?
     var requiredModels: [String] = []
     var missingModels: [String] = []
+    var llmModel: String?
+    var embedModel: String?
+    var remoteModels: [String] = []
+    var usesLocalOllama: Bool = true
+    var cloudBlocked: Bool = false
     var encryptionStatus: String = "unknown"
     var encryptionEnabled: Bool = false
     /// capability -> "passed" | "failed" | "unknown"
@@ -460,8 +466,16 @@ final class OpenBirdService: @unchecked Sendable {
 
         if let ollama = payload["ollama"] as? [String: Any] {
             report.ollamaReachable = ollama["reachable"] as? Bool   // nil if "unknown"/"n/a"
+            report.ollamaHost = ollama["host"] as? String
             report.requiredModels = ollama["required_models"] as? [String] ?? []
             report.missingModels = ollama["missing_models"] as? [String] ?? []
+        }
+        if let cloud = payload["cloud"] as? [String: Any] {
+            report.llmModel = cloud["llm_model"] as? String
+            report.embedModel = cloud["embed_model"] as? String
+            report.remoteModels = cloud["remote_models"] as? [String] ?? []
+            report.usesLocalOllama = cloud["uses_local_ollama"] as? Bool ?? true
+            report.cloudBlocked = cloud["blocked"] as? Bool ?? false
         }
         if let enc = payload["encryption"] as? [String: Any] {
             report.encryptionStatus = enc["status"] as? String ?? "unknown"
