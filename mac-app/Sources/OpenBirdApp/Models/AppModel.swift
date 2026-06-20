@@ -101,6 +101,47 @@ final class AppModel: ObservableObject {
         }
     }
 
+    var localModelStatusState: StepState {
+        if report.cloudBlocked { return .attention }
+        if !report.usesLocalOllama { return report.remoteModels.isEmpty ? .unknown : .attention }
+        if report.ollamaReachable != true { return ollamaState }
+        return report.missingModels.isEmpty ? .ok : .attention
+    }
+
+    var localModelStatusSummary: String {
+        if report.cloudBlocked {
+            let remote = report.remoteModels.isEmpty
+                ? "a remote model"
+                : report.remoteModels.joined(separator: ", ")
+            return "Cloud model blocked: \(remote). Use local Ollama or opt in."
+        }
+        if !report.usesLocalOllama {
+            return report.remoteModels.isEmpty
+                ? "Local Ollama is not used by this model route."
+                : "Not on-device: \(report.remoteModels.joined(separator: ", "))"
+        }
+        if report.ollamaReachable == true {
+            if report.missingModels.isEmpty {
+                return "Ollama connected · on-device models ready: \(requiredModelSummary)"
+            }
+            return "Ollama connected · missing models: \(report.missingModels.joined(separator: ", "))"
+        }
+        if report.ollamaReachable == false {
+            return "Ollama is not reachable. Launch Ollama, then re-check."
+        }
+        return "Local model status unknown. Re-check setup."
+    }
+
+    var requiredModelSummary: String {
+        if !report.requiredModels.isEmpty {
+            return report.requiredModels.joined(separator: ", ")
+        }
+        let configured = [report.llmModel, report.embedModel]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+        return configured.isEmpty ? "configured local models" : configured.joined(separator: ", ")
+    }
+
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off
     /// the main actor and publishes the answer + citations (or a friendly error).
     func ask(_ question: String) {

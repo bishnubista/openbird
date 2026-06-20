@@ -107,7 +107,7 @@ struct SetupView: View {
 
     private var modelsDetail: String {
         if model.report.missingModels.isEmpty && model.modelsState == .ok {
-            return "All required models present."
+            return "Ready: \(model.requiredModelSummary)"
         }
         if !model.report.missingModels.isEmpty {
             return "Missing: \(model.report.missingModels.joined(separator: ", "))"
