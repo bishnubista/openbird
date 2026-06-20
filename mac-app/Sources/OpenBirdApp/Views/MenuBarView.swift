@@ -11,6 +11,11 @@ struct MenuBarView: View {
             NSApp.activate(ignoringOtherApps: true)
         }
 
+        Button("Ask OpenBird…") {
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
         Divider()
 
         if model.captureRunning {

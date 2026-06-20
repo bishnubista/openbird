@@ -37,6 +37,27 @@ enum PrivacyPane: String {
 /// willTerminate handler). The static `run`/`runAsync` helpers operate on locals
 /// guarded by their own lock. This lets the main-queue termination handler capture
 /// the service without a strict-concurrency violation.
+/// One cited source behind a chat answer (decoded from `chat --json`). Extra
+/// fields in the JSON (observation_id, chunk_id) are intentionally ignored.
+struct ChatCitation: Codable, Identifiable, Equatable {
+    let index: Int
+    let app: String?
+    let window: String?
+    let ts: Double
+    let snippet: String
+    var id: Int { index }
+}
+
+/// A grounded chat answer plus its citations (decoded from `openbird chat --json`).
+struct ChatResult: Codable, Equatable {
+    let answer: String
+    let grounded: Bool
+    let citations: [ChatCitation]
+}
+
+enum ChatError: Error { case cliMissing, failed, decode }
+
+
 final class OpenBirdService: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let defaults = UserDefaults.standard
@@ -295,6 +316,73 @@ final class OpenBirdService: @unchecked Sendable {
             .appendingPathComponent("Contents/MacOS/openbird-cli")
         let candidates = [bundled.path, "/opt/homebrew/bin/openbird", "/usr/local/bin/openbird"]
         return candidates.first { fileManager.isExecutableFile(atPath: $0) }
+    }
+
+    /// Ask a grounded question over captured memory via `openbird chat --json`.
+    /// Runs the bundled CLI (inheriting the app's environment, incl. any
+    /// OPENBIRD_DATA_DIR) and decodes the structured answer + citations. The LLM
+    /// call can take a while, so the timeout is generous. Synchronous — callers
+    /// run it off the main actor.
+    func askChat(_ question: String, timeout: TimeInterval = 90) throws -> ChatResult {
+        guard let cli = resolveOpenBirdCLI() else { throw ChatError.cliMissing }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cli)
+        // The question goes via STDIN, never argv — chat text must not be visible
+        // to local process inspection (consistent with the capture pipeline).
+        process.arguments = ["chat", "--json", "--stdin"]
+
+        let stdinPipe = Pipe()
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+
+        // Drain stdout/stderr on background queues so a full pipe buffer cannot
+        // deadlock against our wait loop.
+        var outData = Data()
+        let lock = NSLock()
+        let group = DispatchGroup()
+        for pipe in [outPipe, errPipe] {
+            group.enter()
+            let isOut = pipe === outPipe
+            DispatchQueue.global(qos: .utility).async {
+                let d = pipe.fileHandleForReading.readDataToEndOfFile()
+                if isOut { lock.lock(); outData = d; lock.unlock() }
+                group.leave()
+            }
+        }
+
+        do { try process.run() } catch { throw ChatError.failed }
+
+        // Feed the question, then close stdin so the CLI sees EOF.
+        if let qData = (question + "\n").data(using: .utf8) {
+            stdinPipe.fileHandleForWriting.write(qData)
+        }
+        try? stdinPipe.fileHandleForWriting.close()
+
+        // Hard timeout: wait, then SIGTERM, grace, then SIGKILL.
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        if process.isRunning {
+            process.terminate()  // SIGTERM
+            let grace = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < grace { Thread.sleep(forTimeInterval: 0.05) }
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            process.waitUntilExit()
+            group.wait()
+            throw ChatError.failed
+        }
+
+        process.waitUntilExit()
+        group.wait()
+        guard process.terminationStatus == 0 else { throw ChatError.failed }
+        lock.lock(); let data = outData; lock.unlock()
+        guard let decoded = try? JSONDecoder().decode(ChatResult.self, from: data) else {
+            throw ChatError.decode
+        }
+        return decoded
     }
 
     static func parsePreflight(_ output: String) -> PreflightReport {

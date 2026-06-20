@@ -33,6 +33,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var workingMessage: String?
     @Published var lastActionMessage = ""
 
+    // Quick-chat state (window chat panel).
+    @Published private(set) var chatBusy = false
+    @Published private(set) var chatResult: ChatResult?
+    @Published private(set) var chatError: String?
+
     private let service: OpenBirdService
 
     init(service: OpenBirdService) {
@@ -62,6 +67,41 @@ final class AppModel: ObservableObject {
     var menuBarSymbol: String {
         if captureRunning && !capturePaused { return "bird.fill" }
         return capturePaused ? "pause.circle" : "bird"
+    }
+
+    /// Ask a grounded question over captured memory. Runs the (blocking) CLI off
+    /// the main actor and publishes the answer + citations (or a friendly error).
+    func ask(_ question: String) {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, !chatBusy else { return }
+        chatBusy = true
+        chatError = nil
+        let service = self.service
+        Task {
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try service.askChat(q)
+                }.value
+                self.chatResult = result
+            } catch {
+                self.chatResult = nil
+                self.chatError = Self.describeChatError(error)
+            }
+            self.chatBusy = false
+        }
+    }
+
+    private static func describeChatError(_ error: Error) -> String {
+        switch error {
+        case ChatError.cliMissing:
+            return "OpenBird CLI not found in the app bundle."
+        case ChatError.failed:
+            return "Chat failed — is Ollama running and memory set up? Try `openbird doctor`."
+        case ChatError.decode:
+            return "Could not read the chat response."
+        default:
+            return "Chat error."
+        }
     }
 
     /// True when the CORE text-capture path is ready: local models + Accessibility.

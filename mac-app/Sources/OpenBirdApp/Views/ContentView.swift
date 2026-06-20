@@ -8,6 +8,9 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 24) {
                 HeaderView(model: model)
                 SetupView(model: model)
+                Divider()
+                ChatView(model: model)
+                Divider()
                 HelperListView(helpers: model.helpers)
                 TrustControlsView(model: model)
             }

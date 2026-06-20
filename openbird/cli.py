@@ -457,7 +457,7 @@ def _collect_files(path: Path, *, glob: str, max_bytes: int) -> list[Path]:
 
 @app.command()
 def chat(
-    question: str = typer.Argument(..., help="A natural-language question."),
+    question: Optional[str] = typer.Argument(None, help="A natural-language question."),
     k: int = typer.Option(10, "--k", help="Retrieval depth."),
     no_semantic: bool = typer.Option(
         False, "--no-semantic", help="BM25-only retrieval (skip the embedding call)."
@@ -465,13 +465,29 @@ def chat(
     json_out: bool = typer.Option(
         False, "--json", help="Emit the answer + citations as JSON (used by the app UI)."
     ),
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read the question from stdin so it never appears in argv (used by the app UI).",
+    ),
 ) -> None:
     """Answer a question grounded in your captured memory, with citations.
 
     Runs hybrid retrieval over the store, builds an injection-resistant grounded
     prompt, asks the LLM, then prints the answer plus occurrence-level citations
     (app / window / time + a short snippet) that name where each fact came from.
+
+    Pass ``--stdin`` (or omit the argument) to read the question from stdin; the
+    app UI uses this so chat text never lands in the process argument list.
     """
+    import sys
+
+    if stdin or question is None:
+        question = sys.stdin.read().strip()
+    if not question:
+        _console.print("[red]No question provided.[/]")
+        raise typer.Exit(code=2)
+
     from openbird.chat.rag import RAG
 
     provider = _provider()
