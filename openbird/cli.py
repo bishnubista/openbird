@@ -199,6 +199,120 @@ def _store_maintenance():
 
 
 # --------------------------------------------------------------------------- #
+# Today / day view (timeline + briefing)                                      #
+# --------------------------------------------------------------------------- #
+
+
+def _day_window(day_offset: int) -> tuple[float, float]:
+    """Inclusive ``[start, end]`` of the local calendar day ``day_offset`` days ago
+    (0=today, 1=yesterday). The single source of day bounds shared by ``timeline``
+    and ``briefing`` so the session list and the prose summary cover the same span.
+    """
+    from openbird.routines.templates import _day_bounds
+
+    return _day_bounds(_dt.datetime.now().timestamp(), offset_days=-day_offset)
+
+
+@app.command("timeline")
+def timeline(
+    day: int = typer.Option(0, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show a day's capture sessions (app, span, count) + active time.
+
+    Pure local read: opens the store without the cloud gate or an LLM provider.
+    """
+    if day < 0:
+        _err_console.print("[red]--day must be >= 0.[/]")
+        raise typer.Exit(code=2)
+    start, end = _day_window(day)
+    store = _store_maintenance()
+    try:
+        sessions = store.day_sessions(start, end)
+        active = store.active_seconds(start, end, get_settings().session_gap_seconds)
+    finally:
+        store.close()
+    payload = {
+        "day_offset": day,
+        "start": start,
+        "end": end,
+        "total_observations": sum(s.count for s in sessions),
+        "distinct_apps": len({s.app for s in sessions if s.app}),
+        "active_seconds": active,
+        "sessions": [
+            {
+                "session_id": s.session_id,
+                "app": s.app,
+                "start": s.start_ts,
+                "end": s.end_ts,
+                "count": s.count,
+            }
+            for s in sessions
+        ],
+    }
+    if as_json:
+        _console.print_json(json.dumps(payload))
+        return
+    if not sessions:
+        _console.print("[yellow]No capture sessions in the selected day.[/]")
+        return
+    table = Table(title=f"Timeline (day -{day})", show_header=True, header_style="bold")
+    table.add_column("App")
+    table.add_column("Start")
+    table.add_column("End")
+    table.add_column("Captures", justify="right")
+    for s in sessions:
+        table.add_row(
+            s.app or "(unknown)", _fmt_ts(s.start_ts), _fmt_ts(s.end_ts), str(s.count)
+        )
+    _console.print(table)
+    _console.print(
+        f"{payload['total_observations']} captures · {payload['distinct_apps']} apps · "
+        f"{active / 60:.0f} min active"
+    )
+
+
+@app.command("briefing")
+def briefing(
+    day: int = typer.Option(1, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Generate a grounded prose briefing for a day (on-demand; one LLM call).
+
+    Reuses the ``yesterday`` routine template over the SAME bounds as
+    ``timeline --day N``. An empty day returns a deterministic line without calling
+    the model.
+    """
+    if day < 0:
+        _err_console.print("[red]--day must be >= 0.[/]")
+        raise typer.Exit(code=2)
+    from openbird.routines.templates import get_template
+
+    start, end = _day_window(day)
+    # Open WITHOUT the cloud gate / LLM first; only construct the completion
+    # provider when the day actually has capture content (an empty day returns the
+    # deterministic no-activity line for free, never touching the model/cloud gate).
+    store = _store_maintenance()
+    provider = None
+    try:
+        if store.day_sessions(start, end):
+            store.close()
+            provider = _provider()
+            store = _store(provider=provider)
+        text = get_template("yesterday").run_window(
+            store, provider, start, end, source="capture"
+        )
+    finally:
+        store.close()
+    if as_json:
+        _console.print_json(
+            json.dumps({"day_offset": day, "start": start, "end": end, "text": text})
+        )
+        return
+    _console.print(text)
+
+
+# --------------------------------------------------------------------------- #
 # preflight                                                                   #
 # --------------------------------------------------------------------------- #
 

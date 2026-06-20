@@ -87,12 +87,35 @@ class RoutineTemplate:
             "no activity" line is returned without calling the LLM.
         """
         start, end = self.window(now)
+        return self.run_window(store, provider, start, end)
+
+    def run_window(
+        self,
+        store: object,
+        provider: object,
+        start: float,
+        end: float,
+        *,
+        source: str | None = None,
+    ) -> str:
+        """Like :meth:`run`, but over an EXPLICIT ``[start, end]`` window instead of
+        the template's own ``window(now)``.
+
+        Lets callers (e.g. the on-demand ``briefing`` command) summarize an
+        arbitrary day with this template's prompt/rendering while sharing the exact
+        bounds of the matching ``timeline`` query — so the prose and the session
+        list always describe the same span. ``source`` (when given) restricts the
+        grounding to one observation source (the briefing passes ``"capture"`` to
+        match the timeline). ``run`` delegates here with ``source=None``, so the
+        scheduler path is unchanged.
+        """
         # Prefer the content-bearing path so summaries ground in actual captured
         # text (deduped by content), not just app/window titles. Fall back to
-        # metadata-only if the store doesn't expose time_range_text.
+        # metadata-only if the store doesn't expose time_range_text. Only pass
+        # ``source`` through when set, so simpler 2-arg stores/stubs still work.
         get_text = getattr(store, "time_range_text", None)
         if callable(get_text):
-            rows = get_text(start, end)
+            rows = get_text(start, end) if source is None else get_text(start, end, source=source)
             observations = [obs for obs, _ in rows]
             context = render_context_text(rows)
         else:
