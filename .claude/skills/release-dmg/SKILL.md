@@ -87,6 +87,33 @@ the capture allowlist in Setup, have a local Ollama running; updating from a pri
 build keeps the Accessibility grant (stable signing identity) — just drag the new app
 over the old; the `shasum -a 256` value for integrity.
 
+## 5. Clean up (only AFTER verifying the upload)
+
+`dist/` holds ~550 MB of reproducible build output (`OpenBird.dmg` + the
+`dmg-stage/`, `OpenBird-notarize.zip`, `OpenBird.app` intermediates). Once the release
+exists on GitHub, that is the source of truth — local rebuilds are NOT byte-identical
+(notarization staples a fresh Apple ticket each time), so nothing local is worth
+keeping. Reclaim the space.
+
+GATE: never delete before the asset is confirmed uploaded — a failed publish must not
+lose the build. Verify the asset reports `state: uploaded`, THEN remove `dist/`:
+
+```bash
+# Hard gate: only proceeds to delete if the GitHub asset is fully uploaded.
+state=$(gh release view beta-dmg-<x.y.z> --json assets \
+  --jq '.assets[] | select(.name=="OpenBird.dmg") | .state')
+if [ "$state" = "uploaded" ]; then
+  rm -rf dist/
+  echo "cleaned dist/ (release asset confirmed uploaded)"
+else
+  echo "ABORT cleanup: OpenBird.dmg asset state is '${state:-missing}', not 'uploaded'"
+fi
+```
+
+If you ever need the published dmg back locally (e.g. to re-check its sha256), pull it
+from the release rather than rebuilding: `gh release download beta-dmg-<x.y.z> -p
+OpenBird.dmg`.
+
 ## Notes / gotchas
 
 - The signing identity is stable, so TCC grants persist across updates — testers
