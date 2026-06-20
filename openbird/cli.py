@@ -483,7 +483,8 @@ def chat(
     import sys
 
     if stdin or question is None:
-        question = sys.stdin.read().strip()
+        question = sys.stdin.read()
+    question = (question or "").strip()
     if not question:
         _console.print("[red]No question provided.[/]")
         raise typer.Exit(code=2)

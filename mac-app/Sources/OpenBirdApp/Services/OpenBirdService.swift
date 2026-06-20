@@ -339,8 +339,13 @@ final class OpenBirdService: @unchecked Sendable {
         process.standardOutput = outPipe
         process.standardError = errPipe
 
+        // Launch FIRST. Starting the pipe-drain readers before run() would leak
+        // them (blocked on readDataToEndOfFile waiting for an EOF that never comes)
+        // if run() throws.
+        do { try process.run() } catch { throw ChatError.failed }
+
         // Drain stdout/stderr on background queues so a full pipe buffer cannot
-        // deadlock against our wait loop.
+        // deadlock against our wait loop. Started only after a successful launch.
         var outData = Data()
         let lock = NSLock()
         let group = DispatchGroup()
@@ -353,8 +358,6 @@ final class OpenBirdService: @unchecked Sendable {
                 group.leave()
             }
         }
-
-        do { try process.run() } catch { throw ChatError.failed }
 
         // Feed the question, then close stdin so the CLI sees EOF.
         if let qData = (question + "\n").data(using: .utf8) {
