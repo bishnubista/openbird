@@ -323,6 +323,7 @@ final class OpenBirdService: @unchecked Sendable {
         return decoded
     }
 
+    /// Decode the JSON emitted by `openbird data stats` into UI counters.
     static func parseMemoryStats(_ output: String) -> MemoryStats? {
         guard let data = output.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(MemoryStats.self, from: data)

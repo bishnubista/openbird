@@ -42,6 +42,8 @@ final class AppModel: ObservableObject {
 
     private let service: OpenBirdService
     private var captureStopRequested = false
+    /// Delayed post-start check that confirms capture is actually storing memory.
+    private var captureHealthCheckTask: Task<Void, Never>?
 
     init(service: OpenBirdService) {
         self.service = service
@@ -72,6 +74,7 @@ final class AppModel: ObservableObject {
         return capturePaused ? "pause.circle" : "bird"
     }
 
+    /// User-facing summary of how many local memory observations are currently stored.
     var memorySummary: String {
         let noun = memoryStats.observations == 1 ? "observation" : "observations"
         if let lastMemoryRefresh {
@@ -166,6 +169,7 @@ final class AppModel: ObservableObject {
         lastRefresh = Date()
     }
 
+    /// Refresh local DB counters so capture status is grounded in stored memory.
     func refreshMemoryStats() async {
         memoryStats = await service.memoryStats()
         lastMemoryRefresh = Date()
@@ -218,14 +222,18 @@ final class AppModel: ObservableObject {
         Task { await startCaptureAfterRefreshingStats() }
     }
 
+    /// Start capture after recording the current observation count for health comparison.
     private func startCaptureAfterRefreshingStats() async {
         await refreshMemoryStats()
+        captureHealthCheckTask?.cancel()
         captureStopRequested = false
         let observationsBeforeStart = memoryStats.observations
         if service.startCapture(onExit: { [weak self] code in
             Task { @MainActor in
                 guard let self else { return }
                 self.captureRunning = self.service.isCaptureRunning()
+                self.captureHealthCheckTask?.cancel()
+                self.captureHealthCheckTask = nil
                 await self.refreshMemoryStats()
                 if self.captureStopRequested {
                     self.captureStopRequested = false
@@ -239,10 +247,10 @@ final class AppModel: ObservableObject {
             captureRunning = true
             capturePaused = false
             lastActionMessage = "Capture started for \(allowlist.count) app(s). Waiting for memory updates."
-            Task {
+            captureHealthCheckTask = Task {
                 await refreshMemoryStats()
                 try? await Task.sleep(nanoseconds: 6_000_000_000)
-                guard captureRunning else { return }
+                guard !Task.isCancelled, captureRunning else { return }
                 await refreshMemoryStats()
                 if memoryStats.observations <= observationsBeforeStart {
                     lastActionMessage = "Capture is running, but no new memory is stored yet. Bring an allowed app to the front or re-check setup."
@@ -255,6 +263,8 @@ final class AppModel: ObservableObject {
 
     func stopCapture() {
         captureStopRequested = true
+        captureHealthCheckTask?.cancel()
+        captureHealthCheckTask = nil
         service.stopCapture()
         captureRunning = false
         lastActionMessage = "Capture stopped."
@@ -269,6 +279,9 @@ final class AppModel: ObservableObject {
     }
 
     func stopHelpers() {
+        captureStopRequested = true
+        captureHealthCheckTask?.cancel()
+        captureHealthCheckTask = nil
         let stopped = service.stopHelperProcesses()
         captureRunning = service.isCaptureRunning()
         lastActionMessage = stopped ? "Stopped helper processes." : "No helper processes were running."
