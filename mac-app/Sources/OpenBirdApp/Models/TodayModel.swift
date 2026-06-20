@@ -9,6 +9,10 @@ final class TodayModel: ObservableObject {
     @Published private(set) var loadingTimeline = false
     @Published private(set) var loadingBriefing = false
     @Published private(set) var timelineError: String?
+    /// Display names resolved once per distinct app when the timeline loads, so the
+    /// view never hits LaunchServices per row (a NULL-session day can have hundreds
+    /// of single-observation sessions).
+    @Published private(set) var appNames: [String: String] = [:]
     /// 0 = today, 1 = yesterday, … Defaults to today, matching the "Today's
     /// Activity" menu entry that opens this view.
     @Published var dayOffset = 0
@@ -71,6 +75,19 @@ final class TodayModel: ObservableObject {
         guard generation == loadGeneration else { return }   // superseded → drop
         timeline = result
         timelineError = result == nil ? "Could not load the timeline." : nil
+        // Resolve app display names ONCE per distinct app (off the render path).
+        var names: [String: String] = [:]
+        for app in Set((result?.sessions ?? []).compactMap(\.app)) {
+            names[app] = AppDisplay.name(app)
+        }
+        appNames = names
+    }
+
+    /// Display name for a session's app, from the prebuilt map (falls back to the
+    /// resolver for anything not in it).
+    func displayName(_ app: String?) -> String {
+        guard let app, !app.isEmpty else { return "Unknown" }
+        return appNames[app] ?? AppDisplay.name(app)
     }
 
     private func loadBriefing(day: Int, generation: Int) async {

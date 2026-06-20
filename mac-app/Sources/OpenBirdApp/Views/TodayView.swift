@@ -158,7 +158,7 @@ struct TodayView: View {
                     .frame(width: 30, height: 30)
                     .background(identity.color, in: RoundedRectangle(cornerRadius: OB.Radius.control))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(Self.appName(session.app))
+                    Text(model.displayName(session.app))
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(OB.textPrimary(scheme))
                     Text(Self.sessionDetail(session))
@@ -176,11 +176,6 @@ struct TodayView: View {
     }
 
     // MARK: Formatting
-
-    static func appName(_ bundleID: String?) -> String {
-        guard let bundleID, !bundleID.isEmpty else { return "Unknown" }
-        return bundleID.split(separator: ".").last.map(String.init) ?? bundleID
-    }
 
     static func sessionDetail(_ session: TimelineSession) -> String {
         let span = "\(CitationFormatting.shortTime(session.start)) – \(CitationFormatting.shortTime(session.end))"
