@@ -657,9 +657,73 @@ class MemoryStore:
             "encryption_enabled": self.settings.encryption_enabled,
         }
 
+    def integrity_check(self, *, quick: bool = False) -> dict:
+        """Verify the database is not corrupt via SQLite's integrity check.
+
+        ``PRAGMA integrity_check`` returns a single ``"ok"`` row when the file is
+        sound, or one row per problem otherwise. ``quick=True`` uses the faster
+        ``quick_check`` (skips some cross-page/index checks). Read-only; safe to
+        run anytime.
+        """
+        pragma = "quick_check" if quick else "integrity_check"
+        return _integrity_result(self.conn.execute(f"PRAGMA {pragma}").fetchall())
+
     def close(self) -> None:
         """Close the underlying connection."""
         self.conn.close()
 
 
-__all__ = ["MemoryStore"]
+def _integrity_result(rows) -> dict:
+    """Parse ``PRAGMA integrity_check``/``quick_check`` rows into a result dict.
+
+    SQLite returns a single ``"ok"`` row when sound, else one row per problem.
+    Handles both the dict row_factory and the default tuple shape.
+    """
+    problems: list[str] = []
+    for row in rows:
+        value = next(iter(row.values())) if isinstance(row, dict) else row[0]
+        if value is not None:
+            problems.append(str(value))
+    ok = problems == ["ok"]
+    return {"ok": ok, "problems": [] if ok else problems}
+
+
+def check_database_integrity(
+    db_path: str,
+    *,
+    settings=None,
+    quick: bool = False,
+    opener=None,
+) -> dict:
+    """Open the DB **raw** (no schema/migrations) and run the integrity PRAGMA.
+
+    Used by ``openbird data integrity``. Opening through :class:`MemoryStore`
+    would run schema/migration statements that themselves raise on a corrupt
+    file — so a corruption diagnostic must NOT use it. This opens a bare
+    connection and treats both open failures and PRAGMA errors as *findings*
+    (``ok=False`` with a problem code) rather than raising. Never raises.
+    """
+    import sqlite3
+
+    def _default_opener():
+        from openbird.storage.crypto import open_encrypted_db
+
+        return open_encrypted_db(db_path, settings=settings)
+
+    try:
+        conn = (opener or _default_opener)()
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must report, not crash
+        return {"ok": False, "problems": [f"cannot-open: {type(exc).__name__}"]}
+    try:
+        pragma = "quick_check" if quick else "integrity_check"
+        return _integrity_result(conn.execute(f"PRAGMA {pragma}").fetchall())
+    except sqlite3.DatabaseError as exc:
+        return {"ok": False, "problems": [f"check-failed: {type(exc).__name__}"]}
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+__all__ = ["MemoryStore", "check_database_integrity"]

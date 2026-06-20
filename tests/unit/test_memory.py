@@ -27,6 +27,54 @@ def test_reserved_mlx_backend_fails_before_db_open(tmp_path):
     assert not db_path.exists()
 
 
+def test_integrity_check_ok_on_healthy_db(store):
+    store.add_observation("integrity check payload", source="capture", app="Mail", ts=100.0)
+    full = store.integrity_check()
+    assert full == {"ok": True, "problems": []}
+    quick = store.integrity_check(quick=True)
+    assert quick["ok"] is True and quick["problems"] == []
+
+
+def test_check_database_integrity_healthy(tmp_path):
+    import sqlite3
+
+    from openbird.memory.store import check_database_integrity
+
+    db = tmp_path / "healthy.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE t(x)")
+    conn.execute("INSERT INTO t VALUES (1)")
+    conn.commit()
+    conn.close()
+    res = check_database_integrity(str(db), opener=lambda: sqlite3.connect(db))
+    assert res == {"ok": True, "problems": []}
+
+
+def test_check_database_integrity_corrupt_reports_not_raises(tmp_path):
+    import sqlite3
+
+    from openbird.memory.store import check_database_integrity
+
+    db = tmp_path / "corrupt.db"
+    db.write_bytes(b"definitely not a sqlite file " * 64)
+    # Must REPORT a problem, never raise (this is the whole point of the command).
+    res = check_database_integrity(str(db), opener=lambda: sqlite3.connect(db))
+    assert res["ok"] is False
+    assert res["problems"]
+
+
+def test_check_database_integrity_open_failure_reported():
+    from openbird.memory.store import check_database_integrity
+
+    def boom():
+        raise RuntimeError("locked keychain / unreadable")
+
+    res = check_database_integrity("/nonexistent.db", opener=boom)
+    assert res["ok"] is False
+    assert res["problems"][0].startswith("cannot-open:")
+    assert "locked keychain" not in str(res)  # only the exception type, no message
+
+
 def test_dedup_keeps_one_blob_but_n_observations(store):
     text = "The status report is ready for review."
     obs1 = store.add_observation(text, source="capture", app="Mail", ts=100.0)
