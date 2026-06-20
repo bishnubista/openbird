@@ -4,6 +4,8 @@ import SwiftUI
 struct MenuBarView: View {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    /// Summon the Spotlight Ask panel (also bound to the global ⌥Space hotkey).
+    var openAskPanel: () -> Void
 
     var body: some View {
         Button("Open OpenBird") {
@@ -11,9 +13,10 @@ struct MenuBarView: View {
             NSApp.activate(ignoringOtherApps: true)
         }
 
-        Button("Ask OpenBird…") {
-            openWindow(id: "main")
-            NSApp.activate(ignoringOtherApps: true)
+        // The ⌥Space hint is in the title (not a `.keyboardShortcut`) so it cannot
+        // double-fire alongside the global Carbon hotkey when the app is active.
+        Button("Ask OpenBird…  ⌥Space") {
+            openAskPanel()
         }
 
         Divider()

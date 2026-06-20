@@ -218,16 +218,8 @@ final class AppModel: ObservableObject {
     }
 
     private static func describeChatError(_ error: Error) -> String {
-        switch error {
-        case ChatError.cliMissing:
-            return "OpenBird CLI not found in the app bundle."
-        case ChatError.failed(let message):
-            return message
-        case ChatError.decode:
-            return "Could not read the chat response."
-        default:
-            return "Chat error."
-        }
+        // Single source of truth shared with the Spotlight panel (AskPanelModel).
+        ChatErrorPresenter.describe(error)
     }
 
     /// True when the CORE text-capture path is ready: local models + Accessibility.

@@ -16,19 +16,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct OpenBirdApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = AppModel(service: OpenBirdService())
+    @StateObject private var model: AppModel
+    @StateObject private var askPanel: AskPanelController
+
+    /// Construct the service, model, and Ask-panel controller TOGETHER, sharing the
+    /// one `AppModel`/`OpenBirdService`, so there is never a second model instance
+    /// and no configure-after-launch ordering race (see the design doc).
+    init() {
+        let service = OpenBirdService()
+        let model = AppModel(service: service)
+        _model = StateObject(wrappedValue: model)
+        _askPanel = StateObject(wrappedValue: AskPanelController(model: model, service: service))
+    }
 
     var body: some Scene {
         Window("OpenBird", id: "main") {
             ContentView(model: model)
                 .frame(minWidth: 560, minHeight: 420)
                 .task {
+                    askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
                     await model.refresh()
                 }
         }
 
         MenuBarExtra("OpenBird", systemImage: model.menuBarSymbol) {
-            MenuBarView(model: model)
+            MenuBarView(model: model, openAskPanel: { askPanel.show() })
         }
     }
 }

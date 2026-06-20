@@ -77,14 +77,11 @@ struct ChatView: View {
     }
 
     private func sourceLabel(_ citation: ChatCitation) -> String {
-        let parts = [citation.app, citation.window]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
-        return parts.isEmpty ? "unknown" : parts.joined(separator: " / ")
+        CitationFormatting.sourceLabel(app: citation.app, window: citation.window)
     }
 
     private func timeLabel(_ ts: Double) -> String {
-        Date(timeIntervalSince1970: ts).formatted(date: .abbreviated, time: .shortened)
+        CitationFormatting.timeLabel(ts)
     }
 
     private var statusIcon: String {
