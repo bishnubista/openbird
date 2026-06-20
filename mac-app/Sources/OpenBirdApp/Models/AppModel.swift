@@ -83,11 +83,22 @@ final class AppModel: ObservableObject {
         return "\(memoryStats.observations) \(noun) stored"
     }
 
+    var askUnavailableReason: String? {
+        memoryStats.observations == 0
+            ? "No memory stored yet. Start capture or ingest notes before asking."
+            : nil
+    }
+
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off
     /// the main actor and publishes the answer + citations (or a friendly error).
     func ask(_ question: String) {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !chatBusy else { return }
+        if let askUnavailableReason {
+            chatResult = nil
+            chatError = askUnavailableReason
+            return
+        }
         chatBusy = true
         chatError = nil
         let service = self.service
@@ -109,8 +120,8 @@ final class AppModel: ObservableObject {
         switch error {
         case ChatError.cliMissing:
             return "OpenBird CLI not found in the app bundle."
-        case ChatError.failed:
-            return "Chat failed — is Ollama running and memory set up? Try `openbird doctor`."
+        case ChatError.failed(let message):
+            return message
         case ChatError.decode:
             return "Could not read the chat response."
         default:
