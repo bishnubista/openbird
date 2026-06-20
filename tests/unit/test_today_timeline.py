@@ -16,6 +16,14 @@ from openbird.routines.templates import get_template
 from openbird.types import Observation
 
 
+@pytest.fixture(autouse=True)
+def _clean_settings_cache():
+    """Reset the lru_cached get_settings() after each test so a monkeypatched
+    OPENBIRD_DATA_DIR (now rolled back) can't leak into later tests."""
+    yield
+    reset_settings_cache()
+
+
 def _store(mem_settings, fake_provider) -> MemoryStore:
     return MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
 
