@@ -369,6 +369,51 @@ def test_temporal_query_routes_to_time_range(mem_settings, fake_provider):
         store.close()
 
 
+class _TemporalStore:
+    """Minimal store exposing only ``time_range_text`` for the temporal path."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def time_range_text(self, start, end, *, max_chars=2000):
+        return list(self._rows)
+
+
+def _trow(obs_id, session_id, content_hash, text, ts=1.0):
+    obs = Observation(
+        id=obs_id, content_hash=content_hash, ts=ts, app="Terminal",
+        window=None, session_id=session_id, source="capture",
+    )
+    return (obs, text)
+
+
+def test_temporal_dedup_collapses_same_session_same_content():
+    # Identical text re-seen within ONE session collapses to a single episode.
+    rows = [
+        _trow("a", "s1", "dup", "ran the deploy script", ts=10.0),
+        _trow("b", "s1", "dup", "ran the deploy script", ts=20.0),
+    ]
+    chatter = RAG(_TemporalStore(rows), EchoCiteAllLLM())
+    chatter._now = lambda: 1_000_000.0
+    result = chatter.answer("what did I do today?")
+    assert result.grounded
+    assert len(result.used_hits) == 1  # (s1, dup) seen twice -> one context item
+
+
+def test_temporal_dedup_keeps_distinct_sessions_with_same_content():
+    # Identical text in TWO different sessions must surface BOTH — populated
+    # session_ids make episodic recall coherent (was collapsed by content_hash).
+    rows = [
+        _trow("a", "s1", "dup", "ran the deploy script", ts=10.0),
+        _trow("c", "s2", "dup", "ran the deploy script", ts=500.0),
+    ]
+    chatter = RAG(_TemporalStore(rows), EchoCiteAllLLM())
+    chatter._now = lambda: 1_000_000.0
+    result = chatter.answer("what did I do today?")
+    assert result.grounded
+    assert len(result.used_hits) == 2  # distinct (session, hash) -> two episodes
+
+
 # -- raw-string fallback path ---------------------------------------------------
 
 

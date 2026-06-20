@@ -16,9 +16,21 @@ import platformdirs
 
 # Apps excluded from capture until the user explicitly enables them:
 # terminals, code editors, browsers, password managers, finance/health apps.
+# NOTE: the blocklist is SUBTRACTIVE — `redact.decide` applies the allowlist first,
+# then removes blocklisted apps. So allowlisting a terminal alone will NOT capture
+# it; a user must also drop it from the blocklist (e.g. OPENBIRD_BLOCKLIST=... or a
+# custom `blocklist`). Third-party terminals are included because their virtualized
+# scrollback both leaks secrets and re-renders animated glyphs every frame (the
+# capture-bloat source Layer 1 / `volatility` addresses).
 _DEFAULT_BLOCKLIST: list[str] = [
     "com.apple.Terminal",
     "com.googlecode.iterm2",
+    "com.mitchellh.ghostty",
+    "net.kovidgoyal.kitty",
+    "dev.warp.Warp-Stable",
+    "co.zeit.hyper",
+    "org.alacritty",
+    "com.github.wez.wezterm",
     "com.microsoft.VSCode",
     "com.1password.1password",
     "com.agilebits.onepassword7",
@@ -91,6 +103,12 @@ class Settings:
     # default) disables automatic retention; data is kept until explicitly pruned.
     retention_days: int = 0
 
+    # Episodic-session gap (seconds). The capture daemon starts a NEW session id
+    # when the foreground app changes or activity pauses longer than this, so
+    # temporal recall ("what did I do today") can group contiguous activity. Kept
+    # in sync with capture.daemon._DEFAULT_SESSION_GAP.
+    session_gap_seconds: float = 300.0
+
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir).expanduser()
         if self.db_path is None:
@@ -129,6 +147,7 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "allow_cloud": False,
     "require_encryption": False,
     "retention_days": 0,
+    "session_gap_seconds": 300.0,
     "embed_dim": 768,
     "llm_timeout": 60.0,
     "embed_timeout": 30.0,

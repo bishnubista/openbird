@@ -177,6 +177,27 @@ def test_fresh_db_is_stamped_to_current_version(tmp_path):
         s.close()
 
 
+def test_fresh_store_ships_session_index(tmp_path):
+    """A fresh store carries idx_observations_session (added in schema.sql, no
+    migration — _apply_schema runs schema.sql on every open, so it lands on fresh
+    AND pre-existing DBs). SCHEMA_VERSION stays 1: an additive CREATE INDEX IF NOT
+    EXISTS needs no migration ladder step."""
+    db = str(tmp_path / "idx.db")
+    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
+                    provider=FakeProvider(embed_dim=64))
+    try:
+        row = s.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name='idx_observations_session'"
+        ).fetchone()
+        assert row is not None
+        assert int(next(iter(
+            s.conn.execute("PRAGMA user_version").fetchone().values()
+        ))) == SCHEMA_VERSION  # unchanged: still 1
+    finally:
+        s.close()
+
+
 def test_legacy_unversioned_db_is_adopted_as_v1(tmp_path):
     """A DB with the v1 shape but user_version=0 is stamped to 1, not migrated."""
     conn = sqlite3.connect(tmp_path / "legacy.db")

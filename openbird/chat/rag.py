@@ -273,13 +273,21 @@ class RAG:
                 answer="I don't have any recorded activity in that time window.",
                 citations=[], used_hits=[], grounded=False,
             )
-        # Build context from occurrences, collapsing repeats of the same content.
+        # Build context from occurrences, collapsing repeats of the same content
+        # WITHIN a session. Keying on (session_id, content_hash) — mirroring
+        # _assemble_context — means identical text revisited in a DIFFERENT session
+        # inside the window survives as a distinct episode (so populated session_ids
+        # make temporal recall coherent); a null session_id groups as (None, hash),
+        # preserving the prior content-hash-only collapse for legacy rows.
         context: list[_ContextItem] = []
-        seen: set[str] = set()
+        seen: set[tuple[str | None, str]] = set()
         for obs, text in rows:
-            if obs is None or obs.content_hash in seen:
+            if obs is None:
                 continue
-            seen.add(obs.content_hash)
+            key = (obs.session_id, obs.content_hash)
+            if key in seen:
+                continue
+            seen.add(key)
             hit = SearchHit(
                 chunk_id=f"obs:{obs.id}", content_hash=obs.content_hash,
                 text=text, score=0.0, observation=obs,
