@@ -42,6 +42,12 @@ struct MenuBarView: View {
                     title: model.capturePaused ? "Resume Capture" : "Pause Capture") {
                 run { model.toggleCapturePause() }
             }
+            MenuRow(icon: "calendar.day.timeline.left", title: "Today's Activity") {
+                run {
+                    openWindow(id: "today")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
             MenuRow(icon: "arrow.clockwise", title: "Re-check Setup") {
                 run { Task { await model.refresh() } }
             }

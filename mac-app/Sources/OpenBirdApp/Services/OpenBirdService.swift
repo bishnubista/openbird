@@ -73,6 +73,42 @@ struct MemoryStats: Codable, Equatable {
     static let empty = MemoryStats(observations: 0, blobs: 0, chunks: 0, vectors: 0)
 }
 
+/// One capture session in a day (decoded from `openbird timeline --json`).
+struct TimelineSession: Codable, Identifiable, Equatable {
+    let sessionId: String?
+    let app: String?
+    let start: Double
+    let end: Double
+    let count: Int
+
+    var id: String { "\(sessionId ?? "nil")|\(app ?? "nil")|\(start)" }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case app, start, end, count
+    }
+}
+
+/// A day's capture timeline + stat-chip numbers (decoded from `openbird timeline --json`).
+struct DayTimeline: Codable, Equatable {
+    let dayOffset: Int
+    let start: Double
+    let end: Double
+    let totalObservations: Int
+    let distinctApps: Int
+    let activeSeconds: Double
+    let sessions: [TimelineSession]
+
+    enum CodingKeys: String, CodingKey {
+        case dayOffset = "day_offset"
+        case start, end
+        case totalObservations = "total_observations"
+        case distinctApps = "distinct_apps"
+        case activeSeconds = "active_seconds"
+        case sessions
+    }
+}
+
 
 final class OpenBirdService: @unchecked Sendable {
     private let fileManager = FileManager.default
@@ -388,6 +424,40 @@ final class OpenBirdService: @unchecked Sendable {
     static func parseMemoryStats(_ output: String) -> MemoryStats? {
         guard let data = output.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(MemoryStats.self, from: data)
+    }
+
+    /// Load a day's capture timeline (sessions + stat numbers). Pure local read;
+    /// `openbird timeline` opens the store without an LLM/cloud gate, so this is fast.
+    func dayTimeline(dayOffset: Int) async -> DayTimeline? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
+        let result = await runAsync(
+            cli, arguments: ["timeline", "--day", String(dayOffset), "--json"], timeout: 20
+        )
+        guard result.exitCode == 0 else { return nil }
+        return Self.parseDayTimeline(result.stdout)
+    }
+
+    static func parseDayTimeline(_ output: String) -> DayTimeline? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(DayTimeline.self, from: data)
+    }
+
+    /// Generate a day's grounded prose briefing (`openbird briefing --json`). This
+    /// makes one local LLM call, so the timeout is generous; an empty day returns a
+    /// deterministic line cheaply. Callers should cache per day.
+    func dailyBriefing(dayOffset: Int, timeout: TimeInterval = 120) async -> String? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
+        let result = await runAsync(
+            cli, arguments: ["briefing", "--day", String(dayOffset), "--json"], timeout: timeout
+        )
+        guard result.exitCode == 0 else { return nil }
+        return Self.parseBriefing(result.stdout)
+    }
+
+    static func parseBriefing(_ output: String) -> String? {
+        struct Briefing: Decodable { let text: String }
+        guard let data = output.data(using: .utf8) else { return nil }
+        return (try? JSONDecoder().decode(Briefing.self, from: data))?.text
     }
 
     // MARK: - Internals
