@@ -74,9 +74,12 @@ final class TodayModel: ObservableObject {
     }
 
     private func loadBriefing(day: Int, generation: Int) async {
+        // load() awaits loadTimeline first, so this can start already superseded —
+        // bail before any state mutation in that case.
+        guard generation == loadGeneration else { return }
         let key = dayKey(day)
         if let cached = briefingCache[key] {
-            if generation == loadGeneration { briefing = cached }
+            briefing = cached   // still current (no await since the guard above)
             return
         }
         loadingBriefing = true
