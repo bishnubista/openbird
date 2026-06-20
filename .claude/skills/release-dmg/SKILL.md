@@ -40,8 +40,9 @@ export OPENBIRD_SWIFTPM_DISABLE_SANDBOX=1
 unset OPENBIRD_DMG_SKIP_NOTARIZE
 ./script/package_dmg.sh
 ```
-Run this so it doesn't block the session — it takes several minutes, mostly Apple
-notarization — then poll for completion (e.g. start it as a background task).
+This command runs in the **foreground** and takes several minutes (mostly Apple
+notarization). Launch it non-blocking and poll for completion — the agent should
+start it as a background task (or a human can append `&` / use `nohup … &`).
 The signing identity is **auto-derived** from the single "Developer ID Application"
 identity in the keychain, and the notary profile defaults to `openbird-notary`.
 Override only if needed via env or a gitignored `script/release.env` (see
