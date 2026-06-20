@@ -27,18 +27,20 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
 
-from openbird.capture import adapters, redact
+from openbird.capture import adapters, redact, volatility
 from openbird.config import Settings, get_settings
 from openbird.types import Observation
 
@@ -125,6 +127,11 @@ _MAX_STDERR_BYTES = 64 * 1024
 # window and exits, so continuous capture means re-spawning it on an interval.
 _DEFAULT_POLL_INTERVAL = 2.0  # seconds the supervisor idles between helper spawns
 _DEFAULT_DUPLICATE_WINDOW = 60.0  # keep one unchanged snapshot per minute
+# Fallback session-gap (seconds) used when a settings object predates the
+# ``session_gap_seconds`` field (e.g. an injected test ``Settings``). A new
+# episodic session starts when the foreground app changes OR activity pauses
+# longer than this. Kept in sync with ``config.Settings.session_gap_seconds``.
+_DEFAULT_SESSION_GAP = 300.0
 _DEFAULT_MAX_CONSECUTIVE_FAILURES = 5  # circuit breaker: stop after this many
 _BACKOFF_BASE = 1.0  # first retry delay (seconds), doubled each consecutive fail
 _BACKOFF_MAX = 60.0  # cap on the exponential backoff delay
@@ -288,6 +295,14 @@ class CaptureDaemon:
         self.duplicate_window = max(0.0, duplicate_window)
         self._last_ingested_signature: _CaptureSignature | None = None
         self._last_ingested_at: float | None = None
+        # Episodic-session segmentation (Layer 4). A session groups a contiguous
+        # run of activity in one app; ``_assemble_context`` / ``_answer_temporal``
+        # use it to keep "what did I do today" recall coherent. State advances on
+        # every policy-accepted frame (see :meth:`_session_for`), so continuity is
+        # independent of the coalesce window. Survives a rejected/paused frame.
+        self._session_id: str | None = None
+        self._session_app: str | None = None
+        self._session_last_ts: float | None = None
         self._stderr_thread: threading.Thread | None = None
         # Safe, content-free error counter for the whole-data-path privacy gate:
         # store/embed failures bump this instead of emitting tracebacks that
@@ -309,11 +324,21 @@ class CaptureDaemon:
 
     @staticmethod
     def _event_clock(ts: object) -> float:
-        """Return a comparison timestamp without trusting malformed helper values."""
+        """Return a FINITE comparison/storage timestamp from an untrusted ts.
+
+        JSON permits ``NaN``/``Infinity`` literals and ``float('nan')`` does not
+        raise, so a malformed helper ``ts`` could otherwise poison the session
+        clock (every later finite comparison against NaN is False, freezing
+        segmentation) and corrupt time-range ordering in storage. Non-finite or
+        unparseable values fall back to wall-clock now.
+        """
         try:
-            return float(ts) if ts is not None else time.time()
+            value = float(ts) if ts is not None else None
         except (TypeError, ValueError):
+            value = None
+        if value is None or not math.isfinite(value):
             return time.time()
+        return value
 
     @staticmethod
     def _signature(
@@ -339,6 +364,39 @@ class CaptureDaemon:
     def _mark_ingested(self, signature: _CaptureSignature, event_at: float) -> None:
         self._last_ingested_signature = signature
         self._last_ingested_at = event_at
+
+    def _session_for(self, app: str | None, event_at: float) -> str:
+        """Return the current episodic-session id, starting a new one when needed.
+
+        A NEW ``uuid4().hex`` session begins when the foreground app changes OR the
+        gap since the last accepted frame exceeds ``session_gap_seconds``. Either
+        way ``_session_last_ts`` is advanced to ``event_at``, so this MUST be called
+        for every policy-accepted, non-empty frame — INCLUDING ones that go on to
+        coalesce — to keep the session-activity clock current. That decouples
+        session continuity from ``duplicate_window``: a long run of coalesced
+        heartbeats keeps the session alive. Rejected/paused/empty frames never call
+        this (a blocked app must not extend a session).
+
+        ``getattr`` keeps an injected test ``Settings`` lacking the field working.
+        """
+        gap = getattr(self.settings, "session_gap_seconds", _DEFAULT_SESSION_GAP)
+        prev = self._session_last_ts
+        if (
+            self._session_id is None
+            or app != self._session_app
+            or prev is None
+            or event_at - prev > gap
+        ):
+            self._session_id = uuid.uuid4().hex
+            self._session_app = app
+            self._session_last_ts = event_at
+        elif event_at > prev:
+            # Same session: advance the activity clock, but NEVER regress it on a
+            # backward / out-of-order timestamp (a coalesced stale frame could
+            # otherwise rewind the clock and spuriously age the session, splitting
+            # one continuous run into two). ``event_at > prev`` is also NaN-safe.
+            self._session_last_ts = event_at
+        return self._session_id
 
     # -- per-event handling ---------------------------------------------------
 
@@ -375,8 +433,18 @@ class CaptureDaemon:
             return stats._with(rejected=1)
 
         normalized = adapters.normalize_for_app(scrubbed, app)
+        # Layer 1: strip high-churn UI animation (spinners, progress bars, ANSI) so
+        # flicker frames hash identically and stop forking a fresh blob every poll.
+        # Runs BEFORE the empty check so a pure-spinner frame de-flickers to "" and
+        # is rejected through the existing branch below.
+        normalized = volatility.normalize(normalized)
+        # Re-scrub AFTER de-flickering: stripping ANSI/control sequences can rejoin a
+        # secret that the first scrub missed because an escape split the token
+        # (e.g. ``sk-<ESC>[31mABC…``). The stored body is therefore always the
+        # output of scrub() applied to the final, fully-normalized text.
+        normalized, body_rules = redact.scrub(normalized)
         if not normalized.strip():
-            # Everything was chrome/boilerplate -> nothing worth storing.
+            # Everything was chrome/boilerplate/animation -> nothing worth storing.
             self._reset_coalescing()
             logger.debug("capture: event reduced to empty after normalization app=%s", app)
             return stats._with(rejected=1)
@@ -390,6 +458,9 @@ class CaptureDaemon:
             window=window, url=url
         )
         event_at = self._event_clock(ts)
+        # Advance the episodic-session clock for EVERY accepted frame (before the
+        # coalesce check), so continuity holds even across coalesced heartbeats.
+        session_id = self._session_for(app, event_at)
         signature = self._signature(
             app=app,
             window=safe_window,
@@ -406,9 +477,9 @@ class CaptureDaemon:
                 app=app,
                 window=safe_window,
                 url=safe_url,
-                session_id=None,
+                session_id=session_id,
                 source=self.source,
-                ts=ts,
+                ts=event_at,
             )
         except Exception as exc:  # noqa: BLE001 - isolate one bad event from the loop
             # Some store/embed layers raise exceptions whose
@@ -437,7 +508,7 @@ class CaptureDaemon:
             return stats._with(errors=1)
 
         self._mark_ingested(signature, event_at)
-        matched = tuple(decision.matched_rules) + tuple(title_rules)
+        matched = tuple(decision.matched_rules) + tuple(body_rules) + tuple(title_rules)
         if matched:
             logger.debug(
                 "capture: scrubbed secrets app=%s rules=%s",

@@ -9,13 +9,14 @@ bundle, or Ollama is required. The ingest sink is a lightweight fake recording
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from pathlib import Path
 
 import pytest
 
-from openbird.capture import adapters, redact
+from openbird.capture import adapters, redact, volatility
 from openbird.capture.daemon import (
     CaptureDaemon,
     CaptureStats,
@@ -26,7 +27,10 @@ from openbird.capture.daemon import (
     parse_event,
 )
 from openbird.config import Settings
+from openbird.memory.store import MemoryStore
 from openbird.types import Observation
+
+from tests.unit.conftest import FakeProvider
 
 
 # ---------------------------------------------------------------------------
@@ -1354,3 +1358,333 @@ def test_dangerous_list_parity_json_swift_python():
     # vendors from BOTH original sides (the union the drift was hiding).
     for vendor in ("1password", "keychain", "keeper", "protonpass", "keychainaccess"):
         assert vendor in python_set
+
+
+# ---------------------------------------------------------------------------
+# Layer 1 — volatility.normalize: de-flicker animated UI noise (conservative)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("⠂ Building project", "Building project"),          # braille spinner
+        ("⠿⠿ Loading", "Loading"),                            # repeated braille
+        ("✳ Thinking…", "Thinking…"),                         # star "thinking" glyph
+        ("\x1b[32mgreen\x1b[0m text", "green text"),          # ANSI SGR stripped
+        ("Downloading model-x [####   ] 45%", "Downloading model-x"),  # wide bracket bar
+        ("install [==========]", "install"),                  # wide bar, no percent
+        ("step [## ] 5%", "step"),                             # short body but has percent
+        ("loss 37%|███      |", "loss"),                       # tqdm pipe bar
+        ("progress ███████░░░ done", "progress done"),        # bare block-bar run
+        ("|", ""),                                             # whole-line ASCII spinner
+        ("\\", ""),
+    ],
+)
+def test_volatility_strips_volatile_tokens(raw, expected):
+    assert volatility.normalize(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "- bullet item",            # markdown bullet (leading '-' must survive)
+        "* list item",
+        "/usr/bin/env python",      # path (leading '/' must survive)
+        "| pipe | table |",         # pipes that are not a progress bar
+        "[TODO] finish this",       # bracket without bar chars
+        "[1.2.3] version tag",
+        "[ERROR] something failed",
+        "rebase marker [#] here",   # short bracket markers are NOT bars...
+        "arrow [=>] points",        # ...require width-or-percent to strip
+        "ascii [==>] flow",
+        "single [>] gt",
+        "tag [=] eq",
+        "[----] dashes only",       # dashes are bar-body but not a bar SIGNAL
+        "10:15:30 build failed",    # bare clock — DEFERRED, must survive
+        "API returned in (12s)",    # parenthesized elapsed — DEFERRED, must survive
+        "see https://example.com/path",
+        "plain prose with no noise",
+    ],
+)
+def test_volatility_preserves_meaningful_text(text):
+    # Conservative: never rewrite real content (paths, bullets, timestamps, prose).
+    assert volatility.normalize(text) == text
+
+
+def test_volatility_is_idempotent():
+    sample = "⠂ Building [##   ] 20%\n- keep this line\n\x1b[31mred\x1b[0m\n37%|██  |"
+    once = volatility.normalize(sample)
+    assert volatility.normalize(once) == once
+
+
+def test_volatility_progress_bar_keeps_distinct_labels():
+    # Two different downloads must NOT collapse (label differs); the same download
+    # progressing MUST collapse (only the bar/percent differs).
+    a1 = volatility.normalize("Downloading model-x [#    ] 5%")
+    a2 = volatility.normalize("Downloading model-x [####] 80%")
+    b1 = volatility.normalize("Downloading model-y [#    ] 5%")
+    assert a1 == a2  # same download, different frame -> identical
+    assert a1 != b1  # different downloads stay distinct
+
+
+def test_volatility_pure_spinner_line_becomes_empty():
+    assert volatility.normalize("⠹").strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# Layer 1 — spinner-frame bloat regression (the load-bearing test)
+# ---------------------------------------------------------------------------
+
+_SPINNER_FRAMES = "⠂⠠⠐⠈⠁⠉⠙⠹"
+
+
+def _ghostty_settings(tmp_path) -> Settings:
+    """Allow Ghostty + clear the blocklist so a terminal can be driven in-test."""
+    return Settings(
+        data_dir=tmp_path,
+        allowlist=["com.mitchellh.ghostty"],
+        blocklist=[],
+    )
+
+
+def test_spinner_frames_coalesce_to_single_observation(tmp_path):
+    # N frames identical except a rotating spinner glyph must de-flicker to one
+    # capture: the coalesce gate now matches across frames (was: N new blobs).
+    store = FakeStore()
+    settings = _ghostty_settings(tmp_path)
+    daemon = CaptureDaemon(store, settings=settings, duplicate_window=60.0)
+    body = "Compiling project...\n  module foo\n  module bar\nrunning 42 tests"
+    lines = [
+        _line(app="com.mitchellh.ghostty", window="term", text=f"{g} {body}", ts=float(i))
+        for i, g in enumerate(_SPINNER_FRAMES)
+    ]
+
+    stats = daemon.run_lines(lines)
+
+    assert stats.received == len(_SPINNER_FRAMES)
+    assert stats.ingested == 1
+    assert stats.coalesced == len(_SPINNER_FRAMES) - 1
+    assert len(store.calls) == 1
+    # The stored text is de-flickered (no spinner glyph survived).
+    assert "⠂" not in store.calls[0]["text"]
+    assert "Compiling project" in store.calls[0]["text"]
+
+
+def test_spinner_frames_dedupe_to_single_blob_in_real_store(tmp_path):
+    # Against a REAL store with the daemon coalesce gate DISABLED (duplicate_window
+    # =0), every de-flickered frame reaches add_observation, proving blob-level
+    # dedup (content_blobs) — the actual 300 MB cause. WITHOUT Layer 1 the rotating
+    # glyph would fork content_hash and yield one 184 KB blob PER frame.
+    settings = Settings(
+        data_dir=tmp_path,
+        embed_dim=64,
+        allowlist=["com.mitchellh.ghostty"],
+        blocklist=[],
+    )
+    store = MemoryStore(
+        db_path=str(tmp_path / "bloat.db"),
+        settings=settings,
+        provider=FakeProvider(embed_dim=64),
+    )
+    try:
+        daemon = CaptureDaemon(store, settings=settings, duplicate_window=0)
+        body = "Compiling project...\n  module foo\n  module bar\nrunning 42 tests"
+        lines = [
+            _line(
+                app="com.mitchellh.ghostty",
+                window="term",
+                text=f"{g} {body}",
+                ts=float(i),
+            )
+            for i, g in enumerate(_SPINNER_FRAMES)
+        ]
+
+        stats = daemon.run_lines(lines)
+
+        assert stats.ingested == len(_SPINNER_FRAMES)  # coalesce gate disabled
+        st = store.stats()
+        assert st["observations"] == len(_SPINNER_FRAMES)  # timeline preserved
+        assert st["blobs"] == 1  # de-flickered text collapses to ONE blob
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Layer 3 — terminals blocked by default (recovery is blocklist-override)
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_blocked_even_when_also_allowlisted(tmp_path):
+    # Blocklist is subtractive: a default-blocked terminal stays blocked even if a
+    # user ALSO allowlists it. Allowlisting alone is NOT the recovery path.
+    s = Settings(data_dir=tmp_path, allowlist=["com.mitchellh.ghostty"])
+    d = redact.decide(
+        app="com.mitchellh.ghostty", window="term", text="secrets here", settings=s
+    )
+    assert not d.capture
+    assert d.reason == "blocklisted"
+
+
+def test_terminal_recovery_requires_blocklist_override(tmp_path):
+    # Real recovery: drop the terminal from the blocklist AND allowlist it.
+    s = Settings(
+        data_dir=tmp_path,
+        allowlist=["com.mitchellh.ghostty"],
+        blocklist=[],
+    )
+    d = redact.decide(
+        app="com.mitchellh.ghostty", window="term", text="content", settings=s
+    )
+    assert d.capture
+    assert d.reason == "allowlisted"
+
+
+def test_default_blocklist_covers_third_party_terminals(tmp_path):
+    # A non-terminal allowlisted app still captures (no over-blocking).
+    s = Settings(data_dir=tmp_path, allowlist=["com.apple.mail"])
+    for term in ("net.kovidgoyal.kitty", "org.alacritty", "com.github.wez.wezterm"):
+        d = redact.decide(app=term, window="w", text="x", settings=s)
+        assert not d.capture, term
+    assert redact.decide(
+        app="com.apple.mail", window="Inbox", text="hi", settings=s
+    ).capture
+
+
+# ---------------------------------------------------------------------------
+# Layer 4 — episodic session segmentation
+# ---------------------------------------------------------------------------
+
+
+def test_session_continues_within_gap_and_same_app(allow_settings):
+    store = FakeStore()
+    settings = Settings(
+        data_dir=allow_settings.data_dir,
+        allowlist=list(allow_settings.allowlist),
+        session_gap_seconds=300.0,
+    )
+    daemon = CaptureDaemon(store, settings=settings, duplicate_window=0)
+    lines = [
+        _line(app="com.apple.mail", window="Inbox", text="first note", ts=10.0),
+        _line(app="com.apple.mail", window="Inbox", text="second note", ts=120.0),
+    ]
+    daemon.run_lines(lines)
+    sessions = [c["session_id"] for c in store.calls]
+    assert len(sessions) == 2
+    assert sessions[0] is not None
+    assert sessions[0] == sessions[1]  # same app, within gap -> one session
+
+
+def test_session_breaks_on_app_switch_and_on_gap(allow_settings):
+    store = FakeStore()
+    settings = Settings(
+        data_dir=allow_settings.data_dir,
+        allowlist=list(allow_settings.allowlist),
+        session_gap_seconds=100.0,
+    )
+    daemon = CaptureDaemon(store, settings=settings, duplicate_window=0)
+    lines = [
+        _line(app="com.apple.mail", window="Inbox", text="a", ts=10.0),
+        _line(app="com.apple.Safari", window="Docs", text="b", ts=20.0),   # app switch
+        _line(app="com.apple.Safari", window="Docs", text="c", ts=400.0),  # > gap jump
+    ]
+    daemon.run_lines(lines)
+    s = [c["session_id"] for c in store.calls]
+    assert len(s) == 3
+    assert s[0] != s[1]  # app switch -> new session
+    assert s[1] != s[2]  # gap jump -> new session
+
+
+def test_session_continuity_survives_coalesced_heartbeat(allow_settings):
+    # The session-activity clock must advance on a COALESCED frame, so continuity
+    # is independent of duplicate_window. With duplicate_window >> session_gap, a
+    # coalesced heartbeat at t=80 keeps the gap-clock fresh; the t=150 ingest then
+    # stays in the SAME session. If the clock only advanced on ingest (buggy), the
+    # gap from t=10 to t=150 (140 > 100) would spuriously start a new session.
+    store = FakeStore()
+    settings = Settings(
+        data_dir=allow_settings.data_dir,
+        allowlist=list(allow_settings.allowlist),
+        session_gap_seconds=100.0,
+    )
+    daemon = CaptureDaemon(store, settings=settings, duplicate_window=1000.0)
+    lines = [
+        _line(app="com.apple.mail", window="Inbox", text="same", ts=10.0),   # ingest
+        _line(app="com.apple.mail", window="Inbox", text="same", ts=80.0),   # coalesced
+        _line(app="com.apple.mail", window="Inbox", text="changed", ts=150.0),  # ingest
+    ]
+    stats = daemon.run_lines(lines)
+    assert stats.ingested == 2
+    assert stats.coalesced == 1
+    sessions = [c["session_id"] for c in store.calls]
+    assert len(sessions) == 2
+    assert sessions[0] == sessions[1]  # continuity held across the coalesced frame
+
+
+def test_session_clock_does_not_regress_on_backward_frame(allow_settings):
+    # A backward / out-of-order frame must NOT rewind the session-activity clock.
+    # Sequence (gap=100, big duplicate_window so repeats coalesce):
+    #   t=10  ingest  -> session S1, clock=10
+    #   t=80  coalesce-> clock advances to 80
+    #   t=50  coalesce-> BACKWARD; clock must stay 80 (not regress to 50)
+    #   t=160 ingest  -> gap from 80 is 80 (<100) => still S1
+    # If the clock regressed to 50, t=160 would see gap 110 (>100) -> new session.
+    store = FakeStore()
+    settings = Settings(
+        data_dir=allow_settings.data_dir,
+        allowlist=list(allow_settings.allowlist),
+        session_gap_seconds=100.0,
+    )
+    daemon = CaptureDaemon(store, settings=settings, duplicate_window=1000.0)
+    lines = [
+        _line(app="com.apple.mail", window="Inbox", text="same", ts=10.0),
+        _line(app="com.apple.mail", window="Inbox", text="same", ts=80.0),
+        _line(app="com.apple.mail", window="Inbox", text="same", ts=50.0),
+        _line(app="com.apple.mail", window="Inbox", text="changed", ts=160.0),
+    ]
+    daemon.run_lines(lines)
+    sessions = [c["session_id"] for c in store.calls]
+    assert len(sessions) == 2  # t=10 and t=160 ingested (others coalesced)
+    assert sessions[0] == sessions[1]  # one continuous session; no spurious split
+
+
+# ---------------------------------------------------------------------------
+# Defense-in-depth: re-scrub after de-flicker; non-finite timestamp sanitizing
+# ---------------------------------------------------------------------------
+
+
+def test_ansi_split_secret_is_scrubbed_after_deflicker(allow_settings):
+    # An ANSI escape splitting a token slips past the FIRST scrub (the escape
+    # breaks the regex), but volatility strips the escape and the RE-scrub masks
+    # the rejoined key — so a de-flickered secret can never be stored.
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings)
+    # Named ``key`` (not ``secret``) to match the existing test fixtures in this
+    # file and avoid Ruff S105 (hardcoded-password) on an intentional fixture.
+    key = "sk-abcdefghijklmnop1234567890"
+    split = "sk-abcdefgh\x1b[31mijklmnop1234567890"  # ESC SGR mid-token
+    lines = [_line(app="com.apple.mail", window="Inbox", text=f"key {split} end", ts=1.0)]
+    daemon.run_lines(lines)
+    assert len(store.calls) == 1
+    stored = store.calls[0]["text"]
+    assert key not in stored
+    assert "ijklmnop1234567890" not in stored
+    assert "REDACTED" in stored
+
+
+def test_event_clock_sanitizes_non_finite_ts():
+    assert CaptureDaemon._event_clock(10.0) == 10.0
+    assert CaptureDaemon._event_clock(None) > 0  # fallback to wall clock
+    for bad in (float("nan"), float("inf"), float("-inf"), "not-a-number"):
+        assert math.isfinite(CaptureDaemon._event_clock(bad))
+
+
+def test_nan_timestamp_frame_stores_finite_ts(allow_settings):
+    # A NaN ts (valid JSON literal) must not reach storage as NaN — it would
+    # corrupt time-range ordering and freeze session segmentation.
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings)
+    line = _line(app="com.apple.mail", window="Inbox", text="hello there", ts=float("nan"))
+    stats = daemon.run_lines([line])
+    assert stats.ingested == 1
+    assert math.isfinite(store.calls[0]["ts"])

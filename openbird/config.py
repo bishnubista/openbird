@@ -7,6 +7,7 @@ environment overrides.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field, fields
 from functools import lru_cache
@@ -16,9 +17,21 @@ import platformdirs
 
 # Apps excluded from capture until the user explicitly enables them:
 # terminals, code editors, browsers, password managers, finance/health apps.
+# NOTE: the blocklist is SUBTRACTIVE — `redact.decide` applies the allowlist first,
+# then removes blocklisted apps. So allowlisting a terminal alone will NOT capture
+# it; a user must also drop it from the blocklist (e.g. OPENBIRD_BLOCKLIST=... or a
+# custom `blocklist`). Third-party terminals are included because their virtualized
+# scrollback both leaks secrets and re-renders animated glyphs every frame (the
+# capture-bloat source Layer 1 / `volatility` addresses).
 _DEFAULT_BLOCKLIST: list[str] = [
     "com.apple.Terminal",
     "com.googlecode.iterm2",
+    "com.mitchellh.ghostty",
+    "net.kovidgoyal.kitty",
+    "dev.warp.Warp-Stable",
+    "co.zeit.hyper",
+    "org.alacritty",
+    "com.github.wez.wezterm",
     "com.microsoft.VSCode",
     "com.1password.1password",
     "com.agilebits.onepassword7",
@@ -91,7 +104,23 @@ class Settings:
     # default) disables automatic retention; data is kept until explicitly pruned.
     retention_days: int = 0
 
+    # Episodic-session gap (seconds). The capture daemon starts a NEW session id
+    # when the foreground app changes or activity pauses longer than this, so
+    # temporal recall ("what did I do today") can group contiguous activity. Kept
+    # in sync with capture.daemon._DEFAULT_SESSION_GAP.
+    session_gap_seconds: float = 300.0
+
     def __post_init__(self) -> None:
+        # session_gap_seconds feeds numeric session-boundary arithmetic in the
+        # capture daemon (_session_for). A NaN/inf gap freezes segmentation (every
+        # finite comparison is False) and a negative gap over-splits every frame,
+        # both silently — so reject non-finite/negative values from env/config here
+        # at the single source of truth rather than letting them propagate.
+        self.session_gap_seconds = float(self.session_gap_seconds)
+        if not math.isfinite(self.session_gap_seconds) or self.session_gap_seconds < 0:
+            raise ValueError(
+                "session_gap_seconds must be a finite, non-negative number"
+            )
         self.data_dir = Path(self.data_dir).expanduser()
         if self.db_path is None:
             self.db_path = str(self.data_dir / "openbird.db")
@@ -129,6 +158,7 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "allow_cloud": False,
     "require_encryption": False,
     "retention_days": 0,
+    "session_gap_seconds": 300.0,
     "embed_dim": 768,
     "llm_timeout": 60.0,
     "embed_timeout": 30.0,

@@ -30,8 +30,9 @@ CREATE TABLE IF NOT EXISTS observations (
     source       TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_observations_ts   ON observations(ts);
-CREATE INDEX IF NOT EXISTS idx_observations_hash ON observations(content_hash);
+CREATE INDEX IF NOT EXISTS idx_observations_ts      ON observations(ts);
+CREATE INDEX IF NOT EXISTS idx_observations_hash    ON observations(content_hash);
+CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
 
 -- Globally-deduped retrievable chunks, addressed by SHA-256 of their *normalized
 -- chunk text* (not the parent window). A unique chunk is stored,
