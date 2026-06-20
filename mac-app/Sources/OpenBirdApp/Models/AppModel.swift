@@ -152,6 +152,44 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    var nextStepState: StepState {
+        if isRefreshing { return .working }
+        if ollamaState != .ok || modelsState != .ok || accessibilityState != .ok {
+            return .attention
+        }
+        if allowlist.isEmpty || !captureRunning || memoryStats.observations == 0 {
+            return .attention
+        }
+        return .ok
+    }
+
+    var nextStepSummary: String {
+        if isRefreshing {
+            return "Checking setup..."
+        }
+        if ollamaState != .ok {
+            return "Next: launch Ollama, then re-check setup."
+        }
+        if modelsState != .ok {
+            return report.missingModels.isEmpty
+                ? "Next: re-check local models."
+                : "Next: pull missing models: \(report.missingModels.joined(separator: ", "))"
+        }
+        if accessibilityState != .ok {
+            return "Next: grant Accessibility so OpenBird can read active-window text."
+        }
+        if allowlist.isEmpty {
+            return "Next: add at least one app to the capture allowlist."
+        }
+        if !captureRunning {
+            return "Next: start capture."
+        }
+        if memoryStats.observations == 0 {
+            return "Next: bring an allowed app to the front so memory starts filling."
+        }
+        return "Ready: capture is storing memory. Ask a question when you need it."
+    }
+
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off
     /// the main actor and publishes the answer + citations (or a friendly error).
     func ask(_ question: String) {

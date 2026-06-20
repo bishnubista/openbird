@@ -43,6 +43,28 @@ private struct HeaderView: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
+            Label(model.nextStepSummary, systemImage: nextStepIcon)
+                .font(.callout)
+                .foregroundStyle(nextStepColor)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var nextStepIcon: String {
+        switch model.nextStepState {
+        case .ok: return "checkmark.circle.fill"
+        case .attention: return "arrow.right.circle.fill"
+        case .working: return "arrow.clockwise.circle.fill"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
+    private var nextStepColor: Color {
+        switch model.nextStepState {
+        case .ok: return .green
+        case .attention: return .orange
+        case .working: return .blue
+        case .unknown: return .secondary
         }
     }
 }
