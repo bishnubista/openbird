@@ -78,8 +78,15 @@ rm -f "$RES/python/lib/python"*/EXTERNALLY-MANAGED
 # and *-config dangle once their script targets are gone, which breaks
 # `codesign --verify --strict`). We launch via `python -m openbird`, so nothing
 # else in bin/ is needed at runtime.
+# Resolve the real interpreter name from the python3 symlink (e.g. python3.13) so
+# this is version-agnostic — hardcoding a version would delete the actual
+# interpreter when OPENBIRD_DMG_PY_VERSION differs. Keep python/python3/pythonX.Y;
+# delete everything else (console scripts AND pythonX.Y-config, which carries an
+# absolute shebang).
+real_py="$(basename "$(readlink "$RES/python/bin/python3" 2>/dev/null || true)")"
+[ -n "$real_py" ] && [ "$real_py" != "." ] || real_py="python${PY_VERSION}"
 find "$RES/python/bin" -mindepth 1 -maxdepth 1 \
-  ! -name 'python3.13' ! -name 'python3' ! -name 'python' -delete
+  ! -name "$real_py" ! -name 'python3' ! -name 'python' -delete
 
 # Normalize libpython's install id: uv-managed standalone Pythons bake an absolute
 # LC_ID_DYLIB into the uv cache path. python loads libpython via @executable_path
