@@ -137,9 +137,19 @@ final class AppModel: ObservableObject {
             return report.requiredModels.joined(separator: ", ")
         }
         let configured = [report.llmModel, report.embedModel]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
+            .compactMap(Self.localOllamaModelName)
         return configured.isEmpty ? "configured local models" : configured.joined(separator: ", ")
+    }
+
+    private static func localOllamaModelName(_ model: String?) -> String? {
+        guard let model, !model.isEmpty else { return nil }
+        if model.hasPrefix("ollama/") {
+            return String(model.dropFirst("ollama/".count))
+        }
+        if model.hasPrefix("ollama_chat/") {
+            return String(model.dropFirst("ollama_chat/".count))
+        }
+        return nil
     }
 
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off

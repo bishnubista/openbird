@@ -49,8 +49,10 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertTrue(report.ollamaReachable == true)
         XCTAssertEqual(report.ollamaHost, "http://localhost:11434")
         XCTAssertEqual(report.requiredModels, ["llama3.2", "nomic-embed-text"])
+        XCTAssertEqual(report.missingModels, [])
         XCTAssertEqual(report.llmModel, "ollama/llama3.2")
         XCTAssertEqual(report.embedModel, "ollama/nomic-embed-text")
+        XCTAssertEqual(report.remoteModels, [])
         XCTAssertTrue(report.usesLocalOllama)
         XCTAssertFalse(report.cloudBlocked)
     }
