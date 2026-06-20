@@ -85,6 +85,19 @@ def test_blocklist_defaults_when_env_unset(monkeypatch):
     assert get_settings().blocklist != []
 
 
+def test_session_gap_seconds_default_and_valid(tmp_path):
+    assert Settings(data_dir=tmp_path).session_gap_seconds == 300.0
+    assert Settings(data_dir=tmp_path, session_gap_seconds=0).session_gap_seconds == 0.0
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0])
+def test_session_gap_seconds_rejects_non_finite_or_negative(tmp_path, bad):
+    # A bad gap silently freezes/over-splits session segmentation; reject at the
+    # single source of truth (env coercion produces a float, so this is the gate).
+    with pytest.raises(ValueError, match="session_gap_seconds"):
+        Settings(data_dir=tmp_path, session_gap_seconds=bad)
+
+
 def test_defaults_are_sane():
     s = Settings()
     assert s.llm_timeout == 60.0

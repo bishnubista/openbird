@@ -7,6 +7,7 @@ environment overrides.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field, fields
 from functools import lru_cache
@@ -110,6 +111,16 @@ class Settings:
     session_gap_seconds: float = 300.0
 
     def __post_init__(self) -> None:
+        # session_gap_seconds feeds numeric session-boundary arithmetic in the
+        # capture daemon (_session_for). A NaN/inf gap freezes segmentation (every
+        # finite comparison is False) and a negative gap over-splits every frame,
+        # both silently — so reject non-finite/negative values from env/config here
+        # at the single source of truth rather than letting them propagate.
+        self.session_gap_seconds = float(self.session_gap_seconds)
+        if not math.isfinite(self.session_gap_seconds) or self.session_gap_seconds < 0:
+            raise ValueError(
+                "session_gap_seconds must be a finite, non-negative number"
+            )
         self.data_dir = Path(self.data_dir).expanduser()
         if self.db_path is None:
             self.db_path = str(self.data_dir / "openbird.db")
