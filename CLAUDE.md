@@ -23,7 +23,8 @@ straight to code. For each feature/fix:
    as a cross-family second opinion before coding:
    ```bash
    codex exec --model gpt-5.5 -c model_reasoning_effort=high --sandbox read-only \
-     "<blocking-only review prompt: lead with 'VERDICT: approve|revise'>"
+     "<blocking-only review prompt: lead with 'VERDICT: approve|revise'>" \
+     < /dev/null > review.log 2>&1   # stdin + logfile are mandatory — see "Running gates safely"
    ```
    Iterate plan ↔ Codex until the verdict is `approve` and no high/medium/blocking
    findings remain. Document any accepted low-risk tradeoff in the plan or PR body.
@@ -49,6 +50,36 @@ The two gates are different lenses — Codex hunts correctness/logic; CodeRabbit
 conventions, edge cases, maintainability. Passing both beats either alone. Real examples
 this caught: a relocation bug notarization couldn't see, chat text leaking into argv, an
 ambiguous signing-identity selection, a leaked-reader deadlock, a weak test.
+
+## Running gates safely (background review/build/test commands)
+
+The gates (Codex review, `swift build`, `pytest`) run as long background commands. Standing
+guardrails so they can't silently hang the pipeline:
+
+- **`codex exec` MUST redirect stdin from `/dev/null`** in any background / non-TTY context —
+  otherwise it blocks forever on `Reading additional input from stdin...`.
+- **Redirect output to a logfile; never `cmd | tail`** — `tail` withholds all output until
+  EOF, so a hung run looks identical to a slow one.
+- **Bound each command with an explicit, per-command wall-clock deadline** — Codex review,
+  Swift build, and pytest get *different* values, not one magic number. A deadline beats a
+  poller: it is scoped to the command and self-terminates a hang. macOS has no GNU `timeout`
+  by default — use `gtimeout` (coreutils) if present, or a wrapper that kills the whole
+  **process group**, not just the parent PID.
+- On a killed/timed-out gate, **cap retries and log why each retry happened** — never retry
+  endlessly.
+- **Distinguish hangs from blockers:** credential/permission prompts, merge conflicts, and
+  required human review are BLOCKERS to escalate — never kill-and-retry them.
+- CPU-time delta + log growth are **advisory diagnostics** (extend vs. retry), not a liveness
+  policy — an API-bound Codex wait is healthy with low CPU and no log growth.
+
+**Optional active supervisor — long unattended runs only.** For a long, unattended autonomous
+run you MAY start an active supervisor (e.g. a short-interval loop) to watch the gates. Scope
+it tightly or don't run it: only for a NAMED unattended run, started and stopped by that run,
+with a visible PID/log, a max lifetime, and a max retry count. It supervises ONLY the commands
+it launched or was explicitly handed — it must NEVER scan-and-kill arbitrary processes on the
+host — and it has NO authority to merge or perform destructive cleanup. Do not make it
+mandatory for routine changes: harness task-completion notifications plus per-command deadlines
+already cover those.
 
 ## Hard rules
 
