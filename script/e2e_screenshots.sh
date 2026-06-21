@@ -84,6 +84,7 @@ capture_window() {
   /bin/sleep 0.4
   bounds=$(osascript 2>/dev/null <<OSA || true
 tell application "System Events" to tell process "$APP_NAME"
+  set frontmost to true
   set theWin to (first window whose name contains "$match")
   perform action "AXRaise" of theWin
   set p to position of theWin
@@ -101,6 +102,7 @@ capture_window_by_subrole() {
   local subrole="$1" outfile="$2" bounds
   bounds=$(osascript 2>/dev/null <<OSA || true
 tell application "System Events" to tell process "$APP_NAME"
+  set frontmost to true
   set theWin to (first window whose subrole is "$subrole")
   perform action "AXRaise" of theWin
   set p to position of theWin
