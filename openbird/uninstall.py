@@ -1,9 +1,9 @@
 """System-state cleanup for ``openbird uninstall``.
 
 Removes the OpenBird state that lingers after the app is trashed — the routines
-launchd job + LaunchAgent, stale Launch Services registrations, pause/lock files,
-and (only when no encrypted DB depends on it) the Keychain DB key. Captured data
-in the data dir is PRESERVED unless ``purge_data`` is set.
+launchd job + LaunchAgent, stale Launch Services registrations, the capture pause
+sidecar, and (only when no encrypted DB depends on it) the Keychain DB key.
+Captured data in the data dir is PRESERVED unless ``purge_data`` is set.
 
 Design + Codex consensus: ``docs/design/cleanup-tooling.md``. Content-safe: results
 carry only paths and reason codes, never captured text.
@@ -33,7 +33,9 @@ _LSREGISTER = (
     "LaunchServices.framework/Versions/A/Support/lsregister"
 )
 
-# Pause/lock sidecars the app/daemon leave in the data dir.
+# Runtime sidecars the app/daemon leave in the data dir. Currently only the
+# capture pause flag exists (capture/daemon.py); listed as a tuple so any future
+# lock/pid sidecar can be added in one place.
 _SIDECAR_NAMES = ("capture.paused",)
 
 
@@ -225,7 +227,7 @@ def unregister_launch_services(*, dry_run: bool) -> list[StepResult]:
 
 
 def remove_sidecars(data_dir: Path, *, dry_run: bool) -> list[StepResult]:
-    """Remove pause/lock sidecars in the data dir (data files untouched)."""
+    """Remove the capture pause sidecar in the data dir (data files untouched)."""
     results: list[StepResult] = []
     for name in _SIDECAR_NAMES:
         target = data_dir / name
@@ -244,11 +246,34 @@ def remove_sidecars(data_dir: Path, *, dry_run: bool) -> list[StepResult]:
     return results
 
 
+def _is_safe_purge_target(path: Path) -> bool:
+    """Guard against catastrophic deletion from a mis-set OPENBIRD_DATA_DIR.
+
+    Refuses obviously dangerous recursive-delete targets: the filesystem root, the
+    home dir and its parent, and any too-shallow path (≤1 component below root,
+    e.g. ``/usr``). A correctly-resolved data dir (``~/.openbird`` or a nested
+    custom dir) passes; ``/`` or ``$HOME`` does not.
+    """
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        return False
+    home = Path.home().resolve()
+    if resolved in {Path(resolved.anchor), home, home.parent}:
+        return False
+    # Require depth: at least two components below the filesystem anchor, so a
+    # bare ``/usr`` or ``/Users`` can never be the target.
+    relative_parts = resolved.parts[1:] if resolved.anchor else resolved.parts
+    return len(relative_parts) >= 2
+
+
 def _purge_data_dir(data_dir: Path, *, dry_run: bool) -> StepResult:
     if dry_run:
         return StepResult("purge data", "would", str(data_dir))
     if not data_dir.exists():
         return StepResult("purge data", "skip", "already absent")
+    if not _is_safe_purge_target(data_dir):
+        return StepResult("purge data", "error", f"unsafe target refused: {data_dir}")
     try:
         shutil.rmtree(data_dir)
     except OSError as exc:

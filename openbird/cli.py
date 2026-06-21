@@ -546,9 +546,23 @@ def uninstall(
     _console.print(table)
 
     if any(r.status == "retained" for r in results):
+        from openbird.config import data_dir_path, db_file_path
+
+        db = db_file_path().resolve()
+        data_dir = data_dir_path().resolve()
+        db_inside_data_dir = db == data_dir or data_dir in db.parents
+        if db_inside_data_dir:
+            remedy = "Re-run with --purge-data to remove both."
+        else:
+            # An external OPENBIRD_DB_PATH is NOT removed by --purge-data, so
+            # suggesting it would be misleading (CodeRabbit).
+            remedy = (
+                f"The encrypted DB at {db} is outside the data dir; handle it "
+                "separately (decrypt/move/delete), then re-run uninstall."
+            )
         _console.print(
             "[yellow]Note:[/] the Keychain key was kept because an encrypted DB "
-            "still depends on it. Re-run with --purge-data to remove both."
+            f"still depends on it. {remedy}"
         )
     had_error = any(r.status == "error" for r in results)
     if had_error:

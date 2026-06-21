@@ -78,7 +78,8 @@ and custom `OPENBIRD_DB_PATH`.
    `lsregister -u` (Codex #5) so an unrelated `OpenBird.app` is never touched.
    Ghost paths (registration whose bundle no longer exists) are unregistered
    directly. macOS-only; skipped elsewhere.
-3. **Pause/lock files** — remove `capture.paused` (and any lock files) in the data dir.
+3. **Pause sidecar** — remove `capture.paused` in the data dir (the only runtime
+   sidecar today; `_SIDECAR_NAMES` is a tuple so a future lock/pid file slots in).
 4. **Key + data** — apply the key-safety rule above (data removal, then conditional
    key delete via a new `crypto.delete_key()`, tolerant of not-found).
 

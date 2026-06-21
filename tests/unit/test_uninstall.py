@@ -61,30 +61,59 @@ def test_db_plaintext_or_absent_cases(tmp_path):
     assert crypto.db_is_plaintext_or_absent(enc) is False  # encrypted -> retain key
 
 
-class _FakeKeyring(types.SimpleNamespace):
+def _make_fake_keyring():
+    """A fresh fake keyring per test (no shared mutable class state)."""
     deleted: list[tuple[str, str]] = []
 
-    @staticmethod
     def delete_password(service, user):
-        _FakeKeyring.deleted.append((service, user))
+        deleted.append((service, user))
+
+    return types.SimpleNamespace(delete_password=delete_password), deleted
 
 
 def test_delete_key_invokes_keyring(monkeypatch):
-    _FakeKeyring.deleted = []
+    fake, deleted = _make_fake_keyring()
     errors_mod = types.SimpleNamespace(PasswordDeleteError=RuntimeError)
-    monkeypatch.setitem(sys.modules, "keyring", _FakeKeyring)
+    monkeypatch.setitem(sys.modules, "keyring", fake)
     monkeypatch.setitem(sys.modules, "keyring.errors", errors_mod)
     monkeypatch.delenv("OPENBIRD_DISABLE_KEYRING", raising=False)
     assert crypto.delete_key() is True
-    assert _FakeKeyring.deleted == [(crypto._KEYRING_SERVICE, crypto._KEYRING_USER)]
+    assert deleted == [(crypto._KEYRING_SERVICE, crypto._KEYRING_USER)]
 
 
 def test_delete_key_respects_disable_env(monkeypatch):
-    _FakeKeyring.deleted = []
-    monkeypatch.setitem(sys.modules, "keyring", _FakeKeyring)
+    fake, deleted = _make_fake_keyring()
+    monkeypatch.setitem(sys.modules, "keyring", fake)
     monkeypatch.setenv("OPENBIRD_DISABLE_KEYRING", "1")
     assert crypto.delete_key() is False
-    assert _FakeKeyring.deleted == []  # never touched the Keychain
+    assert deleted == []  # never touched the Keychain
+
+
+def test_purge_refuses_unsafe_targets(tmp_path):
+    import os
+
+    # Safe: a normal nested data dir resolves with enough depth.
+    safe = tmp_path / "ob" / "data"
+    safe.mkdir(parents=True)
+    assert uninstall._is_safe_purge_target(safe) is True
+    # Unsafe: filesystem root, home, and home's parent.
+    assert uninstall._is_safe_purge_target(Path(os.sep)) is False
+    assert uninstall._is_safe_purge_target(Path.home()) is False
+    assert uninstall._is_safe_purge_target(Path.home().parent) is False
+
+
+def test_purge_data_dir_refuses_unsafe(monkeypatch, tmp_path):
+    # Force an unsafe target through _purge_data_dir -> error, no rmtree.
+    monkeypatch.setattr(uninstall, "_is_safe_purge_target", lambda p: False)
+    target = tmp_path / "data"
+    target.mkdir()
+    called = {"rmtree": False}
+    monkeypatch.setattr(
+        uninstall.shutil, "rmtree", lambda *_a, **_k: called.__setitem__("rmtree", True)
+    )
+    r = uninstall._purge_data_dir(target, dry_run=False)
+    assert r.status == "error" and "unsafe target" in r.detail
+    assert called["rmtree"] is False  # never attempted the delete
 
 
 # --------------------------------------------------------------------------- #
