@@ -15,8 +15,8 @@ struct AskPanelView: View {
     @FocusState private var inputFocused: Bool
 
     private let suggestions = [
-        "What did I work on yesterday?",
-        "Summarize my last meeting",
+        "Summarize the Memory sync",
+        "What's left on OB-142",
         "Draft my standup",
     ]
 

@@ -2,6 +2,15 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    /// One-time first-run flag; the onboarding sheet shows until the user taps
+    /// "Start capturing" (or dismisses), then never auto-presents again.
+    @AppStorage("openbird.onboarding.completed") private var onboardingCompleted = false
+
+    /// Drives the onboarding `.sheet` from the inverse of the completed flag; the
+    /// sheet (and its "Start capturing" button) sets it to dismiss.
+    private var onboardingBinding: Binding<Bool> {
+        Binding(get: { !onboardingCompleted }, set: { onboardingCompleted = !$0 })
+    }
 
     var body: some View {
         ScrollView {
@@ -17,6 +26,9 @@ struct ContentView: View {
         }
         .frame(minWidth: 560, minHeight: 560)
         .background(GlassBackdrop())
+        .sheet(isPresented: onboardingBinding) {
+            OnboardingSheet(model: model, isPresented: onboardingBinding)
+        }
     }
 }
 

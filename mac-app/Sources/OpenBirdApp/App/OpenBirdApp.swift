@@ -42,7 +42,7 @@ struct OpenBirdApp: App {
         }
 
         Window("Today", id: "today") {
-            TodayView(model: todayModel)
+            TodayView(model: todayModel, appModel: model, onAsk: { askPanel.show() })
         }
 
         MenuBarExtra("OpenBird", systemImage: model.menuBarSymbol) {

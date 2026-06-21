@@ -43,6 +43,11 @@ class SessionSummary:
     start_ts: float
     end_ts: float
     count: int
+    # The session's representative window title (the most-frequent non-empty
+    # ``window`` among its observations; ties broken by the latest timestamp).
+    # Powers the Today timeline card title (e.g. "rag.py — openbird"). ``None``
+    # when no observation in the session carried a window title.
+    window: str | None = None
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # Wait up to this long on a busy lock for the :memory: branch too; on-disk
@@ -442,13 +447,39 @@ class MemoryStore:
         session_id each bucket on their own ``id`` (SQLite groups NULLs together,
         which would otherwise merge a whole day into one false session). Pure
         indexed read — no embedding.
+
+        Each summary also carries a representative ``window`` title: the most
+        frequent non-empty window in the session (ties → latest timestamp). The
+        window pick reuses the EXACT same bucket key as the session grouping (a
+        shared ``tagged`` CTE), so a legacy NULL-session row never borrows another
+        row's window. Computed in one pass — no per-session subquery rescan.
         """
         rows = self.conn.execute(
-            "SELECT session_id, app, MIN(ts) AS start_ts, MAX(ts) AS end_ts, "
-            "COUNT(*) AS cnt FROM observations "
-            "WHERE ts >= ? AND ts <= ? AND source = ? "
-            "GROUP BY (CASE WHEN session_id IS NULL THEN id ELSE session_id END), app "
-            "ORDER BY start_ts ASC",
+            "WITH tagged AS ("
+            "  SELECT (CASE WHEN session_id IS NULL THEN id ELSE session_id END) AS bucket, "
+            "         session_id, app, ts, window "
+            "  FROM observations WHERE ts >= ? AND ts <= ? AND source = ?"
+            "), "
+            "agg AS ("
+            "  SELECT bucket, session_id, app, MIN(ts) AS start_ts, MAX(ts) AS end_ts, "
+            "         COUNT(*) AS cnt FROM tagged GROUP BY bucket, app"
+            "), "
+            "win AS ("
+            "  SELECT bucket, app, window, COUNT(*) AS wcnt, MAX(ts) AS wlast "
+            "  FROM tagged WHERE window IS NOT NULL AND window != '' "
+            "  GROUP BY bucket, app, window"
+            "), "
+            "win_ranked AS ("
+            "  SELECT bucket, app, window, "
+            "         ROW_NUMBER() OVER ("
+            "           PARTITION BY bucket, app ORDER BY wcnt DESC, wlast DESC"
+            "         ) AS rn FROM win"
+            ") "
+            "SELECT a.session_id, a.app, a.start_ts, a.end_ts, a.cnt, wr.window AS window "
+            "FROM agg a "
+            "LEFT JOIN win_ranked wr "
+            "  ON wr.bucket IS a.bucket AND wr.app IS a.app AND wr.rn = 1 "
+            "ORDER BY a.start_ts ASC",
             (start_ts, end_ts, source),
         ).fetchall()
         return [
@@ -458,6 +489,7 @@ class MemoryStore:
                 start_ts=r["start_ts"],
                 end_ts=r["end_ts"],
                 count=r["cnt"],
+                window=r["window"],
             )
             for r in rows
         ]

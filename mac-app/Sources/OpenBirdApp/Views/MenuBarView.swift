@@ -23,47 +23,59 @@ struct MenuBarView: View {
                 run { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
             }
             // ⌥Space is shown as a trailing hint, not a `.keyboardShortcut`, so it
-            // can't double-fire with the global Carbon hotkey.
-            MenuRow(icon: "sparkle.magnifyingglass", title: "Ask OpenBird…", shortcut: "⌥Space") {
+            // can't double-fire with the global Carbon hotkey that already owns it.
+            MenuRow(icon: "sparkle.magnifyingglass", title: "Ask OpenBird…", hint: "⌥Space") {
                 run { openAskPanel() }
             }
 
             divider
 
+            // Capture-state eyebrow (red pulsing dot when live), matching the
+            // handoff "CAPTURING · N" status line.
             captureStatusRow
 
+            // Honest pairing: only offer Pause/Resume while capture is actually
+            // running; otherwise offer Start. Avoids a "Pause" row that no-ops.
             if model.captureRunning {
-                MenuRow(icon: "stop.fill", title: "Stop Capture") { run { model.stopCapture() } }
+                MenuRow(icon: model.capturePaused ? "play.circle" : "pause.circle",
+                        title: model.capturePaused ? "Resume Capture" : "Pause Capture",
+                        hint: "⌘P", key: "p") {
+                    run { model.toggleCapturePause() }
+                }
             } else {
                 MenuRow(icon: "play.fill", title: "Start Capture",
                         disabled: model.allowlist.isEmpty) { run { model.startCapture() } }
             }
-            MenuRow(icon: model.capturePaused ? "play.circle" : "pause.circle",
-                    title: model.capturePaused ? "Resume Capture" : "Pause Capture") {
-                run { model.toggleCapturePause() }
-            }
-            MenuRow(icon: "calendar.day.timeline.left", title: "Today's Activity") {
+            MenuRow(icon: "calendar.day.timeline.left", title: "Today's Activity", trailing: "›") {
                 run {
                     openWindow(id: "today")
                     NSApp.activate(ignoringOtherApps: true)
                 }
-            }
-            MenuRow(icon: "arrow.clockwise", title: "Re-check Setup") {
-                run { Task { await model.refresh() } }
             }
 
             divider
 
             ForEach(model.helpers) { helper in
                 HealthRow(ok: helper.isBundled,
-                          label: "\(helper.label) \(helper.isBundled ? "OK" : "missing")")
+                          label: helper.label,
+                          status: helper.isBundled ? "OK" : "missing")
             }
-            HealthRow(state: model.encryptionState, label: encryptionLabel)
+            HealthRow(state: model.encryptionState,
+                      label: "Encryption at rest",
+                      status: encryptionStatus)
 
             divider
 
+            MenuRow(icon: "arrow.clockwise", title: "Re-check Setup") {
+                run { Task { await model.refresh() } }
+            }
             MenuRow(icon: "folder", title: "Data Folder") { run { model.openDataFolder() } }
-            MenuRow(icon: "power", title: "Quit OpenBird") { run { model.quit() } }
+            MenuRow(icon: "gearshape", title: "Settings…", hint: "⌘,", key: ",") {
+                run { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+            }
+            MenuRow(icon: "power", title: "Quit OpenBird", hint: "⌘Q", key: "q") {
+                run { model.quit() }
+            }
         }
         .padding(OB.Space.s)
         .frame(width: 288)
@@ -83,34 +95,45 @@ struct MenuBarView: View {
         Divider().overlay(OB.separator(scheme)).padding(.vertical, OB.Space.xs)
     }
 
+    /// The handoff's "CAPTURING · N" eyebrow: a small pulsing status dot, an
+    /// uppercase tracked state word, and the stored-observation count right-aligned.
     private var captureStatusRow: some View {
         HStack(spacing: OB.Space.sm) {
             PulsingDot(active: model.captureRunning && !model.capturePaused)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(captureStateText)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(OB.textPrimary(scheme))
-                Text(model.memorySummary)
-                    .font(.system(size: 11))
-                    .foregroundStyle(OB.textSecondary(scheme))
-                    .lineLimit(1)
-            }
+            Text(captureStateText)
+                .font(.system(size: 10.5, weight: .bold))
+                .tracking(0.6)
+                .foregroundStyle(OB.textSecondary(scheme))
             Spacer()
+            Text(captureCountText)
+                .font(.system(size: 11))
+                .monospacedDigit()
+                .foregroundStyle(OB.textTertiary(scheme))
+                .lineLimit(1)
         }
         .padding(.horizontal, OB.Space.sm)
         .padding(.vertical, OB.Space.s)
     }
 
     private var captureStateText: String {
-        if model.capturePaused { return "Paused" }
-        return model.captureRunning ? "Capturing" : "Idle"
+        if model.capturePaused { return "PAUSED" }
+        return model.captureRunning ? "CAPTURING" : "IDLE"
     }
 
-    private var encryptionLabel: String {
+    /// Real total of stored observations (grouped digits), labeled honestly as
+    /// "stored" — the menu has no per-day count to claim "today".
+    private var captureCountText: String {
+        let n = model.memoryStats.observations
+        let formatted = NumberFormatter.localizedString(
+            from: NSNumber(value: n), number: .decimal)
+        return "\(formatted) stored"
+    }
+
+    private var encryptionStatus: String {
         switch model.encryptionState {
-        case .ok: return "Encryption at rest on"
-        case .attention: return "Encryption at rest off"
-        default: return "Encryption status unknown"
+        case .ok: return "on"
+        case .attention: return "off"
+        default: return "unknown"
         }
     }
 }
@@ -120,7 +143,14 @@ struct MenuBarView: View {
 private struct MenuRow: View {
     let icon: String
     let title: String
-    var shortcut: String? = nil
+    /// Right-aligned dimmed hint text (a shortcut glyph like "⌘P" or a chevron via
+    /// `trailing`). A hint is shown ONLY when honest — either it's backed by a real
+    /// `key` shortcut, or it's the globally-registered ⌥Space.
+    var hint: String? = nil
+    /// Non-shortcut trailing affordance (e.g. the "›" disclosure chevron).
+    var trailing: String? = nil
+    /// When set, wires a real ⌘-`key` shortcut so the `hint` glyph isn't a lie.
+    var key: KeyEquivalent? = nil
     var disabled: Bool = false
     let action: () -> Void
 
@@ -128,18 +158,20 @@ private struct MenuRow: View {
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
+        let button = Button(action: action) {
             HStack(spacing: OB.Space.sm) {
                 Image(systemName: icon)
                     .frame(width: 16)
                 Text(title)
-                if let shortcut {
-                    Spacer()
-                    Text(shortcut)
+                Spacer()
+                if let trailing {
+                    Text(trailing)
+                        .font(.system(size: 13))
+                        .opacity(hovering ? 0.9 : 0.5)
+                } else if let hint {
+                    Text(hint)
                         .font(.system(size: 11))
                         .opacity(hovering ? 0.9 : 0.5)
-                } else {
-                    Spacer()
                 }
             }
             .font(.system(size: 13))
@@ -156,6 +188,14 @@ private struct MenuRow: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .onHover { hovering = $0 }
+
+        // Attaching `.keyboardShortcut` makes the displayed glyph honest: the row
+        // actually fires on ⌘-key while the dropdown is key.
+        if let key {
+            button.keyboardShortcut(key, modifiers: .command)
+        } else {
+            button
+        }
     }
 
     private var rowForeground: Color {
@@ -168,19 +208,22 @@ private struct MenuRow: View {
 private struct HealthRow: View {
     let ok: Bool
     let label: String
+    let status: String
     var state: StepState? = nil
 
     @Environment(\.colorScheme) private var scheme
 
-    init(ok: Bool, label: String) {
+    init(ok: Bool, label: String, status: String) {
         self.ok = ok
         self.label = label
+        self.status = status
     }
 
-    init(state: StepState, label: String) {
+    init(state: StepState, label: String, status: String) {
         self.state = state
         self.ok = state == .ok
         self.label = label
+        self.status = status
     }
 
     var body: some View {
@@ -190,6 +233,9 @@ private struct HealthRow: View {
                 .font(.system(size: 12))
                 .foregroundStyle(OB.textSecondary(scheme))
             Spacer()
+            Text(status)
+                .font(.system(size: 12))
+                .foregroundStyle(OB.textTertiary(scheme))
         }
         .padding(.horizontal, OB.Space.sm)
         .padding(.vertical, 3)

@@ -6,6 +6,10 @@ import Foundation
 final class TodayModel: ObservableObject {
     @Published private(set) var timeline: DayTimeline?
     @Published private(set) var briefing: String?
+    /// When the currently-shown briefing was generated (real fetch time, cached per
+    /// day so reopening Today keeps the original time). Drives the "generated H:MM"
+    /// label on the briefing card.
+    @Published private(set) var briefingGeneratedAt: Date?
     @Published private(set) var loadingTimeline = false
     @Published private(set) var loadingBriefing = false
     @Published private(set) var timelineError: String?
@@ -22,6 +26,9 @@ final class TodayModel: ObservableObject {
     /// the relative offset) so a session left open across midnight doesn't serve a
     /// stale briefing for what is now a different calendar day.
     private var briefingCache: [String: String] = [:]
+    /// Generation time per cached briefing (keyed by the same absolute-day key), so
+    /// a cache hit reuses the original "generated H:MM" instead of stamping now.
+    private var briefingTimeCache: [String: Date] = [:]
     /// Bumped on every `load()`; an in-flight fetch only commits its result if this
     /// is still the current generation when it resumes — so switching days (or a
     /// second refresh) mid-load can't let a stale response overwrite the new day.
@@ -97,20 +104,29 @@ final class TodayModel: ObservableObject {
         let key = dayKey(day)
         if let cached = briefingCache[key] {
             briefing = cached   // still current (no await since the guard above)
+            briefingGeneratedAt = briefingTimeCache[key]
             return
         }
         loadingBriefing = true
         defer { if generation == loadGeneration { loadingBriefing = false } }
         briefing = nil
+        briefingGeneratedAt = nil
         if let text = await service.dailyBriefing(dayOffset: day) {
-            briefingCache[key] = text   // cache regardless (keyed by absolute day)
-            if generation == loadGeneration { briefing = text }
+            let now = Date()
+            briefingCache[key] = text         // cache regardless (keyed by absolute day)
+            briefingTimeCache[key] = now
+            if generation == loadGeneration {
+                briefing = text
+                briefingGeneratedAt = now
+            }
         }
     }
 
     /// Re-fetch both, bypassing the briefing cache for the current day.
     func refresh() async {
-        briefingCache[dayKey(dayOffset)] = nil
+        let key = dayKey(dayOffset)
+        briefingCache[key] = nil
+        briefingTimeCache[key] = nil
         await load()
     }
 
