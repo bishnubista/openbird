@@ -246,13 +246,22 @@ def remove_sidecars(data_dir: Path, *, dry_run: bool) -> list[StepResult]:
     return results
 
 
+# Ownership markers that prove a directory is actually an OpenBird data dir, so a
+# mis-set OPENBIRD_DATA_DIR pointing at an unrelated folder is refused even when
+# it is deep enough (CodeRabbit). A real custom data dir still holds openbird.db
+# (default db_path = <data_dir>/openbird.db).
+_OWNERSHIP_MARKERS = ("openbird.db", "openbird.db-wal", "openbird.db-shm", "capture.paused")
+
+
 def _is_safe_purge_target(path: Path) -> bool:
     """Guard against catastrophic deletion from a mis-set OPENBIRD_DATA_DIR.
 
-    Refuses obviously dangerous recursive-delete targets: the filesystem root, the
-    home dir and its parent, and any too-shallow path (≤1 component below root,
-    e.g. ``/usr``). A correctly-resolved data dir (``~/.openbird`` or a nested
-    custom dir) passes; ``/`` or ``$HOME`` does not.
+    Refuses, in order: the filesystem root, the home dir and its parent, and any
+    too-shallow path (≤1 component below the anchor, e.g. ``/usr``). Then requires
+    an OpenBird ownership signal — either an ``openbird``-containing path component
+    or an OpenBird artifact (``openbird.db``…) in the directory — so a deep but
+    unrelated target like ``~/Documents`` or ``/usr/local`` is still refused.
+    ``~/.openbird`` and genuine custom data dirs pass; ``/`` / ``$HOME`` do not.
     """
     try:
         resolved = path.expanduser().resolve()
@@ -264,7 +273,15 @@ def _is_safe_purge_target(path: Path) -> bool:
     # Require depth: at least two components below the filesystem anchor, so a
     # bare ``/usr`` or ``/Users`` can never be the target.
     relative_parts = resolved.parts[1:] if resolved.anchor else resolved.parts
-    return len(relative_parts) >= 2
+    if len(relative_parts) < 2:
+        return False
+    # Require an OpenBird ownership signal beyond mere depth.
+    if any("openbird" in part.lower() for part in relative_parts):
+        return True
+    try:
+        return any((resolved / marker).exists() for marker in _OWNERSHIP_MARKERS)
+    except OSError:
+        return False
 
 
 def _purge_data_dir(data_dir: Path, *, dry_run: bool) -> StepResult:

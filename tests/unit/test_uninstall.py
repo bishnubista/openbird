@@ -92,10 +92,22 @@ def test_delete_key_respects_disable_env(monkeypatch):
 def test_purge_refuses_unsafe_targets(tmp_path):
     import os
 
-    # Safe: a normal nested data dir resolves with enough depth.
-    safe = tmp_path / "ob" / "data"
-    safe.mkdir(parents=True)
-    assert uninstall._is_safe_purge_target(safe) is True
+    # Safe by name: an openbird-named dir (the default shape, ~/.openbird).
+    named = tmp_path / "stuff" / ".openbird"
+    named.mkdir(parents=True)
+    assert uninstall._is_safe_purge_target(named) is True
+
+    # Safe by ownership marker: a custom-named dir that holds openbird.db.
+    marked = tmp_path / "custom-data"
+    marked.mkdir()
+    (marked / "openbird.db").write_bytes(b"x")
+    assert uninstall._is_safe_purge_target(marked) is True
+
+    # Unsafe: deep but unrelated dir (no openbird name, no marker) — e.g. ~/Documents.
+    unrelated = tmp_path / "Documents"
+    unrelated.mkdir()
+    assert uninstall._is_safe_purge_target(unrelated) is False
+
     # Unsafe: filesystem root, home, and home's parent.
     assert uninstall._is_safe_purge_target(Path(os.sep)) is False
     assert uninstall._is_safe_purge_target(Path.home()) is False
@@ -204,7 +216,7 @@ def test_purge_with_custom_external_encrypted_db_retains_key(
 ):
     """--purge-data removes the data dir, but a custom encrypted DB OUTSIDE it
     survives, so the key must be RETAINED (round-2 stranding fix)."""
-    data_dir = tmp_path / "data"
+    data_dir = tmp_path / ".openbird"  # openbird-named -> passes the ownership guard
     data_dir.mkdir()
     external = tmp_path / "external" / "custom.db"
     external.parent.mkdir()
