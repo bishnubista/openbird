@@ -97,6 +97,17 @@ cat >"$INFO_PLIST" <<PLIST
   <string>OpenBird records meeting audio from your microphone to transcribe it locally on this Mac.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>OpenBird opens System Settings panes to help you grant capture permissions.</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>$BUNDLE_ID</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>openbird</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

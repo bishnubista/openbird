@@ -33,7 +33,7 @@ struct OpenBirdApp: App {
 
     var body: some Scene {
         Window("OpenBird", id: "main") {
-            ContentView(model: model)
+            ContentView(model: model, onAsk: { askPanel.show() })
                 .frame(minWidth: 560, minHeight: 420)
                 .task {
                     askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration

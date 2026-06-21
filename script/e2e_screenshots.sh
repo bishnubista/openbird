@@ -46,8 +46,11 @@ relaunch() {
     pgrep -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" >/dev/null || break
     /bin/sleep 0.1
   done
+  # --enable-e2e-deeplinks arms the openbird:// router, which is inert in normal use
+  # (so a stray URL can't force-show private data). `open --args` only delivers args
+  # on a cold launch — which this is, since we just killed the prior instance.
   for _ in 1 2 3; do
-    if open "$ROOT/dist/$APP_NAME.app" 2>/dev/null; then break; fi
+    if open "$ROOT/dist/$APP_NAME.app" --args --enable-e2e-deeplinks 2>/dev/null; then break; fi
     /bin/sleep 0.5
   done
   /bin/sleep 5
@@ -65,6 +68,7 @@ _capture_region() {  # $1=bounds  $2=outfile  $3=label
   local bounds="$1" outfile="$2" label="$3" x y w h
   if [[ "$bounds" =~ ^-?[0-9]+,-?[0-9]+,[0-9]+,[0-9]+$ ]]; then
     IFS=',' read -r x y w h <<<"$bounds"
+    /bin/sleep 0.3   # let the just-raised window settle on top before capture
     screencapture -x -R"${x},${y},${w},${h}" "$outfile"
     log "captured ${label} → ${outfile##*/} (${w}x${h})"
     return 0
@@ -81,6 +85,7 @@ capture_window() {
   bounds=$(osascript 2>/dev/null <<OSA || true
 tell application "System Events" to tell process "$APP_NAME"
   set theWin to (first window whose name contains "$match")
+  perform action "AXRaise" of theWin
   set p to position of theWin
   set s to size of theWin
   return (item 1 of p as integer as text) & "," & (item 2 of p as integer as text) & "," & (item 1 of s as integer as text) & "," & (item 2 of s as integer as text)
@@ -97,6 +102,7 @@ capture_window_by_subrole() {
   bounds=$(osascript 2>/dev/null <<OSA || true
 tell application "System Events" to tell process "$APP_NAME"
   set theWin to (first window whose subrole is "$subrole")
+  perform action "AXRaise" of theWin
   set p to position of theWin
   set s to size of theWin
   return (item 1 of p as integer as text) & "," & (item 2 of p as integer as text) & "," & (item 1 of s as integer as text) & "," & (item 2 of s as integer as text)
@@ -144,13 +150,18 @@ osascript -e 'tell application "System Events" to key code 49 using {option down
 capture_window_by_subrole "AXSystemDialog" "$OUT/02-ask-spotlight.png"
 osascript -e 'tell application "System Events" to key code 53' >/dev/null 2>&1 || true  # esc → close panel
 
-# 4) Menu dropdown + Today — both are reached through OpenBird's menu-bar status
-#    item. The SwiftUI MenuBarExtra(.window) popover does NOT open via AX, and when
-#    the menu bar is full macOS parks the status item off-screen (AX pos like
-#    -1/976), so a coordinate click is impossible too. We try a real click only if
-#    the item is genuinely on-screen, and we SKIP cleanly (no misleading file)
-#    otherwise — rather than saving a full-screen frame that's really the terminal.
-log "menu dropdown + Today: checking status-item visibility"
+# 4) Today window — opened via the openbird://today deep-link (no menu bar needed).
+log "today: opening via openbird://today deep-link"
+open "openbird://today" >/dev/null 2>&1 || true
+/bin/sleep 2
+capture_window "Today" "$OUT/05-today-dayview.png" || true
+
+# 5) Menu dropdown — reached only through the menu-bar status item. The SwiftUI
+#    MenuBarExtra(.window) popover does NOT open via AX, and a full menu bar parks
+#    the status item off-screen (AX pos like -1/976), so a coordinate click is
+#    impossible too. Try a real click only if the item is genuinely on-screen;
+#    otherwise SKIP cleanly rather than saving a misleading full-screen frame.
+log "menu dropdown: checking status-item visibility"
 ITEM_POS=$(osascript 2>/dev/null <<OSA || true
 tell application "System Events" to tell process "$APP_NAME"
   set p to position of menu bar item 1 of menu bar 2
@@ -162,17 +173,12 @@ ITEM_X="${ITEM_POS%%,*}"; ITEM_Y="${ITEM_POS##*,}"
 if [[ "${ITEM_X:-x}" =~ ^[0-9]+$ ]] && [ "${ITEM_X}" -ge 0 ] && [[ "${ITEM_Y:-99}" =~ ^[0-9]+$ ]] && [ "${ITEM_Y}" -lt 60 ]; then
   cliclick "c:${ITEM_X},${ITEM_Y}" >/dev/null 2>&1 || true
   /bin/sleep 0.8
-  # Only save the dropdown if a popover window actually appeared.
-  if capture_window_by_subrole "AXSystemDialog" "$OUT/01-menu-dropdown.png"; then :; fi
-  # Click "Today's Activity" in the open dropdown to bring up the Today window.
-  osascript -e "tell application \"System Events\" to tell process \"$APP_NAME\" to click (first button whose title contains \"Today\")" >/dev/null 2>&1 || true
-  /bin/sleep 1.5
-  capture_window "Today" "$OUT/05-today-dayview.png" || true
+  capture_window_by_subrole "AXSystemDialog" "$OUT/01-menu-dropdown.png" || true
 else
-  log "SKIP menu dropdown + Today: status item hidden/off-screen (pos=${ITEM_POS:-?})."
+  log "SKIP menu dropdown: status item hidden/off-screen (pos=${ITEM_POS:-?})."
   log "     The menu bar is full; ⌘-drag icons or quit a few menu-bar apps to reveal"
-  log "     OpenBird's icon, then re-run. (A future openbird:// deep-link would let the"
-  log "     harness open Today without the menu — see PR notes.)"
+  log "     OpenBird's icon, then re-run. (The Today window no longer needs this —"
+  log "     it now opens via the openbird://today deep-link above.)"
 fi
 
 echo "Done. Files in $OUT:"
