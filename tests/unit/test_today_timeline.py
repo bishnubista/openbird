@@ -69,6 +69,49 @@ def test_day_sessions_null_sessions_do_not_collapse(mem_settings, fake_provider)
         store.close()
 
 
+def test_day_sessions_picks_representative_window(mem_settings, fake_provider):
+    """A session's ``window`` is its most-frequent non-empty title (tie → latest)."""
+    store = _store(mem_settings, fake_provider)
+    try:
+        base = _day(2026, 6, 12, 9)
+        # Session s1: "rag.py" appears twice, "schema.sql" once → "rag.py" wins.
+        store.add_observation("a1", source="capture", app="Code",
+                              session_id="s1", window="rag.py — openbird", ts=base)
+        store.add_observation("a2", source="capture", app="Code",
+                              session_id="s1", window="schema.sql — openbird", ts=base + 30)
+        store.add_observation("a3", source="capture", app="Code",
+                              session_id="s1", window="rag.py — openbird", ts=base + 60)
+        # Session s2: no window titles at all → None.
+        store.add_observation("b1", source="capture", app="Zoom",
+                              session_id="s2", window=None, ts=base + 600)
+
+        sessions = store.day_sessions(_day(2026, 6, 12), _day(2026, 6, 12, 23, 59))
+        by_id = {s.session_id: s for s in sessions}
+        assert by_id["s1"].window == "rag.py — openbird"
+        assert by_id["s2"].window is None
+    finally:
+        store.close()
+
+
+def test_day_sessions_window_respects_null_session_buckets(mem_settings, fake_provider):
+    """Legacy NULL-session rows must keep their OWN window, never borrow another's
+    (the window pick must reuse the same per-id bucket key as the grouping)."""
+    store = _store(mem_settings, fake_provider)
+    try:
+        base = _day(2026, 6, 12, 9)
+        store.add_observation("n1", source="capture", app="Code",
+                              session_id=None, window="alpha.py", ts=base)
+        store.add_observation("n2", source="capture", app="Code",
+                              session_id=None, window="beta.py", ts=base + 60)
+
+        sessions = store.day_sessions(_day(2026, 6, 12), _day(2026, 6, 12, 23, 59))
+        assert len(sessions) == 2
+        windows = sorted(s.window for s in sessions)
+        assert windows == ["alpha.py", "beta.py"]
+    finally:
+        store.close()
+
+
 def test_day_sessions_excludes_non_capture_sources(mem_settings, fake_provider):
     """The Today timeline is capture activity; ingest/mcp rows must not appear."""
     store = _store(mem_settings, fake_provider)

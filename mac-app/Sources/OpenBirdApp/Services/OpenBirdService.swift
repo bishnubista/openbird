@@ -80,12 +80,17 @@ struct TimelineSession: Codable, Identifiable, Equatable {
     let start: Double
     let end: Double
     let count: Int
+    /// Representative window title for the session (e.g. "rag.py — openbird"),
+    /// surfaced by the CLI from real captured `window` metadata. Optional so a
+    /// session with no captured window title — or a stale CLI that predates the
+    /// field — decodes cleanly.
+    let window: String?
 
     var id: String { "\(sessionId ?? "nil")|\(app ?? "nil")|\(start)" }
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
-        case app, start, end, count
+        case app, start, end, count, window
     }
 }
 

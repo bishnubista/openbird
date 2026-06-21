@@ -246,6 +246,7 @@ def timeline(
                 "start": s.start_ts,
                 "end": s.end_ts,
                 "count": s.count,
+                "window": s.window,
             }
             for s in sessions
         ],
