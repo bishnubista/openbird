@@ -489,6 +489,74 @@ def doctor(
 
 
 # --------------------------------------------------------------------------- #
+# uninstall                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+@app.command()
+def uninstall(
+    purge_data: bool = typer.Option(
+        False,
+        "--purge-data",
+        help="Also delete the data dir (~/.openbird). Irreversible — destroys "
+        "captured observations.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print exactly what would be removed; touch nothing."
+    ),
+) -> None:
+    """Remove OpenBird's system state (LaunchAgent, Launch Services, Keychain key).
+
+    Clears the leftovers that linger after the app is trashed. Captured data in
+    ~/.openbird is PRESERVED unless --purge-data is given. The Keychain DB key is
+    removed only when no encrypted DB depends on it (else it is retained so an
+    encrypted DB is never stranded). Run `openbird uninstall --dry-run` first to
+    preview. Reports only paths and reason codes — never captured content.
+    """
+    from openbird.uninstall import run_uninstall
+
+    if not dry_run and not yes:
+        target = (
+            "system state AND ALL data (~/.openbird)"
+            if purge_data
+            else "system state (data preserved)"
+        )
+        if not typer.confirm(f"Remove OpenBird {target}?", default=False):
+            _console.print("[yellow]Aborted.[/]")
+            raise typer.Exit(code=1)
+
+    results = run_uninstall(purge_data=purge_data, dry_run=dry_run)
+
+    table = Table(title="OpenBird uninstall" + (" (dry-run)" if dry_run else ""))
+    table.add_column("Step")
+    table.add_column("Status")
+    table.add_column("Detail")
+    _styles = {
+        "done": "green",
+        "would": "cyan",
+        "skip": "dim",
+        "retained": "yellow",
+        "error": "red",
+    }
+    for r in results:
+        table.add_row(
+            r.action, f"[{_styles.get(r.status, 'white')}]{r.status}[/]", r.detail
+        )
+    _console.print(table)
+
+    if any(r.status == "retained" for r in results):
+        _console.print(
+            "[yellow]Note:[/] the Keychain key was kept because an encrypted DB "
+            "still depends on it. Re-run with --purge-data to remove both."
+        )
+    had_error = any(r.status == "error" for r in results)
+    if had_error:
+        _err_console.print("[red]Some steps failed — see 'error' rows above.[/]")
+    raise typer.Exit(code=1 if had_error else 0)
+
+
+# --------------------------------------------------------------------------- #
 # ingest                                                                      #
 # --------------------------------------------------------------------------- #
 
