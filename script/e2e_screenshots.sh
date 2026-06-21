@@ -19,6 +19,9 @@
 #        open dist/OpenBird.app
 #      On an unsigned dev build, approve the one-time Keychain ACL prompt with
 #      "Always Allow" (NOT Escape — Escape denies it and dismisses sheets).
+#   3. Install cliclick (third-party) for the menu-dropdown coordinate click:
+#        brew install cliclick
+#      Only the menu-dropdown capture needs it; the other surfaces don't.
 #
 # Usage:  ./script/e2e_screenshots.sh
 #
@@ -129,6 +132,13 @@ if ! ax_ok; then
   exit 2
 fi
 
+# Non-fatal: cliclick is only needed for the menu-dropdown capture. Warn up-front so
+# a missing third-party tool doesn't read as a silent capture failure later.
+if ! command -v cliclick >/dev/null 2>&1; then
+  log "NOTE: cliclick not installed — the menu-dropdown capture will be skipped."
+  log "      Install with: brew install cliclick"
+fi
+
 # 1) Onboarding sheet — reset the one-time flag and relaunch so it presents, then
 #    capture the main window region (the sheet renders centered over it).
 log "onboarding: resetting first-run flag + relaunching"
@@ -184,4 +194,9 @@ else
 fi
 
 echo "Done. Files in $OUT:"
-find "$OUT" -maxdepth 1 -name '*.png' -print 2>/dev/null | sed 's#^#  #' || echo "  (none)"
+shots=$(find "$OUT" -maxdepth 1 -name '*.png' -print 2>/dev/null | sort)
+if [ -n "$shots" ]; then
+  printf '%s\n' "$shots" | sed 's#^#  #'
+else
+  echo "  (none)"
+fi
