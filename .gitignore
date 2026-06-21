@@ -38,3 +38,6 @@ script/release.env
 # Claude Code runtime artifacts
 .claude/scheduled_tasks.lock
 .claude/scheduled_tasks.json
+
+# E2E screenshot captures (regenerate with script/e2e_screenshots.sh)
+e2e/screenshots/*.png
