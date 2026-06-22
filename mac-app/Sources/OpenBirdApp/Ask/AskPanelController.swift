@@ -44,13 +44,17 @@ final class AskPanelController: NSObject, ObservableObject {
     /// Register ⌥Space once. Idempotent.
     func installHotKeyIfNeeded() {
         guard !hotKeyInstalled else { return }
-        hotKeyInstalled = true
-        hotKey = GlobalHotKey(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey)) { [weak self] in
+        // Mark installed only on SUCCESS, so a transient registration failure doesn't
+        // permanently block later retries for this run (CodeRabbit).
+        let candidate = GlobalHotKey(keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey)) { [weak self] in
             DispatchQueue.main.async { self?.toggle() }
         }
-        if hotKey == nil {
-            NSLog("openbird: hotkey-register-failed (⌥Space already in use?)")
+        guard let candidate else {
+            NSLog("openbird: hotkey-register-failed (⌥Space already in use?) — will retry")
+            return
         }
+        hotKey = candidate
+        hotKeyInstalled = true
     }
 
     /// ⌥Space: hide whichever Ask surface is visible, else summon the compact panel.
