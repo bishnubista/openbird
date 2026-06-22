@@ -18,7 +18,7 @@ final class SourcesRailTests: XCTestCase {
     }
 }
 
-final class AskSourcesViewTests: XCTestCase {
+final class SourcesDisplayTests: XCTestCase {
     private func citation(_ index: Int) -> ChatCitation {
         ChatCitation(index: index, app: "VS Code", window: "f.py", ts: 0, snippet: "s")
     }
@@ -29,8 +29,8 @@ final class AskSourcesViewTests: XCTestCase {
     }
 
     func testDisplayHiddenWhenNoAnswerYet() {
-        XCTAssertEqual(AskSourcesView.makeDisplay(thread: [], busy: false).indicator, .hidden)
-        XCTAssertTrue(AskSourcesView.makeDisplay(thread: [], busy: false).citations.isEmpty)
+        XCTAssertEqual(SourcesDisplay.make(thread: [], busy: false).indicator, .hidden)
+        XCTAssertTrue(SourcesDisplay.make(thread: [], busy: false).citations.isEmpty)
     }
 
     func testDisplayThinkingWhileBusyKeepsPriorSources() {
@@ -38,7 +38,7 @@ final class AskSourcesViewTests: XCTestCase {
             turn("q1", grounded: true, citations: [citation(1)]),
             turn("q2"),   // pending
         ]
-        let d = AskSourcesView.makeDisplay(thread: thread, busy: true)
+        let d = SourcesDisplay.make(thread: thread, busy: true)
         XCTAssertEqual(d.indicator, .thinking)
         XCTAssertEqual(d.citations.map(\.index), [1])   // last successful answer's sources
     }
@@ -50,7 +50,7 @@ final class AskSourcesViewTests: XCTestCase {
             turn("q1", grounded: true, citations: [citation(1)]),
             turn("q2", error: "failed"),
         ]
-        let d = AskSourcesView.makeDisplay(thread: thread, busy: false)
+        let d = SourcesDisplay.make(thread: thread, busy: false)
         XCTAssertEqual(d.indicator, .hidden)
         XCTAssertTrue(d.citations.isEmpty)
     }
@@ -60,7 +60,7 @@ final class AskSourcesViewTests: XCTestCase {
             turn("q1", grounded: true, citations: [citation(1)]),
             turn("q2", grounded: false, citations: [citation(2), citation(3)]),
         ]
-        let d = AskSourcesView.makeDisplay(thread: thread, busy: false)
+        let d = SourcesDisplay.make(thread: thread, busy: false)
         XCTAssertEqual(d.indicator, .ungrounded)
         XCTAssertEqual(d.citations.map(\.index), [2, 3])
     }

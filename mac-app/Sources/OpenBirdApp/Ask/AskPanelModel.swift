@@ -49,9 +49,14 @@ final class AskPanelModel: ObservableObject {
     var localModelStatusState: StepState { appModel.localModelStatusState }
 
     /// UI entry point: begin an ask and run it to completion in the background.
-    func ask(_ question: String) {
-        guard let turn = beginAsk(question) else { return }
+    /// Returns whether the ask was accepted (false on empty/whitespace, already busy,
+    /// or unavailable), so a caller can keep the draft text instead of dropping it
+    /// silently when submitted while busy (Codex review).
+    @discardableResult
+    func ask(_ question: String) -> Bool {
+        guard let turn = beginAsk(question) else { return false }
         Task { await complete(turn) }
+        return true
     }
 
     /// Validate + append the pending turn. Returns the turn to run, or nil when the

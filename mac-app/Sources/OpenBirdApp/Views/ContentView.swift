@@ -3,8 +3,10 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
-    /// Summon the Spotlight Ask panel (for the `openbird://ask` deep-link).
+    /// Summon the compact Spotlight Ask panel (for the `openbird://ask` deep-link).
     var onAsk: () -> Void = {}
+    /// Open the expanded Ask window (for the `openbird://ask-expanded` E2E deep-link).
+    var onAskExpanded: () -> Void = {}
     /// One-time first-run flag; the onboarding sheet shows until the user taps
     /// "Start capturing" (or dismisses), then never auto-presents again.
     @AppStorage("openbird.onboarding.completed") private var onboardingCompleted = false
@@ -27,7 +29,6 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: OB.Space.l) {
                     HeaderView(model: model)
                     GlassCard { SetupView(model: model) }
-                    GlassCard { ChatView(model: model) }
                     GlassCard { HelperListView(helpers: model.helpers) }
                     GlassCard { TrustControlsView(model: model) }
                 }
@@ -57,10 +58,9 @@ struct ContentView: View {
         guard url.scheme == "openbird" else { return }
         switch url.host {
         case "today": openWindow(id: "today")
-        case "timeline": openWindow(id: "timeline")
-        case "sources": openWindow(id: "sources")
         case "main": openWindow(id: "main")
         case "ask": onAsk()
+        case "ask-expanded": onAskExpanded()
         default: return
         }
         NSApp.activate(ignoringOtherApps: true)

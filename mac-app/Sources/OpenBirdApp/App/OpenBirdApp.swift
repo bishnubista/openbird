@@ -17,16 +17,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct OpenBirdApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model: AppModel
+    /// The ONE Ask conversation, shared by the compact Spotlight panel and the expanded
+    /// Ask window (both owned by `askPanel`). Lifted here so the thread is continuous
+    /// across both surfaces.
+    @StateObject private var askModel: AskPanelModel
     @StateObject private var askPanel: AskPanelController
     @StateObject private var todayModel: TodayModel
     @StateObject private var timelineModel: TimelineModel
-    /// Per-window chat thread for the Timeline window (Direction C). Built once here
-    /// sharing the one service; the thread persists across window reopen and is reset
-    /// on day change inside the view.
-    @StateObject private var timelineChat: AskPanelModel
-    /// Per-window chat thread for the Sources window (Direction B). Window-local — no
-    /// history shared with the Spotlight panel or the Timeline window.
-    @StateObject private var sourcesChat: AskPanelModel
 
     /// Construct the service, model, Ask-panel controller, and Today model TOGETHER,
     /// sharing the one `AppModel`/`OpenBirdService`, so there is never a second model
@@ -34,17 +31,19 @@ struct OpenBirdApp: App {
     init() {
         let service = OpenBirdService()
         let model = AppModel(service: service)
+        let askModel = AskPanelModel(service: service, appModel: model)
+        let timelineModel = TimelineModel(service: service)
         _model = StateObject(wrappedValue: model)
-        _askPanel = StateObject(wrappedValue: AskPanelController(model: model, service: service))
+        _askModel = StateObject(wrappedValue: askModel)
         _todayModel = StateObject(wrappedValue: TodayModel(service: service))
-        _timelineModel = StateObject(wrappedValue: TimelineModel(service: service))
-        _timelineChat = StateObject(wrappedValue: AskPanelModel(service: service, appModel: model))
-        _sourcesChat = StateObject(wrappedValue: AskPanelModel(service: service, appModel: model))
+        _timelineModel = StateObject(wrappedValue: timelineModel)
+        _askPanel = StateObject(wrappedValue: AskPanelController(
+            model: model, service: service, askModel: askModel, timelineModel: timelineModel))
     }
 
     var body: some Scene {
         Window("OpenBird", id: "main") {
-            ContentView(model: model, onAsk: { askPanel.show() })
+            ContentView(model: model, onAsk: { askPanel.show() }, onAskExpanded: { askPanel.expand() })
                 .frame(minWidth: 560, minHeight: 420)
                 .task {
                     askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
@@ -58,16 +57,6 @@ struct OpenBirdApp: App {
 
         Window("Today", id: "today") {
             TodayView(model: todayModel, appModel: model, onAsk: { askPanel.show() })
-        }
-        .windowStyle(.hiddenTitleBar)
-
-        Window("Timeline", id: "timeline") {
-            TimelineAskView(model: timelineModel, chat: timelineChat)
-        }
-        .windowStyle(.hiddenTitleBar)
-
-        Window("Sources", id: "sources") {
-            AskSourcesView(chat: sourcesChat)
         }
         .windowStyle(.hiddenTitleBar)
 

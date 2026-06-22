@@ -8,6 +8,8 @@ struct AskPanelView: View {
     @ObservedObject var askModel: AskPanelModel
     @ObservedObject var appModel: AppModel
     var onEscape: () -> Void
+    /// Promote the compact panel to the expanded window (chat + Sources/Timeline rails).
+    var onExpand: () -> Void
     var onSizeChange: (CGSize) -> Void
 
     @Environment(\.colorScheme) private var scheme
@@ -56,10 +58,23 @@ struct AskPanelView: View {
                 .foregroundStyle(OB.textPrimary(scheme))
                 .focused($inputFocused)
                 .onSubmit(submit)
+            expandButton
             escChip
         }
         .padding(.horizontal, OB.Space.l)
         .padding(.vertical, OB.Space.ml)
+    }
+
+    private var expandButton: some View {
+        Button(action: onExpand) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(OB.textSecondary(scheme))
+                .frame(width: 22, height: 22)
+                .background(OB.fieldFill(scheme), in: RoundedRectangle(cornerRadius: OB.Radius.control))
+        }
+        .buttonStyle(.plain)
+        .help("Expand to show sources and timeline")
     }
 
     private var escChip: some View {
@@ -196,9 +211,9 @@ struct AskPanelView: View {
     // MARK: Actions
 
     private func submit() {
-        let q = draft
-        draft = ""
-        askModel.ask(q)
+        // Clear the draft only if the ask was accepted — a submit while busy is rejected,
+        // and the text must survive so it isn't silently dropped (Codex review).
+        if askModel.ask(draft) { draft = "" }
     }
 
     private var sizeReader: some View {
