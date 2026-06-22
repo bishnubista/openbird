@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The 222px Today-window sidebar (handoff §3): the OpenBird wordmark, the section
@@ -9,21 +10,26 @@ struct TodaySidebar: View {
     @ObservedObject var appModel: AppModel
     @Environment(\.colorScheme) private var scheme
 
-    /// One nav entry. `enabled == false` rows are present-but-inert placeholders for
-    /// sections that have no window yet.
+    /// One nav entry. The sidebar is *launch navigation* — it lives only in the Today
+    /// window, so "Today" is always the active row. A row with a `windowID` opens that
+    /// window on tap; the rest are present-but-inert placeholders for sections that
+    /// have no window yet (honestly non-interactive, not clickable-looking no-ops).
     private struct NavItem {
         let icon: String
         let label: String
-        let enabled: Bool
+        /// Highlighted as the surface you're already in (Today only).
+        let isActiveHere: Bool
+        /// Non-nil → tapping opens/focuses that window scene.
+        let windowID: String?
     }
 
     private let items: [NavItem] = [
-        .init(icon: "calendar", label: "Today", enabled: true),
-        .init(icon: "list.bullet", label: "Timeline", enabled: false),
-        .init(icon: "waveform", label: "Meetings", enabled: false),
-        .init(icon: "arrow.triangle.2.circlepath", label: "Routines", enabled: false),
-        .init(icon: "magnifyingglass", label: "Search", enabled: false),
-        .init(icon: "slider.horizontal.3", label: "Settings", enabled: false),
+        .init(icon: "calendar", label: "Today", isActiveHere: true, windowID: nil),
+        .init(icon: "list.bullet", label: "Timeline", isActiveHere: false, windowID: "timeline"),
+        .init(icon: "waveform", label: "Meetings", isActiveHere: false, windowID: nil),
+        .init(icon: "arrow.triangle.2.circlepath", label: "Routines", isActiveHere: false, windowID: nil),
+        .init(icon: "magnifyingglass", label: "Search", isActiveHere: false, windowID: nil),
+        .init(icon: "slider.horizontal.3", label: "Settings", isActiveHere: false, windowID: nil),
     ]
 
     var body: some View {
@@ -61,39 +67,15 @@ struct TodaySidebar: View {
     private var nav: some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(items.indices, id: \.self) { i in
-                navRow(items[i])
+                NavRow(
+                    icon: items[i].icon,
+                    label: items[i].label,
+                    isActiveHere: items[i].isActiveHere,
+                    windowID: items[i].windowID
+                )
             }
         }
         .padding(.horizontal, OB.Space.m)
-    }
-
-    @ViewBuilder
-    private func navRow(_ item: NavItem) -> some View {
-        let isActive = item.enabled && item.label == "Today"
-        HStack(spacing: OB.Space.sm) {
-            Image(systemName: item.icon)
-                .frame(width: 18)
-            Text(item.label)
-                .font(.system(size: 13.5, weight: isActive ? .semibold : .regular))
-            Spacer()
-        }
-        .foregroundStyle(navForeground(item, isActive: isActive))
-        .padding(.horizontal, OB.Space.m)
-        .padding(.vertical, OB.Space.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: OB.Radius.control)
-                .fill(isActive ? OB.accent : .clear)
-        )
-        // Inert rows are plain (non-Button) text with no hover/selection/action —
-        // honestly non-interactive, not a clickable-looking no-op. Today is the
-        // only live destination. `.disabled` is a belt-and-suspenders signal.
-        .disabled(!item.enabled)
-    }
-
-    private func navForeground(_ item: NavItem, isActive: Bool) -> Color {
-        if isActive { return .white }
-        return item.enabled ? OB.textPrimary(scheme) : OB.textTertiary(scheme)
     }
 
     // MARK: Footer
@@ -134,6 +116,60 @@ struct TodaySidebar: View {
 
     private var sidebarFill: Color {
         scheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.02)
+    }
+}
+
+/// One sidebar nav row. A row with a `windowID` is a real button that opens/focuses
+/// that window (hover = subtle wash, per the handoff); the active row ("Today") is a
+/// non-interactive accent highlight; rows with neither are inert placeholders.
+private struct NavRow: View {
+    let icon: String
+    let label: String
+    let isActiveHere: Bool
+    let windowID: String?
+
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.openWindow) private var openWindow
+    @State private var hovered = false
+
+    var body: some View {
+        let row = HStack(spacing: OB.Space.sm) {
+            Image(systemName: icon).frame(width: 18)
+            Text(label).font(.system(size: 13.5, weight: isActiveHere ? .semibold : .regular))
+            Spacer()
+        }
+        .foregroundStyle(foreground)
+        .padding(.horizontal, OB.Space.m)
+        .padding(.vertical, OB.Space.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: OB.Radius.control).fill(background))
+        .contentShape(Rectangle())
+
+        if let windowID {
+            Button {
+                openWindow(id: windowID)
+                NSApp.activate(ignoringOtherApps: true)
+            } label: { row }
+                .buttonStyle(.plain)
+                .onHover { hovered = $0 }
+        } else {
+            // Inert placeholder: honestly non-interactive, not a clickable no-op.
+            row.disabled(true)
+        }
+    }
+
+    private var foreground: Color {
+        if isActiveHere { return .white }
+        if windowID != nil { return hovered ? OB.textPrimary(scheme) : OB.textSecondary(scheme) }
+        return OB.textTertiary(scheme)
+    }
+
+    private var background: Color {
+        if isActiveHere { return OB.accent }
+        if windowID != nil, hovered {
+            return scheme == .dark ? Color.white.opacity(0.09) : Color.black.opacity(0.06)
+        }
+        return .clear
     }
 }
 

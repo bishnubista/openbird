@@ -168,6 +168,13 @@ open "openbird://today" >/dev/null 2>&1 || true
 /bin/sleep 2
 capture_window "Today" "$OUT/05-today-dayview.png" || true
 
+# 4b) Timeline window (handoff Direction C) — opened via the openbird://timeline
+#     deep-link, same gated router as Today.
+log "timeline: opening via openbird://timeline deep-link"
+open "openbird://timeline" >/dev/null 2>&1 || true
+/bin/sleep 2
+capture_window "Timeline" "$OUT/04-ask-timeline.png" || true
+
 # 5) Menu dropdown — reached only through the menu-bar status item. The SwiftUI
 #    MenuBarExtra(.window) popover does NOT open via AX, and a full menu bar parks
 #    the status item off-screen (AX pos like -1/976), so a coordinate click is

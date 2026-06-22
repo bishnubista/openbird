@@ -41,6 +41,11 @@ struct MenuBarView: View {
                 NSApp.activate(ignoringOtherApps: true)
             }
 
+            Button("Timeline") {
+                openWindow(id: "timeline")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+
             Divider()
 
             ForEach(model.helpers) { helper in

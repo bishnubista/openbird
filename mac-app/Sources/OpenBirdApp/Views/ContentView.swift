@@ -49,6 +49,7 @@ struct ContentView: View {
         guard url.scheme == "openbird" else { return }
         switch url.host {
         case "today": openWindow(id: "today")
+        case "timeline": openWindow(id: "timeline")
         case "main": openWindow(id: "main")
         case "ask": onAsk()
         default: return
