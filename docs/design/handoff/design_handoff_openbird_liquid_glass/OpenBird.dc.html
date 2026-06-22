@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+::selection{background:rgba(47,127,242,0.3)}
+*::-webkit-scrollbar{width:9px;height:9px}
+*::-webkit-scrollbar-thumb{background:rgba(140,140,150,0.4);border-radius:9px;border:2px solid transparent;background-clip:padding-box}
+*::-webkit-scrollbar-track{background:transparent}
+@keyframes obPop{from{opacity:0;transform:translateY(10px) scale(.975)}to{opacity:1;transform:none}}
+@keyframes obFade{from{opacity:0}to{opacity:1}}
+@keyframes obPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.85)}}
+@keyframes obDot{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:.9;transform:translateY(-3px)}}
+</style>
+</helmet>
+
+<div ref="{{ rootRef }}" style="--bar:linear-gradient(180deg,rgba(255,255,255,0.10),rgba(255,255,255,0) 65%),rgba(26,26,32,0.5);--panel:linear-gradient(180deg,rgba(255,255,255,0.14),rgba(255,255,255,0.02) 36%,rgba(255,255,255,0) 62%),rgba(46,46,55,0.6);--win:linear-gradient(180deg,rgba(255,255,255,0.11),rgba(255,255,255,0) 32%),rgba(34,34,42,0.64);--field:rgba(255,255,255,0.08);--card:rgba(255,255,255,0.06);--text:rgba(255,255,255,0.92);--text2:rgba(255,255,255,0.56);--text3:rgba(255,255,255,0.34);--sep:rgba(255,255,255,0.12);--hover:rgba(255,255,255,0.09);--green:#32d74b;--border:rgba(255,255,255,0.10);--shadow:0 28px 70px rgba(0,0,0,0.55);--glass:inset 0 1px 0 rgba(255,255,255,0.5),inset 0 0 0 0.5px rgba(255,255,255,0.16),inset 0 -12px 22px -14px rgba(255,255,255,0.22),0 30px 70px rgba(0,0,0,0.55),0 4px 14px rgba(0,0,0,0.3);--accent:#2f7ff2;--wall:radial-gradient(130% 130% at 18% 8%, #3b4a86 0%, #2a2350 46%, #14202f 100%);position:relative;width:100vw;height:100vh;overflow:hidden;background:var(--wall);font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;color:var(--text);-webkit-font-smoothing:antialiased;">
+
+  <!-- ============ BACKGROUND COLOR ORBS (for glass refraction) ============ -->
+  <div style="position:absolute;width:520px;height:520px;left:-80px;top:120px;border-radius:50%;background:radial-gradient(circle at 50% 50%, rgba(120,90,255,0.55), rgba(120,90,255,0) 70%);filter:blur(20px);z-index:0;pointer-events:none;"></div>
+  <div style="position:absolute;width:460px;height:460px;right:-60px;top:-40px;border-radius:50%;background:radial-gradient(circle at 50% 50%, rgba(47,127,242,0.5), rgba(47,127,242,0) 70%);filter:blur(20px);z-index:0;pointer-events:none;"></div>
+  <div style="position:absolute;width:420px;height:420px;right:120px;bottom:-120px;border-radius:50%;background:radial-gradient(circle at 50% 50%, rgba(255,120,170,0.4), rgba(255,120,170,0) 70%);filter:blur(20px);z-index:0;pointer-events:none;"></div>
+
+  <!-- ============ MENU BAR ============ -->
+  <div style="position:absolute;top:0;left:0;right:0;height:28px;display:flex;align-items:center;justify-content:space-between;padding:0 13px;background:var(--bar);backdrop-filter:blur(36px) saturate(170%) brightness(1.05);-webkit-backdrop-filter:blur(36px) saturate(170%) brightness(1.05);border-bottom:0.5px solid var(--sep);font-size:13px;z-index:80;">
+    <div style="display:flex;align-items:center;gap:18px;color:var(--text);">
+      <svg viewBox="0 0 14 17" style="width:13px;height:15px;" fill="currentColor"><path d="M11.7 13.1c-.3.7-.5 1-.9 1.6-.6.9-1.4 2-2.4 2-1 0-1.2-.6-2.5-.6s-1.6.6-2.5.6c-1 0-1.8-1-2.4-1.9C-.6 12.7-.2 9 1.7 7.4c.7-.6 1.6-1 2.5-1 1 0 1.6.6 2.5.6.8 0 1.3-.6 2.5-.6.8 0 1.7.4 2.3 1.2-2 1.1-1.7 4 .2 4.9zM8.7 3.5c.5-.6.8-1.5.7-2.3-.8 0-1.7.5-2.2 1.1-.5.6-.8 1.4-.7 2.3.8.1 1.7-.5 2.2-1.1z"/></svg>
+      <span style="font-weight:600;">OpenBird</span>
+      <span style="opacity:.82;">File</span>
+      <span style="opacity:.82;">Capture</span>
+      <span style="opacity:.82;">View</span>
+      <span style="opacity:.82;">Help</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:15px;color:var(--text);">
+      <svg viewBox="0 0 22 16" style="width:18px;height:13px;opacity:.85" fill="currentColor"><path d="M11 3.5c3 0 5.7 1.1 7.8 3l1.4-1.5C17.7 2.6 14.5 1.3 11 1.3S4.3 2.6 1.8 5l1.4 1.5C5.3 4.6 8 3.5 11 3.5zM11 8c1.7 0 3.3.7 4.5 1.8l1.4-1.5C15.4 6.9 13.3 6 11 6S6.6 6.9 5.1 8.3l1.4 1.5C7.7 8.7 9.3 8 11 8zm0 4.5l2.5-2.6C12.8 9.3 11.9 9 11 9s-1.8.3-2.5.9L11 12.5z"/></svg>
+      <svg viewBox="0 0 24 12" style="width:22px;height:11px;opacity:.85" fill="none"><rect x="1" y="1.5" width="19" height="9" rx="2.5" stroke="currentColor" stroke-opacity=".5"/><rect x="2.6" y="3.1" width="13" height="5.8" rx="1.2" fill="currentColor"/><rect x="21" y="4" width="1.8" height="4" rx=".9" fill="currentColor" fill-opacity=".5"/></svg>
+      <sc-if value="{{ isMenu }}" hint-placeholder-val="{{ false }}">
+        <button onClick="{{ goAsk }}" title="OpenBird" style="display:flex;align-items:center;justify-content:center;width:30px;height:20px;border-radius:6px;border:none;cursor:pointer;background:var(--accent);color:#fff;padding:0 6px;">
+          <svg viewBox="0 0 48 48" style="width:16px;height:16px;" fill="currentColor"><path d="M15 16 L2 11 L15 19 Z"/><circle cx="16.5" cy="17" r="4.8"/><ellipse cx="24" cy="26" rx="10" ry="6.2" transform="rotate(30 24 26)"/><path d="M30 30 L45 36 L37 30 L44 25 Z"/><path d="M19 20 C 26 8 36 5 45 9 C 37 11 32 16 30 25 C 27 20 22 19 19 20 Z"/></svg>
+        </button>
+      </sc-if>
+      <sc-if value="{{ isNotMenu }}" hint-placeholder-val="{{ true }}">
+        <button onClick="{{ goMenu }}" title="OpenBird" style="display:flex;align-items:center;justify-content:center;width:30px;height:20px;border-radius:6px;border:none;cursor:pointer;background:transparent;color:var(--text);padding:0 6px;" style-hover="background:var(--hover)">
+          <svg viewBox="0 0 48 48" style="width:16px;height:16px;" fill="currentColor"><path d="M15 16 L2 11 L15 19 Z"/><circle cx="16.5" cy="17" r="4.8"/><ellipse cx="24" cy="26" rx="10" ry="6.2" transform="rotate(30 24 26)"/><path d="M30 30 L45 36 L37 30 L44 25 Z"/><path d="M19 20 C 26 8 36 5 45 9 C 37 11 32 16 30 25 C 27 20 22 19 19 20 Z"/></svg>
+        </button>
+      </sc-if>
+      <span style="font-variant-numeric:tabular-nums;opacity:.9;">Sat Jun 20&nbsp;&nbsp;9:41 AM</span>
+    </div>
+  </div>
+
+  <!-- ============ MENU DROPDOWN ============ -->
+  <sc-if value="{{ isMenu }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ goAsk }}" style="position:absolute;inset:0;z-index:90;"></div>
+    <div style="position:absolute;top:31px;right:80px;z-index:91;width:288px;background:var(--panel);backdrop-filter:blur(44px) saturate(180%) brightness(1.08);-webkit-backdrop-filter:blur(44px) saturate(180%) brightness(1.08);border-radius:12px;border:0.5px solid var(--border);box-shadow:var(--glass);padding:6px;font-size:13px;">
+      <button onClick="{{ goToday }}" style="display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:5px 10px;border:none;background:transparent;border-radius:6px;cursor:pointer;color:var(--text);font:inherit;font-size:13px;text-align:left;" style-hover="background:var(--accent);color:#fff;"><span>Open OpenBird</span></button>
+      <button onClick="{{ goAsk }}" style="display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:5px 10px;border:none;background:transparent;border-radius:6px;cursor:pointer;color:var(--text);font:inherit;font-size:13px;text-align:left;" style-hover="background:var(--accent);color:#fff;"><span>Ask OpenBird…</span><span style="opacity:.55;font-size:12px;">⌥Space</span></button>
+      <div style="height:0.5px;background:var(--sep);margin:5px 8px;"></div>
+      <div style="display:flex;align-items:center;gap:8px;padding:5px 10px 4px;">
+        <span style="width:7px;height:7px;border-radius:50%;background:#ff453a;animation:obPulse 1.7s ease-in-out infinite;"></span>
+        <span style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text2);">Capturing</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums;">1,284 today</span>
+      </div>
+      <button onClick="{{ noop }}" style="display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:5px 10px;border:none;background:transparent;border-radius:6px;cursor:pointer;color:var(--text);font:inherit;font-size:13px;text-align:left;" style-hover="background:var(--accent);color:#fff;"><span>Pause Capture</span><span style="opacity:.55;font-size:12px;">⌘P</span></button>
+      <button onClick="{{ goToday }}" style="display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:5px 10px;border:none;background:transparent;border-radius:6px;cursor:pointer;color:var(--text);font:inherit;font-size:13px;text-align:left;" style-hover="background:var(--accent);color:#fff;"><span>Today’s Activity</span><span style="opacity:.55;font-size:13px;">›</span></button>
+      <div style="height:0.5px;background:var(--sep);margin:5px 8px;"></div>
+      <div style="display:flex;flex-direction:column;gap:6px;padding:4px 10px 6px;">
+        <div style="display:flex;align-items:center;gap:8px;"><span style="width:6px;height:6px;border-radius:50%;background:var(--green);"></span><span style="font-size:12px;color:var(--text2);">Capture helper</span><span style="margin-left:auto;font-size:11px;color:var(--text3);">OK</span></div>
+        <div style="display:flex;align-items:center;gap:8px;"><span style="width:6px;height:6px;border-radius:50%;background:var(--green);"></span><span style="font-size:12px;color:var(--text2);">Audio helper</span><span style="margin-left:auto;font-size:11px;color:var(--text3);">OK</span></div>
+        <div style="display:flex;align-items:center;gap:8px;"><span style="width:6px;height:6px;border-radius:50%;background:var(--green);"></span><span style="font-size:12px;color:var(--text2);">Encryption at rest</span><span style="margin-left:auto;font-size:11px;color:var(--text3);">on</span></div>
+      </div>
+      <div style="height:0.5px;background:var(--sep);margin:5px 8px;"></div>
+      <button onClick="{{ goSetup }}" style="display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:5px 10px;border:none;background:transparent;border-radius:6px;cursor:pointer;color:var(--text);font:inherit;font-size:13px;text-align:left;" style-hover="background:var(--accent);color:#fff;"><span>Re-check Setup</span></button>
+      <button onClick="{{ noop }}" style="display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:5px 10px;border:none;background:transparent;border-radius:6px;cursor:pointer;color:var(--text);font:inherit;font-size:13px;text-align:left;" style-hover="background:var(--accent);color:#fff;"><span>Data Folder</span></button>
+      <button onClick="{{ goSetup }}" style="display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:5px 10px;border:none;background:transparent;border-radius:6px;cursor:pointer;color:var(--text);font:inherit;font-size:13px;text-align:left;" style-hover="background:var(--accent);color:#fff;"><span>Settings…</span><span style="opacity:.55;font-size:12px;">⌘,</span></button>
+      <button onClick="{{ noop }}" style="display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%;padding:5px 10px;border:none;background:transparent;border-radius:6px;cursor:pointer;color:var(--text);font:inherit;font-size:13px;text-align:left;" style-hover="background:var(--accent);color:#fff;"><span>Quit OpenBird</span><span style="opacity:.55;font-size:12px;">⌘Q</span></button>
+    </div>
+  </sc-if>
+
+  <!-- ============ STAGE ============ -->
+  <div style="position:absolute;inset:28px 0 0 0;display:flex;align-items:center;justify-content:center;padding:24px;">
+
+    <!-- ====== ASK ====== -->
+    <sc-if value="{{ isAsk }}" hint-placeholder-val="{{ true }}">
+
+      <!-- Direction A — Spotlight -->
+      <sc-if value="{{ isA }}" hint-placeholder-val="{{ true }}">
+        <div style="width:620px;max-width:94vw;">
+          <div style="background:var(--panel);backdrop-filter:blur(50px) saturate(180%) brightness(1.08);-webkit-backdrop-filter:blur(50px) saturate(180%) brightness(1.08);border-radius:17px;border:0.5px solid var(--border);box-shadow:var(--glass);overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:13px;padding:16px 18px;border-bottom:0.5px solid var(--sep);">
+              <span style="color:var(--accent);width:24px;height:24px;flex:none;"><svg viewBox="0 0 48 48" style="width:100%;height:100%" fill="currentColor"><path d="M15 16 L2 11 L15 19 Z"/><circle cx="16.5" cy="17" r="4.8"/><ellipse cx="24" cy="26" rx="10" ry="6.2" transform="rotate(30 24 26)"/><path d="M30 30 L45 36 L37 30 L44 25 Z"/><path d="M19 20 C 26 8 36 5 45 9 C 37 11 32 16 30 25 C 27 20 22 19 19 20 Z"/></svg></span>
+              <input value="{{ draftA }}" onInput="{{ inA }}" onKeyDown="{{ keyA }}" placeholder="Ask about your work…" style="flex:1;border:none;background:transparent;outline:none;color:var(--text);font:inherit;font-size:18px;" />
+              <span style="flex:none;font-size:10.5px;color:var(--text3);border:0.5px solid var(--sep);border-radius:5px;padding:3px 6px;">esc</span>
+            </div>
+            <div data-scroll="A" ref="{{ scrollA }}" style="max-height:62vh;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:14px;">
+              <div style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--text3);"><span style="width:6px;height:6px;border-radius:50%;background:var(--green);"></span>Answer · grounded in 4 sources from yesterday</div>
+              <div style="font-size:14.5px;line-height:1.6;color:var(--text);">Yesterday was mostly heads-down on OpenBird’s citation pipeline. You spent the morning in <b>rag.py</b> getting occurrence-level citations to validate, carried it into the Memory sync call, then closed out the ticket and drafted the retention doc.</div>
+              <div style="display:flex;flex-direction:column;gap:9px;">
+                <div style="display:flex;gap:12px;align-items:baseline;"><span style="flex:none;min-width:92px;font-size:12px;color:var(--text2);font-variant-numeric:tabular-nums;">9:12–11:40</span><span style="font-size:13.5px;line-height:1.5;color:var(--text);"><b>rag.py &amp; schema.sql</b> in VS Code — citation validation + chunk dedup</span></div>
+                <div style="display:flex;gap:12px;align-items:baseline;"><span style="flex:none;min-width:92px;font-size:12px;color:var(--text2);font-variant-numeric:tabular-nums;">11:00 AM</span><span style="font-size:13.5px;line-height:1.5;color:var(--text);"><b>Memory sync</b> call (Zoom, 4 people) — agreed on S1/S2 source labels</span></div>
+                <div style="display:flex;gap:12px;align-items:baseline;"><span style="flex:none;min-width:92px;font-size:12px;color:var(--text2);font-variant-numeric:tabular-nums;">2:15 PM</span><span style="font-size:13.5px;line-height:1.5;color:var(--text);"><b>OB-142</b> in Linear — moved to In Review</span></div>
+                <div style="display:flex;gap:12px;align-items:baseline;"><span style="flex:none;min-width:92px;font-size:12px;color:var(--text2);font-variant-numeric:tabular-nums;">3:40 PM</span><span style="font-size:13.5px;line-height:1.5;color:var(--text);"><b>Storage &amp; retention</b> doc in Notion — drafted prune/vacuum</span></div>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px;">
+                <div style="display:flex;align-items:center;gap:7px;padding:5px 9px 5px 5px;background:var(--card);border:0.5px solid var(--border);border-radius:8px;"><span style="width:18px;height:18px;border-radius:5px;background:#2f6be0;color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;">{}</span><span style="font-size:11.5px;color:var(--text2);">VS Code · 9:12 AM</span></div>
+                <div style="display:flex;align-items:center;gap:7px;padding:5px 9px 5px 5px;background:var(--card);border:0.5px solid var(--border);border-radius:8px;"><span style="width:18px;height:18px;border-radius:5px;background:#2d8cff;color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;">Z</span><span style="font-size:11.5px;color:var(--text2);">Zoom · 11:00 AM</span></div>
+                <div style="display:flex;align-items:center;gap:7px;padding:5px 9px 5px 5px;background:var(--card);border:0.5px solid var(--border);border-radius:8px;"><span style="width:18px;height:18px;border-radius:5px;background:#5e6ad2;color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;">L</span><span style="font-size:11.5px;color:var(--text2);">Linear · 2:15 PM</span></div>
+                <div style="display:flex;align-items:center;gap:7px;padding:5px 9px 5px 5px;background:var(--card);border:0.5px solid var(--border);border-radius:8px;"><span style="width:18px;height:18px;border-radius:5px;background:#4b4b52;color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;">N</span><span style="font-size:11.5px;color:var(--text2);">Notion · 3:40 PM</span></div>
+              </div>
+              <sc-for list="{{ followA }}" as="m" hint-placeholder-count="0">
+                <sc-if value="{{ m.isUser }}" hint-placeholder-val="{{ false }}"><div style="align-self:flex-end;max-width:80%;background:var(--accent);color:#fff;padding:8px 13px;border-radius:14px;font-size:13.5px;line-height:1.45;">{{ m.text }}</div></sc-if>
+                <sc-if value="{{ m.isAsst }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;flex-direction:column;gap:9px;">
+                    <div style="font-size:14px;line-height:1.6;white-space:pre-wrap;color:var(--text);">{{ m.text }}</div>
+                    <sc-if value="{{ m.hasSources }}" hint-placeholder-val="{{ false }}"><div style="display:flex;flex-wrap:wrap;gap:8px;"><sc-for list="{{ m.sources }}" as="src" hint-placeholder-count="0"><div style="display:flex;align-items:center;gap:7px;padding:5px 9px 5px 5px;background:var(--card);border:0.5px solid var(--border);border-radius:8px;"><span style="width:18px;height:18px;border-radius:5px;color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;background:{{ src.color }}">{{ src.glyph }}</span><span style="font-size:11.5px;color:var(--text2);">{{ src.app }} · {{ src.time }}</span></div></sc-for></div></sc-if>
+                  </div>
+                </sc-if>
+              </sc-for>
+              <sc-if value="{{ thinkingA }}" hint-placeholder-val="{{ false }}"><div style="display:flex;gap:4px;align-items:center;padding:2px 0;"><span style="width:6px;height:6px;border-radius:50%;background:var(--text3);animation:obDot 1s infinite;"></span><span style="width:6px;height:6px;border-radius:50%;background:var(--text3);animation:obDot 1s infinite .15s;"></span><span style="width:6px;height:6px;border-radius:50%;background:var(--text3);animation:obDot 1s infinite .3s;"></span></div></sc-if>
+              <div style="display:flex;flex-wrap:wrap;gap:8px;padding-top:2px;border-top:0.5px solid var(--sep);margin-top:2px;padding-top:14px;">
+                <sc-for list="{{ chipsA }}" as="c" hint-placeholder-count="3"><button onClick="{{ c.onClick }}" style="border:0.5px solid var(--border);background:var(--field);color:var(--text2);font:inherit;font-size:12.5px;padding:6px 11px;border-radius:999px;cursor:pointer;" style-hover="background:var(--hover);color:var(--text)">{{ c.label }}</button></sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- Direction B — Sources rail -->
+      <sc-if value="{{ isB }}" hint-placeholder-val="{{ false }}">
+        <div style="width:800px;max-width:95vw;height:540px;">
+          <div style="display:flex;flex-direction:column;height:100%;background:var(--win);backdrop-filter:blur(50px) saturate(180%) brightness(1.08);-webkit-backdrop-filter:blur(50px) saturate(180%) brightness(1.08);border-radius:13px;border:0.5px solid var(--border);box-shadow:var(--glass);overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 14px;border-bottom:0.5px solid var(--sep);position:relative;flex:none;">
+              <span style="width:12px;height:12px;border-radius:50%;background:#ff5f57;"></span><span style="width:12px;height:12px;border-radius:50%;background:#febc2e;"></span><span style="width:12px;height:12px;border-radius:50%;background:#28c840;"></span>
+              <div style="position:absolute;left:0;right:0;text-align:center;font-size:13px;font-weight:600;color:var(--text2);pointer-events:none;">Ask OpenBird</div>
+              <div style="margin-left:auto;display:flex;align-items:center;gap:5px;color:var(--text3);font-size:11px;"><span style="width:6px;height:6px;border-radius:50%;background:var(--green);"></span>grounded</div>
+            </div>
+            <div style="display:flex;flex:1;min-height:0;">
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column;">
+                <div data-scroll="B" ref="{{ scrollB }}" style="flex:1;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:14px;">
+                  <div style="align-self:flex-end;max-width:78%;background:var(--accent);color:#fff;padding:9px 13px;border-radius:15px;font-size:13.5px;">What did I work on yesterday?</div>
+                  <div style="display:flex;flex-direction:column;gap:11px;max-width:94%;">
+                    <div style="font-size:14px;line-height:1.6;color:var(--text);">Yesterday was mostly heads-down on OpenBird’s citation pipeline — code in the morning, the sync call, then wrapping the ticket and the retention doc.</div>
+                    <ul style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:7px;">
+                      <li style="font-size:13.5px;line-height:1.5;color:var(--text);">Morning in <b>rag.py &amp; schema.sql</b> — occurrence-level citation validation + chunk dedup<sup style="color:var(--accent);font-weight:700;font-size:9px;">&nbsp;1</sup></li>
+                      <li style="font-size:13.5px;line-height:1.5;color:var(--text);">The <b>Memory sync</b> call — agreed to ship short S1/S2 source labels<sup style="color:var(--accent);font-weight:700;font-size:9px;">&nbsp;2</sup></li>
+                      <li style="font-size:13.5px;line-height:1.5;color:var(--text);"><b>OB-142</b> moved to In Review<sup style="color:var(--accent);font-weight:700;font-size:9px;">&nbsp;3</sup></li>
+                      <li style="font-size:13.5px;line-height:1.5;color:var(--text);">Drafted the <b>storage &amp; retention</b> doc (prune / vacuum)<sup style="color:var(--accent);font-weight:700;font-size:9px;">&nbsp;4</sup></li>
+                    </ul>
+                  </div>
+                  <sc-for list="{{ followB }}" as="m" hint-placeholder-count="0">
+                    <sc-if value="{{ m.isUser }}" hint-placeholder-val="{{ false }}"><div style="align-self:flex-end;max-width:78%;background:var(--accent);color:#fff;padding:9px 13px;border-radius:15px;font-size:13.5px;line-height:1.45;">{{ m.text }}</div></sc-if>
+                    <sc-if value="{{ m.isAsst }}" hint-placeholder-val="{{ false }}"><div style="max-width:94%;font-size:14px;line-height:1.6;white-space:pre-wrap;color:var(--text);">{{ m.text }}</div></sc-if>
+                  </sc-for>
+                  <sc-if value="{{ thinkingB }}" hint-placeholder-val="{{ false }}"><div style="display:flex;gap:4px;align-items:center;"><span style="width:6px;height:6px;border-radius:50%;background:var(--text3);animation:obDot 1s infinite;"></span><span style="width:6px;height:6px;border-radius:50%;background:var(--text3);animation:obDot 1s infinite .15s;"></span><span style="width:6px;height:6px;border-radius:50%;background:var(--text3);animation:obDot 1s infinite .3s;"></span></div></sc-if>
+                </div>
+                <div style="flex:none;padding:12px;border-top:0.5px solid var(--sep);display:flex;gap:8px;align-items:center;">
+                  <input value="{{ draftB }}" onInput="{{ inB }}" onKeyDown="{{ keyB }}" placeholder="Ask a follow-up…" style="flex:1;border:0.5px solid var(--border);background:var(--field);outline:none;color:var(--text);font:inherit;font-size:13.5px;padding:9px 13px;border-radius:999px;" />
+                  <button onClick="{{ sendB }}" style="flex:none;width:34px;height:34px;border-radius:9px;border:none;background:var(--accent);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;" style-hover="filter:brightness(1.1)"><svg viewBox="0 0 24 24" style="width:18px;height:18px" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+                </div>
+              </div>
+              <div style="width:262px;flex:none;border-left:0.5px solid var(--sep);display:flex;flex-direction:column;">
+                <div style="padding:14px 14px 8px;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);">Sources · 4</div>
+                <div style="overflow:auto;padding:4px 12px 14px;display:flex;flex-direction:column;gap:8px;">
+                  <div style="display:flex;gap:10px;padding:10px;border-radius:10px;background:var(--field);border:0.5px solid var(--border);"><span style="flex:none;width:24px;height:24px;border-radius:6px;background:#2f6be0;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;">{}</span><div style="min-width:0;"><div style="display:flex;gap:6px;align-items:baseline;"><span style="font-size:9px;font-weight:700;color:var(--accent);">1</span><span style="font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;">rag.py — openbird</span></div><div style="font-size:11px;color:var(--text2);">VS Code · 9:12 AM</div><div style="font-size:11px;color:var(--text3);line-height:1.4;margin-top:3px;">validate citations: only ids present in context may be cited</div></div></div>
+                  <div style="display:flex;gap:10px;padding:10px;border-radius:10px;background:var(--field);border:0.5px solid var(--border);"><span style="flex:none;width:24px;height:24px;border-radius:6px;background:#2d8cff;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;">Z</span><div style="min-width:0;"><div style="display:flex;gap:6px;align-items:baseline;"><span style="font-size:9px;font-weight:700;color:var(--accent);">2</span><span style="font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;">Memory sync · 4 people</span></div><div style="font-size:11px;color:var(--text2);">Zoom · 11:00 AM</div><div style="font-size:11px;color:var(--text3);line-height:1.4;margin-top:3px;">“ship the S1/S2 labels and move on”</div></div></div>
+                  <div style="display:flex;gap:10px;padding:10px;border-radius:10px;background:var(--field);border:0.5px solid var(--border);"><span style="flex:none;width:24px;height:24px;border-radius:6px;background:#5e6ad2;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;">L</span><div style="min-width:0;"><div style="display:flex;gap:6px;align-items:baseline;"><span style="font-size:9px;font-weight:700;color:var(--accent);">3</span><span style="font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;">OB-142 · Citation validation</span></div><div style="font-size:11px;color:var(--text2);">Linear · 2:15 PM</div><div style="font-size:11px;color:var(--text3);line-height:1.4;margin-top:3px;">status: To Do → In Review</div></div></div>
+                  <div style="display:flex;gap:10px;padding:10px;border-radius:10px;background:var(--field);border:0.5px solid var(--border);"><span style="flex:none;width:24px;height:24px;border-radius:6px;background:#4b4b52;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;">N</span><div style="min-width:0;"><div style="display:flex;gap:6px;align-items:baseline;"><span style="font-size:9px;font-weight:700;color:var(--accent);">4</span><span style="font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;">Storage growth &amp; retention</span></div><div style="font-size:11px;color:var(--text2);">Notion · 3:40 PM</div><div style="font-size:11px;color:var(--text3);line-height:1.4;margin-top:3px;">prune --older-than 90d cascade-deletes…</div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- Direction C — Timeline-grounded -->
+      <sc-if value="{{ isC }}" hint-placeholder-val="{{ false }}">
+        <div style="width:840px;max-width:96vw;height:560px;">
+          <div style="display:flex;flex-direction:column;height:100%;background:var(--win);backdrop-filter:blur(50px) saturate(180%) brightness(1.08);-webkit-backdrop-filter:blur(50px) saturate(180%) brightness(1.08);border-radius:13px;border:0.5px solid var(--border);box-shadow:var(--glass);overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 14px;border-bottom:0.5px solid var(--sep);position:relative;flex:none;">
+              <span style="width:12px;height:12px;border-radius:50%;background:#ff5f57;"></span><span style="width:12px;height:12px;border-radius:50%;background:#febc2e;"></span><span style="width:12px;height:12px;border-radius:50%;background:#28c840;"></span>
+              <div style="position:absolute;left:0;right:0;text-align:center;font-size:13px;font-weight:600;color:var(--text2);pointer-events:none;">Yesterday · Ask</div>
+            </div>
+            <div style="display:flex;flex:1;min-height:0;">
+              <div style="width:312px;flex:none;border-right:0.5px solid var(--sep);display:flex;flex-direction:column;">
+                <div style="padding:14px 16px 8px;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);">Friday, June 19</div>
+                <div style="overflow:auto;padding:4px 16px 16px;">
+                  <div style="display:flex;gap:11px;"><div style="flex:none;width:50px;text-align:right;font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:1px;">9:12<br><span style="color:var(--text3);">11:40</span></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:9px;height:9px;border-radius:50%;background:#2f6be0;margin-top:3px;"></span><span style="flex:1;width:2px;background:var(--sep);margin:3px 0;"></span></div><div style="flex:1;min-width:0;padding-bottom:16px;"><div style="font-size:12.5px;font-weight:600;color:var(--text);">rag.py — openbird</div><div style="font-size:11px;color:var(--text2);margin-top:1px;">VS Code · 2h 28m · 142 captures</div><div style="font-size:11px;color:var(--text3);margin-top:3px;">Citation validation + chunk dedup</div></div></div>
+                  <div style="display:flex;gap:11px;"><div style="flex:none;width:50px;text-align:right;font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:1px;">11:00<br><span style="color:var(--text3);">11:35</span></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:9px;height:9px;border-radius:50%;background:#2d8cff;margin-top:3px;"></span><span style="flex:1;width:2px;background:var(--sep);margin:3px 0;"></span></div><div style="flex:1;min-width:0;padding-bottom:16px;"><div style="font-size:12.5px;font-weight:600;color:var(--text);">Memory sync · 4 people</div><div style="font-size:11px;color:var(--text2);margin-top:1px;">Zoom · 35m · transcript</div><div style="font-size:11px;color:var(--text3);margin-top:3px;">Agreed on S1/S2 source labels</div></div></div>
+                  <div style="display:flex;gap:11px;"><div style="flex:none;width:50px;text-align:right;font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:1px;">2:15<br><span style="color:var(--text3);">2:50</span></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:9px;height:9px;border-radius:50%;background:#5e6ad2;margin-top:3px;"></span><span style="flex:1;width:2px;background:var(--sep);margin:3px 0;"></span></div><div style="flex:1;min-width:0;padding-bottom:16px;"><div style="font-size:12.5px;font-weight:600;color:var(--text);">OB-142 · Citation validation</div><div style="font-size:11px;color:var(--text2);margin-top:1px;">Linear · 35m · 8 captures</div><div style="font-size:11px;color:var(--text3);margin-top:3px;">Moved to In Review</div></div></div>
+                  <div style="display:flex;gap:11px;"><div style="flex:none;width:50px;text-align:right;font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:1px;">3:40<br><span style="color:var(--text3);">4:30</span></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:9px;height:9px;border-radius:50%;background:#4b4b52;margin-top:3px;"></span></div><div style="flex:1;min-width:0;"><div style="font-size:12.5px;font-weight:600;color:var(--text);">Storage growth &amp; retention</div><div style="font-size:11px;color:var(--text2);margin-top:1px;">Notion · 50m · 64 captures</div><div style="font-size:11px;color:var(--text3);margin-top:3px;">Drafted prune/vacuum section</div></div></div>
+                </div>
+              </div>
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column;">
+                <div data-scroll="C" ref="{{ scrollC }}" style="flex:1;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:13px;">
+                  <div style="align-self:flex-end;max-width:80%;background:var(--accent);color:#fff;padding:9px 13px;border-radius:15px;font-size:13.5px;">What did I work on yesterday?</div>
+                  <div style="font-size:14px;line-height:1.6;color:var(--text);">Reading down your day, the through-line is OpenBird’s citation work. You went from code, to the decision in the sync call, to closing the ticket and writing it up:</div>
+                  <div style="display:flex;flex-direction:column;gap:9px;">
+                    <div style="display:flex;gap:10px;align-items:flex-start;"><span style="flex:none;margin-top:5px;width:8px;height:8px;border-radius:50%;background:#2f6be0;"></span><span style="font-size:13.5px;line-height:1.5;color:var(--text);"><b>9:12</b> — got occurrence-level citations to validate in <b>rag.py</b></span></div>
+                    <div style="display:flex;gap:10px;align-items:flex-start;"><span style="flex:none;margin-top:5px;width:8px;height:8px;border-radius:50%;background:#2d8cff;"></span><span style="font-size:13.5px;line-height:1.5;color:var(--text);"><b>11:00</b> — <b>Memory sync</b> locked the S1/S2 label format</span></div>
+                    <div style="display:flex;gap:10px;align-items:flex-start;"><span style="flex:none;margin-top:5px;width:8px;height:8px;border-radius:50%;background:#5e6ad2;"></span><span style="font-size:13.5px;line-height:1.5;color:var(--text);"><b>2:15</b> — pushed <b>OB-142</b> to In Review</span></div>
+                    <div style="display:flex;gap:10px;align-items:flex-start;"><span style="flex:none;margin-top:5px;width:8px;height:8px;border-radius:50%;background:#4b4b52;"></span><span style="font-size:13.5px;line-height:1.5;color:var(--text);"><b>3:40</b> — drafted the <b>retention</b> doc</span></div>
+                  </div>
+                  <sc-for list="{{ followC }}" as="m" hint-placeholder-count="0">
+                    <sc-if value="{{ m.isUser }}" hint-placeholder-val="{{ false }}"><div style="align-self:flex-end;max-width:80%;background:var(--accent);color:#fff;padding:9px 13px;border-radius:15px;font-size:13.5px;line-height:1.45;">{{ m.text }}</div></sc-if>
+                    <sc-if value="{{ m.isAsst }}" hint-placeholder-val="{{ false }}"><div style="font-size:14px;line-height:1.6;white-space:pre-wrap;color:var(--text);">{{ m.text }}</div></sc-if>
+                  </sc-for>
+                  <sc-if value="{{ thinkingC }}" hint-placeholder-val="{{ false }}"><div style="display:flex;gap:4px;align-items:center;"><span style="width:6px;height:6px;border-radius:50%;background:var(--text3);animation:obDot 1s infinite;"></span><span style="width:6px;height:6px;border-radius:50%;background:var(--text3);animation:obDot 1s infinite .15s;"></span><span style="width:6px;height:6px;border-radius:50%;background:var(--text3);animation:obDot 1s infinite .3s;"></span></div></sc-if>
+                </div>
+                <div style="flex:none;padding:12px;border-top:0.5px solid var(--sep);display:flex;gap:8px;align-items:center;">
+                  <input value="{{ draftC }}" onInput="{{ inC }}" onKeyDown="{{ keyC }}" placeholder="Ask a follow-up…" style="flex:1;border:0.5px solid var(--border);background:var(--field);outline:none;color:var(--text);font:inherit;font-size:13.5px;padding:9px 13px;border-radius:999px;" />
+                  <button onClick="{{ sendC }}" style="flex:none;width:34px;height:34px;border-radius:9px;border:none;background:var(--accent);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;" style-hover="filter:brightness(1.1)"><svg viewBox="0 0 24 24" style="width:18px;height:18px" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+    </sc-if>
+
+    <!-- ====== TODAY ====== -->
+    <sc-if value="{{ isToday }}" hint-placeholder-val="{{ false }}">
+      <div style="width:940px;max-width:97vw;height:600px;max-height:84vh;">
+        <div style="display:flex;flex-direction:column;height:100%;background:var(--win);backdrop-filter:blur(50px) saturate(180%) brightness(1.08);-webkit-backdrop-filter:blur(50px) saturate(180%) brightness(1.08);border-radius:13px;border:0.5px solid var(--border);box-shadow:var(--glass);overflow:hidden;">
+          <div style="display:flex;flex:1;min-height:0;">
+            <div style="width:222px;flex:none;background:var(--card);border-right:0.5px solid var(--sep);display:flex;flex-direction:column;">
+              <div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 14px;-webkit-app-region:drag;">
+                <span style="width:12px;height:12px;border-radius:50%;background:#ff5f57;"></span><span style="width:12px;height:12px;border-radius:50%;background:#febc2e;"></span><span style="width:12px;height:12px;border-radius:50%;background:#28c840;"></span>
+              </div>
+              <div style="display:flex;align-items:center;gap:9px;padding:6px 16px 14px;">
+                <span style="color:var(--accent);width:22px;height:22px;flex:none;"><svg viewBox="0 0 48 48" style="width:100%;height:100%" fill="currentColor"><path d="M15 16 L2 11 L15 19 Z"/><circle cx="16.5" cy="17" r="4.8"/><ellipse cx="24" cy="26" rx="10" ry="6.2" transform="rotate(30 24 26)"/><path d="M30 30 L45 36 L37 30 L44 25 Z"/><path d="M19 20 C 26 8 36 5 45 9 C 37 11 32 16 30 25 C 27 20 22 19 19 20 Z"/></svg></span>
+                <span style="font-size:15px;font-weight:700;color:var(--text);">OpenBird</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:1px;padding:0 8px;">
+                <button onClick="{{ noop }}" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:none;border-radius:7px;background:var(--accent);color:#fff;font:inherit;font-size:13px;cursor:pointer;text-align:left;"><svg viewBox="0 0 16 16" style="width:15px;height:15px" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>Today</button>
+                <button onClick="{{ noop }}" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:none;border-radius:7px;background:transparent;color:var(--text2);font:inherit;font-size:13px;cursor:pointer;text-align:left;" style-hover="background:var(--hover);color:var(--text)"><svg viewBox="0 0 16 16" style="width:15px;height:15px" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 4h12M2 8h9M2 12h6"/></svg>Timeline</button>
+                <button onClick="{{ noop }}" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:none;border-radius:7px;background:transparent;color:var(--text2);font:inherit;font-size:13px;cursor:pointer;text-align:left;" style-hover="background:var(--hover);color:var(--text)"><svg viewBox="0 0 16 16" style="width:15px;height:15px" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 9V7M6 11V5M9 12V4M12 10V6"/></svg>Meetings</button>
+                <button onClick="{{ noop }}" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:none;border-radius:7px;background:transparent;color:var(--text2);font:inherit;font-size:13px;cursor:pointer;text-align:left;" style-hover="background:var(--hover);color:var(--text)"><svg viewBox="0 0 16 16" style="width:15px;height:15px" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 1.5" stroke-linecap="round"/></svg>Routines</button>
+                <button onClick="{{ goAsk }}" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:none;border-radius:7px;background:transparent;color:var(--text2);font:inherit;font-size:13px;cursor:pointer;text-align:left;" style-hover="background:var(--hover);color:var(--text)"><svg viewBox="0 0 16 16" style="width:15px;height:15px" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14" stroke-linecap="round"/></svg>Search</button>
+                <button onClick="{{ goSetup }}" style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:none;border-radius:7px;background:transparent;color:var(--text2);font:inherit;font-size:13px;cursor:pointer;text-align:left;" style-hover="background:var(--hover);color:var(--text)"><svg viewBox="0 0 16 16" style="width:15px;height:15px" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 5h7M11 5h3M2 11h3M7 11h7"/><circle cx="9.5" cy="5" r="1.6"/><circle cx="5.5" cy="11" r="1.6"/></svg>Settings</button>
+              </div>
+              <div style="margin-top:auto;padding:12px 14px;border-top:0.5px solid var(--sep);">
+                <div style="display:flex;align-items:center;gap:8px;"><span style="width:7px;height:7px;border-radius:50%;background:#ff453a;animation:obPulse 1.7s ease-in-out infinite;"></span><span style="font-size:12.5px;font-weight:600;color:var(--text);">Capturing</span></div>
+                <div style="font-size:11px;color:var(--text3);margin-top:4px;">3 apps allowed · on-device · encrypted</div>
+              </div>
+            </div>
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;">
+              <div style="flex:none;display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:0.5px solid var(--sep);">
+                <div><div style="font-size:21px;font-weight:700;color:var(--text);">Yesterday</div><div style="font-size:12.5px;color:var(--text2);margin-top:1px;">Friday, June 19 · 6 sessions across 6 apps</div></div>
+                <button onClick="{{ goAsk }}" style="display:flex;align-items:center;gap:7px;border:0.5px solid var(--border);background:var(--field);color:var(--text);font:inherit;font-size:13px;font-weight:500;padding:7px 13px;border-radius:9px;cursor:pointer;" style-hover="background:var(--hover)"><span style="color:var(--accent);width:14px;height:14px;display:flex;"><svg viewBox="0 0 48 48" style="width:100%;height:100%" fill="currentColor"><path d="M15 16 L2 11 L15 19 Z"/><circle cx="16.5" cy="17" r="4.8"/><ellipse cx="24" cy="26" rx="10" ry="6.2" transform="rotate(30 24 26)"/><path d="M30 30 L45 36 L37 30 L44 25 Z"/><path d="M19 20 C 26 8 36 5 45 9 C 37 11 32 16 30 25 C 27 20 22 19 19 20 Z"/></svg></span>Ask about this day</button>
+              </div>
+              <div style="flex:1;overflow:auto;padding:20px 22px;">
+                <div style="background:var(--card);border:0.5px solid var(--border);border-radius:14px;padding:17px 18px;display:flex;flex-direction:column;gap:11px;margin-bottom:22px;">
+                  <div style="display:flex;align-items:center;gap:8px;"><span style="color:var(--accent);width:15px;height:15px;display:flex;"><svg viewBox="0 0 48 48" style="width:100%;height:100%" fill="currentColor"><path d="M15 16 L2 11 L15 19 Z"/><circle cx="16.5" cy="17" r="4.8"/><ellipse cx="24" cy="26" rx="10" ry="6.2" transform="rotate(30 24 26)"/><path d="M30 30 L45 36 L37 30 L44 25 Z"/><path d="M19 20 C 26 8 36 5 45 9 C 37 11 32 16 30 25 C 27 20 22 19 19 20 Z"/></svg></span><span style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--accent);">Daily briefing</span><span style="margin-left:auto;font-size:11px;color:var(--text3);">generated 7:00 AM</span></div>
+                  <div style="font-size:14px;line-height:1.6;color:var(--text);">A heads-down day on OpenBird’s citation pipeline. The morning was spent in <b>rag.py</b> validating occurrence-level citations and landing chunk-level dedup; the <b>Memory sync</b> call locked the S1/S2 label format; the afternoon closed out <b>OB-142</b> and drafted the storage-retention doc. Likely follow-ups: temporal-path tests and the prune/vacuum write-up.</div>
+                  <div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:2px;">
+                    <span style="font-size:11.5px;white-space:nowrap;color:var(--text2);background:var(--field);border:0.5px solid var(--border);border-radius:7px;padding:4px 10px;">6 apps</span>
+                    <span style="font-size:11.5px;white-space:nowrap;color:var(--text2);background:var(--field);border:0.5px solid var(--border);border-radius:7px;padding:4px 10px;">1 meeting · 35m</span>
+                    <span style="font-size:11.5px;white-space:nowrap;color:var(--text2);background:var(--field);border:0.5px solid var(--border);border-radius:7px;padding:4px 10px;">1,284 captures</span>
+                    <span style="font-size:11.5px;white-space:nowrap;color:var(--text2);background:var(--field);border:0.5px solid var(--border);border-radius:7px;padding:4px 10px;">5h 53m active</span>
+                  </div>
+                </div>
+                <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);margin-bottom:14px;">Timeline</div>
+                <div style="display:flex;gap:14px;"><div style="flex:none;width:56px;text-align:right;font-size:11.5px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:13px;">9:12<div style="color:var(--text3);">11:40</div></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:11px;height:11px;border-radius:50%;background:#2f6be0;margin-top:14px;box-shadow:0 0 0 4px var(--win)"></span><span style="flex:1;width:2px;background:var(--sep);"></span></div><div style="flex:1;min-width:0;padding-bottom:14px;"><div style="background:var(--card);border:0.5px solid var(--border);border-radius:11px;padding:12px 14px;"><div style="display:flex;align-items:center;gap:9px;"><span style="width:22px;height:22px;border-radius:6px;background:#2f6be0;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;">{}</span><div style="min-width:0;flex:1;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">rag.py — openbird</div><div style="font-size:11.5px;color:var(--text2);">Visual Studio Code · 2h 28m</div></div><span style="font-size:11px;color:var(--text3);flex:none;">142 captures</span></div><div style="font-size:12.5px;color:var(--text2);margin-top:8px;line-height:1.45;">Citation validation + chunk dedup. Distinct chunks of one doc now stay independently citable.</div></div></div></div>
+                <div style="display:flex;gap:14px;"><div style="flex:none;width:56px;text-align:right;font-size:11.5px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:13px;">11:00<div style="color:var(--text3);">11:35</div></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:11px;height:11px;border-radius:50%;background:#2d8cff;margin-top:14px;box-shadow:0 0 0 4px var(--win)"></span><span style="flex:1;width:2px;background:var(--sep);"></span></div><div style="flex:1;min-width:0;padding-bottom:14px;"><div style="background:var(--card);border:0.5px solid var(--border);border-radius:11px;padding:12px 14px;"><div style="display:flex;align-items:center;gap:9px;"><span style="width:22px;height:22px;border-radius:6px;background:#2d8cff;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;">Z</span><div style="min-width:0;flex:1;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">Memory sync · 4 people</div><div style="font-size:11.5px;color:var(--text2);">Zoom · 35m · transcript</div></div><span style="font-size:11px;color:var(--text3);flex:none;">meeting</span></div><div style="font-size:12.5px;color:var(--text2);margin-top:8px;line-height:1.45;">Agreed to ship short S1/S2 source labels over raw chunk hashes. Action: land OB-142 before the cut.</div></div></div></div>
+                <div style="display:flex;gap:14px;"><div style="flex:none;width:56px;text-align:right;font-size:11.5px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:13px;">12:30<div style="color:var(--text3);">1:05</div></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:11px;height:11px;border-radius:50%;background:#6b4fbb;margin-top:14px;box-shadow:0 0 0 4px var(--win)"></span><span style="flex:1;width:2px;background:var(--sep);"></span></div><div style="flex:1;min-width:0;padding-bottom:14px;"><div style="background:var(--card);border:0.5px solid var(--border);border-radius:11px;padding:12px 14px;"><div style="display:flex;align-items:center;gap:9px;"><span style="width:22px;height:22px;border-radius:6px;background:#6b4fbb;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;">#</span><div style="min-width:0;flex:1;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">#openbird</div><div style="font-size:11.5px;color:var(--text2);">Slack · 35m</div></div><span style="font-size:11px;color:var(--text3);flex:none;">21 captures</span></div><div style="font-size:12.5px;color:var(--text2);margin-top:8px;line-height:1.45;">Thread on retention defaults — landed on 90-day prune as the recommended baseline.</div></div></div></div>
+                <div style="display:flex;gap:14px;"><div style="flex:none;width:56px;text-align:right;font-size:11.5px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:13px;">2:15<div style="color:var(--text3);">2:50</div></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:11px;height:11px;border-radius:50%;background:#5e6ad2;margin-top:14px;box-shadow:0 0 0 4px var(--win)"></span><span style="flex:1;width:2px;background:var(--sep);"></span></div><div style="flex:1;min-width:0;padding-bottom:14px;"><div style="background:var(--card);border:0.5px solid var(--border);border-radius:11px;padding:12px 14px;"><div style="display:flex;align-items:center;gap:9px;"><span style="width:22px;height:22px;border-radius:6px;background:#5e6ad2;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;">L</span><div style="min-width:0;flex:1;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">OB-142 · Citation validation</div><div style="font-size:11.5px;color:var(--text2);">Linear · 35m</div></div><span style="font-size:11px;color:var(--text3);flex:none;">8 captures</span></div><div style="font-size:12.5px;color:var(--text2);margin-top:8px;line-height:1.45;">Moved To Do → In Review. Validator drops hallucinated ids; resolves labels back to observations.</div></div></div></div>
+                <div style="display:flex;gap:14px;"><div style="flex:none;width:56px;text-align:right;font-size:11.5px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:13px;">3:40<div style="color:var(--text3);">4:30</div></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:11px;height:11px;border-radius:50%;background:#4b4b52;margin-top:14px;box-shadow:0 0 0 4px var(--win)"></span><span style="flex:1;width:2px;background:var(--sep);"></span></div><div style="flex:1;min-width:0;padding-bottom:14px;"><div style="background:var(--card);border:0.5px solid var(--border);border-radius:11px;padding:12px 14px;"><div style="display:flex;align-items:center;gap:9px;"><span style="width:22px;height:22px;border-radius:6px;background:#4b4b52;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;">N</span><div style="min-width:0;flex:1;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">Storage growth &amp; retention</div><div style="font-size:11.5px;color:var(--text2);">Notion · 50m</div></div><span style="font-size:11px;color:var(--text3);flex:none;">64 captures</span></div><div style="font-size:12.5px;color:var(--text2);margin-top:8px;line-height:1.45;">Drafted the prune/vacuum section — cascade-delete old observations, reclaim pages with VACUUM.</div></div></div></div>
+                <div style="display:flex;gap:14px;"><div style="flex:none;width:56px;text-align:right;font-size:11.5px;color:var(--text2);font-variant-numeric:tabular-nums;padding-top:13px;">4:30<div style="color:var(--text3);">5:10</div></div><div style="flex:none;display:flex;flex-direction:column;align-items:center;"><span style="width:11px;height:11px;border-radius:50%;background:#3a7bee;margin-top:14px;box-shadow:0 0 0 4px var(--win)"></span></div><div style="flex:1;min-width:0;"><div style="background:var(--card);border:0.5px solid var(--border);border-radius:11px;padding:12px 14px;"><div style="display:flex;align-items:center;gap:9px;"><span style="width:22px;height:22px;border-radius:6px;background:#3a7bee;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none;">◉</span><div style="min-width:0;flex:1;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">sqlite-vec docs</div><div style="font-size:11.5px;color:var(--text2);">Chrome · 40m</div></div><span style="font-size:11px;color:var(--text3);flex:none;">12 captures</span></div><div style="font-size:12.5px;color:var(--text2);margin-top:8px;line-height:1.45;">Read up on KNN search + cohort dimensions for the embedding store.</div></div></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <!-- ====== SETUP / ONBOARDING JOURNEY ====== -->
+    <sc-if value="{{ isInstall }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:22px;">
+        <div style="width:560px;max-width:92vw;background:var(--win);backdrop-filter:blur(50px) saturate(180%) brightness(1.08);-webkit-backdrop-filter:blur(50px) saturate(180%) brightness(1.08);border-radius:13px;border:0.5px solid var(--border);box-shadow:var(--glass);overflow:hidden;">
+          <div style="display:flex;align-items:center;height:40px;padding:0 14px;border-bottom:0.5px solid var(--sep);position:relative;">
+            <div style="display:flex;gap:8px;"><span style="width:12px;height:12px;border-radius:50%;background:#ff5f57;"></span><span style="width:12px;height:12px;border-radius:50%;background:#febc2e;"></span><span style="width:12px;height:12px;border-radius:50%;background:#28c840;"></span></div>
+            <span style="position:absolute;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;color:var(--text2);"><svg viewBox="0 0 16 16" style="width:14px;height:14px" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="11" height="11" rx="2.4"/><circle cx="8" cy="8" r="2.2"/></svg>OpenBird</span>
+          </div>
+          <div style="position:relative;padding:38px 48px 42px;background:radial-gradient(130% 90% at 50% 0%, rgba(47,127,242,0.12), transparent 62%);display:flex;flex-direction:column;align-items:center;gap:26px;">
+            <div style="font-size:13.5px;color:var(--text2);">Drag <b style="color:var(--text);font-weight:600;">OpenBird</b> onto the Applications folder</div>
+            <div style="display:flex;align-items:center;gap:26px;">
+              <div style="display:flex;flex-direction:column;align-items:center;gap:11px;">
+                <div style="width:96px;height:96px;border-radius:22px;background:linear-gradient(160deg,#5a9bff,#2f6be0 58%,#1f54c4);box-shadow:0 12px 26px rgba(31,84,196,0.45),inset 0 1.5px 0 rgba(255,255,255,0.55);display:flex;align-items:center;justify-content:center;color:#fff;"><span style="width:56px;height:56px;display:block;"><svg viewBox="0 0 48 48" style="width:100%;height:100%" fill="currentColor"><path d="M15 16 L2 11 L15 19 Z"/><circle cx="16.5" cy="17" r="4.8"/><ellipse cx="24" cy="26" rx="10" ry="6.2" transform="rotate(30 24 26)"/><path d="M30 30 L45 36 L37 30 L44 25 Z"/><path d="M19 20 C 26 8 36 5 45 9 C 37 11 32 16 30 25 C 27 20 22 19 19 20 Z"/></svg></span></div>
+                <span style="font-size:12px;color:var(--text);font-weight:500;">OpenBird</span>
+              </div>
+              <svg viewBox="0 0 64 40" style="width:64px;height:40px;flex:none;color:var(--text3);" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20 C 22 6, 42 6, 58 20" stroke-dasharray="3 4"/><path d="M50 14 L59 20 L50 26"/></svg>
+              <div style="display:flex;flex-direction:column;align-items:center;gap:11px;">
+                <svg viewBox="0 0 96 80" style="width:96px;height:80px;flex:none;"><path d="M6 18 a5 5 0 0 1 5-5 h24 l8 8 h42 a5 5 0 0 1 5 5 v6 H6 z" fill="#4d8fe6"/><path d="M6 26 h90 v42 a6 6 0 0 1 -6 6 H12 a6 6 0 0 1 -6-6 z" fill="#79b3f2"/><path d="M6 26 h90 v7 H6 z" fill="#6aa7ee"/></svg>
+                <span style="font-size:12px;color:var(--text2);">Applications</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <button onClick="{{ openApp }}" style="border:none;background:var(--accent);color:#fff;font:inherit;font-size:13.5px;font-weight:600;padding:11px 26px;border-radius:10px;cursor:pointer;box-shadow:0 8px 22px rgba(47,127,242,0.4);" style-hover="filter:brightness(1.08)">Open OpenBird</button>
+        <span style="font-size:11.5px;color:var(--text3);margin-top:-10px;">First launch from your Applications folder</span>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isOnb }}" hint-placeholder-val="{{ false }}">
+      <div style="width:540px;max-width:92vw;background:var(--win);backdrop-filter:blur(50px) saturate(180%) brightness(1.08);-webkit-backdrop-filter:blur(50px) saturate(180%) brightness(1.08);border-radius:14px;border:0.5px solid var(--border);box-shadow:var(--glass);overflow:hidden;">
+        <div style="display:flex;align-items:center;height:42px;padding:0 14px;border-bottom:0.5px solid var(--sep);position:relative;">
+          <div style="display:flex;gap:8px;"><span style="width:12px;height:12px;border-radius:50%;background:#ff5f57;"></span><span style="width:12px;height:12px;border-radius:50%;background:#febc2e;"></span><span style="width:12px;height:12px;border-radius:50%;background:#28c840;"></span></div>
+          <div style="position:absolute;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:18px;">
+            <sc-for list="{{ onbSteps }}" as="st" hint-placeholder-count="3">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span style="width:7px;height:7px;border-radius:50%;background:{{ st.dotColor }};"></span>
+                <span style="font-size:11.5px;font-weight:{{ st.txtWeight }};color:{{ st.txtColor }};">{{ st.label }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <!-- STEP: WELCOME -->
+        <sc-if value="{{ isWelcome }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:30px 40px 30px;display:flex;flex-direction:column;align-items:center;text-align:center;">
+            <span style="color:var(--accent);width:50px;height:50px;"><svg viewBox="0 0 48 48" style="width:100%;height:100%" fill="currentColor"><path d="M15 16 L2 11 L15 19 Z"/><circle cx="16.5" cy="17" r="4.8"/><ellipse cx="24" cy="26" rx="10" ry="6.2" transform="rotate(30 24 26)"/><path d="M30 30 L45 36 L37 30 L44 25 Z"/><path d="M19 20 C 26 8 36 5 45 9 C 37 11 32 16 30 25 C 27 20 22 19 19 20 Z"/></svg></span>
+            <h1 style="font-size:22px;font-weight:700;margin:13px 0 6px;color:var(--text);">Welcome to OpenBird</h1>
+            <p style="font-size:13.5px;color:var(--text2);max-width:380px;line-height:1.55;margin:0 0 22px;">Your Mac's memory. OpenBird quietly remembers what you worked on, so you never have to retrace your day.</p>
+            <div style="width:100%;display:flex;flex-direction:column;gap:8px;text-align:left;">
+              <div style="display:flex;align-items:center;gap:13px;padding:12px 14px;border-radius:11px;background:var(--card);border:0.5px solid var(--border);">
+                <span style="width:34px;height:34px;border-radius:9px;background:rgba(47,127,242,0.14);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;"><svg viewBox="0 0 20 20" style="width:18px;height:18px" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.5 2"/></svg></span>
+                <div><div style="font-size:13.5px;font-weight:600;color:var(--text);">Remembers your day</div><div style="font-size:11.5px;color:var(--text2);">Ask "what did I work on?" — get a grounded answer with sources.</div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:13px;padding:12px 14px;border-radius:11px;background:var(--card);border:0.5px solid var(--border);">
+                <span style="width:34px;height:34px;border-radius:9px;background:rgba(47,127,242,0.14);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;"><svg viewBox="0 0 20 20" style="width:18px;height:18px" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 4C5 4 2.5 10 2.5 10S5 16 10 16s7.5-6 7.5-6S15 4 10 4z" stroke-linejoin="round"/><circle cx="10" cy="10" r="2.4"/></svg></span>
+                <div><div style="font-size:13.5px;font-weight:600;color:var(--text);">Reads text, never screenshots</div><div style="font-size:11.5px;color:var(--text2);">Only the words in your active window — no images captured.</div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:13px;padding:12px 14px;border-radius:11px;background:var(--card);border:0.5px solid var(--border);">
+                <span style="width:34px;height:34px;border-radius:9px;background:rgba(47,127,242,0.14);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;"><svg viewBox="0 0 20 20" style="width:18px;height:18px" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="9" width="12" height="8" rx="1.6"/><path d="M6.5 9V6.5a3.5 3.5 0 0 1 7 0V9" stroke-linecap="round"/></svg></span>
+                <div><div style="font-size:13.5px;font-weight:600;color:var(--text);">Everything stays on this Mac</div><div style="font-size:11.5px;color:var(--text2);">On-device storage, encrypted at rest. Nothing is uploaded.</div></div>
+              </div>
+            </div>
+            <button onClick="{{ onbNext }}" style="margin-top:22px;width:100%;border:none;background:var(--accent);color:#fff;font:inherit;font-size:14.5px;font-weight:600;padding:13px;border-radius:11px;cursor:pointer;" style-hover="filter:brightness(1.08)">Get started</button>
+          </div>
+        </sc-if>
+
+        <!-- STEP: PERMISSIONS -->
+        <sc-if value="{{ isPerms }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:26px 40px 28px;">
+            <div style="text-align:center;margin-bottom:20px;">
+              <h1 style="font-size:19px;font-weight:700;margin:0 0 5px;color:var(--text);">Grant a few permissions</h1>
+              <p style="font-size:12.5px;color:var(--text2);max-width:380px;margin:0 auto;line-height:1.5;">macOS requires your approval before OpenBird can read window text. You can change these anytime in Settings.</p>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:9px;">
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:12px;background:var(--card);border:0.5px solid var(--border);">
+                <span style="width:36px;height:36px;border-radius:9px;background:rgba(47,127,242,0.14);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;"><svg viewBox="0 0 20 20" style="width:18px;height:18px" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="3.5" width="15" height="10" rx="1.5"/><path d="M7 17h6M10 13.5V17" stroke-linecap="round"/></svg></span>
+                <div style="flex:1;min-width:0;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">Screen text capture <span style="font-size:10.5px;font-weight:600;color:var(--accent);background:rgba(47,127,242,0.13);padding:1px 6px;border-radius:5px;margin-left:4px;">Required</span></div><div style="font-size:11.5px;color:var(--text2);">Reads active-window text via Accessibility</div></div>
+                <sc-if value="{{ permScreen }}" hint-placeholder-val="{{ false }}"><span style="display:flex;align-items:center;gap:5px;color:var(--green);font-size:12.5px;font-weight:600;flex:none;"><svg viewBox="0 0 16 16" style="width:15px;height:15px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.5 3.5L13 4.5"/></svg>Granted</span></sc-if>
+                <sc-if value="{{ permScreenOff }}" hint-placeholder-val="{{ true }}"><button onClick="{{ grantScreen }}" style="border:none;background:var(--accent);color:#fff;font:inherit;font-size:12.5px;font-weight:600;padding:7px 15px;border-radius:8px;cursor:pointer;flex:none;" style-hover="filter:brightness(1.1)">Grant</button></sc-if>
+              </div>
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:12px;background:var(--card);border:0.5px solid var(--border);">
+                <span style="width:36px;height:36px;border-radius:9px;background:rgba(47,127,242,0.14);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;"><svg viewBox="0 0 20 20" style="width:18px;height:18px" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="10" cy="6" r="2.5"/><path d="M4 16c0-3 2.7-5 6-5s6 2 6 5" stroke-linecap="round"/></svg></span>
+                <div style="flex:1;min-width:0;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">Accessibility <span style="font-size:10.5px;font-weight:600;color:var(--accent);background:rgba(47,127,242,0.13);padding:1px 6px;border-radius:5px;margin-left:4px;">Required</span></div><div style="font-size:11.5px;color:var(--text2);">App &amp; window metadata for the timeline</div></div>
+                <sc-if value="{{ permAccess }}" hint-placeholder-val="{{ false }}"><span style="display:flex;align-items:center;gap:5px;color:var(--green);font-size:12.5px;font-weight:600;flex:none;"><svg viewBox="0 0 16 16" style="width:15px;height:15px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.5 3.5L13 4.5"/></svg>Granted</span></sc-if>
+                <sc-if value="{{ permAccessOff }}" hint-placeholder-val="{{ true }}"><button onClick="{{ grantAccess }}" style="border:none;background:var(--accent);color:#fff;font:inherit;font-size:12.5px;font-weight:600;padding:7px 15px;border-radius:8px;cursor:pointer;flex:none;" style-hover="filter:brightness(1.1)">Grant</button></sc-if>
+              </div>
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:12px;background:var(--card);border:0.5px solid var(--border);">
+                <span style="width:36px;height:36px;border-radius:9px;background:rgba(47,127,242,0.14);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;"><svg viewBox="0 0 20 20" style="width:18px;height:18px" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="7.5" y="2.5" width="5" height="9" rx="2.5"/><path d="M5 9a5 5 0 0 0 10 0M10 14.5V17M7 17h6"/></svg></span>
+                <div style="flex:1;min-width:0;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">System audio for meetings <span style="font-size:10.5px;font-weight:600;color:var(--text3);background:var(--hover);padding:1px 6px;border-radius:5px;margin-left:4px;">Optional</span></div><div style="font-size:11.5px;color:var(--text2);">Transcribe calls locally · skip and add later</div></div>
+                <sc-if value="{{ permAudio }}" hint-placeholder-val="{{ false }}"><span style="display:flex;align-items:center;gap:5px;color:var(--green);font-size:12.5px;font-weight:600;flex:none;"><svg viewBox="0 0 16 16" style="width:15px;height:15px" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.5 3.5L13 4.5"/></svg>On</span></sc-if>
+                <sc-if value="{{ permAudioOff }}" hint-placeholder-val="{{ true }}"><button onClick="{{ grantAudio }}" style="border:0.5px solid var(--border);background:transparent;color:var(--text);font:inherit;font-size:12.5px;font-weight:600;padding:7px 15px;border-radius:8px;cursor:pointer;flex:none;" style-hover="background:var(--hover)">Enable</button></sc-if>
+              </div>
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:12px;background:var(--card);border:0.5px solid var(--border);">
+                <span style="width:36px;height:36px;border-radius:9px;background:rgba(47,127,242,0.14);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;"><svg viewBox="0 0 20 20" style="width:18px;height:18px" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="4" width="15" height="12" rx="2"/><path d="M6 8l2.5 2L6 12M11 12h3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                <div style="flex:1;min-width:0;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">Local model · Ollama</div><div style="font-size:11.5px;color:var(--text2);">llama3.2 + nomic-embed-text · auto-detected</div></div>
+                <span style="display:flex;align-items:center;gap:5px;color:var(--green);font-size:12.5px;font-weight:600;flex:none;"><span style="width:7px;height:7px;border-radius:50%;background:var(--green);"></span>Connected</span>
+              </div>
+            </div>
+            <sc-if value="{{ canContinue }}" hint-placeholder-val="{{ false }}">
+              <button onClick="{{ permsNext }}" style="margin-top:20px;width:100%;border:none;background:var(--accent);color:#fff;font:inherit;font-size:14.5px;font-weight:600;padding:13px;border-radius:11px;cursor:pointer;" style-hover="filter:brightness(1.08)">Continue</button>
+            </sc-if>
+            <sc-if value="{{ canContinueOff }}" hint-placeholder-val="{{ true }}">
+              <div style="margin-top:20px;width:100%;background:var(--card);color:var(--text3);font-size:13px;font-weight:600;padding:13px;border-radius:11px;text-align:center;border:0.5px solid var(--border);">Grant the required permissions to continue</div>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <!-- STEP: READY -->
+        <sc-if value="{{ isReady }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:34px 40px 32px;display:flex;flex-direction:column;align-items:center;text-align:center;">
+            <span style="width:60px;height:60px;border-radius:50%;background:rgba(50,215,75,0.16);color:var(--green);display:flex;align-items:center;justify-content:center;"><svg viewBox="0 0 24 24" style="width:30px;height:30px" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg></span>
+            <h1 style="font-size:22px;font-weight:700;margin:15px 0 6px;color:var(--text);">You're all set</h1>
+            <p style="font-size:13.5px;color:var(--text2);max-width:360px;line-height:1.55;margin:0 0 22px;">OpenBird is now capturing in the background. Here's how to reach it.</p>
+            <div style="width:100%;display:flex;flex-direction:column;gap:9px;text-align:left;">
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:11px;background:var(--card);border:0.5px solid var(--border);">
+                <span style="display:flex;align-items:center;gap:3px;flex:none;"><kbd style="font:inherit;font-size:11px;font-weight:600;color:var(--text);background:var(--field);border:0.5px solid var(--border);border-radius:5px;padding:3px 6px;">⌥</kbd><kbd style="font:inherit;font-size:11px;font-weight:600;color:var(--text);background:var(--field);border:0.5px solid var(--border);border-radius:5px;padding:3px 7px;">Space</kbd></span>
+                <div><div style="font-size:13.5px;font-weight:600;color:var(--text);">Ask anytime</div><div style="font-size:11.5px;color:var(--text2);">Press the shortcut to open Ask from anywhere.</div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:11px;background:var(--card);border:0.5px solid var(--border);">
+                <span style="width:30px;height:30px;border-radius:7px;background:rgba(47,127,242,0.14);color:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;"><svg viewBox="0 0 48 48" style="width:19px;height:19px" fill="currentColor"><path d="M15 16 L2 11 L15 19 Z"/><circle cx="16.5" cy="17" r="4.8"/><ellipse cx="24" cy="26" rx="10" ry="6.2" transform="rotate(30 24 26)"/><path d="M30 30 L45 36 L37 30 L44 25 Z"/><path d="M19 20 C 26 8 36 5 45 9 C 37 11 32 16 30 25 C 27 20 22 19 19 20 Z"/></svg></span>
+                <div><div style="font-size:13.5px;font-weight:600;color:var(--text);">Live in your menu bar</div><div style="font-size:11.5px;color:var(--text2);">The bird shows capture status and quick actions.</div></div>
+              </div>
+            </div>
+            <button onClick="{{ finishOnb }}" style="margin-top:22px;width:100%;border:none;background:var(--accent);color:#fff;font:inherit;font-size:14.5px;font-weight:600;padding:13px;border-radius:11px;cursor:pointer;" style-hover="filter:brightness(1.08)">Start using OpenBird</button>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+
+  </div>
+
+  <!-- ============ PROTOTYPE CONTROL BAR ============ -->
+  <div style="position:absolute;bottom:18px;left:50%;transform:translateX(-50%);z-index:95;display:flex;align-items:center;gap:7px;background:linear-gradient(180deg,rgba(255,255,255,0.16),rgba(255,255,255,0) 60%),rgba(18,18,24,0.55);backdrop-filter:blur(30px) saturate(180%) brightness(1.08);-webkit-backdrop-filter:blur(30px) saturate(180%) brightness(1.08);border:0.5px solid rgba(255,255,255,0.14);border-radius:999px;padding:6px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.45),inset 0 0 0 0.5px rgba(255,255,255,0.1),0 14px 40px rgba(0,0,0,0.42);">
+    <div style="display:flex;gap:2px;">
+      <button onClick="{{ goMenu }}" style="padding:6px 13px;border:none;border-radius:999px;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;background:{{ seg.menu.bg }};color:{{ seg.menu.fg }};">Menu</button>
+      <button onClick="{{ goAsk }}" style="padding:6px 13px;border:none;border-radius:999px;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;background:{{ seg.ask.bg }};color:{{ seg.ask.fg }};">Ask</button>
+      <button onClick="{{ goToday }}" style="padding:6px 13px;border:none;border-radius:999px;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;background:{{ seg.today.bg }};color:{{ seg.today.fg }};">Today</button>
+      <button onClick="{{ goSetup }}" style="padding:6px 13px;border:none;border-radius:999px;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;background:{{ seg.setup.bg }};color:{{ seg.setup.fg }};">Setup</button>
+    </div>
+    <sc-if value="{{ isAsk }}" hint-placeholder-val="{{ true }}">
+      <div style="width:0.5px;height:22px;background:rgba(255,255,255,0.18);"></div>
+      <div style="display:flex;gap:2px;">
+        <button onClick="{{ selA }}" style="padding:6px 12px;border:none;border-radius:999px;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;background:{{ seg.a.bg }};color:{{ seg.a.fg }};">Spotlight</button>
+        <button onClick="{{ selB }}" style="padding:6px 12px;border:none;border-radius:999px;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;background:{{ seg.b.bg }};color:{{ seg.b.fg }};">Sources</button>
+        <button onClick="{{ selC }}" style="padding:6px 12px;border:none;border-radius:999px;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;background:{{ seg.c.bg }};color:{{ seg.c.fg }};">Timeline</button>
+      </div>
+    </sc-if>
+    <div style="width:0.5px;height:22px;background:rgba(255,255,255,0.18);"></div>
+    <button onClick="{{ toggleTheme }}" title="Toggle light / dark" style="width:30px;height:30px;border:none;border-radius:999px;background:rgba(255,255,255,0.1);color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;" style-hover="background:rgba(255,255,255,0.2)">{{ themeIcon }}</button>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#2f7ff2&quot;,&quot;options&quot;:[&quot;#2f7ff2&quot;,&quot;#7a5cff&quot;,&quot;#e0533d&quot;,&quot;#1fa463&quot;],&quot;tsType&quot;:&quot;string&quot;},&quot;wallpaper&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;Aurora&quot;,&quot;options&quot;:[&quot;Aurora&quot;,&quot;Graphite&quot;,&quot;Sunrise&quot;],&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  rootRef = React.createRef();
+  scrollA = React.createRef();
+  scrollB = React.createRef();
+  scrollC = React.createRef();
+  scrollDir(dir){ setTimeout(()=>{ const root=this.rootRef.current; const el=root&&root.querySelector('[data-scroll="'+dir+'"]'); if(el) el.scrollTop=el.scrollHeight; }, 60); }
+
+  PAL = {
+    dark:{'--bar':'linear-gradient(180deg,rgba(255,255,255,0.10),rgba(255,255,255,0) 65%),rgba(26,26,32,0.5)','--panel':'linear-gradient(180deg,rgba(255,255,255,0.14),rgba(255,255,255,0.02) 36%,rgba(255,255,255,0) 62%),rgba(46,46,55,0.6)','--win':'linear-gradient(180deg,rgba(255,255,255,0.11),rgba(255,255,255,0) 32%),rgba(34,34,42,0.64)','--field':'rgba(255,255,255,0.08)','--card':'rgba(255,255,255,0.06)','--text':'rgba(255,255,255,0.92)','--text2':'rgba(255,255,255,0.56)','--text3':'rgba(255,255,255,0.34)','--sep':'rgba(255,255,255,0.12)','--hover':'rgba(255,255,255,0.09)','--green':'#32d74b','--border':'rgba(255,255,255,0.10)','--shadow':'0 28px 70px rgba(0,0,0,0.55)','--glass':'inset 0 1px 0 rgba(255,255,255,0.5),inset 0 0 0 0.5px rgba(255,255,255,0.16),inset 0 -12px 22px -14px rgba(255,255,255,0.22),0 30px 70px rgba(0,0,0,0.55),0 4px 14px rgba(0,0,0,0.3)'},
+    light:{'--bar':'linear-gradient(180deg,rgba(255,255,255,0.75),rgba(255,255,255,0.25) 65%),rgba(255,255,255,0.45)','--panel':'linear-gradient(180deg,rgba(255,255,255,0.85),rgba(255,255,255,0.3) 40%),rgba(250,250,252,0.55)','--win':'linear-gradient(180deg,rgba(255,255,255,0.8),rgba(255,255,255,0.25) 34%),rgba(252,252,253,0.62)','--field':'rgba(0,0,0,0.05)','--card':'rgba(0,0,0,0.04)','--text':'rgba(0,0,0,0.85)','--text2':'rgba(0,0,0,0.5)','--text3':'rgba(0,0,0,0.34)','--sep':'rgba(0,0,0,0.1)','--hover':'rgba(0,0,0,0.06)','--green':'#1e9e3a','--border':'rgba(0,0,0,0.08)','--shadow':'0 28px 70px rgba(0,0,0,0.22)','--glass':'inset 0 1px 0 rgba(255,255,255,0.95),inset 0 0 0 0.5px rgba(255,255,255,0.6),inset 0 -12px 22px -14px rgba(255,255,255,0.7),0 30px 70px rgba(0,0,0,0.18),0 3px 10px rgba(0,0,0,0.12)'},
+  };
+  WALL = {
+    dark:{Aurora:'radial-gradient(130% 130% at 18% 8%, #3b4a86 0%, #2a2350 46%, #14202f 100%)',Graphite:'radial-gradient(130% 130% at 18% 8%, #3a3d46 0%, #25272e 50%, #141519 100%)',Sunrise:'radial-gradient(130% 130% at 18% 8%, #6b3f6e 0%, #3a2a54 46%, #182238 100%)'},
+    light:{Aurora:'radial-gradient(130% 130% at 18% 8%, #d6e4ff 0%, #ecebff 46%, #def0f6 100%)',Graphite:'radial-gradient(130% 130% at 18% 8%, #e9eaee 0%, #f3f4f6 50%, #e7e9ec 100%)',Sunrise:'radial-gradient(130% 130% at 18% 8%, #ffe3d6 0%, #fdeaf0 46%, #e7ecff 100%)'},
+  };
+  SRC = {
+    vscode:{glyph:'{}',color:'#2f6be0',app:'VS Code',time:'9:12 AM'},
+    zoom:{glyph:'Z',color:'#2d8cff',app:'Zoom',time:'11:00 AM'},
+    linear:{glyph:'L',color:'#5e6ad2',app:'Linear',time:'2:15 PM'},
+    notion:{glyph:'N',color:'#4b4b52',app:'Notion',time:'3:40 PM'},
+  };
+
+  state = { surface:'ask', dir:'A', theme:'dark', drafts:{A:'',B:'',C:''}, follow:{A:[],B:[],C:[]}, thinking:{A:false,B:false,C:false}, onb:0, perms:{screen:false,access:false,audio:false} };
+
+  componentDidMount(){ this.applyTheme(this.state.theme); }
+  componentDidUpdate(prev){ if(prev.accent!==this.props.accent || prev.wallpaper!==this.props.wallpaper) this.applyTheme(this.state.theme); }
+  applyTheme(t){
+    const el=this.rootRef.current; if(!el) return;
+    const p=this.PAL[t]; for(const k in p) el.style.setProperty(k,p[k]);
+    el.style.setProperty('--accent', this.props.accent || '#2f7ff2');
+    const w=(this.WALL[t]||this.WALL.dark);
+    el.style.setProperty('--wall', w[this.props.wallpaper] || w.Aurora);
+  }
+
+  goMenu=()=>this.setState({surface:'menu'});
+  goAsk=()=>this.setState({surface:'ask'});
+  goToday=()=>this.setState({surface:'today'});
+  goSetup=()=>this.setState({surface:'setup',onb:0});
+  noop=()=>{};
+  openApp=()=>this.setState({onb:1});
+  onbNext=()=>this.setState(s=>({onb:Math.min(3,s.onb+1)}));
+  onbBack=()=>this.setState(s=>({onb:Math.max(0,s.onb-1)}));
+  grant=(k)=>this.setState(s=>({perms:{...s.perms,[k]:true}}));
+  permsNext=()=>{ if(this.state.perms.screen && this.state.perms.access) this.setState({onb:3}); };
+  finishOnb=()=>this.setState({surface:'today'});
+  sel=(d)=>this.setState({dir:d,surface:'ask'});
+  toggleTheme=()=>{ const t=this.state.theme==='dark'?'light':'dark'; this.applyTheme(t); this.setState({theme:t}); };
+
+  setDraft=(dir,v)=>this.setState(s=>({drafts:{...s.drafts,[dir]:v}}));
+  onKey=(dir,e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); this.send(dir); } };
+  send=(dir)=>{ const q=(this.state.drafts[dir]||'').trim(); if(!q) return; this.setState(s=>({drafts:{...s.drafts,[dir]:''}})); this.sendText(dir,q); };
+  sendText=(dir,q)=>{
+    this.setState(s=>({ follow:{...s.follow,[dir]:[...s.follow[dir],{role:'user',text:q}]}, thinking:{...s.thinking,[dir]:true} }));
+    this.scrollDir(dir);
+    setTimeout(()=>{
+      const a=this.matchAnswer(q);
+      this.setState(s=>({ follow:{...s.follow,[dir]:[...s.follow[dir],{role:'assistant',text:a.text,sources:a.sources}]}, thinking:{...s.thinking,[dir]:false} }));
+      this.scrollDir(dir);
+    }, 850);
+  };
+  matchAnswer(q){
+    const l=q.toLowerCase(); const S=this.SRC;
+    if(/(meeting|sync|call|zoom)/.test(l)) return {text:'The Memory sync call was about the citation work. The team agreed to ship short S1/S2 source labels instead of raw chunk hashes — small local models echo them reliably. Your action item was to land OB-142 before the weekly cut.', sources:[S.zoom,S.linear]};
+    if(/(142|ticket|review|left|todo|citation)/.test(l)) return {text:'OB-142 — Citation validation is In Review. The validator now drops hallucinated ids and resolves each accepted label back to its observation (app, window, time). Still open: a test for the temporal path and the ungrounded-answer gate.', sources:[S.linear,S.vscode]};
+    if(/(standup|draft|update|summary|summarize)/.test(l)) return {text:'Draft standup:\n• Shipped occurrence-level citation validation (OB-142, in review)\n• Landed chunk-level dedup so distinct chunks of one doc stay citable\n• Next: temporal-window tests + the prune/vacuum retention doc', sources:[S.linear,S.notion]};
+    return {text:'Here’s what I found in your memory. Most of yesterday’s signal is the OpenBird citation pipeline and the storage-retention doc — want me to expand either?', sources:[S.vscode,S.notion]};
+  }
+  mapFollow(dir){ return this.state.follow[dir].map(m=>({ isUser:m.role==='user', isAsst:m.role==='assistant', text:m.text, sources:m.sources||[], hasSources:!!(m.sources&&m.sources.length) })); }
+  chip(dir,label){ return {label, onClick:()=>this.sendText(dir,label)}; }
+
+  renderVals(){
+    const s=this.state;
+    const onv=(on)=> on ? {bg:'rgba(255,255,255,0.18)',fg:'#fff'} : {bg:'transparent',fg:'rgba(255,255,255,0.58)'};
+    const chips=(d)=>[ this.chip(d,'Summarize the Memory sync call'), this.chip(d,'What’s left on OB-142?'), this.chip(d,'Draft my standup') ];
+    return {
+      rootRef:this.rootRef, scrollA:this.scrollA, scrollB:this.scrollB, scrollC:this.scrollC,
+      isMenu:s.surface==='menu', isNotMenu:s.surface!=='menu', isAsk:s.surface==='ask', isToday:s.surface==='today', isSetup:s.surface==='setup',
+      isInstall:s.surface==='setup'&&s.onb===0, isOnb:s.surface==='setup'&&s.onb>=1,
+      isWelcome:s.onb===1, isPerms:s.onb===2, isReady:s.onb===3,
+      permScreen:s.perms.screen, permAccess:s.perms.access, permAudio:s.perms.audio,
+      canContinue:s.perms.screen&&s.perms.access, canContinueOff:!(s.perms.screen&&s.perms.access),
+      permScreenOff:!s.perms.screen, permAccessOff:!s.perms.access, permAudioOff:!s.perms.audio, neverShow:false,
+      grantScreen:()=>this.grant('screen'), grantAccess:()=>this.grant('access'), grantAudio:()=>this.grant('audio'),
+      openApp:this.openApp, onbNext:this.onbNext, onbBack:this.onbBack, permsNext:this.permsNext, finishOnb:this.finishOnb,
+      onbSteps:['Welcome','Permissions','Ready'].map((label,i)=>{ const n=i+1, accent=this.props.accent||'#2f7ff2'; const done=s.onb>n, active=s.onb===n; return {label, dotColor:(done||active)?accent:'var(--text3)', txtColor:active?'var(--text)':(done?'var(--text2)':'var(--text3)'), txtWeight:active?'700':'500'}; }),
+      isA:s.dir==='A', isB:s.dir==='B', isC:s.dir==='C',
+      goMenu:this.goMenu, goAsk:this.goAsk, goToday:this.goToday, goSetup:this.goSetup, noop:this.noop,
+      selA:()=>this.sel('A'), selB:()=>this.sel('B'), selC:()=>this.sel('C'), toggleTheme:this.toggleTheme,
+      themeIcon: s.theme==='dark' ? '☾' : '☀',
+      draftA:s.drafts.A, draftB:s.drafts.B, draftC:s.drafts.C,
+      inA:e=>this.setDraft('A',e.target.value), inB:e=>this.setDraft('B',e.target.value), inC:e=>this.setDraft('C',e.target.value),
+      keyA:e=>this.onKey('A',e), keyB:e=>this.onKey('B',e), keyC:e=>this.onKey('C',e),
+      sendA:()=>this.send('A'), sendB:()=>this.send('B'), sendC:()=>this.send('C'),
+      thinkingA:s.thinking.A, thinkingB:s.thinking.B, thinkingC:s.thinking.C,
+      followA:this.mapFollow('A'), followB:this.mapFollow('B'), followC:this.mapFollow('C'),
+      chipsA:chips('A'), chipsB:chips('B'), chipsC:chips('C'),
+      seg:{ menu:onv(s.surface==='menu'), ask:onv(s.surface==='ask'), today:onv(s.surface==='today'), setup:onv(s.surface==='setup'), a:onv(s.dir==='A'), b:onv(s.dir==='B'), c:onv(s.dir==='C') },
+    };
+  }
+}
+</script>
+</body>
+</html>

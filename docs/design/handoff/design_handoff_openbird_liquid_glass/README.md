@@ -96,6 +96,23 @@ All three answer the same seed query **"What did I work on yesterday?"** with th
 - All other icons (wifi, battery, nav, permissions, send arrow) are inline SVG strokes — replace with SF Symbols on macOS.
 - No raster images; nothing external.
 
+## Reference Screenshots (`screenshots/`)
+Per-screen reference captures. Filenames match the validation checklist in `CLAUDE_CODE_PROMPT.md`.
+Note: the live **backdrop-blur was flattened to a solid fill** for these captures (the renderer can't
+rasterize `backdrop-filter`) — judge layout/color/type/copy from these, but open `OpenBird.dc.html` for
+the true glass translucency, blur, and color refraction.
+
+- `01-menu-dropdown-dark.png` — Menu bar + dropdown (dark)
+- `02-ask-spotlight-dark.png` — Ask · Direction A "Spotlight" (dark)
+- `03-ask-sources-rail-dark.png` — Ask · Direction B "Sources rail" (dark)
+- `04-ask-timeline-dark.png` — Ask · Direction C "Timeline-grounded" (dark)
+- `05-today-dayview-dark.png` — Today / day view (dark)
+- `06-setup-onboarding-dark.png` — Onboarding / permissions (dark)
+- `07-ask-spotlight-light.png` — Ask · Spotlight (light)
+- `08-today-dayview-light.png` — Today (light)
+
 ## Files
 - `OpenBird.dc.html` — the full prototype (all four surfaces + three Ask directions, light/dark, demo chat logic). Open in a browser to interact.
 - `support.js` — prototype runtime only. **Not** part of the product; do not port.
+- `CLAUDE_CODE_PROMPT.md` — implementation + per-screenshot validation protocol. Start here for the build/validate loop.
+- `screenshots/` — the 8 reference captures listed above.
