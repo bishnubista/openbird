@@ -57,9 +57,12 @@ final class AskPanelController: NSObject, ObservableObject {
         hotKeyInstalled = true
     }
 
-    /// ⌥Space: hide whichever Ask surface is visible, else summon the compact panel.
+    /// ⌥Space deterministically yields the compact panel: hide it if it's already
+    /// showing, otherwise show it (closing the expanded window first if open). It never
+    /// reopens the 960px expanded surface — that is only reached via the expand button
+    /// (CodeRabbit).
     func toggle() {
-        if isCompactVisible || isExpandedVisible { hide() } else { show() }
+        if isCompactVisible { hide() } else { show() }
     }
 
     private var isCompactVisible: Bool { compactPanel?.isVisible ?? false }
