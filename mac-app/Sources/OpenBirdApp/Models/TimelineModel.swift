@@ -17,6 +17,11 @@ final class TimelineModel: ObservableObject {
     /// "Yesterday" as demo content, but a live timeline defaults to the current day.
     @Published var dayOffset = 0
 
+    /// Base date the currently-loaded data was fetched against. `dayTitle`/`dayHeading`
+    /// derive from this rather than `Date()` so an always-open window past midnight
+    /// keeps labels aligned with the loaded sessions until the next load (CodeRabbit).
+    private var dayReference = Date()
+
     private let service: OpenBirdService
     /// Bumped on every `load()`; an in-flight fetch only commits if it is still the
     /// current generation when it resumes (drops superseded day-switch/refresh races).
@@ -32,7 +37,7 @@ final class TimelineModel: ObservableObject {
         case 0: return "Today"
         case 1: return "Yesterday"
         default:
-            guard let day = Calendar.current.date(byAdding: .day, value: -dayOffset, to: Date())
+            guard let day = Calendar.current.date(byAdding: .day, value: -dayOffset, to: dayReference)
             else { return "\(dayOffset) days ago" }
             return day.formatted(.dateTime.weekday(.wide))
         }
@@ -40,7 +45,7 @@ final class TimelineModel: ObservableObject {
 
     /// Uppercase full-date rail header ("FRIDAY, JUNE 19"), matching the handoff.
     var dayHeading: String {
-        let date = Calendar.current.date(byAdding: .day, value: -dayOffset, to: Date()) ?? Date()
+        let date = Calendar.current.date(byAdding: .day, value: -dayOffset, to: dayReference) ?? dayReference
         return date.formatted(.dateTime.weekday(.wide).month(.wide).day()).uppercased()
     }
 
@@ -53,6 +58,7 @@ final class TimelineModel: ObservableObject {
     }
 
     func load() async {
+        dayReference = Date()   // anchor day labels to this fetch
         loadGeneration += 1
         let generation = loadGeneration
         let day = dayOffset
