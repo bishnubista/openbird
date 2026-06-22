@@ -98,4 +98,27 @@ final class AccessibilityGrantAppModelTests: XCTestCase {
         XCTAssertTrue(recorder.openedPanes.isEmpty)
         XCTAssertEqual(model.lastActionMessage, "Accessibility is already granted.")
     }
+
+    func testRequestAccessibilityRefreshesBeforeCheckingCachedGrantedState() {
+        let recorder = PermissionRecorder(trusted: true)
+        let service = OpenBirdService(
+            accessibilityProbe: { recorder.trusted },
+            accessibilityPrompter: { recorder.promptCount += 1 },
+            privacyPaneOpener: { recorder.openedPanes.append($0) }
+        )
+        let model = AppModel(service: service)
+        XCTAssertTrue(model.accessibilityGranted)
+
+        recorder.trusted = false
+        model.requestAccessibility()
+
+        XCTAssertFalse(model.accessibilityGranted)
+        XCTAssertEqual(model.accessibilityState, .attention)
+        XCTAssertEqual(recorder.promptCount, 1)
+        XCTAssertEqual(recorder.openedPanes, [.accessibility])
+        XCTAssertEqual(
+            model.lastActionMessage,
+            "Approve OpenBird in the prompt (or System Settings), then Re-check."
+        )
+    }
 }

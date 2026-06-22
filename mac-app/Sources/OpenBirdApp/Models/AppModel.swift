@@ -320,8 +320,8 @@ final class AppModel: ObservableObject {
     // These trigger native TCC prompts only when the relevant grant is not already
     // present. After granting, the user taps Re-check to refresh full setup state.
     func requestAccessibility() {
+        refreshPermissionStates()
         if accessibilityEffectivelyGranted {
-            refreshPermissionStates()
             lastActionMessage = "Accessibility is already granted."
             return
         }
