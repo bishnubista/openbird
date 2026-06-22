@@ -152,7 +152,7 @@ struct TimelineAskView: View {
                     withAnimation { proxy.scrollTo("chat-tail", anchor: .bottom) }
                 }
             }
-            AskFollowUpBar(draft: $draft, onSubmit: submit)
+            AskFollowUpBar(draft: $draft, isBusy: chat.busy, onSubmit: submit)
         }
     }
 

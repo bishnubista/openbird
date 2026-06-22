@@ -46,6 +46,11 @@ struct MenuBarView: View {
                 NSApp.activate(ignoringOtherApps: true)
             }
 
+            Button("Ask with Sources") {
+                openWindow(id: "sources")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+
             Divider()
 
             ForEach(model.helpers) { helper in

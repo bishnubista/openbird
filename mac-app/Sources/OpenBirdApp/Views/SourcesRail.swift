@@ -1,0 +1,97 @@
+import SwiftUI
+
+/// The 262px "Sources" panel from the handoff (Direction B): a header count and a
+/// scroll of numbered citation cards — glyph tile + index + title + "App · time" +
+/// a one-line excerpt. Bound to the latest completed answer's citations; shows an
+/// empty state before the first answer.
+struct SourcesRail: View {
+    let citations: [ChatCitation]
+
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("SOURCES · \(citations.count)")
+                .font(.system(size: 10.5, weight: .bold))
+                .tracking(0.6)
+                .foregroundStyle(OB.textTertiary(scheme))
+                .padding(.horizontal, OB.Space.ml)
+                .padding(.top, OB.Space.ml)
+                .padding(.bottom, OB.Space.sm)
+
+            if citations.isEmpty {
+                Text("Ask a question to see its sources.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(OB.textTertiary(scheme))
+                    .padding(.horizontal, OB.Space.ml)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: OB.Space.sm) {
+                        ForEach(citations) { card($0) }
+                    }
+                    .padding(.horizontal, OB.Space.m)
+                    .padding(.top, OB.Space.xs)
+                    .padding(.bottom, OB.Space.ml)
+                }
+            }
+        }
+        .frame(width: 262)
+        .frame(maxHeight: .infinity)
+    }
+
+    /// Card title: the captured window title, falling back to the app name, then a
+    /// generic label — so a card never renders blank. Trim first so whitespace-only
+    /// metadata still falls through instead of rendering blank-looking text (CodeRabbit).
+    static func cardTitle(_ c: ChatCitation) -> String {
+        if let window = c.window?.trimmingCharacters(in: .whitespacesAndNewlines), !window.isEmpty {
+            return window
+        }
+        if let app = c.app?.trimmingCharacters(in: .whitespacesAndNewlines), !app.isEmpty {
+            return app
+        }
+        return "Source"
+    }
+
+    private func card(_ c: ChatCitation) -> some View {
+        let identity = SourceIdentity.forApp(c.app)
+        let title = Self.cardTitle(c)
+        return HStack(alignment: .top, spacing: 10) {
+            Text(identity.glyph)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 24, height: 24)
+                .background(identity.color, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline, spacing: OB.Space.s) {
+                    Text("\(c.index)")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(OB.accent)
+                    Text(title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(OB.textPrimary(scheme))
+                        .lineLimit(1)
+                }
+                Text("\(c.app ?? "unknown") · \(CitationFormatting.shortTime(c.ts))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(OB.textSecondary(scheme))
+                if !c.snippet.isEmpty {
+                    Text(c.snippet)
+                        .font(.system(size: 11))
+                        .lineSpacing(1)
+                        .foregroundStyle(OB.textTertiary(scheme))
+                        .lineLimit(2)
+                        .padding(.top, 3)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(OB.fieldFill(scheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(OB.separator(scheme), lineWidth: 0.5)
+        )
+    }
+}
