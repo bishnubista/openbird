@@ -12,6 +12,9 @@ final class SourcesRailTests: XCTestCase {
         XCTAssertEqual(SourcesRail.cardTitle(citation(index: 1, app: "Zoom", window: "")), "Zoom")
         XCTAssertEqual(SourcesRail.cardTitle(citation(index: 1, app: "Zoom", window: nil)), "Zoom")
         XCTAssertEqual(SourcesRail.cardTitle(citation(index: 1, app: nil, window: nil)), "Source")
+        // Whitespace-only metadata falls through instead of rendering blank.
+        XCTAssertEqual(SourcesRail.cardTitle(citation(index: 1, app: "Zoom", window: "   ")), "Zoom")
+        XCTAssertEqual(SourcesRail.cardTitle(citation(index: 1, app: "  ", window: "  ")), "Source")
     }
 }
 

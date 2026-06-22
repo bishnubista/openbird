@@ -41,10 +41,15 @@ struct SourcesRail: View {
     }
 
     /// Card title: the captured window title, falling back to the app name, then a
-    /// generic label — so a card never renders blank.
+    /// generic label — so a card never renders blank. Trim first so whitespace-only
+    /// metadata still falls through instead of rendering blank-looking text (CodeRabbit).
     static func cardTitle(_ c: ChatCitation) -> String {
-        if let window = c.window, !window.isEmpty { return window }
-        if let app = c.app, !app.isEmpty { return app }
+        if let window = c.window?.trimmingCharacters(in: .whitespacesAndNewlines), !window.isEmpty {
+            return window
+        }
+        if let app = c.app?.trimmingCharacters(in: .whitespacesAndNewlines), !app.isEmpty {
+            return app
+        }
         return "Source"
     }
 
