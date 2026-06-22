@@ -185,6 +185,13 @@ final class OpenBirdService: @unchecked Sendable {
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         if let key = injectedDBKey {
             env["OPENBIRD_DB_KEY"] = key
+        } else {
+            // If the signed app could not resolve the key, never let the bundled
+            // Python interpreter try Keychain itself. That fallback is what makes
+            // macOS prompt for "python3.13" instead of "OpenBird". Strict mode
+            // also keeps this from silently degrading to plaintext.
+            env["OPENBIRD_DISABLE_KEYRING"] = "1"
+            env["OPENBIRD_REQUIRE_ENCRYPTION"] = "1"
         }
         return env
     }

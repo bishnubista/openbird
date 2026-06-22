@@ -22,6 +22,13 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
     }
 
+    func testChildEnvironmentDisablesPythonKeyringFallbackWhenAppKeyMissing() {
+        let env = OpenBirdService.childEnvironment(base: [:])
+
+        XCTAssertEqual(env["OPENBIRD_DISABLE_KEYRING"], "1")
+        XCTAssertEqual(env["OPENBIRD_REQUIRE_ENCRYPTION"], "1")
+    }
+
     func testParseMemoryStatsDecodesCliJson() {
         let stats = OpenBirdService.parseMemoryStats("""
         {
