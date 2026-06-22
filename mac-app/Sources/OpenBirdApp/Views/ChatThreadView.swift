@@ -101,6 +101,18 @@ struct AskFollowUpBar: View {
 
     @Environment(\.colorScheme) private var scheme
 
+    private var canSubmit: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Single submit gate so Enter and the send button apply the identical non-empty
+    /// rule — Enter must not fire on a whitespace-only draft while the button is
+    /// disabled (CodeRabbit).
+    private func submitIfAllowed() {
+        guard canSubmit else { return }
+        onSubmit()
+    }
+
     var body: some View {
         HStack(spacing: OB.Space.sm) {
             TextField("Ask about your work…", text: $draft)
@@ -111,8 +123,8 @@ struct AskFollowUpBar: View {
                 .padding(.vertical, 9)
                 .background(OB.fieldFill(scheme), in: Capsule())
                 .overlay(Capsule().strokeBorder(OB.separator(scheme), lineWidth: 0.5))
-                .onSubmit(onSubmit)
-            Button(action: onSubmit) {
+                .onSubmit(submitIfAllowed)
+            Button(action: submitIfAllowed) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
@@ -120,7 +132,7 @@ struct AskFollowUpBar: View {
                     .background(OB.accent, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             }
             .buttonStyle(.plain)
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!canSubmit)
         }
         .padding(OB.Space.m)
         .overlay(alignment: .top) {
