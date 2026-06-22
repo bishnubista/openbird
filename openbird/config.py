@@ -47,6 +47,32 @@ def _default_data_dir() -> Path:
     return Path.home() / ".openbird"
 
 
+def data_dir_path() -> Path:
+    """Resolve the data dir WITHOUT creating it (side-effect-free).
+
+    Mirrors :func:`_default_data_dir` precedence (``OPENBIRD_DATA_DIR`` →
+    ``~/.openbird``) but, unlike :func:`get_settings`, never calls ``mkdir`` /
+    ``chmod`` via :meth:`Settings.__post_init__`. Use this for read-only / destructive
+    flows (e.g. ``uninstall``, ``--dry-run``) where merely resolving the path must
+    not materialize ``~/.openbird`` on an otherwise-clean machine.
+    """
+    return _default_data_dir()
+
+
+def db_file_path() -> Path:
+    """Resolve the DB file WITHOUT creating anything (side-effect-free).
+
+    Mirrors :meth:`Settings.__post_init__` precedence: a non-empty
+    ``OPENBIRD_DB_PATH`` wins (it may point OUTSIDE the data dir); otherwise
+    ``<data dir>/openbird.db``. An empty ``OPENBIRD_DB_PATH`` is treated as unset,
+    matching :func:`_settings_from_env`.
+    """
+    override = os.environ.get("OPENBIRD_DB_PATH")
+    if override:
+        return Path(override).expanduser()
+    return data_dir_path() / "openbird.db"
+
+
 @dataclass
 class Settings:
     """Runtime configuration for OpenBird.
@@ -309,6 +335,8 @@ __all__ = [
     "Settings",
     "get_settings",
     "reset_settings_cache",
+    "data_dir_path",
+    "db_file_path",
     "resolved_ollama_host",
     "is_loopback_host",
     "is_ollama_model",

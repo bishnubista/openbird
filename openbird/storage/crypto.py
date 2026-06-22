@@ -214,6 +214,78 @@ def _get_or_create_key() -> str | None:
         return None
 
 
+# The 16-byte SQLite plaintext header. A non-empty DB whose first bytes are NOT
+# this is treated as SQLCipher-encrypted (or otherwise unsafe to drop the key for).
+# Kept in sync with the Swift KeychainKeyProvider.sqliteMagic.
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def db_is_plaintext_or_absent(path: str | Path) -> bool:
+    """True iff the DB at ``path`` is safe to drop the Keychain key for.
+
+    Safe means the file is **absent or empty**, or its header **==** the plaintext
+    SQLite magic. A non-empty file lacking the magic looks SQLCipher-encrypted, so
+    the key must be RETAINED (returns False) — deleting it would strand the DB.
+    Side-effect-free: opens read-only and never creates the file. Never raises.
+    """
+    p = Path(path)
+    try:
+        if not p.exists() or p.stat().st_size == 0:
+            return True
+        with p.open("rb") as fh:
+            head = fh.read(len(_SQLITE_MAGIC))
+    except OSError:
+        # Cannot read it -> fail safe by RETAINING the key (treat as unsafe).
+        return False
+    if not head:
+        return True
+    return head == _SQLITE_MAGIC
+
+
+def delete_key() -> bool:
+    """Delete the DB-encryption key from the Keychain. Returns True if removed.
+
+    Tolerant of a missing item (returns False, not an error) and of any keyring
+    backend failure (logged content-safe, returns False). Honors the same
+    ``OPENBIRD_DISABLE_KEYRING`` opt-out as :func:`_get_or_create_key` so CI/dev
+    runs never touch the real Keychain. Caller is responsible for the stranding
+    guard (see :func:`db_is_plaintext_or_absent`).
+    """
+    if os.environ.get("OPENBIRD_DISABLE_KEYRING", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        logger.info("OPENBIRD_DISABLE_KEYRING set; skipping Keychain key deletion")
+        return False
+    try:
+        import keyring
+        import keyring.errors
+    except ImportError:
+        return False
+    try:
+        result = _call_keyring(
+            "delete_password",
+            keyring.delete_password,
+            _KEYRING_SERVICE,
+            _KEYRING_USER,
+        )
+        if result is _KEYRING_TIMEOUT:
+            return False
+        logger.info("db key deleted from Keychain")
+        return True
+    except keyring.errors.PasswordDeleteError:
+        # No such item — already absent, treat as a no-op success-ish (nothing left).
+        logger.info("db key already absent from Keychain")
+        return False
+    except Exception as exc:  # keyring backend errors, locked keychain, etc.
+        logger.warning(
+            "keyring unavailable for key deletion (%s)", type(exc).__name__
+        )
+        return False
+
+
 def _try_sqlcipher(path: str, key: str) -> sqlite3.Connection | None:
     """Attempt to open an encrypted SQLCipher connection with sqlite-vec.
 

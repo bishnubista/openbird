@@ -113,3 +113,11 @@ keychain; override via a gitignored `script/release.env`. See
 - Dev runs without the recurring Keychain prompt: prefix with `OPENBIRD_DISABLE_KEYRING=1`
   (each `uv run` is a different unsigned interpreter, so the DB-key ACL never matches; the
   signed `.app` is unaffected).
+- Uninstall / system-state cleanup: `openbird uninstall --dry-run` (preview), then
+  `openbird uninstall` (LaunchAgent + Launch Services + Keychain key; data preserved) or
+  `openbird uninstall --purge-data` (also deletes `~/.openbird`). The Keychain key is
+  retained when an encrypted DB still depends on it.
+- Dev Launch-Services hygiene (purge stale `dist/OpenBird.app` ghosts that shadow the real
+  install by bundle id): `./script/dev_cleanup.sh` (add `--dist` to also delete build
+  artifacts). By default only ghost + `*/dist/` dev builds are touched; `/Applications` is
+  kept unless `--all`; Homebrew/Cellar/libexec installs are never unregistered.
