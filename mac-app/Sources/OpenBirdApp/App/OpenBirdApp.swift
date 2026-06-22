@@ -24,6 +24,9 @@ struct OpenBirdApp: App {
     /// sharing the one service; the thread persists across window reopen and is reset
     /// on day change inside the view.
     @StateObject private var timelineChat: AskPanelModel
+    /// Per-window chat thread for the Sources window (Direction B). Window-local — no
+    /// history shared with the Spotlight panel or the Timeline window.
+    @StateObject private var sourcesChat: AskPanelModel
 
     /// Construct the service, model, Ask-panel controller, and Today model TOGETHER,
     /// sharing the one `AppModel`/`OpenBirdService`, so there is never a second model
@@ -36,6 +39,7 @@ struct OpenBirdApp: App {
         _todayModel = StateObject(wrappedValue: TodayModel(service: service))
         _timelineModel = StateObject(wrappedValue: TimelineModel(service: service))
         _timelineChat = StateObject(wrappedValue: AskPanelModel(service: service, appModel: model))
+        _sourcesChat = StateObject(wrappedValue: AskPanelModel(service: service, appModel: model))
     }
 
     var body: some Scene {
@@ -57,6 +61,11 @@ struct OpenBirdApp: App {
 
         Window("Timeline", id: "timeline") {
             TimelineAskView(model: timelineModel, chat: timelineChat)
+        }
+        .windowStyle(.hiddenTitleBar)
+
+        Window("Sources", id: "sources") {
+            AskSourcesView(chat: sourcesChat)
         }
         .windowStyle(.hiddenTitleBar)
 

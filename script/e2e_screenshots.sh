@@ -175,6 +175,12 @@ open "openbird://timeline" >/dev/null 2>&1 || true
 /bin/sleep 2
 capture_window "Timeline" "$OUT/04-ask-timeline.png" || true
 
+# 4c) Sources window (handoff Direction B) — opened via the openbird://sources deep-link.
+log "sources: opening via openbird://sources deep-link"
+open "openbird://sources" >/dev/null 2>&1 || true
+/bin/sleep 2
+capture_window "Sources" "$OUT/03-ask-sources-rail.png" || true
+
 # 5) Menu dropdown — reached only through the menu-bar status item. The SwiftUI
 #    MenuBarExtra(.window) popover does NOT open via AX, and a full menu bar parks
 #    the status item off-screen (AX pos like -1/976), so a coordinate click is

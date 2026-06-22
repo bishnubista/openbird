@@ -97,17 +97,20 @@ struct ChatThreadView: View {
 /// (handoff B/C bottom bar). Submits on Enter and on the button.
 struct AskFollowUpBar: View {
     @Binding var draft: String
+    /// True while an ask is in flight. Submit is gated on `!isBusy` because the model
+    /// rejects a new ask while busy — without this gate, pressing Enter during a
+    /// pending answer would clear the draft and queue nothing (Codex review).
+    var isBusy: Bool = false
     var onSubmit: () -> Void
 
     @Environment(\.colorScheme) private var scheme
 
     private var canSubmit: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !isBusy && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Single submit gate so Enter and the send button apply the identical non-empty
-    /// rule — Enter must not fire on a whitespace-only draft while the button is
-    /// disabled (CodeRabbit).
+    /// Single submit gate so Enter and the send button apply the identical rule — Enter
+    /// must not fire on a whitespace-only draft, nor while an ask is in flight.
     private func submitIfAllowed() {
         guard canSubmit else { return }
         onSubmit()

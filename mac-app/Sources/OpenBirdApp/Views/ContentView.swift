@@ -50,6 +50,7 @@ struct ContentView: View {
         switch url.host {
         case "today": openWindow(id: "today")
         case "timeline": openWindow(id: "timeline")
+        case "sources": openWindow(id: "sources")
         case "main": openWindow(id: "main")
         case "ask": onAsk()
         default: return
