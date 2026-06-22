@@ -8,29 +8,22 @@ import SwiftUI
 /// clickable while doing nothing (macOS HIG / Codex review).
 struct TodaySidebar: View {
     @ObservedObject var appModel: AppModel
+    /// Show the Ask panel (the `.ask` destination — a controller action, not a window).
+    var onAsk: () -> Void
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.openWindow) private var openWindow
 
-    /// One nav entry. The sidebar is *launch navigation* — it lives only in the Today
-    /// window, so "Today" is always the active row. A row with a `windowID` opens that
-    /// window on tap; the rest are present-but-inert placeholders for sections that
-    /// have no window yet (honestly non-interactive, not clickable-looking no-ops).
-    private struct NavItem {
-        let icon: String
-        let label: String
-        /// Highlighted as the surface you're already in (Today only).
-        let isActiveHere: Bool
-        /// Non-nil → tapping opens/focuses that window scene.
-        let windowID: String?
+    /// The sidebar mirrors the menu bar via the shared `AppDestination` set. It lives
+    /// only in the Today window, so `.today` is always the active row.
+    private func select(_ destination: AppDestination) {
+        switch destination {
+        case .ask: onAsk()
+        case .today: break                       // already the active surface
+        case .setup:
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
-
-    private let items: [NavItem] = [
-        .init(icon: "calendar", label: "Today", isActiveHere: true, windowID: nil),
-        .init(icon: "list.bullet", label: "Timeline", isActiveHere: false, windowID: "timeline"),
-        .init(icon: "waveform", label: "Meetings", isActiveHere: false, windowID: nil),
-        .init(icon: "arrow.triangle.2.circlepath", label: "Routines", isActiveHere: false, windowID: nil),
-        .init(icon: "magnifyingglass", label: "Search", isActiveHere: false, windowID: nil),
-        .init(icon: "slider.horizontal.3", label: "Settings", isActiveHere: false, windowID: nil),
-    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -66,12 +59,12 @@ struct TodaySidebar: View {
 
     private var nav: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(items.indices, id: \.self) { i in
+            ForEach(AppDestination.allCases) { dest in
                 NavRow(
-                    icon: items[i].icon,
-                    label: items[i].label,
-                    isActiveHere: items[i].isActiveHere,
-                    windowID: items[i].windowID
+                    title: dest.title,
+                    systemImage: dest.systemImage,
+                    isActive: dest == .today,
+                    action: { select(dest) }
                 )
             }
         }
@@ -123,19 +116,18 @@ struct TodaySidebar: View {
 /// that window (hover = subtle wash, per the handoff); the active row ("Today") is a
 /// non-interactive accent highlight; rows with neither are inert placeholders.
 private struct NavRow: View {
-    let icon: String
-    let label: String
-    let isActiveHere: Bool
-    let windowID: String?
+    let title: String
+    let systemImage: String
+    let isActive: Bool
+    let action: () -> Void
 
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.openWindow) private var openWindow
     @State private var hovered = false
 
     var body: some View {
         let row = HStack(spacing: OB.Space.sm) {
-            Image(systemName: icon).frame(width: 18)
-            Text(label).font(.system(size: 13.5, weight: isActiveHere ? .semibold : .regular))
+            Image(systemName: systemImage).frame(width: 18)
+            Text(title).font(.system(size: 13.5, weight: isActive ? .semibold : .regular))
             Spacer()
         }
         .foregroundStyle(foreground)
@@ -145,30 +137,23 @@ private struct NavRow: View {
         .background(RoundedRectangle(cornerRadius: OB.Radius.control).fill(background))
         .contentShape(Rectangle())
 
-        if let windowID {
-            Button {
-                openWindow(id: windowID)
-                NSApp.activate(ignoringOtherApps: true)
-            } label: { row }
+        if isActive {
+            row   // the surface you're already in — highlighted, non-interactive
+        } else {
+            Button(action: action) { row }
                 .buttonStyle(.plain)
                 .onHover { hovered = $0 }
-        } else {
-            // Inert placeholder: honestly non-interactive, not a clickable no-op.
-            row.disabled(true)
         }
     }
 
     private var foreground: Color {
-        if isActiveHere { return .white }
-        if windowID != nil { return hovered ? OB.textPrimary(scheme) : OB.textSecondary(scheme) }
-        return OB.textTertiary(scheme)
+        if isActive { return .white }
+        return hovered ? OB.textPrimary(scheme) : OB.textSecondary(scheme)
     }
 
     private var background: Color {
-        if isActiveHere { return OB.accent }
-        if windowID != nil, hovered {
-            return scheme == .dark ? Color.white.opacity(0.09) : Color.black.opacity(0.06)
-        }
+        if isActive { return OB.accent }
+        if hovered { return scheme == .dark ? Color.white.opacity(0.09) : Color.black.opacity(0.06) }
         return .clear
     }
 }

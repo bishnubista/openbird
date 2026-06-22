@@ -168,20 +168,12 @@ open "openbird://today" >/dev/null 2>&1 || true
 /bin/sleep 2
 capture_window "Today" "$OUT/05-today-dayview.png" || true
 
-# 4b) Timeline window (handoff Direction C) — opened via the openbird://timeline
-#     deep-link, same gated router as Today.
-log "timeline: opening via openbird://timeline deep-link"
-open "openbird://timeline" >/dev/null 2>&1 || true
-/bin/sleep 2
-capture_window "Timeline" "$OUT/04-ask-timeline.png" || true
-
-# 4c) Sources window (handoff Direction B) — opened via the openbird://sources deep-link.
-#     Poll until the window is discoverable instead of a fixed sleep, so a slow host
-#     doesn't miss the capture (CodeRabbit).
-log "sources: opening via openbird://sources deep-link"
-open "openbird://sources" >/dev/null 2>&1 || true
+# 4b) Expanded Ask (the unified surface: chat + optional Sources/Timeline rails) —
+#     opened via the gated openbird://ask-expanded deep-link. Poll until discoverable.
+log "ask (expanded): opening via openbird://ask-expanded deep-link"
+open "openbird://ask-expanded" >/dev/null 2>&1 || true
 for _ in $(seq 1 20); do
-  if capture_window "Sources" "$OUT/03-ask-sources-rail.png"; then break; fi
+  if capture_window "Ask" "$OUT/03-ask-expanded.png"; then break; fi
   /bin/sleep 0.2
 done
 

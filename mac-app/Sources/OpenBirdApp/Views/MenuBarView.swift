@@ -23,13 +23,20 @@ struct MenuBarView: View {
 
     var body: some View {
         Group {
-            Button("Open OpenBird") {
-                openMainWindow()
-            }
-
-            Button("Ask OpenBird...") {
+            // Primary destinations — mirrored with the Today sidebar via AppDestination.
+            Button(AppDestination.ask.title) {
                 openAskPanel()
             }
+
+            Button(AppDestination.today.title) {
+                openWindow(id: "today")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+
+            Button(AppDestination.setup.title) {
+                openMainWindow()
+            }
+            .keyboardShortcut(",", modifiers: .command)
 
             Divider()
 
@@ -46,21 +53,6 @@ struct MenuBarView: View {
                     model.startCapture()
                 }
                 .disabled(model.allowlist.isEmpty)
-            }
-
-            Button("Today's Activity") {
-                openWindow(id: "today")
-                NSApp.activate(ignoringOtherApps: true)
-            }
-
-            Button("Timeline") {
-                openWindow(id: "timeline")
-                NSApp.activate(ignoringOtherApps: true)
-            }
-
-            Button("Ask with Sources") {
-                openWindow(id: "sources")
-                NSApp.activate(ignoringOtherApps: true)
             }
 
             Divider()
@@ -81,10 +73,6 @@ struct MenuBarView: View {
             Button("About OpenBird") {
                 showAboutPanel()
             }
-            Button("Settings...") {
-                openMainWindow()
-            }
-            .keyboardShortcut(",", modifiers: .command)
 
             Divider()
 

@@ -101,6 +101,10 @@ struct AskFollowUpBar: View {
     /// rejects a new ask while busy — without this gate, pressing Enter during a
     /// pending answer would clear the draft and queue nothing (Codex review).
     var isBusy: Bool = false
+    /// Drives keyboard focus into this field (the owning view sets it on appear so the
+    /// expanded Ask window can type immediately — Codex review: the field lives here, so
+    /// the focus binding must too).
+    var focused: FocusState<Bool>.Binding
     var onSubmit: () -> Void
 
     @Environment(\.colorScheme) private var scheme
@@ -126,6 +130,7 @@ struct AskFollowUpBar: View {
                 .padding(.vertical, 9)
                 .background(OB.fieldFill(scheme), in: Capsule())
                 .overlay(Capsule().strokeBorder(OB.separator(scheme), lineWidth: 0.5))
+                .focused(focused)
                 .onSubmit(submitIfAllowed)
             Button(action: submitIfAllowed) {
                 Image(systemName: "arrow.up")

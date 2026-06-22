@@ -13,7 +13,7 @@ struct TodayView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            TodaySidebar(appModel: appModel)
+            TodaySidebar(appModel: appModel, onAsk: onAsk)
             mainColumn
         }
         .frame(minWidth: 860, minHeight: 560)
