@@ -7,7 +7,7 @@ BUNDLE_ID="ai.openbird.OpenBird"
 MIN_SYSTEM_VERSION="13.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_VERSION="$(awk -F'"' '/^version = / {print $2; exit}' "$ROOT_DIR/pyproject.toml")"
+APP_VERSION="${OPENBIRD_APP_VERSION:-$(awk -F'"' '/^version = / {print $2; exit}' "$ROOT_DIR/pyproject.toml")}"
 APP_VERSION="${APP_VERSION:-0.0.0}"
 APP_BUILD="$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || printf '0')"
 APP_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
@@ -91,6 +91,10 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$APP_NAME</string>
   <key>CFBundleDisplayName</key>
   <string>$APP_NAME</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -121,6 +125,11 @@ cat >"$INFO_PLIST" <<PLIST
 </dict>
 </plist>
 PLIST
+
+if command -v swift >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+  swift "$ROOT_DIR/script/generate_app_icon.swift" "$APP_RESOURCES/AppIcon.icns" || \
+    echo "warning: app icon generation failed; About/Finder may use the generic icon" >&2
+fi
 
 # Ad-hoc sign the assembled bundle with stable identifiers so macOS TCC grants
 # (Accessibility / Screen Recording / Microphone) persist across launches once

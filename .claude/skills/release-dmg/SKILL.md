@@ -37,6 +37,7 @@ asset — a new tag gives testers a version + changelog anchor.
 
 ```bash
 export OPENBIRD_SWIFTPM_DISABLE_SANDBOX=1
+export OPENBIRD_APP_VERSION=<x.y.z>
 unset OPENBIRD_DMG_SKIP_NOTARIZE
 ./script/package_dmg.sh
 ```
@@ -47,6 +48,9 @@ The signing identity is **auto-derived** from the single "Developer ID Applicati
 identity in the keychain, and the notary profile defaults to `openbird-notary`.
 Override only if needed via env or a gitignored `script/release.env` (see
 `script/release.env.example`) — e.g. when multiple Developer ID identities exist.
+`OPENBIRD_APP_VERSION` must match the beta dmg version selected in step 1, so
+About/Finder show the tester-facing beta version instead of the Python package
+version.
 The script: embeds a relocatable Python, installs `openbird[encryption,integrations]`
 (excludes `meetings`), prunes to interpreters, runs the relocation audit + run-from-
 moved-copy test, Developer ID-signs every nested Mach-O inside-out, then notarizes +

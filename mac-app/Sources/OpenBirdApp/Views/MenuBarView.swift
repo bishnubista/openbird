@@ -1,97 +1,79 @@
 import AppKit
 import SwiftUI
 
-/// The menu-bar dropdown, styled as a Liquid Glass panel (handoff §1). Rendered via
-/// `.menuBarExtraStyle(.window)` so it's a real SwiftUI surface (not the system
-/// menu), letting it use the shared glass material, custom rows with hover accent,
-/// a live capturing indicator, and helper/encryption health dots.
+/// Native menu-bar menu. Keep this as plain menu content rather than a custom
+/// `.window` popover so the status item behaves like older Homebrew builds:
+/// visible icon, click opens a standard menu, click outside dismisses.
 struct MenuBarView: View {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    /// Summon the Spotlight Ask panel (also bound to the global ⌥Space hotkey).
+    /// Summon the Spotlight Ask panel (also bound to the global Option-Space hotkey).
     var openAskPanel: () -> Void
 
-    @Environment(\.colorScheme) private var scheme
-    /// The popover window hosting this view. A `.window`-style MenuBarExtra does not
-    /// auto-dismiss on a button tap the way a system menu does, so command rows
-    /// close it explicitly (matching native menu behavior).
-    @State private var menuWindow: NSWindow?
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            MenuRow(icon: "macwindow", title: "Open OpenBird") {
-                run { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
-            }
-            // ⌥Space is shown as a trailing hint, not a `.keyboardShortcut`, so it
-            // can't double-fire with the global Carbon hotkey that already owns it.
-            MenuRow(icon: "sparkle.magnifyingglass", title: "Ask OpenBird…", hint: "⌥Space") {
-                run { openAskPanel() }
-            }
-
-            divider
-
-            // Capture-state eyebrow (red pulsing dot when live), matching the
-            // handoff "CAPTURING · N" status line.
-            captureStatusRow
-
-            // Honest pairing: only offer Pause/Resume while capture is actually
-            // running; otherwise offer Start. Avoids a "Pause" row that no-ops.
-            if model.captureRunning {
-                MenuRow(icon: model.capturePaused ? "play.circle" : "pause.circle",
-                        title: model.capturePaused ? "Resume Capture" : "Pause Capture",
-                        hint: "⌘P", key: "p") {
-                    run { model.toggleCapturePause() }
-                }
-            } else {
-                MenuRow(icon: "play.fill", title: "Start Capture",
-                        disabled: model.allowlist.isEmpty) { run { model.startCapture() } }
-            }
-            MenuRow(icon: "calendar.day.timeline.left", title: "Today's Activity", trailing: "›") {
-                run {
-                    openWindow(id: "today")
-                    NSApp.activate(ignoringOtherApps: true)
-                }
-            }
-
-            divider
-
-            ForEach(model.helpers) { helper in
-                HealthRow(ok: helper.isBundled,
-                          label: helper.label,
-                          status: helper.isBundled ? "OK" : "missing")
-            }
-            HealthRow(state: model.encryptionState,
-                      label: "Encryption at rest",
-                      status: encryptionStatus)
-
-            divider
-
-            MenuRow(icon: "arrow.clockwise", title: "Re-check Setup") {
-                run { Task { await model.refresh() } }
-            }
-            MenuRow(icon: "folder", title: "Data Folder") { run { model.openDataFolder() } }
-            MenuRow(icon: "info.circle", title: "About OpenBird") {
-                run { showAboutPanel() }
-            }
-            MenuRow(icon: "gearshape", title: "Settings…", hint: "⌘,", key: ",") {
-                run { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
-            }
-            MenuRow(icon: "power", title: "Quit OpenBird", hint: "⌘Q", key: "q") {
-                run { model.quit() }
-            }
+        Button("Open OpenBird") {
+            openMainWindow()
         }
-        .padding(OB.Space.s)
-        .frame(width: 288)
-        .glassSurface(cornerRadius: OB.Radius.dropdown)
-        .padding(OB.Space.sm)
-        .background(WindowAccessor { menuWindow = $0 })
+
+        Button("Ask OpenBird...") {
+            openAskPanel()
+        }
+
+        Divider()
+
+        Text(statusLine)
+        Text(model.memorySummary)
+
+        if model.captureRunning {
+            Button(model.capturePaused ? "Resume Capture" : "Pause Capture") {
+                model.toggleCapturePause()
+            }
+        } else {
+            Button("Start Capture") {
+                model.startCapture()
+            }
+            .disabled(model.allowlist.isEmpty)
+        }
+
+        Button("Today's Activity") {
+            openWindow(id: "today")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        Divider()
+
+        ForEach(model.helpers) { helper in
+            Text(helper.isBundled ? "\(helper.label): OK" : "\(helper.label): Missing")
+        }
+        Text("Encryption at rest: \(encryptionStatus)")
+
+        Divider()
+
+        Button("Re-check Setup") {
+            Task { await model.refresh() }
+        }
+        Button("Data Folder") {
+            model.openDataFolder()
+        }
+        Button("About OpenBird") {
+            showAboutPanel()
+        }
+        Button("Settings...") {
+            openMainWindow()
+        }
+        .keyboardShortcut(",", modifiers: .command)
+
+        Divider()
+
+        Button("Quit OpenBird") {
+            model.quit()
+        }
+        .keyboardShortcut("q", modifiers: .command)
     }
 
-    /// Dismiss the dropdown, then run the action on the next runloop turn so closing
-    /// the popover never races a window/panel the action itself brings up.
-    private func run(_ action: @escaping () -> Void) {
-        menuWindow?.orderOut(nil)
-        DispatchQueue.main.async(execute: action)
+    private func openMainWindow() {
+        openWindow(id: "main")
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func showAboutPanel() {
@@ -99,42 +81,10 @@ struct MenuBarView: View {
         NSApp.orderFrontStandardAboutPanel(options: [:])
     }
 
-    private var divider: some View {
-        Divider().overlay(OB.separator(scheme)).padding(.vertical, OB.Space.xs)
-    }
-
-    /// The handoff's "CAPTURING · N" eyebrow: a small pulsing status dot, an
-    /// uppercase tracked state word, and the stored-observation count right-aligned.
-    private var captureStatusRow: some View {
-        HStack(spacing: OB.Space.sm) {
-            PulsingDot(active: model.captureRunning && !model.capturePaused)
-            Text(captureStateText)
-                .font(.system(size: 10.5, weight: .bold))
-                .tracking(0.6)
-                .foregroundStyle(OB.textSecondary(scheme))
-            Spacer()
-            Text(captureCountText)
-                .font(.system(size: 11))
-                .monospacedDigit()
-                .foregroundStyle(OB.textTertiary(scheme))
-                .lineLimit(1)
-        }
-        .padding(.horizontal, OB.Space.sm)
-        .padding(.vertical, OB.Space.s)
-    }
-
-    private var captureStateText: String {
-        if model.capturePaused { return "PAUSED" }
-        return model.captureRunning ? "CAPTURING" : "IDLE"
-    }
-
-    /// Real total of stored observations (grouped digits), labeled honestly as
-    /// "stored" — the menu has no per-day count to claim "today".
-    private var captureCountText: String {
-        let n = model.memoryStats.observations
-        let formatted = NumberFormatter.localizedString(
-            from: NSNumber(value: n), number: .decimal)
-        return "\(formatted) stored"
+    private var statusLine: String {
+        if model.capturePaused { return "Paused" }
+        if model.captureRunning { return "Capturing" }
+        return model.isFullyConfigured ? "Ready" : "Setup incomplete"
     }
 
     private var encryptionStatus: String {
@@ -143,161 +93,5 @@ struct MenuBarView: View {
         case .attention: return "off"
         default: return "unknown"
         }
-    }
-}
-
-/// A tappable dropdown row with a leading SF Symbol, optional trailing shortcut,
-/// and the handoff's hover = accent-background / white-text treatment.
-private struct MenuRow: View {
-    let icon: String
-    let title: String
-    /// Right-aligned dimmed hint text (a shortcut glyph like "⌘P" or a chevron via
-    /// `trailing`). A hint is shown ONLY when honest — either it's backed by a real
-    /// `key` shortcut, or it's the globally-registered ⌥Space.
-    var hint: String? = nil
-    /// Non-shortcut trailing affordance (e.g. the "›" disclosure chevron).
-    var trailing: String? = nil
-    /// When set, wires a real ⌘-`key` shortcut so the `hint` glyph isn't a lie.
-    var key: KeyEquivalent? = nil
-    var disabled: Bool = false
-    let action: () -> Void
-
-    @Environment(\.colorScheme) private var scheme
-    @State private var hovering = false
-
-    var body: some View {
-        let button = Button(action: action) {
-            HStack(spacing: OB.Space.sm) {
-                Image(systemName: icon)
-                    .frame(width: 16)
-                Text(title)
-                Spacer()
-                if let trailing {
-                    Text(trailing)
-                        .font(.system(size: 13))
-                        .opacity(hovering ? 0.9 : 0.5)
-                } else if let hint {
-                    Text(hint)
-                        .font(.system(size: 11))
-                        .opacity(hovering ? 0.9 : 0.5)
-                }
-            }
-            .font(.system(size: 13))
-            .foregroundStyle(rowForeground)
-            .padding(.horizontal, OB.Space.sm)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: OB.Radius.control)
-                    .fill(hovering && !disabled ? OB.accent : .clear)
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .onHover { hovering = $0 }
-
-        // Attaching `.keyboardShortcut` makes the displayed glyph honest: the row
-        // actually fires on ⌘-key while the dropdown is key.
-        if let key {
-            button.keyboardShortcut(key, modifiers: .command)
-        } else {
-            button
-        }
-    }
-
-    private var rowForeground: Color {
-        if disabled { return OB.textTertiary(scheme) }
-        return hovering ? .white : OB.textPrimary(scheme)
-    }
-}
-
-/// A non-interactive status row with a colored health dot.
-private struct HealthRow: View {
-    let ok: Bool
-    let label: String
-    let status: String
-    var state: StepState? = nil
-
-    @Environment(\.colorScheme) private var scheme
-
-    init(ok: Bool, label: String, status: String) {
-        self.ok = ok
-        self.label = label
-        self.status = status
-    }
-
-    init(state: StepState, label: String, status: String) {
-        self.state = state
-        self.ok = state == .ok
-        self.label = label
-        self.status = status
-    }
-
-    var body: some View {
-        HStack(spacing: OB.Space.sm) {
-            Circle().fill(dotColor).frame(width: 7, height: 7)
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(OB.textSecondary(scheme))
-            Spacer()
-            Text(status)
-                .font(.system(size: 12))
-                .foregroundStyle(OB.textTertiary(scheme))
-        }
-        .padding(.horizontal, OB.Space.sm)
-        .padding(.vertical, 3)
-    }
-
-    private var dotColor: Color {
-        switch state {
-        case .some(.attention): return .orange
-        case .some(.unknown): return OB.textTertiary(scheme)
-        default: return ok ? OB.ok(scheme) : .red
-        }
-    }
-}
-
-/// A capture indicator dot that pulses while actively capturing. The animation is
-/// driven by `active` (not just `.onAppear`), so it starts/stops correctly when
-/// capture state changes while the dropdown is open.
-private struct PulsingDot: View {
-    let active: Bool
-    @State private var pulsing = false
-
-    var body: some View {
-        Circle()
-            .fill(active ? OB.capturingDot : Color.secondary)
-            .frame(width: 9, height: 9)
-            .scaleEffect(pulsing ? 1.0 : 0.7)
-            .opacity(pulsing ? 1.0 : 0.6)
-            .onAppear { applyAnimation() }
-            .onChange(of: active) { _ in applyAnimation() }
-    }
-
-    private func applyAnimation() {
-        if active {
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                pulsing = true
-            }
-        } else {
-            withAnimation(.default) { pulsing = false }
-        }
-    }
-}
-
-/// Captures the hosting `NSWindow` of a SwiftUI view so the dropdown can dismiss
-/// itself programmatically (the `.window` MenuBarExtra has no system dismissal).
-private struct WindowAccessor: NSViewRepresentable {
-    let onResolve: (NSWindow?) -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async { onResolve(view.window) }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { onResolve(nsView.window) }
     }
 }
