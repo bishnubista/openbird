@@ -17,19 +17,27 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: OB.Space.l) {
-                HeaderView(model: model)
-                GlassCard { SetupView(model: model) }
-                GlassCard { ChatView(model: model) }
-                GlassCard { HelperListView(helpers: model.helpers) }
-                GlassCard { TrustControlsView(model: model) }
+        VStack(spacing: 0) {
+            // Clear strip beneath the overlaid traffic lights (the window now uses a
+            // hidden titlebar). Doubles as a drag region, and — because the ScrollView
+            // starts below it and clips to its bounds — scrolled content never slides
+            // up under the traffic lights.
+            Color.clear.frame(height: 28)
+            ScrollView {
+                VStack(alignment: .leading, spacing: OB.Space.l) {
+                    HeaderView(model: model)
+                    GlassCard { SetupView(model: model) }
+                    GlassCard { ChatView(model: model) }
+                    GlassCard { HelperListView(helpers: model.helpers) }
+                    GlassCard { TrustControlsView(model: model) }
+                }
+                .padding(OB.Space.xl)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(OB.Space.xl)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(minWidth: 560, minHeight: 560)
         .background(GlassBackdrop())
+        .background(WindowConfigurator())   // draggable by background (macOS-13-safe)
         .sheet(isPresented: onboardingBinding) {
             OnboardingSheet(model: model, isPresented: onboardingBinding)
         }

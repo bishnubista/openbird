@@ -18,6 +18,7 @@ struct TodayView: View {
         }
         .frame(minWidth: 860, minHeight: 560)
         .background(GlassBackdrop())
+        .background(WindowConfigurator())   // draggable by background under the hidden titlebar
         .task {
             if model.timeline == nil {
                 await model.load()
