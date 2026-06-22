@@ -180,6 +180,9 @@ final class OpenBirdService: @unchecked Sendable {
         base: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String: String] {
         var env = base
+        // The notarized app bundles Python inside the signed app tree. Prevent
+        // import-time .pyc writes from mutating the Developer ID seal at runtime.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         if let key = injectedDBKey {
             env["OPENBIRD_DB_KEY"] = key
         }
