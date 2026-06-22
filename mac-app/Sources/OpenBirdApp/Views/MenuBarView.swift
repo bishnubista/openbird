@@ -70,6 +70,9 @@ struct MenuBarView: View {
                 run { Task { await model.refresh() } }
             }
             MenuRow(icon: "folder", title: "Data Folder") { run { model.openDataFolder() } }
+            MenuRow(icon: "info.circle", title: "About OpenBird") {
+                run { showAboutPanel() }
+            }
             MenuRow(icon: "gearshape", title: "Settings…", hint: "⌘,", key: ",") {
                 run { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
             }
@@ -89,6 +92,11 @@ struct MenuBarView: View {
     private func run(_ action: @escaping () -> Void) {
         menuWindow?.orderOut(nil)
         DispatchQueue.main.async(execute: action)
+    }
+
+    private func showAboutPanel() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [:])
     }
 
     private var divider: some View {
