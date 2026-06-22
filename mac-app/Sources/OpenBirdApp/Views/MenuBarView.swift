@@ -11,64 +11,69 @@ struct MenuBarView: View {
     var openAskPanel: () -> Void
 
     var body: some View {
-        Button("Open OpenBird") {
-            openMainWindow()
-        }
-
-        Button("Ask OpenBird...") {
-            openAskPanel()
-        }
-
-        Divider()
-
-        Text(statusLine)
-        Text(model.memorySummary)
-
-        if model.captureRunning {
-            Button(model.capturePaused ? "Resume Capture" : "Pause Capture") {
-                model.toggleCapturePause()
+        Group {
+            Button("Open OpenBird") {
+                openMainWindow()
             }
-        } else {
-            Button("Start Capture") {
-                model.startCapture()
+
+            Button("Ask OpenBird...") {
+                openAskPanel()
             }
-            .disabled(model.allowlist.isEmpty)
-        }
 
-        Button("Today's Activity") {
-            openWindow(id: "today")
-            NSApp.activate(ignoringOtherApps: true)
-        }
+            Divider()
 
-        Divider()
+            Text(statusLine)
+            Text(model.memorySummary)
 
-        ForEach(model.helpers) { helper in
-            Text(helper.isBundled ? "\(helper.label): OK" : "\(helper.label): Missing")
-        }
-        Text("Encryption at rest: \(encryptionStatus)")
+            if model.captureRunning {
+                Button(model.capturePaused ? "Resume Capture" : "Pause Capture") {
+                    model.toggleCapturePause()
+                }
+            } else {
+                Button("Start Capture") {
+                    model.startCapture()
+                }
+                .disabled(model.allowlist.isEmpty)
+            }
 
-        Divider()
+            Button("Today's Activity") {
+                openWindow(id: "today")
+                NSApp.activate(ignoringOtherApps: true)
+            }
 
-        Button("Re-check Setup") {
-            Task { await model.refresh() }
-        }
-        Button("Data Folder") {
-            model.openDataFolder()
-        }
-        Button("About OpenBird") {
-            showAboutPanel()
-        }
-        Button("Settings...") {
-            openMainWindow()
-        }
-        .keyboardShortcut(",", modifiers: .command)
+            Divider()
 
-        Divider()
+            ForEach(model.helpers) { helper in
+                Text(helper.isBundled ? "\(helper.label): OK" : "\(helper.label): Missing")
+            }
+            Text("Encryption at rest: \(encryptionStatus)")
 
-        Button("Quit OpenBird") {
-            model.quit()
+            Divider()
+
+            Button("Re-check Setup") {
+                Task { await model.refresh() }
+            }
+            Button("Data Folder") {
+                model.openDataFolder()
+            }
+            Button("About OpenBird") {
+                showAboutPanel()
+            }
+            Button("Settings...") {
+                openMainWindow()
+            }
+            .keyboardShortcut(",", modifiers: .command)
+
+            Divider()
+
+            Button("Quit OpenBird") {
+                model.quit()
+            }
+            .keyboardShortcut("q", modifiers: .command)
         }
-        .keyboardShortcut("q", modifiers: .command)
+        .onAppear {
+            model.refreshPermissionStates()
+        }
     }
 
     private func openMainWindow() {
