@@ -210,11 +210,13 @@ final class AskPanelController: NSObject, ObservableObject {
 
     private func centerExpanded(_ window: AskExpandedWindow) {
         let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero
-        // Clamp height to the visible screen so the rails never run off-screen.
+        // Clamp BOTH dimensions and the origin to the visible frame so the rails never
+        // run off-screen on a narrow display/space (CodeRabbit).
+        let width = min(expandedWidth, screen.width - 40)
         let height = min(window.frame.height, screen.height - 40)
-        window.setContentSize(NSSize(width: expandedWidth, height: height))
-        let originX = screen.midX - expandedWidth / 2
-        let originY = screen.midY - height / 2
+        window.setContentSize(NSSize(width: width, height: height))
+        let originX = max(screen.minX, screen.midX - width / 2)
+        let originY = max(screen.minY, screen.midY - height / 2)
         window.setFrameOrigin(NSPoint(x: originX, y: originY))
     }
 }
