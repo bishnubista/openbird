@@ -35,14 +35,30 @@ for spec in specs {
     )
 }
 
+guard let iconutilURL = findExecutable("iconutil") else {
+    FileHandle.standardError.write(Data("iconutil not found in PATH\n".utf8))
+    exit(127)
+}
+
 let process = Process()
-process.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
+process.executableURL = iconutilURL
 process.arguments = ["-c", "icns", "-o", output.path, iconset.path]
 try process.run()
 process.waitUntilExit()
 guard process.terminationStatus == 0 else {
     FileHandle.standardError.write(Data("iconutil failed with \(process.terminationStatus)\n".utf8))
     exit(process.terminationStatus)
+}
+
+func findExecutable(_ name: String) -> URL? {
+    let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+    for directory in path.split(separator: ":") {
+        let candidate = URL(fileURLWithPath: String(directory)).appendingPathComponent(name)
+        if FileManager.default.isExecutableFile(atPath: candidate.path) {
+            return candidate
+        }
+    }
+    return nil
 }
 
 func renderIcon(pixels: Int, to url: URL) throws {
