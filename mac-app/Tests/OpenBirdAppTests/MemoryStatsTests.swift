@@ -1,11 +1,19 @@
+import AppKit
 import XCTest
 @testable import OpenBirdApp
 
 final class MemoryStatsTests: XCTestCase {
-    func testMenuBarSymbolUsesStableSystemSymbols() {
-        XCTAssertEqual(AppModel.menuBarSymbol(captureRunning: false, capturePaused: false), "circle")
-        XCTAssertEqual(AppModel.menuBarSymbol(captureRunning: true, capturePaused: false), "record.circle.fill")
-        XCTAssertEqual(AppModel.menuBarSymbol(captureRunning: true, capturePaused: true), "pause.circle")
+    func testMenuBarSymbolUsesBrandedBirdIcon() {
+        let cases = [
+            (actual: AppModel.menuBarSymbol(captureRunning: false, capturePaused: false), expected: "bird"),
+            (actual: AppModel.menuBarSymbol(captureRunning: true, capturePaused: false), expected: "bird.fill"),
+            (actual: AppModel.menuBarSymbol(captureRunning: true, capturePaused: true), expected: "pause.circle")
+        ]
+
+        for (actual, expected) in cases {
+            XCTAssertEqual(actual, expected)
+            XCTAssertNotNil(NSImage(systemSymbolName: actual, accessibilityDescription: nil))
+        }
     }
 
     func testChildEnvironmentDisablesPythonBytecodeWrites() {

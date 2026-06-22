@@ -81,8 +81,8 @@ final class AppModel: ObservableObject {
     }
 
     nonisolated static func menuBarSymbol(captureRunning: Bool, capturePaused: Bool) -> String {
-        if captureRunning && !capturePaused { return "record.circle.fill" }
-        return capturePaused ? "pause.circle" : "circle"
+        if captureRunning && !capturePaused { return "bird.fill" }
+        return capturePaused ? "pause.circle" : "bird"
     }
 
     /// User-facing summary of how many local memory observations are currently stored.
