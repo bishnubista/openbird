@@ -7,6 +7,10 @@ BUNDLE_ID="ai.openbird.OpenBird"
 MIN_SYSTEM_VERSION="13.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_VERSION="$(awk -F'"' '/^version = / {print $2; exit}' "$ROOT_DIR/pyproject.toml")"
+APP_VERSION="${APP_VERSION:-0.0.0}"
+APP_BUILD="$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || printf '0')"
+APP_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
@@ -89,6 +93,12 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$APP_VERSION</string>
+  <key>CFBundleVersion</key>
+  <string>$APP_BUILD</string>
+  <key>OpenBirdGitCommit</key>
+  <string>$APP_COMMIT</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>

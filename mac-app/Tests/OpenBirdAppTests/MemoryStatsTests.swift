@@ -2,6 +2,12 @@ import XCTest
 @testable import OpenBirdApp
 
 final class MemoryStatsTests: XCTestCase {
+    func testMenuBarSymbolUsesStableSystemSymbols() {
+        XCTAssertEqual(AppModel.menuBarSymbol(captureRunning: false, capturePaused: false), "circle")
+        XCTAssertEqual(AppModel.menuBarSymbol(captureRunning: true, capturePaused: false), "record.circle.fill")
+        XCTAssertEqual(AppModel.menuBarSymbol(captureRunning: true, capturePaused: true), "pause.circle")
+    }
+
     func testChildEnvironmentDisablesPythonBytecodeWrites() {
         let env = OpenBirdService.childEnvironment(base: ["PYTHONDONTWRITEBYTECODE": "0"])
 
