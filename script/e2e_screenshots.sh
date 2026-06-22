@@ -59,11 +59,17 @@ relaunch() {
   /bin/sleep 5
 }
 
-# Is AX usable by this host process?
+# Is AX usable by this host process? Retry a few times: the frontmost app can expose
+# zero readable menu bars for a moment mid-launch/transition, which made a single probe
+# wrongly report AX as ungranted and abort the whole run.
 ax_ok() {
-  local n
-  n=$(osascript -e 'tell application "System Events" to count menu bars of (first application process whose frontmost is true)' 2>/dev/null || echo 0)
-  [ "${n:-0}" -ge 1 ]
+  local n i
+  for i in 1 2 3 4; do
+    n=$(osascript -e 'tell application "System Events" to count menu bars of (first application process whose frontmost is true)' 2>/dev/null || echo 0)
+    [ "${n:-0}" -ge 1 ] && return 0
+    /bin/sleep 0.5
+  done
+  return 1
 }
 
 # Crop a screen region "x,y,w,h" → outfile, or warn if bounds are invalid.
@@ -159,7 +165,9 @@ osascript -e "tell application \"$APP_NAME\" to activate" >/dev/null 2>&1 || tru
 osascript -e 'tell application "System Events" to key code 49 using {option down}' >/dev/null 2>&1 || true
 /bin/sleep 1.2
 # The Ask panel is a floating NSPanel with an empty name; match it by subrole.
-capture_window_by_subrole "AXSystemDialog" "$OUT/02-ask-spotlight.png"
+# `|| true` so a missed panel (e.g. the synthetic ⌥Space didn't fire the Carbon hotkey)
+# warns and continues instead of aborting the rest of the run under `set -e`.
+capture_window_by_subrole "AXSystemDialog" "$OUT/02-ask-spotlight.png" || true
 osascript -e 'tell application "System Events" to key code 53' >/dev/null 2>&1 || true  # esc → close panel
 
 # 4) Today window — opened via the openbird://today deep-link (no menu bar needed).
