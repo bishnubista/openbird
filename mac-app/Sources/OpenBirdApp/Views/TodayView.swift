@@ -251,16 +251,9 @@ struct TodayView: View {
 
     static let timeColumnWidth: CGFloat = 46
 
-    /// Group-separated integer ("1,284").
-    static func grouped(_ n: Int) -> String {
-        NumberFormatter.localizedString(from: NSNumber(value: n), number: .decimal)
-    }
+    /// Group-separated integer ("1,284"). Forwards to the shared formatter so the
+    /// Today card rail and the compact Direction-C rail never disagree on a value.
+    static func grouped(_ n: Int) -> String { TimelineFormatting.grouped(n) }
 
-    static func durationLabel(_ seconds: Double) -> String {
-        let total = Int(seconds.rounded())
-        if total < 60 { return "\(total)s" }
-        let minutes = total / 60
-        if minutes < 60 { return "\(minutes)m" }
-        return "\(minutes / 60)h \(minutes % 60)m"
-    }
+    static func durationLabel(_ seconds: Double) -> String { TimelineFormatting.durationLabel(seconds) }
 }

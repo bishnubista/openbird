@@ -19,6 +19,11 @@ struct OpenBirdApp: App {
     @StateObject private var model: AppModel
     @StateObject private var askPanel: AskPanelController
     @StateObject private var todayModel: TodayModel
+    @StateObject private var timelineModel: TimelineModel
+    /// Per-window chat thread for the Timeline window (Direction C). Built once here
+    /// sharing the one service; the thread persists across window reopen and is reset
+    /// on day change inside the view.
+    @StateObject private var timelineChat: AskPanelModel
 
     /// Construct the service, model, Ask-panel controller, and Today model TOGETHER,
     /// sharing the one `AppModel`/`OpenBirdService`, so there is never a second model
@@ -29,6 +34,8 @@ struct OpenBirdApp: App {
         _model = StateObject(wrappedValue: model)
         _askPanel = StateObject(wrappedValue: AskPanelController(model: model, service: service))
         _todayModel = StateObject(wrappedValue: TodayModel(service: service))
+        _timelineModel = StateObject(wrappedValue: TimelineModel(service: service))
+        _timelineChat = StateObject(wrappedValue: AskPanelModel(service: service, appModel: model))
     }
 
     var body: some Scene {
@@ -47,6 +54,11 @@ struct OpenBirdApp: App {
         Window("Today", id: "today") {
             TodayView(model: todayModel, appModel: model, onAsk: { askPanel.show() })
         }
+
+        Window("Timeline", id: "timeline") {
+            TimelineAskView(model: timelineModel, chat: timelineChat)
+        }
+        .windowStyle(.hiddenTitleBar)
 
         MenuBarExtra("OpenBird", systemImage: model.menuBarSymbol) {
             MenuBarView(model: model, openAskPanel: { askPanel.show() })

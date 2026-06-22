@@ -215,23 +215,5 @@ private struct PanelSizeKey: PreferenceKey {
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
 
-/// A small staggered three-dot "thinking" indicator (handoff `obDot`).
-private struct ThinkingDots: View {
-    @State private var animating = false
-    var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .frame(width: 6, height: 6)
-                    .scaleEffect(animating ? 1.0 : 0.5)
-                    .opacity(animating ? 1.0 : 0.4)
-                    .animation(
-                        .easeInOut(duration: 0.5).repeatForever().delay(Double(i) * 0.15),
-                        value: animating
-                    )
-            }
-        }
-        .foregroundStyle(.secondary)
-        .onAppear { animating = true }
-    }
-}
+// ThinkingDots now lives in ChatThreadView.swift (shared by the Spotlight panel and
+// the windowed Ask surfaces) — see that file.
