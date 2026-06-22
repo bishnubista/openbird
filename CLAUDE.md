@@ -12,8 +12,7 @@ plan → Codex adversarial review to consensus → implement → Codex adversari
 review of the diff to consensus → create PR → wait for CodeRabbit → resolve every
 review comment → merge → move to the next queued task. Do not pause for
 confirmation between gates; **only stop to ask a human when genuinely stuck**.
-This overrides any global "don't open a PR until explicitly asked" default for
-this repo. It does not override branch protection, required human review,
+This autonomy does not override branch protection, required human review,
 credential prompts, sandbox/permission prompts, or safety constraints. Never jump
 straight to code. For each feature/fix:
 
@@ -37,6 +36,12 @@ straight to code. For each feature/fix:
    (one fix per commit, validate after each), reply with a concrete rationale for
    anything non-actionable, duplicate, incorrect, or intentionally deferred, and
    re-trigger with `@coderabbitai review` if it doesn't auto-run.
+   - **"Review limit reached" is a transient wait, NOT a blocker.** If CodeRabbit posts
+     a rate-limit warning instead of a review ("we couldn't start this review because
+     you've reached your PR review rate limit. More reviews will be available in
+     N minutes"), do not escalate to a human or abandon the merge. Wait out the stated
+     window (add a small buffer), then re-trigger with `@coderabbitai review`. Repeat if
+     it's still limited. Only the *clean* review counts as the gate passing.
 6. **Merge** only when BOTH gates are clean (Codex consensus + CodeRabbit pass) and the PR is
    mergeable: `gh pr merge <n> --squash --delete-branch`.
 
