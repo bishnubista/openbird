@@ -38,6 +38,11 @@ enum PrivacyPane: String {
     }
 }
 
+enum AccessibilityRequestOutcome: Equatable {
+    case alreadyGranted
+    case needsPrompt
+}
+
 /// `@unchecked Sendable`: the only mutable instance state is `captureProcess`,
 /// which is touched solely on the main actor (AppModel actions and the main-queue
 /// willTerminate handler). The static `run`/`runAsync` helpers operate on locals
@@ -119,9 +124,28 @@ final class OpenBirdService: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let defaults = UserDefaults.standard
     private let allowlistKey = "openbird.captureAllowlist"
+    private let accessibilityProbe: @Sendable () -> Bool
+    private let accessibilityPrompter: @Sendable () -> Void
+    private let privacyPaneOpener: @Sendable (PrivacyPane) -> Void
 
     /// The capture daemon launched by the app (if any), so it can be stopped.
     private var captureProcess: Process?
+
+    init(
+        accessibilityProbe: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
+        accessibilityPrompter: @escaping @Sendable () -> Void = {
+            let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+        },
+        privacyPaneOpener: @escaping @Sendable (PrivacyPane) -> Void = { pane in
+            guard let url = pane.url else { return }
+            NSWorkspace.shared.open(url)
+        }
+    ) {
+        self.accessibilityProbe = accessibilityProbe
+        self.accessibilityPrompter = accessibilityPrompter
+        self.privacyPaneOpener = privacyPaneOpener
+    }
 
     private var dataDirectory: URL {
         Self.dataDirectoryURL()
@@ -320,8 +344,7 @@ final class OpenBirdService: @unchecked Sendable {
     /// the permission. macOS does not allow an app to grant TCC itself; deep-link
     /// + re-check is the closest to "no manual work" the platform permits.
     func openPrivacyPane(_ pane: PrivacyPane) {
-        guard let url = pane.url else { return }
-        NSWorkspace.shared.open(url)
+        privacyPaneOpener(pane)
     }
 
     // MARK: - TCC checked/requested from the APP process
@@ -333,7 +356,7 @@ final class OpenBirdService: @unchecked Sendable {
     // capture daemon (launched as a descendant of the app) inherits it at runtime.
 
     func accessibilityGranted() -> Bool {
-        AXIsProcessTrusted()
+        accessibilityProbe()
     }
 
     func screenRecordingGranted() -> Bool {
@@ -344,12 +367,19 @@ final class OpenBirdService: @unchecked Sendable {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
-    /// Trigger the Accessibility prompt for the APP (adds OpenBird to the list),
-    /// then open the pane as a fallback for when the prompt was already answered.
-    func requestAccessibility() {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+    static func decideAccessibilityRequest(isTrusted: Bool) -> AccessibilityRequestOutcome {
+        isTrusted ? .alreadyGranted : .needsPrompt
+    }
+
+    /// Trigger the Accessibility prompt for the APP only when it is not already
+    /// trusted. Re-prompting an already granted app creates a confusing loop when
+    /// System Settings is already correct but the setup UI is stale.
+    func requestAccessibility() -> AccessibilityRequestOutcome {
+        let outcome = Self.decideAccessibilityRequest(isTrusted: accessibilityGranted())
+        guard outcome == .needsPrompt else { return outcome }
+        accessibilityPrompter()
         openPrivacyPane(.accessibility)
+        return outcome
     }
 
     /// Trigger the Screen-Recording prompt for the APP, then open the pane.

@@ -39,6 +39,9 @@ struct OpenBirdApp: App {
                     askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
                     await model.refresh()
                 }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    model.refreshPermissionStates()
+                }
         }
 
         Window("Today", id: "today") {

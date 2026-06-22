@@ -52,8 +52,9 @@ final class AppModel: ObservableObject {
     /// Delayed post-start check that confirms capture is actually storing memory.
     private var captureHealthCheckTask: Task<Void, Never>?
 
-    init(service: OpenBirdService) {
+    init(service: OpenBirdService, initialReport: PreflightReport = PreflightReport()) {
         self.service = service
+        self.report = initialReport
         self.capturePaused = service.isCapturePaused()
         self.helpers = service.helperStatuses()
         self.allowlist = service.allowlist()
@@ -256,11 +257,27 @@ final class AppModel: ObservableObject {
         return .attention   // plaintext-0600
     }
 
-    var accessibilityState: StepState { accessibilityGranted ? .ok : .attention }
+    var accessibilityState: StepState { accessibilityEffectivelyGranted ? .ok : .attention }
     var screenRecordingState: StepState { screenRecordingGranted ? .ok : .attention }
     var microphoneState: StepState { microphoneGranted ? .ok : .attention }
 
+    var accessibilityEffectivelyGranted: Bool {
+        accessibilityGranted || preflightAccessibilityPassed
+    }
+
+    private var preflightAccessibilityPassed: Bool {
+        report.grant("accessibility") == "passed"
+    }
+
     // MARK: - Actions
+
+    /// Cheap permission refresh for app activation/menu-open paths. This avoids
+    /// spawning CLI/preflight children every time the user returns from Settings.
+    func refreshPermissionStates() {
+        accessibilityGranted = service.accessibilityGranted()
+        screenRecordingGranted = service.screenRecordingGranted()
+        microphoneGranted = service.microphoneGranted()
+    }
 
     func refresh() async {
         isRefreshing = true
@@ -269,9 +286,7 @@ final class AppModel: ObservableObject {
         captureRunning = service.isCaptureRunning()
         helpers = service.helperStatuses()
         allowlist = service.allowlist()
-        accessibilityGranted = service.accessibilityGranted()
-        screenRecordingGranted = service.screenRecordingGranted()
-        microphoneGranted = service.microphoneGranted()
+        refreshPermissionStates()
         report = await service.preflightReport()
         await refreshMemoryStats()
         lastRefresh = Date()
@@ -302,12 +317,22 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
-    // These trigger the native TCC prompt via the helper (registering it in the
-    // relevant System Settings list) and also open the pane. After granting,
-    // the user taps Re-check to refresh status.
+    // These trigger native TCC prompts only when the relevant grant is not already
+    // present. After granting, the user taps Re-check to refresh full setup state.
     func requestAccessibility() {
-        service.requestAccessibility()
-        lastActionMessage = "Approve OpenBird in the prompt (or System Settings), then Re-check."
+        if accessibilityEffectivelyGranted {
+            refreshPermissionStates()
+            lastActionMessage = "Accessibility is already granted."
+            return
+        }
+        let outcome = service.requestAccessibility()
+        refreshPermissionStates()
+        switch outcome {
+        case .alreadyGranted:
+            lastActionMessage = "Accessibility is already granted."
+        case .needsPrompt:
+            lastActionMessage = "Approve OpenBird in the prompt (or System Settings), then Re-check."
+        }
     }
     func requestScreenRecording() {
         service.requestScreenRecording()
