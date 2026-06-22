@@ -2,6 +2,12 @@ import XCTest
 @testable import OpenBirdApp
 
 final class MemoryStatsTests: XCTestCase {
+    func testChildEnvironmentDisablesPythonBytecodeWrites() {
+        let env = OpenBirdService.childEnvironment(base: ["PYTHONDONTWRITEBYTECODE": "0"])
+
+        XCTAssertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
+    }
+
     func testParseMemoryStatsDecodesCliJson() {
         let stats = OpenBirdService.parseMemoryStats("""
         {

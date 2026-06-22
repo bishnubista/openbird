@@ -43,6 +43,59 @@ ENT_PYTHON="$ROOT_DIR/mac-app/Python.entitlements"
 log() { echo "package_dmg: $*" >&2; }
 die() { echo "package_dmg: ERROR: $*" >&2; exit 1; }
 
+remove_python_bytecode() {
+  local root="$1"
+  find "$root" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+  find "$root" -type d -name '__pycache__' -empty -delete
+}
+
+python_bytecode_manifest() {
+  local root="$1"
+  (
+    cd "$root"
+    {
+      find . -type d -name '__pycache__' -print | LC_ALL=C sort | sed 's/^/D /'
+      find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -print | LC_ALL=C sort | while IFS= read -r f; do
+        shasum -a 256 "$f" | sed 's/^/F /'
+      done
+    }
+  )
+}
+
+assert_python_bytecode_unchanged() {
+  local root="$1" before="$2" label="$3" after
+  after="$(mktemp)"
+  python_bytecode_manifest "$root" >"$after"
+  if diff -u "$before" "$after" >&2; then
+    rm -f "$after"
+    return 0
+  fi
+  rm -f "$after"
+  log "  Python bytecode changed during $label"
+  return 1
+}
+
+if [[ "${1:-}" == "--self-test-bytecode-guard" ]]; then
+  tmp_self_test="$(mktemp -d)"
+  trap 'rm -rf "$tmp_self_test"' EXIT
+  mkdir -p "$tmp_self_test/App.app/Contents/Resources/python/pkg/__pycache__"
+  printf 'old\n' >"$tmp_self_test/App.app/Contents/Resources/python/pkg/__pycache__/a.pyc"
+  before_self_test="$tmp_self_test/before.manifest"
+  python_bytecode_manifest "$tmp_self_test/App.app" >"$before_self_test"
+  printf 'changed\n' >"$tmp_self_test/App.app/Contents/Resources/python/pkg/__pycache__/a.pyc"
+  if assert_python_bytecode_unchanged "$tmp_self_test/App.app" "$before_self_test" "self-test mutation" >/dev/null 2>&1; then
+    die "bytecode guard self-test failed to catch a modified .pyc"
+  fi
+  printf 'old\n' >"$tmp_self_test/App.app/Contents/Resources/python/pkg/__pycache__/a.pyc"
+  python_bytecode_manifest "$tmp_self_test/App.app" >"$before_self_test"
+  printf 'new\n' >"$tmp_self_test/App.app/Contents/Resources/python/pkg/__pycache__/b.pyc"
+  if assert_python_bytecode_unchanged "$tmp_self_test/App.app" "$before_self_test" "self-test addition" >/dev/null 2>&1; then
+    die "bytecode guard self-test failed to catch a new .pyc"
+  fi
+  log "bytecode guard self-test OK"
+  exit 0
+fi
+
 # Resolve the Developer ID signing identity: an explicit OPENBIRD_SIGN_IDENTITY
 # (env or script/release.env) wins; otherwise auto-derive the single
 # "Developer ID Application" identity from the keychain.
@@ -133,6 +186,7 @@ PY="$DIR/../Resources/python/bin/python3"
 # Sanitize inherited env so the bundled interpreter can't be hijacked to load a
 # foreign stdlib/extension or inject a dylib (we ship a self-contained runtime).
 unset PYTHONHOME PYTHONPATH DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_FRAMEWORK_PATH
+export PYTHONDONTWRITEBYTECODE=1
 export OPENBIRD_CAPTURE_HELPER="$DIR/capture-helper"
 export OPENBIRD_AUDIO_HELPER="$DIR/audio-helper"
 exec "$PY" -m openbird "$@"
@@ -183,16 +237,33 @@ if [ -n "$macho_leaks" ]; then
 fi
 log "  relocation audit clean"
 
+# pip/sysconfig may write timestamp bytecode while staging. Rebuild a clean,
+# hash-based cache as the final staged Python execution before the relocated
+# smoke test and signing. Runtime writes stay disabled in openbird-cli.
+log "  rebuilding sealed Python bytecode cache"
+remove_python_bytecode "$APP"
+"$BPY" -m compileall -q -f --invalidation-mode unchecked-hash "$RES/python" >&2
+STAGED_BYTECODE_MANIFEST="$(mktemp)"
+python_bytecode_manifest "$APP" >"$STAGED_BYTECODE_MANIFEST"
+
 # Prove relocatability: copy the staged app to a DIFFERENT path and run the CLI.
 RELOC_TMP="$(mktemp -d)"
-cp -R "$APP" "$RELOC_TMP/$APP_NAME.app"
-if "$RELOC_TMP/$APP_NAME.app/Contents/MacOS/openbird-cli" --help >/dev/null 2>"$RELOC_TMP/err"; then
+RELOC_APP="$RELOC_TMP/$APP_NAME.app"
+cp -R "$APP" "$RELOC_APP"
+RELOC_BYTECODE_MANIFEST="$RELOC_TMP/bytecode.before"
+python_bytecode_manifest "$RELOC_APP" >"$RELOC_BYTECODE_MANIFEST"
+if "$RELOC_APP/Contents/MacOS/openbird-cli" --help >/dev/null 2>"$RELOC_TMP/err"; then
   log "  relocation run OK (CLI runs from a moved copy)"
 else
   log "  CLI failed from moved copy:"; cat "$RELOC_TMP/err" >&2
   rm -rf "$RELOC_TMP"; die "embedded interpreter is NOT relocatable"
 fi
+assert_python_bytecode_unchanged "$RELOC_APP" "$RELOC_BYTECODE_MANIFEST" "relocated CLI smoke test" \
+  || { rm -rf "$RELOC_TMP"; die "relocated CLI mutated Python bytecode inside the app bundle"; }
 rm -rf "$RELOC_TMP"
+assert_python_bytecode_unchanged "$APP" "$STAGED_BYTECODE_MANIFEST" "pre-sign staging" \
+  || die "staged app Python bytecode changed before signing"
+rm -f "$STAGED_BYTECODE_MANIFEST"
 
 # ---------------------------------------------------------------------------
 log "[7/8] Developer ID sign every Mach-O, inside-out (no --deep)"

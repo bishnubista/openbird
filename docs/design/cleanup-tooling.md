@@ -6,15 +6,18 @@ A tester's machine reached a broken state where OpenBird vanished from the menu 
 and the Keychain prompt read `python3.13` instead of `OpenBird`. Investigation found
 **two** distinct problems:
 
-1. **Self-corrupting code signature (separate PR).** The embedded Python writes
+1. **Self-corrupting code signature (fixed in the DMG seal guard).** The embedded Python writes
    `__pycache__/*.pyc` into the *signed* app bundle on first run
    (`Resources/python/lib/python3.13/encodings/__pycache__/aliases.cpython-313.pyc`
    was modified post-signing), breaking the Developer ID seal. Because the macOS
    Keychain ACL is keyed to the app's code signature, a broken seal makes the app
    unrecognizable → `crypto.py` falls back to `keyring` → the `python3.13` prompt;
    it also fails Gatekeeper (`spctl`) and destabilises launch/`MenuBarExtra`.
-   **Fix tracked separately** (`PYTHONDONTWRITEBYTECODE=1` in child env + CLI
-   wrapper, plus build-time pre-compile). Out of scope for this doc.
+   The DMG packager now rebuilds hash-based `.pyc` files before signing, disables
+   runtime bytecode writes in the bundled CLI wrapper, and fails the relocation
+   smoke test if a bundled CLI launch adds or mutates Python bytecode. The Swift
+   app also overlays `PYTHONDONTWRITEBYTECODE=1` for CLI children as defense in
+   depth.
 
 2. **Launch Services pollution (this work).** The machine had 8+ registrations of
    bundle id `ai.openbird.OpenBird` — five *ghost* `dist/OpenBird.app` from build
