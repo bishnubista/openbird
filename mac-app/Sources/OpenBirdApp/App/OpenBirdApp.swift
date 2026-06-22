@@ -54,10 +54,12 @@ struct OpenBirdApp: App {
                     model.refreshPermissionStates()
                 }
         }
+        .windowStyle(.hiddenTitleBar)
 
         Window("Today", id: "today") {
             TodayView(model: todayModel, appModel: model, onAsk: { askPanel.show() })
         }
+        .windowStyle(.hiddenTitleBar)
 
         Window("Timeline", id: "timeline") {
             TimelineAskView(model: timelineModel, chat: timelineChat)
