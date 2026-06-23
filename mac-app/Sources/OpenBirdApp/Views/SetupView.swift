@@ -108,10 +108,10 @@ struct SetupView: View {
     }
 
     private func modelRouteAction() {
-        if !model.report.missingModels.isEmpty {
-            Task { await model.pullMissingModels() }
-        } else {
+        if model.report.ollamaReachable == false {
             NSWorkspace.shared.open(URL(string: "https://ollama.com")!)
+        } else if !model.report.missingModels.isEmpty {
+            Task { await model.pullMissingModels() }
         }
     }
 
