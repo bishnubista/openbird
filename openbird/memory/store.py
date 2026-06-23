@@ -563,6 +563,50 @@ class MemoryStore:
             out.append((self._row_to_observation(r), text))
         return out
 
+    def export_observations(
+        self,
+        *,
+        since_ts: float | None = None,
+        until_ts: float | None = None,
+        source: str | None = None,
+    ) -> list[dict]:
+        """Return decrypted observations plus blob text for explicit user export.
+
+        Export is a local maintenance read: it never embeds and never contacts a
+        provider. Callers are responsible for warning that the destination path
+        may leave OpenBird's retention boundary (for example via iCloud/Dropbox).
+        """
+        sql = (
+            "SELECT o.*, b.text AS text FROM observations o "
+            "JOIN content_blobs b ON b.content_hash = o.content_hash WHERE 1=1"
+        )
+        params: list[object] = []
+        if since_ts is not None:
+            sql += " AND o.ts >= ?"
+            params.append(since_ts)
+        if until_ts is not None:
+            sql += " AND o.ts <= ?"
+            params.append(until_ts)
+        if source is not None:
+            sql += " AND o.source = ?"
+            params.append(source)
+        sql += " ORDER BY o.ts ASC"
+        rows = self.conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "content_hash": row["content_hash"],
+                "ts": row["ts"],
+                "app": row["app"],
+                "window": row["window"],
+                "url": row["url"],
+                "session_id": row["session_id"],
+                "source": row["source"],
+                "text": row["text"],
+            }
+            for row in rows
+        ]
+
     @staticmethod
     def _row_to_observation(row) -> Observation:
         """Map a sqlite Row to an :class:`Observation`."""

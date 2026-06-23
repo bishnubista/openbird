@@ -1,0 +1,166 @@
+# Machine-readable companion to docs/design/privacy-data-flow.md.
+# Keep route ids stable; tests and UI copy may reference them.
+version: 1
+route_classes:
+  local:
+    description: Runtime data stays on this Mac.
+    egress: false
+  self-hosted-remote:
+    description: Data leaves this Mac for user-controlled infrastructure.
+    egress: true
+  third-party-cloud:
+    description: Data leaves this Mac for a third-party provider.
+    egress: true
+  unknown:
+    description: OpenBird cannot prove the route.
+    egress: true
+    release_green: false
+
+release_policy:
+  public_beta_requires_verified_sqlcipher: true
+  plaintext_0600_release_green: false
+  unknown_route_release_green: false
+
+routes:
+  - id: capture.active_window
+    class: local
+    source: Swift Accessibility helper
+    captured_fields:
+      - bundle_id
+      - window_title_sanitized_before_storage
+      - active_window_text
+      - timestamp
+      - incognito_flag
+    storage:
+      - sqlite.observations
+      - sqlite.content_blobs
+      - sqlite.chunks
+      - sqlite.fts_chunks
+      - sqlite.vec_chunks
+    egress:
+      default: none
+      inherited_by:
+        - chat.remote
+        - routines.summary
+    deletion:
+      command: openbird data purge/prune
+      must_remove:
+        - observations
+        - orphaned_content_blobs
+        - orphaned_chunks
+        - fts_rows
+        - vector_rows
+    truth_surface:
+      - app.capture_state
+      - preflight.privacy
+
+  - id: capture.pause
+    class: local
+    source: capture.paused sidecar
+    captured_fields: []
+    storage: []
+    egress:
+      default: none
+    enforcement:
+      boundary: Swift helper before AX read
+      failure_mode: fail_closed
+    truth_surface:
+      - app.capture_pause_state
+      - menu_bar.pause_state
+
+  - id: ingest.files
+    class: local
+    source: user-selected local files
+    captured_fields:
+      - extracted_text
+      - source_path_metadata
+      - timestamp
+    storage:
+      - sqlite.observations
+      - sqlite.content_blobs
+      - sqlite.chunks
+      - sqlite.fts_chunks
+      - sqlite.vec_chunks
+    egress:
+      default: none
+      inherited_by:
+        - embedding.remote
+        - chat.remote
+    truth_surface:
+      - cli.ingest_output
+
+  - id: model.local_ollama
+    class: local
+    source: retrieved memory and user prompt
+    egress:
+      condition: ollama_host_is_loopback
+      default: none
+    truth_surface:
+      - preflight.cloud
+      - cli.cloud_banner
+      - app.privacyTransmissionSummary
+
+  - id: model.remote_ollama
+    class: self-hosted-remote
+    source: retrieved memory and user prompt
+    egress:
+      condition: ollama_host_is_not_loopback
+      default: off_device
+    enforcement:
+      requires: OPENBIRD_ALLOW_CLOUD
+    truth_surface:
+      - preflight.cloud
+      - cli.CLOUD_ACTIVE
+      - app.CLOUD_ACTIVE
+
+  - id: model.third_party_cloud
+    class: third-party-cloud
+    source: retrieved memory and user prompt
+    egress:
+      condition: provider_is_not_local
+      default: third_party_provider
+    enforcement:
+      requires: OPENBIRD_ALLOW_CLOUD
+    truth_surface:
+      - preflight.cloud
+      - cli.CLOUD_ACTIVE
+      - app.CLOUD_ACTIVE
+
+  - id: diagnostics.logs
+    class: local
+    source: runtime diagnostics
+    captured_fields:
+      - reason_codes
+      - counts
+      - safe_status
+    forbidden_fields:
+      - captured_text
+      - raw_window_title
+      - raw_url
+      - provider_secret
+    egress:
+      default: none
+    tests_required:
+      - no_captured_text_in_capture_logs
+      - no_raw_url_or_window_in_diagnostics
+
+  - id: data.export
+    class: unknown
+    status: implemented_jsonl
+    source: local memory DB
+    captured_fields:
+      - decrypted_observations
+      - decrypted_content_blobs
+      - metadata
+    egress:
+      default: user_selected_destination
+      warning: destination may be cloud-synced outside OpenBird control
+    controls_active:
+      - explicit_destination_warning
+      - no_tempfile_leak
+      - output_file_mode_0600
+    controls_planned:
+      - optional_encrypted_export
+    truth_surface:
+      - cli.export_warning
+      - app.export_warning

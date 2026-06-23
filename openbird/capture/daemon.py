@@ -576,13 +576,14 @@ class CaptureDaemon:
     def _with_policy_args(self, argv: list[str]) -> list[str]:
         """Append the allow/block policy so the helper gates content AT THE SOURCE.
 
-        The capture helper enforces the allowlist-only policy before reading any AX
-        text, so disallowed app content is never read or sent over IPC. The Python
-        redaction pass (`redact.decide`) still runs as authoritative defense-in-depth.
+        The capture helper enforces the pause + allowlist-only policy before
+        reading any AX text, so paused/disallowed app content is never read or
+        sent over IPC. The Python redaction pass (`redact.decide`) still runs as
+        authoritative defense-in-depth.
         """
         allow = list(getattr(self.settings, "allowlist", None) or [])
         block = list(getattr(self.settings, "blocklist", None) or [])
-        extra: list[str] = []
+        extra: list[str] = ["--pause-file", str(self._pause_file())]
         if allow:
             extra += ["--allow", ",".join(allow)]
         if block:

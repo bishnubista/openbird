@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +32,9 @@ from openbird.memory.store import MemoryStore
 from openbird.types import Observation
 
 from tests.unit.conftest import FakeProvider
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +607,80 @@ def test_daemon_rejects_all_events_when_paused(allow_settings):
     stats = daemon.run_lines(lines)
     assert stats.ingested == 1
     assert len(store.calls) == 1
+
+
+def test_daemon_passes_pause_file_to_helper_boundary(allow_settings):
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=("capture-helper",),
+        require_signed_helper=False,
+    )
+
+    argv = daemon._with_policy_args(["capture-helper"])
+
+    assert argv[:3] == [
+        "capture-helper",
+        "--pause-file",
+        str(allow_settings.data_dir / "capture.paused"),
+    ]
+    assert "--allow" in argv
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="capture helper is macOS-only")
+def test_swift_helper_pause_file_exits_before_accessibility(tmp_path):
+    pause_file = tmp_path / "capture.paused"
+    pause_file.write_text("")
+
+    res = subprocess.run(
+        [
+            "swift",
+            "run",
+            "--quiet",
+            "CaptureHelper",
+            "--no-prompt",
+            "--pause-file",
+            str(pause_file),
+            "--allow",
+            "com.apple.mail",
+        ],
+        cwd=ROOT / "capture-helper",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert res.stdout == ""
+    assert "capture: skipped_paused" in res.stderr
+
+    unknown = tmp_path / "missing" / "capture.paused"
+    res = subprocess.run(
+        [
+            "swift",
+            "run",
+            "--quiet",
+            "CaptureHelper",
+            "--no-prompt",
+            "--pause-file",
+            str(unknown),
+            "--allow",
+            "com.apple.mail",
+        ],
+        cwd=ROOT / "capture-helper",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert res.stdout == ""
+    assert "capture: pause_state_unknown" in res.stderr
+    assert "capture: skipped_paused" in res.stderr
 
 
 def test_daemon_scrubs_before_ingest(allow_settings):
