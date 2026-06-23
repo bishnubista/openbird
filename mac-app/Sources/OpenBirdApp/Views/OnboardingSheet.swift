@@ -100,16 +100,7 @@ struct OnboardingSheet: View {
     }
 
     private func modelRouteEnable() {
-        switch model.modelRouteProvisioningState {
-        case .ollamaUnavailable:
-            NSWorkspace.shared.open(URL(string: "https://ollama.com")!)
-        case .modelsMissing(let canPull) where canPull:
-            Task { await model.pullMissingModels() }
-        case .error where model.canPullMissingModels:
-            Task { await model.pullMissingModels() }
-        default:
-            break
-        }
+        model.performModelRouteAction { NSWorkspace.shared.open($0) }
     }
 
     private func start() {

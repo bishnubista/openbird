@@ -245,6 +245,21 @@ final class AppModel: ObservableObject {
             && !report.missingModels.isEmpty
     }
 
+    func performModelRouteAction(openURL: (URL) -> Void) {
+        switch modelRouteProvisioningState {
+        case .ollamaUnavailable:
+            if let url = URL(string: "https://ollama.com") {
+                openURL(url)
+            }
+        case .modelsMissing(let canPull) where canPull:
+            Task { await pullMissingModels() }
+        case .error where canPullMissingModels:
+            Task { await pullMissingModels() }
+        default:
+            break
+        }
+    }
+
     private var hasDecodedModelRoute: Bool {
         report.llmModel != nil
             || report.embedModel != nil

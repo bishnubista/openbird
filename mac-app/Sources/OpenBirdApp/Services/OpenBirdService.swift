@@ -471,7 +471,17 @@ final class OpenBirdService: @unchecked Sendable {
         guard let ollama = ollamaPath() else {
             return (false, "Ollama CLI not found. Install Ollama from ollama.com.")
         }
-        let result = await runAsync(ollama, arguments: ["pull", model], timeout: 1800)
+        var environment = Self.childEnvironment()
+        if let host = host?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !host.isEmpty {
+            environment["OLLAMA_HOST"] = host
+        }
+        let result = await runAsync(
+            ollama,
+            arguments: ["pull", model],
+            timeout: 1800,
+            environment: environment
+        )
         if result.exitCode == 0 {
             return (true, "Pulled \(model).")
         }
@@ -777,14 +787,17 @@ final class OpenBirdService: @unchecked Sendable {
     }
 
     private static func run(
-        _ path: String, arguments: [String], timeout: TimeInterval = 4
+        _ path: String,
+        arguments: [String],
+        timeout: TimeInterval = 4,
+        environment: [String: String]? = nil
     ) -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
         // Overlay OPENBIRD_DB_KEY so preflight/data-stats children read the
         // app-owned key and never raise their own Keychain prompt.
-        process.environment = childEnvironment()
+        process.environment = environment ?? childEnvironment()
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -833,11 +846,19 @@ final class OpenBirdService: @unchecked Sendable {
     }
 
     private func runAsync(
-        _ path: String, arguments: [String], timeout: TimeInterval
+        _ path: String,
+        arguments: [String],
+        timeout: TimeInterval,
+        environment: [String: String]? = nil
     ) async -> ProcessResult {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: Self.run(path, arguments: arguments, timeout: timeout))
+                continuation.resume(returning: Self.run(
+                    path,
+                    arguments: arguments,
+                    timeout: timeout,
+                    environment: environment
+                ))
             }
         }
     }
