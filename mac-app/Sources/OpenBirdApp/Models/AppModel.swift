@@ -165,6 +165,13 @@ final class AppModel: ObservableObject {
         return "No remote model route is configured; finish local model setup before using AI features."
     }
 
+    var modelRouteFooterLabel: String {
+        if report.cloudBlocked { return "remote blocked" }
+        if hasRemoteModelRoute { return "remote model" }
+        if localModelStatusState == .unknown { return "model route unknown" }
+        return "local model"
+    }
+
     var hasRemoteModelRoute: Bool {
         !report.remoteModelRoles.isEmpty || !report.remoteModels.isEmpty
     }

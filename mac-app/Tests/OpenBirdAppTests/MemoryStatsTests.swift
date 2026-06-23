@@ -142,6 +142,7 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService(), initialReport: localRuntimeOKReport())
 
         XCTAssertEqual(model.localModelStatusState, .ok)
+        XCTAssertEqual(model.modelRouteFooterLabel, "local model")
         XCTAssertTrue(model.privacyTransmissionSummary.contains("Model requests stay on this Mac"))
         assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)
         assertNoAbsoluteDeviceClaim(model.localModelStatusSummary)
@@ -151,6 +152,7 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService())
 
         XCTAssertEqual(model.localModelStatusState, .unknown)
+        XCTAssertEqual(model.modelRouteFooterLabel, "model route unknown")
         XCTAssertTrue(model.privacyTransmissionSummary.contains("not verified yet"))
         assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)
     }
@@ -163,6 +165,7 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService(), initialReport: report)
 
         XCTAssertEqual(model.localModelStatusState, .attention)
+        XCTAssertEqual(model.modelRouteFooterLabel, "remote blocked")
         XCTAssertFalse(model.isFullyConfigured)
         XCTAssertTrue(model.localModelStatusSummary.contains("openai/gpt-4o-mini"))
         XCTAssertTrue(model.localModelStatusSummary.contains("opt in"))
@@ -178,6 +181,7 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService(), initialReport: report)
 
         XCTAssertEqual(model.localModelStatusState, .ok)
+        XCTAssertEqual(model.modelRouteFooterLabel, "remote model")
         XCTAssertTrue(model.isFullyConfigured)
         XCTAssertTrue(model.privacyTransmissionSummary.contains("may send captured memory"))
         XCTAssertTrue(model.privacyTransmissionSummary.contains("openai/gpt-4o-mini"))
@@ -192,6 +196,7 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService(), initialReport: report)
 
         XCTAssertEqual(model.localModelStatusState, .attention)
+        XCTAssertEqual(model.modelRouteFooterLabel, "remote model")
         XCTAssertFalse(model.isFullyConfigured)
         XCTAssertTrue(model.localModelStatusSummary.contains("configured but not verified by preflight"))
         XCTAssertTrue(model.privacyTransmissionSummary.contains("may send captured memory"))

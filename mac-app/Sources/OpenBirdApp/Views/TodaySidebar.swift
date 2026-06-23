@@ -89,9 +89,9 @@ struct TodaySidebar: View {
         }
     }
 
-    /// Real footer status: capture state, allowlist size, and the actual at-rest
-    /// encryption state. The encryption word is derived from `encryptionState`, not
-    /// hardcoded — claiming "encrypted" when it isn't would be a false privacy claim.
+    /// Real footer status: capture state, allowlist size, model route, and the
+    /// actual at-rest encryption state. Privacy words are derived from state, not
+    /// hardcoded, so the footer never claims local-only behavior for a remote route.
     private var footerText: String {
         let state = appModel.capturePaused
             ? "Paused"
@@ -104,7 +104,7 @@ struct TodaySidebar: View {
         case .attention: encryption = "encryption off"
         default: encryption = "encryption unknown"
         }
-        return "\(state) · \(apps) · on-device · \(encryption)"
+        return "\(state) · \(apps) · \(appModel.modelRouteFooterLabel) · \(encryption)"
     }
 
     private var sidebarFill: Color {
