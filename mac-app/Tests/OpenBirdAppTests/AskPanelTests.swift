@@ -41,9 +41,11 @@ final class CitationFormattingTests: XCTestCase {
 @MainActor
 final class AskPanelModelTests: XCTestCase {
     private func makeAppModel() -> AppModel {
-        // Fresh AppModel: memoryStatsState is .unknown so askUnavailableReason is nil
-        // and asks proceed (the panel's availability gate is exercised elsewhere).
-        AppModel(service: OpenBirdService())
+        // Models ready + memoryStatsState .unknown keeps askUnavailableReason nil
+        // so these tests exercise panel concurrency/result flow, not setup gating.
+        var report = PreflightReport()
+        report.ollamaReachable = true
+        return AppModel(service: OpenBirdService(), initialReport: report)
     }
 
     func testSingleAskAppendsOneTurnAndFillsResult() async {

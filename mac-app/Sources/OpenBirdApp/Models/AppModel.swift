@@ -96,14 +96,21 @@ final class AppModel: ObservableObject {
     }
 
     var askUnavailableReason: String? {
+        if localModelStatusState != .ok {
+            return localModelStatusSummary
+        }
         switch memoryStatsState {
         case .loaded(let stats) where stats.observations == 0:
-            return "No memory stored yet. Start capture or ingest notes before asking."
+            return "No memories yet. Start capture or ingest notes to ask grounded questions."
         case .failed:
             return "Could not check local memory. Re-check setup before asking."
         case .unknown, .loaded:
             return nil
         }
+    }
+
+    var askEmptyPrompt: String {
+        askUnavailableReason ?? "Ask about your work to get a grounded, cited answer."
     }
 
     var localModelStatusState: StepState {
@@ -266,6 +273,13 @@ final class AppModel: ObservableObject {
             return "Next: bring an allowed app to the front so memory starts filling."
         }
         return "Ready: capture is storing memory. Ask a question when you need it."
+    }
+
+    var canStartCaptureNow: Bool {
+        accessibilityState == .ok
+            && !allowlist.isEmpty
+            && service.canLaunchOpenBirdCLI()
+            && !captureRunning
     }
 
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off

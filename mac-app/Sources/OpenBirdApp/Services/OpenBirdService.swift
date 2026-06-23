@@ -128,6 +128,7 @@ final class OpenBirdService: @unchecked Sendable {
     private let accessibilityProbe: @Sendable () -> Bool
     private let accessibilityPrompter: @Sendable () -> Void
     private let privacyPaneOpener: @Sendable (PrivacyPane) -> Void
+    private let openBirdCLIResolver: (@Sendable () -> String?)?
 
     /// The capture daemon launched by the app (if any), so it can be stopped.
     private var captureProcess: Process?
@@ -141,11 +142,13 @@ final class OpenBirdService: @unchecked Sendable {
         privacyPaneOpener: @escaping @Sendable (PrivacyPane) -> Void = { pane in
             guard let url = pane.url else { return }
             NSWorkspace.shared.open(url)
-        }
+        },
+        openBirdCLIResolver: (@Sendable () -> String?)? = nil
     ) {
         self.accessibilityProbe = accessibilityProbe
         self.accessibilityPrompter = accessibilityPrompter
         self.privacyPaneOpener = privacyPaneOpener
+        self.openBirdCLIResolver = openBirdCLIResolver
     }
 
     private var dataDirectory: URL {
@@ -324,6 +327,10 @@ final class OpenBirdService: @unchecked Sendable {
         return processNames
             .map { Self.run("/usr/bin/pkill", arguments: ["-x", $0]).exitCode == 0 }
             .contains(true)
+    }
+
+    func canLaunchOpenBirdCLI() -> Bool {
+        resolveOpenBirdCLI() != nil
     }
 
     // MARK: - Folders & panes
@@ -521,6 +528,9 @@ final class OpenBirdService: @unchecked Sendable {
     }
 
     private func resolveOpenBirdCLI() -> String? {
+        if let openBirdCLIResolver {
+            return openBirdCLIResolver()
+        }
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/MacOS/openbird-cli")
         let candidates = [bundled.path, "/opt/homebrew/bin/openbird", "/usr/local/bin/openbird"]
