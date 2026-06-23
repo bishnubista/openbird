@@ -47,7 +47,9 @@ app = typer.Typer(
 )
 
 routine_app = typer.Typer(help="Manage and run scheduled routines.", no_args_is_help=True)
+eval_app = typer.Typer(help="Run local eval harnesses.", no_args_is_help=True)
 app.add_typer(routine_app, name="routine")
+app.add_typer(eval_app, name="eval")
 register_capture_command(app)
 
 _console = Console()
@@ -1082,6 +1084,54 @@ def meeting() -> None:
         _console.print(
             "[dim]Install with `uv sync --extra meetings` to enable transcription.[/]"
         )
+
+
+# --------------------------------------------------------------------------- #
+# eval                                                                        #
+# --------------------------------------------------------------------------- #
+
+
+@eval_app.command("signals")
+def eval_signals(
+    fixture: Path = typer.Argument(..., help="Signal eval JSONL fixture."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Run the deterministic signal classifier eval fixture."""
+    from openbird.signals import (
+        load_signal_eval_jsonl,
+        run_signal_eval,
+        signal_eval_report_payload,
+    )
+
+    try:
+        cases = load_signal_eval_jsonl(fixture)
+        report = run_signal_eval(cases)
+    except (OSError, ValueError) as exc:
+        _err_console.print(f"[red]Invalid signal eval fixture:[/] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    payload = signal_eval_report_payload(report)
+    if as_json:
+        _console.print_json(data=payload)
+    else:
+        table = Table(title="Signal eval", show_header=True, header_style="bold")
+        table.add_column("Metric")
+        table.add_column("Value", justify="right")
+        for key in (
+            "passed",
+            "total_cases",
+            "precision_at_5",
+            "must_surface_recall",
+            "missed_important_count",
+            "noise_rate",
+            "sensitive_leak_count",
+            "sensitive_quarantine_miss_count",
+        ):
+            table.add_row(key, str(payload[key]))
+        _console.print(table)
+
+    if not report.passed:
+        raise typer.Exit(code=1)
 
 
 # --------------------------------------------------------------------------- #

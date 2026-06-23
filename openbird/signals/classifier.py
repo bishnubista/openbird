@@ -206,6 +206,24 @@ class SignalClassifier:
     ) -> BriefingSignals:
         """Classify a capture window into ranked, surfaceable signal facts."""
         packets, grouped_duplicates = self.build_packets(rows)
+        return self.classify_packets(
+            packets,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            local_model_status=local_model_status,
+            grouped_duplicates_count=grouped_duplicates,
+        )
+
+    def classify_packets(
+        self,
+        packets: list[CandidatePacket],
+        *,
+        start_ts: float,
+        end_ts: float,
+        local_model_status: str = "not_requested",
+        grouped_duplicates_count: int = 0,
+    ) -> BriefingSignals:
+        """Classify pre-built packets into ranked, surfaceable signal facts."""
         sensitive_count = sum(1 for p in packets if p.sensitive)
         eligible = self._eligible_packets(packets)
 
@@ -234,7 +252,7 @@ class SignalClassifier:
             end_ts=end_ts,
             signals=ranked,
             hidden_count=hidden_count,
-            grouped_duplicates_count=grouped_duplicates,
+            grouped_duplicates_count=grouped_duplicates_count,
             low_confidence_count=low_confidence,
             deterministic_fallback_count=fallback_count,
             sensitive_quarantine_count=sensitive_count,
