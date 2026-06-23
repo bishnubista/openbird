@@ -140,6 +140,39 @@ private func axChildren(_ element: AXUIElement) -> [AXUIElement] {
     return children
 }
 
+/// Live pause-state check. The pause sidecar is intentionally read on every
+/// checkpoint; the helper never caches it for a whole capture.
+private func capturePaused(_ pauseFile: String?) -> Bool {
+    guard let pauseFile else { return false }
+    if pauseFile.isEmpty {
+        diag("capture: pause_state_unknown")
+        return true
+    }
+    let fm = FileManager.default
+    if fm.fileExists(atPath: pauseFile) {
+        return true
+    }
+
+    let parent = (pauseFile as NSString).deletingLastPathComponent
+    var isDir = ObjCBool(false)
+    if parent.isEmpty
+        || !fm.fileExists(atPath: parent, isDirectory: &isDir)
+        || !isDir.boolValue
+        || !fm.isReadableFile(atPath: parent) {
+        diag("capture: pause_state_unknown")
+        return true
+    }
+    return false
+}
+
+private func skipIfPaused(_ pauseFile: String?) -> Bool {
+    if capturePaused(pauseFile) {
+        diag("capture: skipped_paused")
+        return true
+    }
+    return false
+}
+
 /// Depth/node/time-bounded AX text aggregation.
 ///
 /// Collects `AXValue`/`AXTitle`/`AXDescription` strings from the element subtree,
@@ -148,19 +181,22 @@ private func collectText(
     from element: AXUIElement,
     depth: Int,
     budget: TraversalBudget,
-    into parts: inout [String]
+    into parts: inout [String],
+    pauseFile: String?
 ) {
-    if depth > Limits.maxDepth || budget.expired { return }
+    if skipIfPaused(pauseFile) || depth > Limits.maxDepth || budget.expired { return }
     budget.nodesVisited += 1
 
     // Role/subrole policy BEFORE reading any value: never aggregate secure text
     // fields (passwords), and never descend into them.
+    if skipIfPaused(pauseFile) { return }
     if isSensitive(element) {
         budget.sensitiveSkipped += 1
         return
     }
 
     for attr in [kAXValueAttribute as String, kAXTitleAttribute as String] {
+        if skipIfPaused(pauseFile) { return }
         if let s = axString(element, attr), !s.isEmpty {
             parts.append(s)
             budget.bytesCollected += s.utf8.count
@@ -168,9 +204,16 @@ private func collectText(
         }
     }
 
+    if skipIfPaused(pauseFile) { return }
     for child in axChildren(element) {
-        if budget.expired { return }
-        collectText(from: child, depth: depth + 1, budget: budget, into: &parts)
+        if skipIfPaused(pauseFile) || budget.expired { return }
+        collectText(
+            from: child,
+            depth: depth + 1,
+            budget: budget,
+            into: &parts,
+            pauseFile: pauseFile
+        )
     }
 }
 
@@ -287,19 +330,23 @@ private func contentAllowed(bundleId: String?, allow: Set<String>, block: Set<St
 }
 
 /// Capture the frontmost app's active-window text once and emit it.
-private func captureFrontmost(allow: Set<String>, block: Set<String>) {
+private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile: String?) {
+    if skipIfPaused(pauseFile) { return }
+
     guard let frontApp = NSWorkspace.shared.frontmostApplication else {
         diag("capture: no_frontmost_app")
         return
     }
     let bundleId = frontApp.bundleIdentifier
     let pid = frontApp.processIdentifier
+    if skipIfPaused(pauseFile) { return }
 
     // Allowlist-first gate BEFORE reading any AX text. A disallowed app emits
     // metadata only (empty text) so the daemon sees the focus change but no
     // captured content ever crosses the IPC boundary.
     if !contentAllowed(bundleId: bundleId, allow: allow, block: block) {
         diag("capture: skipped_not_allowlisted")
+        if skipIfPaused(pauseFile) { return }
         emit(CaptureEvent(
             app: bundleId, window: nil, url: nil, text: "",
             ts: Date().timeIntervalSince1970, incognito: false))
@@ -311,12 +358,15 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>) {
     // and ensures a vault's title/text is never read, even if (mis)allowlisted.
     if isDangerousBundle(bundleId) {
         diag("capture: skipped_dangerous_app")
+        if skipIfPaused(pauseFile) { return }
         emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
                           ts: Date().timeIntervalSince1970, incognito: false))
         return
     }
 
+    if skipIfPaused(pauseFile) { return }
     let appElement = AXUIElementCreateApplication(pid)
+    if skipIfPaused(pauseFile) { return }
 
     // Resolve the focused window (fall back to the first window).
     var focused: CFTypeRef?
@@ -339,12 +389,15 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>) {
         return
     }
 
+    if skipIfPaused(pauseFile) { return }
     let windowTitle = axString(window, kAXTitleAttribute as String)
+    if skipIfPaused(pauseFile) { return }
 
     // Incognito/private windows: emit metadata only, with incognito=true and no
     // (potentially sensitive) window title, before any text traversal.
     if isIncognitoTitle(windowTitle) {
         diag("capture: skipped_incognito")
+        if skipIfPaused(pauseFile) { return }
         emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
                           ts: Date().timeIntervalSince1970, incognito: true))
         return
@@ -352,7 +405,9 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>) {
 
     let budget = TraversalBudget(deadlineSeconds: Limits.deadlineSeconds)
     var parts: [String] = []
-    collectText(from: window, depth: 0, budget: budget, into: &parts)
+    if skipIfPaused(pauseFile) { return }
+    collectText(from: window, depth: 0, budget: budget, into: &parts, pauseFile: pauseFile)
+    if skipIfPaused(pauseFile) { return }
 
     var text = parts.joined(separator: "\n")
     if text.utf8.count > Limits.maxTextBytes {
@@ -372,6 +427,7 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>) {
         ts: Date().timeIntervalSince1970,
         incognito: false
     )
+    if skipIfPaused(pauseFile) { return }
     emit(event)
 }
 
@@ -392,6 +448,19 @@ private func listArg(_ args: [String], _ name: String) -> Set<String> {
         i += 1
     }
     return out
+}
+
+/// Parse a single value flag (e.g. `--pause-file /path/to/capture.paused`).
+private func valueArg(_ args: [String], _ name: String) -> String? {
+    var i = 0
+    while i < args.count {
+        if args[i] == name, i + 1 < args.count, !args[i + 1].hasPrefix("--") {
+            return args[i + 1]
+        }
+        if args[i] == name { return "" }
+        i += 1
+    }
+    return nil
 }
 
 private func run() {
@@ -415,6 +484,9 @@ private func run() {
     // Allowlist-first content policy, enforced before any AX text is read.
     let allow = listArg(args, "--allow")
     let block = listArg(args, "--block")
+    let pauseFile = valueArg(args, "--pause-file")
+
+    if skipIfPaused(pauseFile) { return }
 
     // Privacy boundary: captured AX text must only flow to the daemon's private
     // pipe. Refuse if stdout is a terminal or a redirected file, so content can
@@ -432,7 +504,7 @@ private func run() {
         exit(2)
     }
 
-    captureFrontmost(allow: allow, block: block)
+    captureFrontmost(allow: allow, block: block, pauseFile: pauseFile)
 }
 
 run()

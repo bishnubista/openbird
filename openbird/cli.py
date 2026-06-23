@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -1116,6 +1117,95 @@ def data_stats() -> None:
     finally:
         store.close()
     _console.print_json(json.dumps(stats))
+
+
+@data_app.command("export")
+def data_export(
+    output: Path = typer.Option(
+        ...,
+        "--output",
+        "-o",
+        help="Write decrypted memory export as JSONL to this file.",
+    ),
+    since: Optional[str] = typer.Option(
+        None,
+        "--since",
+        help="Export observations at/after this time. Accepts unix ts, ISO date, or 7d/24h spans.",
+    ),
+    until: Optional[str] = typer.Option(
+        None,
+        "--until",
+        help="Export observations at/before this time. Accepts unix ts, ISO date, or 7d/24h spans.",
+    ),
+    source: Optional[str] = typer.Option(
+        None,
+        "--source",
+        help="Restrict export to one observation source, e.g. capture or ingest.",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace an existing output file.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Export decrypted observations and text as JSONL.
+
+    Export is explicit egress: the chosen destination may be cloud-synced outside
+    OpenBird's control, and exported files are not affected by later purge/prune.
+    """
+    since_ts = _parse_since(since) if since else None
+    until_ts = _parse_since(until, option_name="--until") if until else None
+    if since_ts is not None and until_ts is not None and since_ts > until_ts:
+        _err_console.print("[red]Refusing[/] --since must be before --until.")
+        raise typer.Exit(code=2)
+
+    if output.exists() and not overwrite:
+        _err_console.print(
+            f"[red]Refusing[/] output exists: {output}. Use --overwrite to replace it."
+        )
+        raise typer.Exit(code=2)
+    if not output.parent.exists():
+        _err_console.print(f"[red]Refusing[/] parent directory does not exist: {output.parent}")
+        raise typer.Exit(code=2)
+
+    warning = (
+        "EXPORT WARNING: writing decrypted OpenBird memory to "
+        f"{output}. The destination may be cloud-synced outside OpenBird control; "
+        "later purge/prune will not delete this export."
+    )
+    _err_console.print(f"[bold yellow]{warning}[/]")
+    if not yes:
+        if not sys.stdin.isatty():
+            _err_console.print("[red]Refusing[/] (non-interactive). Re-run with --yes to export.")
+            raise typer.Exit(code=1)
+        if not typer.confirm("Export decrypted memory to this destination?", default=False):
+            _console.print("[yellow]Aborted.[/]")
+            raise typer.Exit(code=1)
+
+    count = 0
+    store = _store_maintenance()
+    try:
+        flags = os.O_WRONLY | os.O_CREAT
+        flags |= os.O_TRUNC if overwrite else os.O_EXCL
+        fd = os.open(output, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fd = -1
+                for row in store.export_observations(
+                    since_ts=since_ts, until_ts=until_ts, source=source
+                ):
+                    fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+                    count += 1
+            output.chmod(0o600)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+    finally:
+        store.close()
+
+    _console.print(f"[green]Exported[/] {count} observation(s) to {output}.")
 
 
 @data_app.command("integrity")

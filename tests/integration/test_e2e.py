@@ -22,6 +22,7 @@ import json
 import math
 import re
 import shlex
+import stat
 import sys
 
 import pytest
@@ -208,6 +209,23 @@ def test_cli_ingest_chat_purge_roundtrip(tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     stats = json.loads(res.output)
     assert stats["observations"] == 1
+
+    export_path = tmp_path / "memory-export.jsonl"
+    res = runner.invoke(cli.app, ["data", "export", "--output", str(export_path), "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "EXPORT WARNING" in res.output
+    exported = [json.loads(line) for line in export_path.read_text().splitlines()]
+    assert len(exported) == 1
+    assert "OpenBird is an open-source, local-first personal memory app" in exported[0]["text"]
+    assert stat.S_IMODE(export_path.stat().st_mode) == 0o600
+
+    export_path.chmod(0o644)
+    res = runner.invoke(
+        cli.app,
+        ["data", "export", "--output", str(export_path), "--overwrite", "--yes"],
+    )
+    assert res.exit_code == 0, res.output
+    assert stat.S_IMODE(export_path.stat().st_mode) == 0o600
 
     # data purge --all (cascade delete) with confirmation skipped
     res = runner.invoke(cli.app, ["data", "purge", "--all", "--yes"])

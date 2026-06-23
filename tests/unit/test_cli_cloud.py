@@ -100,6 +100,22 @@ def test_data_vacuum_not_gated_by_cloud(monkeypatch):
     assert "Vacuumed" in res.output
 
 
+def test_data_export_not_gated_by_cloud(monkeypatch, tmp_path):
+    # Export is explicit local egress to a user-chosen file; it must warn, but it
+    # must not construct a cloud provider or block cleanup/export workflows.
+    monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("OPENBIRD_EMBED_DIM", "1536")
+    reset_settings_cache()
+    out = tmp_path / "memory.jsonl"
+    res = CliRunner().invoke(
+        cli.app, ["data", "export", "--output", str(out), "--yes"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "CLOUD MODEL CONFIGURED" not in res.output
+    assert "EXPORT WARNING" in res.output
+    assert out.exists()
+
+
 def test_vacuum_works_after_embed_model_switch(monkeypatch, tmp_path):
     # Regression: a populated store + a switched embed model/dim must still
     # vacuum. Maintenance must not hit the cohort-mismatch guard.
