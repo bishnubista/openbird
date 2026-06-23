@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The Today/day view (handoff §3): a 222px nav sidebar plus a main column with a
@@ -10,6 +11,7 @@ struct TodayView: View {
     /// Summon the Spotlight Ask panel (the header "Ask about this day" button).
     var onAsk: () -> Void
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 0) {
@@ -175,9 +177,44 @@ struct TodayView: View {
         } else if let timeline = model.timeline, !timeline.sessions.isEmpty {
             sessionList(timeline)
         } else {
-            Text("No capture sessions for this day.")
-                .foregroundStyle(OB.textSecondary(scheme))
+            emptyTimelinePanel
         }
+    }
+
+    private var emptyTimelinePanel: some View {
+        // The Today window has no day navigation today, so this current-readiness
+        // guidance cannot imply that a historical empty day can be fixed retroactively.
+        VStack(alignment: .leading, spacing: OB.Space.m) {
+            Label("No activity captured for this day.", systemImage: "sparkle.magnifyingglass")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(OB.textPrimary(scheme))
+            Text(appModel.nextStepSummary)
+                .font(.system(size: 13))
+                .foregroundStyle(OB.textSecondary(scheme))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: OB.Space.sm) {
+                Button("Open Setup") {
+                    openWindow(id: "main")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .buttonStyle(.bordered)
+
+                if appModel.canStartCaptureNow {
+                    Button("Start Capture") {
+                        appModel.startCapture()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                Button("Ask about this day") {
+                    onAsk()
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(OB.Space.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassSurface(cornerRadius: OB.Radius.card)
     }
 
     private func sessionList(_ timeline: DayTimeline) -> some View {

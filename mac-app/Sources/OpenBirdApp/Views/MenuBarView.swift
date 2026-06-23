@@ -40,8 +40,8 @@ struct MenuBarView: View {
 
             Divider()
 
-            Text(statusLine)
-            Text(model.memorySummary)
+            Text("Status: \(statusLine)")
+            Text("Memory: \(model.memorySummary)")
 
             if model.captureRunning {
                 Button(model.capturePaused ? "Resume Capture" : "Pause Capture") {
@@ -58,9 +58,9 @@ struct MenuBarView: View {
             Divider()
 
             ForEach(model.helpers) { helper in
-                Text(helper.isBundled ? "\(helper.label): OK" : "\(helper.label): Missing")
+                Text(helper.isBundled ? "\(helper.label): present" : "\(helper.label): missing")
             }
-            Text("Encryption at rest: \(encryptionStatus)")
+            Text("Encryption: \(encryptionStatus)")
 
             Divider()
 

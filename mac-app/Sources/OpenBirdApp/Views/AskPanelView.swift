@@ -32,7 +32,9 @@ struct AskPanelView: View {
                 Divider().overlay(OB.separator(scheme))
                 answerArea
             }
-            suggestionRow
+            if showsSuggestions {
+                suggestionRow
+            }
         }
         .frame(width: 620, alignment: .leading)
         .glassSurface(cornerRadius: OB.Radius.spotlight)
@@ -44,6 +46,7 @@ struct AskPanelView: View {
     }
 
     private var showsAnswerArea: Bool { !askModel.thread.isEmpty || askModel.busy }
+    private var showsSuggestions: Bool { appModel.askUnavailableReason == nil }
 
     // MARK: Input
 

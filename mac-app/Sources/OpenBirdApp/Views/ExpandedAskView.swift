@@ -16,7 +16,7 @@ struct ExpandedAskView: View {
     @Environment(\.colorScheme) private var scheme
     @State private var draft = ""
     @FocusState private var inputFocused: Bool
-    @AppStorage("openbird.ask.showSources") private var showSources = true
+    @AppStorage("openbird.ask.showSources") private var showSources = false
     @AppStorage("openbird.ask.showTimeline") private var showTimeline = false
 
     private let suggestions = [
@@ -220,21 +220,23 @@ struct ExpandedAskView: View {
 
     private var emptyPrompt: some View {
         VStack(alignment: .leading, spacing: OB.Space.ml) {
-            Text("Ask about your work to get a grounded, cited answer.")
+            Text(appModel.askEmptyPrompt)
                 .font(.system(size: 14))
                 .foregroundStyle(OB.textSecondary(scheme))
-            HStack(spacing: OB.Space.sm) {
-                ForEach(suggestions, id: \.self) { suggestion in
-                    Button { askModel.ask(suggestion) } label: {
-                        Text(suggestion)
-                            .font(.system(size: 12.5))
-                            .padding(.horizontal, OB.Space.m)
-                            .padding(.vertical, OB.Space.sm)
-                            .background(OB.fieldFill(scheme), in: Capsule())
-                            .overlay(Capsule().strokeBorder(OB.separator(scheme), lineWidth: 0.5))
+            if appModel.askUnavailableReason == nil {
+                HStack(spacing: OB.Space.sm) {
+                    ForEach(suggestions, id: \.self) { suggestion in
+                        Button { askModel.ask(suggestion) } label: {
+                            Text(suggestion)
+                                .font(.system(size: 12.5))
+                                .padding(.horizontal, OB.Space.m)
+                                .padding(.vertical, OB.Space.sm)
+                                .background(OB.fieldFill(scheme), in: Capsule())
+                                .overlay(Capsule().strokeBorder(OB.separator(scheme), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(OB.textSecondary(scheme))
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(OB.textSecondary(scheme))
                 }
             }
         }
