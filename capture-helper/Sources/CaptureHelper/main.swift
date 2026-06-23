@@ -346,6 +346,7 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile:
     // captured content ever crosses the IPC boundary.
     if !contentAllowed(bundleId: bundleId, allow: allow, block: block) {
         diag("capture: skipped_not_allowlisted")
+        if skipIfPaused(pauseFile) { return }
         emit(CaptureEvent(
             app: bundleId, window: nil, url: nil, text: "",
             ts: Date().timeIntervalSince1970, incognito: false))
@@ -357,6 +358,7 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile:
     // and ensures a vault's title/text is never read, even if (mis)allowlisted.
     if isDangerousBundle(bundleId) {
         diag("capture: skipped_dangerous_app")
+        if skipIfPaused(pauseFile) { return }
         emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
                           ts: Date().timeIntervalSince1970, incognito: false))
         return
@@ -395,6 +397,7 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile:
     // (potentially sensitive) window title, before any text traversal.
     if isIncognitoTitle(windowTitle) {
         diag("capture: skipped_incognito")
+        if skipIfPaused(pauseFile) { return }
         emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
                           ts: Date().timeIntervalSince1970, incognito: true))
         return
@@ -424,6 +427,7 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile:
         ts: Date().timeIntervalSince1970,
         incognito: false
     )
+    if skipIfPaused(pauseFile) { return }
     emit(event)
 }
 
