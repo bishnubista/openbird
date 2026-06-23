@@ -476,7 +476,8 @@ def _score_text(
         tags.append("commitment_marker")
         reasons.append("commitment_language")
         score += 0.5
-        label = SignalLabel.COMMITMENT
+        if label != SignalLabel.BLOCKER:
+            label = SignalLabel.COMMITMENT
     if _ACTION_RE.search(text):
         tags.append("action_marker")
         reasons.append("action_language")
@@ -648,6 +649,8 @@ def _fingerprint(text: str) -> str:
 
 
 def _truncate(text: str, limit: int) -> str:
-    if limit <= 0 or len(text) <= limit:
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."

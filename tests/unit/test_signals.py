@@ -147,6 +147,24 @@ def test_hidden_model_output_cannot_suppress_deterministic_blocker():
     assert result.signals[0].label == SignalLabel.BLOCKER
 
 
+def test_blocker_keeps_precedence_over_commitment_marker():
+    rows = [(_obs(1), "Build failed and needs to ship by tomorrow.")]
+
+    result = SignalClassifier(None).classify_window(
+        rows, start_ts=0.0, end_ts=10.0, local_model_status="unavailable"
+    )
+
+    assert result.signals[0].label == SignalLabel.BLOCKER
+
+
+def test_zero_snippet_budget_does_not_retain_text():
+    rows = [(_obs(1), "Need to follow up on PR #53 after review.")]
+
+    packets, _ = SignalClassifier(max_snippet_chars=0).build_packets(rows)
+
+    assert packets[0].snippets == ("",)
+
+
 def test_evaluation_gate_blocks_silence_and_sensitive_leaks():
     result = evaluate_signal_predictions(
         [

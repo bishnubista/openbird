@@ -344,7 +344,7 @@ def _briefing_signals(day: int, start: float, end: float, *, as_json: bool) -> N
     local_model_status = "not_needed"
     if rows:
         remote = classify_models(settings)
-        if "llm" in remote:
+        if remote:
             local_model_status = "disabled_remote_route"
         else:
             try:
@@ -352,10 +352,9 @@ def _briefing_signals(day: int, start: float, end: float, *, as_json: bool) -> N
                 local_model_status = "available"
             except Exception:  # noqa: BLE001 - signal path degrades locally
                 # Provider construction can fail because the local route is not
-                # ready, or because another configured role trips the existing
-                # provider guard. The signal path is experimental/local-only, so
-                # it treats that as deterministic fallback rather than using
-                # remote completion.
+                # ready. The signal path is experimental/local-only, so it treats
+                # that as deterministic fallback rather than using remote
+                # completion.
                 local_model_status = "unavailable"
 
     classifier = SignalClassifier(provider)
