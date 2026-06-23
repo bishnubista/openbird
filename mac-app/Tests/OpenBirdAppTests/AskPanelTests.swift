@@ -45,6 +45,7 @@ final class AskPanelModelTests: XCTestCase {
         // so these tests exercise panel concurrency/result flow, not setup gating.
         var report = PreflightReport()
         report.ollamaReachable = true
+        report.runtimeOK = true
         return AppModel(service: OpenBirdService(), initialReport: report)
     }
 
