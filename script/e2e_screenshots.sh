@@ -132,10 +132,8 @@ restore_onboarding_pref() {
 }
 trap restore_onboarding_pref EXIT
 
-process_executable_path() {
-  local pid="$1" path
-  path="$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 || true)"
-  [[ -n "$path" ]] || return 1
+canonical_file_path() {
+  local path="$1"
   if [[ -e "$path" ]]; then
     local dir base
     dir="$(cd "$(dirname "$path")" && pwd -P)" || return 1
@@ -146,14 +144,24 @@ process_executable_path() {
   fi
 }
 
+process_has_executable_path() {
+  local pid="$1" expected="$2" path canonical
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    canonical="$(canonical_file_path "$path")" || continue
+    [[ "$canonical" == "$expected" ]] && return 0
+  done < <(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' || true)
+  return 1
+}
+
 assert_selected_app_running() {
-  local pids pid count exe_path
+  local pids pid count
   pids="$(pgrep -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" || true)"
   count="$(printf '%s\n' "$pids" | grep -c . || true)"
   [[ "$count" -eq 1 ]] || die "expected exactly one $APP_NAME GUI process, found $count (${pids//$'\n'/ })"
   pid="$pids"
-  exe_path="$(process_executable_path "$pid")" || die "could not resolve executable path for PID $pid"
-  [[ "$exe_path" == "$APP_EXECUTABLE" ]] || die "running $APP_NAME is $exe_path, expected $APP_EXECUTABLE"
+  process_has_executable_path "$pid" "$APP_EXECUTABLE" \
+    || die "running $APP_NAME process $pid does not expose expected executable $APP_EXECUTABLE"
 }
 
 prepare_launch_services() {
