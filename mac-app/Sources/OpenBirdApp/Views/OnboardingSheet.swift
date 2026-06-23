@@ -96,17 +96,19 @@ struct OnboardingSheet: View {
     }
 
     private var modelRouteEnableTitle: String? {
-        if model.hasRemoteModelRoute { return nil }
-        if model.report.ollamaReachable == false { return "Get Ollama" }
-        if !model.report.missingModels.isEmpty { return "Pull" }
-        return nil
+        model.modelRouteActionLabel
     }
 
     private func modelRouteEnable() {
-        if model.report.ollamaReachable == false {
+        switch model.modelRouteProvisioningState {
+        case .ollamaUnavailable:
             NSWorkspace.shared.open(URL(string: "https://ollama.com")!)
-        } else if !model.report.missingModels.isEmpty {
+        case .modelsMissing(let canPull) where canPull:
             Task { await model.pullMissingModels() }
+        case .error where model.canPullMissingModels:
+            Task { await model.pullMissingModels() }
+        default:
+            break
         }
     }
 

@@ -15,6 +15,7 @@ struct PreflightReport: Equatable {
     var remoteModelRoles: [String: String] = [:]
     var remoteModels: [String] = []
     var usesLocalOllama: Bool = true
+    var autoPullAllowed: Bool = false
     var cloudBlocked: Bool = false
     var encryptionStatus: String = "unknown"
     var encryptionEnabled: Bool = false
@@ -26,6 +27,20 @@ struct PreflightReport: Equatable {
     var error: String?
 
     func grant(_ capability: String) -> String { grants[capability] ?? "unknown" }
+}
+
+/// Progress from Ollama model provisioning. `fraction` is nil when Ollama streams
+/// a status update without byte counters.
+struct ModelPullProgress: Equatable {
+    let model: String
+    let status: String
+    let completed: Int64?
+    let total: Int64?
+
+    var fraction: Double? {
+        guard let completed, let total, total > 0 else { return nil }
+        return min(1.0, max(0.0, Double(completed) / Double(total)))
+    }
 }
 
 /// macOS privacy panes the setup flow can deep-link into.
@@ -434,9 +449,25 @@ final class OpenBirdService: @unchecked Sendable {
         return candidates.first { fileManager.isExecutableFile(atPath: $0) }
     }
 
-    /// Pull a model via the Ollama CLI. This can take minutes (multi-GB), so it
-    /// runs with a generous timeout and reports a concise outcome string.
-    func pullModel(_ model: String) async -> (ok: Bool, message: String) {
+    /// Pull a model via the local Ollama API, falling back to the CLI when
+    /// available. This can take minutes (multi-GB), so it uses a generous timeout
+    /// and reports concise progress/outcome strings.
+    func pullModel(
+        _ model: String,
+        host: String?,
+        progress: (@Sendable (ModelPullProgress) -> Void)? = nil
+    ) async -> (ok: Bool, message: String) {
+        if let host, let url = Self.ollamaPullURL(host: host) {
+            do {
+                let message = try await pullModelViaAPI(model, url: url, progress: progress)
+                return (true, message)
+            } catch {
+                if ollamaPath() == nil {
+                    return (false, "Could not pull \(model): \(Self.describePullError(error))")
+                }
+            }
+        }
+
         guard let ollama = ollamaPath() else {
             return (false, "Ollama CLI not found. Install Ollama from ollama.com.")
         }
@@ -446,6 +477,70 @@ final class OpenBirdService: @unchecked Sendable {
         }
         let detail = result.stderr.isEmpty ? "exit \(result.exitCode)" : result.stderr
         return (false, "Could not pull \(model): \(detail)")
+    }
+
+    static func ollamaPullURL(host: String) -> URL? {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let normalized = trimmed.hasSuffix("/") ? trimmed : "\(trimmed)/"
+        guard let base = URL(string: normalized) else { return nil }
+        return URL(string: "api/pull", relativeTo: base)?.absoluteURL
+    }
+
+    static func parsePullProgressLine(_ line: String, model: String) throws -> ModelPullProgress? {
+        guard let data = line.data(using: .utf8),
+              let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let error = payload["error"] as? String, !error.isEmpty {
+            throw OllamaPullError.api(error)
+        }
+        guard let status = payload["status"] as? String, !status.isEmpty else {
+            return nil
+        }
+        return ModelPullProgress(
+            model: model,
+            status: status,
+            completed: Self.int64(payload["completed"]),
+            total: Self.int64(payload["total"])
+        )
+    }
+
+    private func pullModelViaAPI(
+        _ model: String,
+        url: URL,
+        progress: (@Sendable (ModelPullProgress) -> Void)?
+    ) async throws -> String {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 1800
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["model": model])
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            throw OllamaPullError.http(http.statusCode)
+        }
+
+        for try await line in bytes.lines {
+            guard let update = try Self.parsePullProgressLine(line, model: model) else { continue }
+            progress?(update)
+        }
+        return "Pulled \(model)."
+    }
+
+    private static func int64(_ value: Any?) -> Int64? {
+        if let value = value as? Int64 { return value }
+        if let value = value as? Int { return Int64(value) }
+        if let value = value as? NSNumber { return value.int64Value }
+        return nil
+    }
+
+    private static func describePullError(_ error: Error) -> String {
+        if let error = error as? OllamaPullError {
+            return error.description
+        }
+        return error.localizedDescription
     }
 
     // MARK: - Preflight
@@ -651,6 +746,7 @@ final class OpenBirdService: @unchecked Sendable {
             report.ollamaHost = ollama["host"] as? String
             report.requiredModels = ollama["required_models"] as? [String] ?? []
             report.missingModels = ollama["missing_models"] as? [String] ?? []
+            report.autoPullAllowed = ollama["auto_pull_allowed"] as? Bool ?? false
         }
         if let cloud = payload["cloud"] as? [String: Any] {
             report.llmModel = cloud["llm_model"] as? String
@@ -751,4 +847,18 @@ private struct ProcessResult {
     let exitCode: Int
     let stdout: String
     let stderr: String
+}
+
+private enum OllamaPullError: Error, CustomStringConvertible {
+    case api(String)
+    case http(Int)
+
+    var description: String {
+        switch self {
+        case .api(let message):
+            return message
+        case .http(let status):
+            return "Ollama API returned HTTP \(status)"
+        }
+    }
 }

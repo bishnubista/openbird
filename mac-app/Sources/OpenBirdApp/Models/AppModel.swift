@@ -22,6 +22,16 @@ enum MemoryStatsState: Equatable {
     case failed
 }
 
+enum ModelRouteProvisioningState: Equatable {
+    case unknown
+    case remoteRoute
+    case ollamaUnavailable
+    case modelsMissing(canPull: Bool)
+    case pulling
+    case runtimeReady
+    case error(String)
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var report = PreflightReport()
@@ -40,6 +50,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastRefresh: Date?
     @Published private(set) var isRefreshing = false
     @Published private(set) var workingMessage: String?
+    @Published private(set) var provisioningModel: String?
+    @Published private(set) var provisioningProgress: ModelPullProgress?
+    @Published private(set) var provisioningError: String?
     @Published var lastActionMessage = ""
 
     // Quick-chat state (window chat panel).
@@ -124,6 +137,15 @@ final class AppModel: ObservableObject {
     }
 
     var localModelStatusSummary: String {
+        if let provisioningError {
+            return provisioningError
+        }
+        if let provisioningModel {
+            if let progress = provisioningProgress {
+                return Self.pullWorkingMessage(progress)
+            }
+            return "Downloading \(provisioningModel)…"
+        }
         if let error = report.error {
             return "Preflight could not read model route: \(error)"
         }
@@ -144,6 +166,9 @@ final class AppModel: ObservableObject {
         }
         if report.ollamaReachable == true {
             if report.missingModels.isEmpty { return "Local model route is not runtime-ready. Re-check setup." }
+            if !report.autoPullAllowed {
+                return "Ollama connected, but automatic model download is disabled for this host."
+            }
             return "Ollama connected · missing models: \(report.missingModels.joined(separator: ", "))"
         }
         if report.ollamaReachable == false {
@@ -185,6 +210,39 @@ final class AppModel: ObservableObject {
 
     var hasRemoteModelRoute: Bool {
         !report.remoteModelRoles.isEmpty || !report.remoteModels.isEmpty
+    }
+
+    var modelRouteProvisioningState: ModelRouteProvisioningState {
+        if let provisioningError { return .error(provisioningError) }
+        if provisioningModel != nil { return .pulling }
+        if hasRemoteModelRoute { return .remoteRoute }
+        if !hasDecodedModelRoute { return .unknown }
+        if report.runtimeOK { return .runtimeReady }
+        if report.ollamaReachable == false { return .ollamaUnavailable }
+        if !report.missingModels.isEmpty {
+            return .modelsMissing(canPull: canPullMissingModels)
+        }
+        return .unknown
+    }
+
+    var modelRouteActionLabel: String? {
+        switch modelRouteProvisioningState {
+        case .ollamaUnavailable:
+            return "Get Ollama"
+        case .modelsMissing(let canPull):
+            return canPull ? "Download models" : nil
+        case .error:
+            return canPullMissingModels ? "Retry" : nil
+        default:
+            return nil
+        }
+    }
+
+    var canPullMissingModels: Bool {
+        report.usesLocalOllama
+            && report.ollamaReachable == true
+            && report.autoPullAllowed
+            && !report.missingModels.isEmpty
     }
 
     private var hasDecodedModelRoute: Bool {
@@ -256,6 +314,9 @@ final class AppModel: ObservableObject {
                 return "Next: launch Ollama, then re-check setup."
             }
             if !report.missingModels.isEmpty {
+                if !report.autoPullAllowed {
+                    return "Next: use a local Ollama host, then re-check setup."
+                }
                 return "Next: pull missing models: \(report.missingModels.joined(separator: ", "))"
             }
             return "Next: re-check the active model route."
@@ -355,6 +416,7 @@ final class AppModel: ObservableObject {
 
     func refresh() async {
         isRefreshing = true
+        clearProvisioningState()
         defer { isRefreshing = false }
         capturePaused = service.isCapturePaused()
         captureRunning = service.isCaptureRunning()
@@ -381,15 +443,59 @@ final class AppModel: ObservableObject {
     func pullMissingModels() async {
         let missing = report.missingModels
         guard !missing.isEmpty else { return }
-        for model in missing {
-            workingMessage = "Pulling \(model)… (this can take a few minutes)"
-            let outcome = await service.pullModel(model)
-            lastActionMessage = outcome.message
-            if !outcome.ok { break }
+        guard canPullMissingModels else {
+            lastActionMessage = "Automatic model download is available only for local Ollama."
+            return
         }
+        provisioningError = nil
+        var failed = false
+        for model in missing {
+            provisioningModel = model
+            provisioningProgress = nil
+            workingMessage = "Downloading \(model)… (this can take a few minutes)"
+            let host = report.ollamaHost
+            let outcome = await service.pullModel(model, host: host) { progress in
+                Task { @MainActor in
+                    guard self.provisioningModel == progress.model else { return }
+                    self.provisioningProgress = progress
+                    self.workingMessage = Self.pullWorkingMessage(progress)
+                }
+            }
+            lastActionMessage = outcome.message
+            if !outcome.ok {
+                provisioningError = outcome.message
+                failed = true
+                break
+            }
+        }
+        provisioningModel = nil
+        provisioningProgress = nil
         workingMessage = nil
-        await refresh()
+        if !failed {
+            await refresh()
+        }
     }
+
+    private static func pullWorkingMessage(_ progress: ModelPullProgress) -> String {
+        if let fraction = progress.fraction {
+            let pct = Int((fraction * 100).rounded())
+            return "Downloading \(progress.model)… \(pct)% · \(progress.status)"
+        }
+        return "Downloading \(progress.model)… \(progress.status)"
+    }
+
+    private func clearProvisioningState() {
+        provisioningModel = nil
+        provisioningProgress = nil
+        provisioningError = nil
+        workingMessage = nil
+    }
+
+    #if DEBUG
+    func setProvisioningErrorForTesting(_ message: String) {
+        provisioningError = message
+    }
+    #endif
 
     // These trigger native TCC prompts only when the relevant grant is not already
     // present. After granting, the user taps Re-check to refresh full setup state.
