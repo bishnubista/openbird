@@ -42,21 +42,25 @@ struct OpenBirdApp: App {
     }
 
     var body: some Scene {
+        // ONE window for the whole app: the shell renders Ask / Today / Setup as
+        // selectable detail panes (no second `Window` scene). Today's surface is now a
+        // pane, reached by setting `model.selection`, never by opening another window.
         Window("OpenBird", id: "main") {
-            ContentView(model: model, onAsk: { askPanel.show() }, onAskExpanded: { askPanel.expand() })
-                .frame(minWidth: 560, minHeight: 420)
-                .task {
-                    askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
-                    await model.refresh()
-                }
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                    model.refreshPermissionStates()
-                }
-        }
-        .windowStyle(.hiddenTitleBar)
-
-        Window("Today", id: "today") {
-            TodayView(model: todayModel, appModel: model, onAsk: { askPanel.show() })
+            AppShellView(
+                model: model,
+                todayModel: todayModel,
+                askModel: askModel,
+                timelineModel: timelineModel,
+                onAsk: { askPanel.show() },
+                onAskExpanded: { askPanel.expand() }
+            )
+            .task {
+                askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
+                await model.refresh()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                model.refreshPermissionStates()
+            }
         }
         .windowStyle(.hiddenTitleBar)
 

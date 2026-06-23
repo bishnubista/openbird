@@ -34,6 +34,12 @@ enum ModelRouteProvisioningState: Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    /// The active navigation pane in the single app window. Runtime single source of
+    /// truth that the sidebar, the menu bar, and the deep-link router all read/write —
+    /// switching panes never opens a second window. Held on this long-lived model, so it
+    /// persists for the app session (the window can close and reopen on the same pane);
+    /// it intentionally resets to `.today` on a full relaunch.
+    @Published var selection: AppDestination = .today
     @Published private(set) var report = PreflightReport()
     @Published private(set) var capturePaused = false
     @Published private(set) var captureRunning = false

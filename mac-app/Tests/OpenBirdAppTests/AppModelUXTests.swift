@@ -44,6 +44,21 @@ final class AppModelUXTests: XCTestCase {
         XCTAssertEqual(model.askUnavailableReason, "Could not check local memory. Re-check setup before asking.")
     }
 
+    // The single-window shell drives the active pane off `model.selection`: the sidebar
+    // highlight, the menu bar, and the deep-link router all read/write it. It must
+    // default to `.today` (the launch surface) and be freely settable to any destination.
+    func testSelectionDefaultsToTodayAndIsSettable() {
+        let service = OpenBirdService(openBirdCLIResolver: { "/tmp/openbird" })
+        let model = AppModel(service: service)
+
+        XCTAssertEqual(model.selection, .today)
+
+        for destination in AppDestination.allCases {
+            model.selection = destination
+            XCTAssertEqual(model.selection, destination)
+        }
+    }
+
     func testCanStartCaptureNowRequiresAccessibilityAllowlistAndCli() {
         withRestoredAllowlist {
             let service = OpenBirdService(
