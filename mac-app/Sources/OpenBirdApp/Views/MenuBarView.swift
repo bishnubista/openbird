@@ -29,12 +29,11 @@ struct MenuBarView: View {
             }
 
             Button(AppDestination.today.title) {
-                openWindow(id: "today")
-                NSApp.activate(ignoringOtherApps: true)
+                showMainWindow(.today)
             }
 
             Button(AppDestination.setup.title) {
-                openMainWindow()
+                showMainWindow(.setup)
             }
             .keyboardShortcut(",", modifiers: .command)
 
@@ -86,7 +85,13 @@ struct MenuBarView: View {
         }
     }
 
-    private func openMainWindow() {
+    /// Select a pane and bring the single app window forward. For a `Window` (singleton)
+    /// scene, `openWindow(id:"main")` focuses the existing window — or RE-CREATES it if
+    /// the user previously closed it (which `NSApp.activate` alone cannot do, Codex
+    /// review) — and never spawns a duplicate. Setting `selection` first means the
+    /// window comes up already showing the requested pane.
+    private func showMainWindow(_ destination: AppDestination) {
+        model.selection = destination
         openWindow(id: "main")
         NSApp.activate(ignoringOtherApps: true)
     }

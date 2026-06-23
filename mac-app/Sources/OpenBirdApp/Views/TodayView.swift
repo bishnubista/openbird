@@ -1,31 +1,23 @@
-import AppKit
 import SwiftUI
 
-/// The Today/day view (handoff §3): a 222px nav sidebar plus a main column with a
-/// grounded briefing card, stat chips, and a session timeline on a connector rail —
-/// rendered over the `timeline`/`briefing` CLI JSON via `TodayModel`. Capture/
-/// allowlist state for the sidebar footer comes from the shared `AppModel`.
+/// The Today/day detail pane (handoff §3): a main column with a grounded briefing card,
+/// stat chips, and a session timeline on a connector rail — rendered over the
+/// `timeline`/`briefing` CLI JSON via `TodayModel`. The shared nav sidebar and the
+/// window chrome are owned by the `AppShellView`; this view is just the day column.
 struct TodayView: View {
     @ObservedObject var model: TodayModel
     @ObservedObject var appModel: AppModel
     /// Summon the Spotlight Ask panel (the header "Ask about this day" button).
     var onAsk: () -> Void
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        HStack(spacing: 0) {
-            TodaySidebar(appModel: appModel, onAsk: onAsk)
-            mainColumn
-        }
-        .frame(minWidth: 860, minHeight: 560)
-        .background(GlassBackdrop())
-        .background(WindowConfigurator())   // draggable by background under the hidden titlebar
-        .task {
-            if model.timeline == nil {
-                await model.load()
+        mainColumn
+            .task {
+                if model.timeline == nil {
+                    await model.load()
+                }
             }
-        }
     }
 
     private var mainColumn: some View {
@@ -194,8 +186,7 @@ struct TodayView: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: OB.Space.sm) {
                 Button("Open Setup") {
-                    openWindow(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
+                    appModel.selection = .setup
                 }
                 .buttonStyle(.bordered)
 

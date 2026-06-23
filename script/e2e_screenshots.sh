@@ -286,17 +286,24 @@ else
 fi
 
 # 1) Onboarding sheet — reset the one-time flag and relaunch so it presents, then
-#    capture the main window region (the sheet renders centered over it).
+#    capture the main window region (the sheet renders centered over it). Select the
+#    Setup pane behind the sheet first: the single window now defaults to the Today /
+#    last-restored pane, not Setup.
 log "onboarding: resetting first-run flag + relaunching"
 prepare_launch_services
 defaults delete "$BUNDLE_ID" "$ONBOARDING_KEY" >/dev/null 2>&1 || true
 relaunch
+open "openbird://main" >/dev/null 2>&1 || true
+/bin/sleep 0.6
 capture_window "$APP_NAME" "$OUT/06-setup-onboarding.png"
 
 # 2) Main window (config / SetupView). Mark onboarding complete first so the sheet
-#    isn't covering it, then re-show the main window.
+#    isn't covering it, then re-show the main window and select the Setup pane — Setup
+#    is one pane of the single shell window now (openbird://main), not the default surface.
 defaults write "$BUNDLE_ID" "$ONBOARDING_KEY" -bool true >/dev/null 2>&1 || true
 relaunch
+open "openbird://main" >/dev/null 2>&1 || true
+/bin/sleep 0.6
 capture_window "$APP_NAME" "$OUT/00-main-window.png"
 
 # 3) Ask Spotlight panel — summon via the global ⌥Space hotkey, then capture.
@@ -311,12 +318,17 @@ osascript -e 'tell application "System Events" to key code 49 using {option down
 capture_window_by_subrole "AXSystemDialog" "$OUT/02-ask-spotlight.png" || true
 osascript -e 'tell application "System Events" to key code 53' >/dev/null 2>&1 || true  # esc → close panel
 
-# 4) Today window — opened via the openbird://today deep-link (no menu bar needed).
-log "today: opening via openbird://today deep-link"
+# 4) Today pane — selected via the openbird://today deep-link (no menu bar needed). It
+#    is now a pane of the single "OpenBird" window, not a separate "Today" window, so
+#    capture the main window after the pane switches.
+log "today: selecting via openbird://today deep-link"
 open "openbird://today" >/dev/null 2>&1 || true
 /bin/sleep 2
 assert_selected_app_running
-capture_window "Today" "$OUT/05-today-dayview.png" || true
+# No `|| true`: the Today surface is now a pane of the always-present "OpenBird"
+# window (same reliable target as the main-window capture above), not a race-prone
+# separate window — so a failure here is a real defect and should fail the run.
+capture_window "$APP_NAME" "$OUT/05-today-dayview.png"
 
 # 4b) Expanded Ask (the unified surface: chat + optional Sources/Timeline rails) —
 #     opened via the gated openbird://ask-expanded deep-link. Poll until discoverable.

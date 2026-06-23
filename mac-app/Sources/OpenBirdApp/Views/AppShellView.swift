@@ -1,0 +1,78 @@
+import AppKit
+import SwiftUI
+
+/// The single app window's root shell: the persistent nav sidebar plus a detail pane
+/// switched by `model.selection` (Ask / Today / Setup all live in ONE window now). This
+/// view is ALWAYS mounted for the window's lifetime, so it owns everything that must
+/// outlive any individual pane: the window chrome (min-size, glass backdrop, background
+/// drag region), the first-run onboarding sheet, and the gated `openbird://` deep-link
+/// router. (Codex review: hanging `onOpenURL`/`.sheet` off the Setup pane would unmount
+/// them whenever the user is on Today or Ask.)
+struct AppShellView: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var todayModel: TodayModel
+    @ObservedObject var askModel: AskPanelModel
+    @ObservedObject var timelineModel: TimelineModel
+    /// Summon the compact Spotlight Ask panel (the `openbird://ask` deep-link).
+    var onAsk: () -> Void = {}
+    /// Open the expanded Ask overlay window (the `openbird://ask-expanded` E2E deep-link).
+    var onAskExpanded: () -> Void = {}
+
+    /// One-time first-run flag; the onboarding sheet shows until the user taps
+    /// "Start capturing" (or dismisses), then never auto-presents again.
+    @AppStorage("openbird.onboarding.completed") private var onboardingCompleted = false
+
+    /// Drives the onboarding `.sheet` from the inverse of the completed flag; the
+    /// sheet (and its "Start capturing" button) sets it to dismiss.
+    private var onboardingBinding: Binding<Bool> {
+        Binding(get: { !onboardingCompleted }, set: { onboardingCompleted = !$0 })
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            AppSidebar(appModel: model)
+            detailPane
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        // One coherent floor that fits every pane: sidebar (222) + the widest pane's
+        // usable content. The Ask rails collapse responsively below this, so the chat
+        // column is never clipped (Codex review).
+        .frame(minWidth: 920, minHeight: 560)
+        .background(GlassBackdrop())
+        .background(WindowConfigurator())   // draggable by background (macOS-13-safe)
+        .sheet(isPresented: onboardingBinding) {
+            OnboardingSheet(model: model, isPresented: onboardingBinding)
+        }
+        .onOpenURL { url in route(url) }
+    }
+
+    @ViewBuilder
+    private var detailPane: some View {
+        switch model.selection {
+        case .ask:
+            AskPaneView(askModel: askModel, appModel: model, timelineModel: timelineModel)
+        case .today:
+            TodayView(model: todayModel, appModel: model, onAsk: onAsk)
+        case .setup:
+            ContentView(model: model)
+        }
+    }
+
+    private func route(_ url: URL) {
+        // TEST-ONLY affordance for the E2E screenshot harness — NOT a public product
+        // surface. A routable openbird:// scheme would let any local app or web page
+        // force OpenBird to foreground private activity data (Today) or steal focus
+        // (Ask). So the router is inert unless the app was launched explicitly with
+        // `--enable-e2e-deeplinks` (the harness passes it via `open --args`).
+        guard ProcessInfo.processInfo.arguments.contains("--enable-e2e-deeplinks") else { return }
+        guard url.scheme == "openbird" else { return }
+        switch url.host {
+        case "today": model.selection = .today
+        case "main", "setup": model.selection = .setup
+        case "ask": model.selection = .ask          // in-window pane (was the compact overlay)
+        case "ask-expanded": onAskExpanded()         // the borderless expanded overlay (E2E)
+        default: return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}

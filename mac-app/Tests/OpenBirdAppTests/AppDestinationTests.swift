@@ -2,7 +2,7 @@ import XCTest
 @testable import OpenBirdApp
 
 final class AppDestinationTests: XCTestCase {
-    // Pins the destination SET. `TodaySidebar` iterates `allCases` (auto-syncs) but
+    // Pins the destination SET. `AppSidebar` iterates `allCases` (auto-syncs) but
     // `MenuBarView` hand-lists `.ask/.today/.setup`, so a new case would silently miss
     // the menu bar. This test fails the moment the set changes, forcing whoever adds a
     // destination to update the menu bar (and this expectation) on purpose.

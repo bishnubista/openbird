@@ -1,28 +1,17 @@
-import AppKit
 import SwiftUI
 
-/// The 222px Today-window sidebar (handoff §3): the OpenBird wordmark, the section
-/// nav, and a live capture-status footer. Only **Today** has a destination today,
-/// so the other nav rows are rendered pixel-faithfully but are honestly inert —
-/// `.disabled(true)` + an accessibility "not enabled" trait — rather than looking
-/// clickable while doing nothing (macOS HIG / Codex review).
-struct TodaySidebar: View {
+/// The 222px app shell sidebar (handoff §3): the OpenBird wordmark, the section nav,
+/// and a live capture-status footer. Every row is now a real navigation destination —
+/// selecting one swaps the single window's detail pane via `appModel.selection` rather
+/// than opening a separate window (Ask, Today, and Setup all live in one window now).
+struct AppSidebar: View {
     @ObservedObject var appModel: AppModel
-    /// Show the Ask panel (the `.ask` destination — a controller action, not a window).
-    var onAsk: () -> Void
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.openWindow) private var openWindow
 
-    /// The sidebar mirrors the menu bar via the shared `AppDestination` set. It lives
-    /// only in the Today window, so `.today` is always the active row.
+    /// Switch the in-window detail pane. The sidebar mirrors the menu bar via the
+    /// shared `AppDestination` set; the active row is whichever pane is selected.
     private func select(_ destination: AppDestination) {
-        switch destination {
-        case .ask: onAsk()
-        case .today: break                       // already the active surface
-        case .setup:
-            openWindow(id: "main")
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        appModel.selection = destination
     }
 
     var body: some View {
@@ -63,7 +52,7 @@ struct TodaySidebar: View {
                 NavRow(
                     title: dest.title,
                     systemImage: dest.systemImage,
-                    isActive: dest == .today,
+                    isActive: dest == appModel.selection,
                     action: { select(dest) }
                 )
             }
@@ -112,9 +101,9 @@ struct TodaySidebar: View {
     }
 }
 
-/// One sidebar nav row. A row with a `windowID` is a real button that opens/focuses
-/// that window (hover = subtle wash, per the handoff); the active row ("Today") is a
-/// non-interactive accent highlight; rows with neither are inert placeholders.
+/// One sidebar nav row. The active row (the selected pane) is a non-interactive accent
+/// highlight; every other row is a real button that switches the detail pane on click
+/// (hover = subtle wash, per the handoff).
 private struct NavRow: View {
     let title: String
     let systemImage: String
