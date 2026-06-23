@@ -22,6 +22,7 @@ final class AppModelUXTests: XCTestCase {
     private func readyReport() -> PreflightReport {
         var report = PreflightReport()
         report.ollamaReachable = true
+        report.runtimeOK = true
         return report
     }
 
