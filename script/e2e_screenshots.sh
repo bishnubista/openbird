@@ -325,7 +325,10 @@ log "today: selecting via openbird://today deep-link"
 open "openbird://today" >/dev/null 2>&1 || true
 /bin/sleep 2
 assert_selected_app_running
-capture_window "$APP_NAME" "$OUT/05-today-dayview.png" || true
+# No `|| true`: the Today surface is now a pane of the always-present "OpenBird"
+# window (same reliable target as the main-window capture above), not a race-prone
+# separate window — so a failure here is a real defect and should fail the run.
+capture_window "$APP_NAME" "$OUT/05-today-dayview.png"
 
 # 4b) Expanded Ask (the unified surface: chat + optional Sources/Timeline rails) —
 #     opened via the gated openbird://ask-expanded deep-link. Poll until discoverable.
