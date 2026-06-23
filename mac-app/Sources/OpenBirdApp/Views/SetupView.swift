@@ -23,7 +23,7 @@ struct SetupView: View {
                 } label: {
                     Label("Re-check", systemImage: "arrow.clockwise")
                 }
-                .disabled(model.isRefreshing)
+                .disabled(model.isRefreshing || model.provisioningModel != nil)
             }
 
             if let working = model.workingMessage {
@@ -99,20 +99,11 @@ struct SetupView: View {
     }
 
     private var modelRouteActionLabel: String? {
-        if model.hasRemoteModelRoute { return nil }
-        if model.report.ollamaReachable == false { return "Get Ollama" }
-        if !model.report.missingModels.isEmpty {
-            return "Pull models"
-        }
-        return nil
+        model.modelRouteActionLabel
     }
 
     private func modelRouteAction() {
-        if model.report.ollamaReachable == false {
-            NSWorkspace.shared.open(URL(string: "https://ollama.com")!)
-        } else if !model.report.missingModels.isEmpty {
-            Task { await model.pullMissingModels() }
-        }
+        model.performModelRouteAction { NSWorkspace.shared.open($0) }
     }
 
     private var encryptionDetail: String {

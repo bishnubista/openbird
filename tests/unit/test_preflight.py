@@ -630,6 +630,39 @@ def test_cloud_section_local_default(settings):
     assert report["cloud"]["active"] is False
     assert report["cloud"]["blocked"] is False
     assert report["cloud"]["remote_models"] == {}
+    assert report["ollama"]["auto_pull_allowed"] is True
+
+
+def test_ollama_auto_pull_allowed_for_loopback_host(settings):
+    report = run_preflight(
+        settings,
+        ollama_host="http://127.0.0.1:11434",
+        http_get=make_http_get(),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["host"] == "http://127.0.0.1:11434"
+    assert report["ollama"]["auto_pull_allowed"] is True
+
+
+def test_ollama_auto_pull_blocked_for_remote_host(settings):
+    report = run_preflight(
+        settings,
+        ollama_host="http://10.0.0.5:11434",
+        http_get=make_http_get(),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["host"] == "http://10.0.0.5:11434"
+    assert report["ollama"]["auto_pull_allowed"] is False
+
+
+def test_ollama_auto_pull_blocked_for_malformed_host(settings):
+    report = run_preflight(
+        settings,
+        ollama_host="http://[::1",
+        http_get=make_http_get(),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["auto_pull_allowed"] is False
 
 
 def test_cloud_section_blocked_without_opt_in(tmp_path):
@@ -902,6 +935,7 @@ def test_cloud_only_route_reports_no_ollama_requirements(tmp_path):
     # Cloud-only route: the Ollama probe is skipped and reported not-applicable
     # (no misleading "down" for a service the route never uses).
     assert report["ollama"]["reachable"] == "n/a"
+    assert report["ollama"]["auto_pull_allowed"] is False
 
 
 def test_preflight_and_provider_agree_on_ollama_host(monkeypatch, tmp_path):

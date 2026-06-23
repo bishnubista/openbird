@@ -99,11 +99,13 @@ class Openbird < Formula
       Privacy & Security.
 
       To enable screen/audio capture, open the app and follow Guided Setup: it
-      walks you through Ollama, models, and granting Accessibility / Screen
-      Recording / Microphone permissions. macOS requires you to toggle those
-      permissions yourself in System Settings; the app deep-links you to the right
-      pane and re-checks. The CLI memory features (openbird ingest / chat /
-      routine) work immediately without any permissions.
+      walks you through Ollama, first-launch local model download, and granting
+      Accessibility / Screen Recording / Microphone permissions. The default
+      Ollama route downloads llama3.2 + nomic-embed-text (about 2.3 GB) into
+      Ollama-managed storage. macOS requires you to toggle permissions yourself
+      in System Settings; the app deep-links you to the right pane and re-checks.
+      The CLI memory features (openbird ingest / chat / routine) work immediately
+      without any permissions.
     EOS
   end
 

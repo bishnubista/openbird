@@ -34,6 +34,7 @@ from urllib.parse import urljoin
 from openbird.config import (
     Settings,
     get_settings,
+    is_loopback_host,
     is_ollama_model,
     ollama_bare_model,
     resolved_ollama_host,
@@ -669,6 +670,7 @@ def run_preflight(
     uses_ollama = any(
         is_ollama_model(m) for m in (settings.llm_model, settings.embed_model)
     )
+    auto_pull_allowed = bool(uses_ollama and is_loopback_host(resolved_host))
 
     if not uses_ollama:
         # Cloud-only / mlx-only route never touches local Ollama: skip the probe
@@ -682,6 +684,7 @@ def run_preflight(
             "models": {},
             "missing_models": [],
             "error": None,
+            "auto_pull_allowed": False,
         }
     elif probe_ollama:
         ollama = check_ollama(
@@ -690,6 +693,7 @@ def run_preflight(
             http_get=http_get,
             timeout=ollama_timeout,
         )
+        ollama["auto_pull_allowed"] = auto_pull_allowed
     else:
         ollama = {
             "reachable": "unknown",
@@ -699,6 +703,7 @@ def run_preflight(
             "models": {m: "unknown" for m in required_models},
             "missing_models": "unknown",
             "error": None,
+            "auto_pull_allowed": auto_pull_allowed,
         }
 
     # Probe against the SAME resolved host the report shows. When an explicit

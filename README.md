@@ -123,6 +123,21 @@ virtualenv-backed CLI and stages `OpenBird.app` under Homebrew's prefix.
 > [Release gates](#release-gates)). The CLI memory features
 > (`openbird ingest` / `chat` / `routine`) work fully from the brew install.
 
+### Beta DMG install
+
+The notarized beta `.dmg` is self-contained for OpenBird itself: download
+`OpenBird.dmg`, open it, drag `OpenBird.app` to `/Applications`, then launch the
+app. It does **not** bundle Ollama or model weights, and it cannot run setup
+while the DMG is downloading.
+
+On first launch, Guided Setup checks the active model route. For the default
+local route it helps you install/launch Ollama if needed, then downloads the
+required local AI models through the local Ollama API. The current defaults are
+`llama3.2` plus `nomic-embed-text`, which need network access and about 2.3 GB
+of Ollama-managed disk space. If `OLLAMA_HOST` / `OPENBIRD_OLLAMA_HOST` points
+at a non-local Ollama server, OpenBird will not auto-download models to that
+host.
+
 ### CLI
 
 ```

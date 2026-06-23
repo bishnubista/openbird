@@ -62,7 +62,8 @@ final class MemoryStatsTests: XCTestCase {
             "reachable": true,
             "host": "http://localhost:11434",
             "required_models": ["llama3.2", "nomic-embed-text"],
-            "missing_models": []
+            "missing_models": [],
+            "auto_pull_allowed": true
           },
           "cloud": {
             "llm_model": "ollama/llama3.2",
@@ -78,6 +79,7 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(report.ollamaHost, "http://localhost:11434")
         XCTAssertEqual(report.requiredModels, ["llama3.2", "nomic-embed-text"])
         XCTAssertEqual(report.missingModels, [])
+        XCTAssertTrue(report.autoPullAllowed)
         XCTAssertEqual(report.llmModel, "ollama/llama3.2")
         XCTAssertEqual(report.embedModel, "ollama/nomic-embed-text")
         XCTAssertEqual(report.remoteModelRoles, [:])
@@ -152,6 +154,7 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService())
 
         XCTAssertEqual(model.localModelStatusState, .unknown)
+        XCTAssertEqual(model.modelRouteProvisioningState, .unknown)
         XCTAssertEqual(model.modelRouteFooterLabel, "model route unknown")
         XCTAssertTrue(model.privacyTransmissionSummary.contains("not verified yet"))
         assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)
@@ -178,6 +181,7 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService(), initialReport: report)
 
         XCTAssertEqual(model.localModelStatusState, .attention)
+        XCTAssertEqual(model.modelRouteProvisioningState, .remoteRoute)
         XCTAssertEqual(model.modelRouteFooterLabel, "remote blocked")
         XCTAssertFalse(model.isFullyConfigured)
         XCTAssertTrue(model.localModelStatusSummary.contains("openai/gpt-4o-mini"))
@@ -194,6 +198,7 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService(), initialReport: report)
 
         XCTAssertEqual(model.localModelStatusState, .ok)
+        XCTAssertEqual(model.modelRouteProvisioningState, .remoteRoute)
         XCTAssertEqual(model.modelRouteFooterLabel, "remote model")
         XCTAssertTrue(model.isFullyConfigured)
         XCTAssertTrue(model.privacyTransmissionSummary.contains("may send captured memory"))
@@ -209,6 +214,7 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService(), initialReport: report)
 
         XCTAssertEqual(model.localModelStatusState, .attention)
+        XCTAssertEqual(model.modelRouteProvisioningState, .remoteRoute)
         XCTAssertEqual(model.modelRouteFooterLabel, "remote model")
         XCTAssertFalse(model.isFullyConfigured)
         XCTAssertTrue(model.localModelStatusSummary.contains("configured but not verified by preflight"))
@@ -241,8 +247,90 @@ final class MemoryStatsTests: XCTestCase {
         )
 
         XCTAssertTrue(model.hasRemoteModelRoute)
+        XCTAssertEqual(model.modelRouteProvisioningState, .remoteRoute)
         XCTAssertTrue(model.privacyTransmissionSummary.contains("embed=openai/text-embedding-3-small"))
         XCTAssertTrue(model.privacyTransmissionSummary.contains("may send captured memory"))
+    }
+
+    func testLocalMissingModelsCanBePulledOnlyWhenPreflightAllowsIt() {
+        var report = localRuntimeOKReport()
+        report.runtimeOK = false
+        report.missingModels = ["llama3.2"]
+        report.autoPullAllowed = true
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.modelRouteProvisioningState, .modelsMissing(canPull: true))
+        XCTAssertEqual(model.modelRouteActionLabel, "Download models")
+        XCTAssertTrue(model.canPullMissingModels)
+    }
+
+    func testLocalMissingModelsBlockedWhenPreflightDisallowsAutoPull() {
+        var report = localRuntimeOKReport()
+        report.runtimeOK = false
+        report.missingModels = ["llama3.2"]
+        report.autoPullAllowed = false
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.modelRouteProvisioningState, .modelsMissing(canPull: false))
+        XCTAssertNil(model.modelRouteActionLabel)
+        XCTAssertFalse(model.canPullMissingModels)
+        XCTAssertTrue(model.localModelStatusSummary.contains("automatic model download is disabled"))
+    }
+
+    func testRefreshClearsStaleProvisioningError() async {
+        let service = OpenBirdService(openBirdCLIResolver: { nil })
+        let model = AppModel(service: service, initialReport: localRuntimeOKReport())
+        model.setProvisioningErrorForTesting("stale pull failure")
+
+        XCTAssertEqual(model.modelRouteProvisioningState, .error("stale pull failure"))
+
+        await model.refresh()
+
+        XCTAssertNotEqual(model.modelRouteProvisioningState, .error("stale pull failure"))
+        XCTAssertFalse(model.localModelStatusSummary.contains("stale pull failure"))
+    }
+
+    func testProvisioningErrorShowsRetryWhenModelsStillMissing() {
+        var report = localRuntimeOKReport()
+        report.runtimeOK = false
+        report.missingModels = ["llama3.2"]
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+        model.setProvisioningErrorForTesting("pull failed")
+
+        XCTAssertEqual(model.modelRouteProvisioningState, .error("pull failed"))
+        XCTAssertEqual(model.modelRouteActionLabel, "Retry")
+        XCTAssertTrue(model.localModelStatusSummary.contains("pull failed"))
+    }
+
+    func testOllamaUnavailableShowsGetOllamaAction() {
+        var report = localRuntimeOKReport()
+        report.runtimeOK = false
+        report.ollamaReachable = false
+        report.missingModels = ["llama3.2"]
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.modelRouteProvisioningState, .ollamaUnavailable)
+        XCTAssertEqual(model.modelRouteActionLabel, "Get Ollama")
+    }
+
+    func testPullProgressLineDecodesPercent() throws {
+        let progress = try XCTUnwrap(OpenBirdService.parsePullProgressLine(
+            #"{"status":"pulling manifest","completed":25,"total":100}"#,
+            model: "llama3.2"
+        ))
+
+        XCTAssertEqual(progress.model, "llama3.2")
+        XCTAssertEqual(progress.status, "pulling manifest")
+        XCTAssertEqual(progress.completed, 25)
+        XCTAssertEqual(progress.total, 100)
+        XCTAssertEqual(progress.fraction, 0.25)
+    }
+
+    func testPullProgressLineThrowsOnOllamaError() {
+        XCTAssertThrowsError(try OpenBirdService.parsePullProgressLine(
+            #"{"error":"model not found"}"#,
+            model: "llama3.2"
+        ))
     }
 
     func testChatFailureSummaryClassifiesMissingModel() {
@@ -291,6 +379,7 @@ final class MemoryStatsTests: XCTestCase {
         report.remoteModelRoles = [:]
         report.remoteModels = []
         report.usesLocalOllama = true
+        report.autoPullAllowed = true
         return report
     }
 
