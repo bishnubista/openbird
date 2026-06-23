@@ -213,6 +213,7 @@ struct TodayView: View {
             }
             .font(.system(size: 12))
             .monospacedDigit()
+            .lineLimit(1)                       // never wrap the " AM"/" PM" onto a second line
             .frame(width: Self.timeColumnWidth, alignment: .trailing)
             .padding(.top, 14)
 
@@ -250,7 +251,10 @@ struct TodayView: View {
 
     // MARK: Formatting
 
-    static let timeColumnWidth: CGFloat = 46
+    // Wide enough for a two-digit 12-hour time with day period ("10:52 PM") at 12pt
+    // monospaced-digit — the gutter must not wrap (the connector rail inset derives
+    // from this constant, so it follows automatically).
+    static let timeColumnWidth: CGFloat = 62
 
     /// Group-separated integer ("1,284"). Forwards to the shared formatter so the
     /// Today card rail and the compact Direction-C rail never disagree on a value.
