@@ -12,6 +12,7 @@ struct PreflightReport: Equatable {
     var missingModels: [String] = []
     var llmModel: String?
     var embedModel: String?
+    var remoteModelRoles: [String: String] = [:]
     var remoteModels: [String] = []
     var usesLocalOllama: Bool = true
     var cloudBlocked: Bool = false
@@ -644,7 +645,15 @@ final class OpenBirdService: @unchecked Sendable {
         if let cloud = payload["cloud"] as? [String: Any] {
             report.llmModel = cloud["llm_model"] as? String
             report.embedModel = cloud["embed_model"] as? String
-            report.remoteModels = cloud["remote_models"] as? [String] ?? []
+            if let remoteModelRoles = cloud["remote_models"] as? [String: String] {
+                report.remoteModelRoles = remoteModelRoles
+                report.remoteModels = remoteModelRoles
+                    .keys
+                    .sorted()
+                    .compactMap { remoteModelRoles[$0] }
+            } else if let remoteModels = cloud["remote_models"] as? [String] {
+                report.remoteModels = remoteModels
+            }
             report.usesLocalOllama = cloud["uses_local_ollama"] as? Bool ?? true
             report.cloudBlocked = cloud["blocked"] as? Bool ?? false
         }

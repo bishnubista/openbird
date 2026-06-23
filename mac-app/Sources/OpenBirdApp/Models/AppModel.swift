@@ -107,34 +107,100 @@ final class AppModel: ObservableObject {
     }
 
     var localModelStatusState: StepState {
+        if report.error != nil { return .attention }
         if report.cloudBlocked { return .attention }
-        if !report.usesLocalOllama { return report.remoteModels.isEmpty ? .unknown : .attention }
-        if report.ollamaReachable != true { return ollamaState }
-        return report.missingModels.isEmpty ? .ok : .attention
+        if hasRemoteModelRoute { return report.runtimeOK ? .ok : .attention }
+        if !hasDecodedModelRoute { return .unknown }
+        if report.runtimeOK { return .ok }
+        if report.ollamaReachable == nil { return .unknown }
+        return .attention
     }
 
     var localModelStatusSummary: String {
-        if report.cloudBlocked {
-            let remote = report.remoteModels.isEmpty
-                ? "a remote model"
-                : report.remoteModels.joined(separator: ", ")
-            return "Cloud model blocked: \(remote). Use local Ollama or opt in."
+        if let error = report.error {
+            return "Preflight could not read model route: \(error)"
         }
-        if !report.usesLocalOllama {
-            return report.remoteModels.isEmpty
-                ? "Local Ollama is not used by this model route."
-                : "Not on-device: \(report.remoteModels.joined(separator: ", "))"
+        if report.cloudBlocked {
+            return "Remote model blocked: \(remoteModelRouteSummary). Use local Ollama or opt in."
+        }
+        if hasRemoteModelRoute {
+            if report.runtimeOK {
+                return "Remote model route verified by preflight: \(remoteModelRouteSummary)"
+            }
+            return "Remote model route configured but not verified by preflight: \(remoteModelRouteSummary)"
+        }
+        if !hasDecodedModelRoute {
+            return "Model route not verified yet. Re-check setup."
+        }
+        if report.runtimeOK {
+            return "Local Ollama route verified by preflight: \(requiredModelSummary)"
         }
         if report.ollamaReachable == true {
-            if report.missingModels.isEmpty {
-                return "Ollama connected · on-device models ready: \(requiredModelSummary)"
-            }
+            if report.missingModels.isEmpty { return "Local model route is not runtime-ready. Re-check setup." }
             return "Ollama connected · missing models: \(report.missingModels.joined(separator: ", "))"
         }
         if report.ollamaReachable == false {
             return "Ollama is not reachable. Launch Ollama, then re-check."
         }
         return "Local model status unknown. Re-check setup."
+    }
+
+    var privacyStorageSummary: String {
+        "Captured memory is stored on this Mac."
+    }
+
+    var privacyTransmissionSummary: String {
+        if report.error != nil {
+            return "Model route could not be verified. Re-check setup before relying on transmission privacy."
+        }
+        if report.cloudBlocked {
+            return "Remote model configured (\(remoteModelRouteSummary)), but cloud use is blocked; captured memory stays local until you opt in or switch to local Ollama."
+        }
+        if hasRemoteModelRoute {
+            return "Remote model route active (\(remoteModelRouteSummary)); AI features may send captured memory to the configured provider."
+        }
+        if !hasDecodedModelRoute {
+            return "Model route not verified yet. Re-check setup before relying on transmission privacy."
+        }
+        if report.runtimeOK {
+            return "Model requests stay on this Mac through local Ollama."
+        }
+        return "No remote model route is configured; finish local model setup before using AI features."
+    }
+
+    var modelRouteFooterLabel: String {
+        if report.error != nil { return "model route unknown" }
+        if report.cloudBlocked { return "remote blocked" }
+        if hasRemoteModelRoute { return "remote model" }
+        if localModelStatusState == .unknown { return "model route unknown" }
+        return "local model"
+    }
+
+    var hasRemoteModelRoute: Bool {
+        !report.remoteModelRoles.isEmpty || !report.remoteModels.isEmpty
+    }
+
+    private var hasDecodedModelRoute: Bool {
+        report.llmModel != nil
+            || report.embedModel != nil
+            || report.ollamaReachable != nil
+    }
+
+    private var remoteModelRouteSummary: String {
+        if !report.remoteModelRoles.isEmpty {
+            return report.remoteModelRoles
+                .keys
+                .sorted()
+                .compactMap { role in
+                    guard let model = report.remoteModelRoles[role] else { return nil }
+                    return "\(role)=\(model)"
+                }
+                .joined(separator: ", ")
+        }
+        if !report.remoteModels.isEmpty {
+            return report.remoteModels.joined(separator: ", ")
+        }
+        return "a remote model"
     }
 
     var requiredModelSummary: String {
@@ -159,7 +225,7 @@ final class AppModel: ObservableObject {
 
     var nextStepState: StepState {
         if isRefreshing { return .working }
-        if ollamaState != .ok || modelsState != .ok || accessibilityState != .ok {
+        if localModelStatusState != .ok || accessibilityState != .ok {
             return .attention
         }
         if allowlist.isEmpty || !captureRunning || memoryStats.observations == 0 {
@@ -172,13 +238,20 @@ final class AppModel: ObservableObject {
         if isRefreshing {
             return "Checking setup..."
         }
-        if ollamaState != .ok {
-            return "Next: launch Ollama, then re-check setup."
-        }
-        if modelsState != .ok {
-            return report.missingModels.isEmpty
-                ? "Next: re-check local models."
-                : "Next: pull missing models: \(report.missingModels.joined(separator: ", "))"
+        if localModelStatusState != .ok {
+            if report.cloudBlocked {
+                return "Next: opt in to the remote model route or switch to local Ollama."
+            }
+            if hasRemoteModelRoute {
+                return "Next: re-check setup to verify the configured remote model route."
+            }
+            if report.ollamaReachable == false {
+                return "Next: launch Ollama, then re-check setup."
+            }
+            if !report.missingModels.isEmpty {
+                return "Next: pull missing models: \(report.missingModels.joined(separator: ", "))"
+            }
+            return "Next: re-check the active model route."
         }
         if accessibilityState != .ok {
             return "Next: grant Accessibility so OpenBird can read active-window text."
@@ -233,23 +306,10 @@ final class AppModel: ObservableObject {
     /// none of them gate "Ready", so the badge never contradicts an optional or
     /// informational checklist row.
     var isFullyConfigured: Bool {
-        modelsState == .ok && accessibilityState == .ok
+        localModelStatusState == .ok && accessibilityState == .ok
     }
 
     // MARK: - Derived step states
-
-    var ollamaState: StepState {
-        switch report.ollamaReachable {
-        case .some(true): return .ok
-        case .some(false): return .attention
-        case .none: return .unknown
-        }
-    }
-
-    var modelsState: StepState {
-        if report.ollamaReachable != true { return .attention }
-        return report.missingModels.isEmpty ? .ok : .attention
-    }
 
     var encryptionState: StepState {
         if report.encryptionEnabled { return .ok }

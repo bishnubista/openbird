@@ -63,8 +63,8 @@ relaunch() {
 # zero readable menu bars for a moment mid-launch/transition, which made a single probe
 # wrongly report AX as ungranted and abort the whole run.
 ax_ok() {
-  local n i
-  for i in 1 2 3 4; do
+  local n
+  for _ in 1 2 3 4; do
     n=$(osascript -e 'tell application "System Events" to count menu bars of (first application process whose frontmost is true)' 2>/dev/null || echo 0)
     [ "${n:-0}" -ge 1 ] && return 0
     /bin/sleep 0.5

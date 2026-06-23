@@ -22,7 +22,7 @@ struct OnboardingSheet: View {
                 Text("Welcome to OpenBird")
                     .font(.system(size: 22, weight: .bold))
                     .foregroundStyle(OB.textPrimary(scheme))
-                Text("Local-first memory for your Mac. It reads the **text** of your active window — never screenshots — and keeps everything on this device.")
+                Text("Local-first memory for your Mac. It reads the **text** of your active window — never screenshots. \(model.privacyStorageSummary) \(model.privacyTransmissionSummary)")
                     .font(.system(size: 13.5))
                     .foregroundStyle(OB.textSecondary(scheme))
                     .multilineTextAlignment(.center)
@@ -44,7 +44,7 @@ struct OnboardingSheet: View {
 
             HStack(spacing: OB.Space.s) {
                 Image(systemName: "lock.fill").font(.system(size: 10))
-                Text("Nothing leaves your device. Pause anytime from the menu bar.")
+                Text("\(model.privacyTransmissionSummary) Pause anytime from the menu bar.")
                     .font(.system(size: 11.5))
             }
             .foregroundStyle(OB.textTertiary(scheme))
@@ -85,13 +85,28 @@ struct OnboardingSheet: View {
             )
             OnboardingRow(
                 icon: "cpu",
-                title: "Local model · Ollama",
-                subtitle: model.requiredModelSummary,
+                title: "Active model route",
+                subtitle: model.localModelStatusSummary,
                 state: model.localModelStatusState,
                 connectedLabel: "Connected",
-                enableTitle: "Get Ollama",
-                onEnable: { NSWorkspace.shared.open(URL(string: "https://ollama.com")!) }
+                enableTitle: modelRouteEnableTitle,
+                onEnable: modelRouteEnable
             )
+        }
+    }
+
+    private var modelRouteEnableTitle: String? {
+        if model.hasRemoteModelRoute { return nil }
+        if model.report.ollamaReachable == false { return "Get Ollama" }
+        if !model.report.missingModels.isEmpty { return "Pull" }
+        return nil
+    }
+
+    private func modelRouteEnable() {
+        if model.report.ollamaReachable == false {
+            NSWorkspace.shared.open(URL(string: "https://ollama.com")!)
+        } else if !model.report.missingModels.isEmpty {
+            Task { await model.pullMissingModels() }
         }
     }
 
@@ -118,7 +133,7 @@ private struct OnboardingRow: View {
     /// When set and `state == .ok`, render a green-dot "● <label>" instead of the
     /// "✓ Granted" checkmark (used for the model-connection row).
     var connectedLabel: String? = nil
-    let enableTitle: String
+    let enableTitle: String?
     let onEnable: () -> Void
 
     @Environment(\.colorScheme) private var scheme
@@ -170,15 +185,21 @@ private struct OnboardingRow: View {
                     .foregroundStyle(OB.ok(scheme))
             }
         } else {
-            Button(action: onEnable) {
-                Text(enableTitle)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, OB.Space.m)
-                    .padding(.vertical, OB.Space.s)
-                    .background(OB.accent, in: RoundedRectangle(cornerRadius: OB.Radius.control, style: .continuous))
+            if let enableTitle {
+                Button(action: onEnable) {
+                    Text(enableTitle)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, OB.Space.m)
+                        .padding(.vertical, OB.Space.s)
+                        .background(OB.accent, in: RoundedRectangle(cornerRadius: OB.Radius.control, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            } else {
+                Label("Review", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.orange)
             }
-            .buttonStyle(.plain)
         }
     }
 }
