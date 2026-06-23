@@ -278,6 +278,11 @@ def timeline(
 def briefing(
     day: int = typer.Option(1, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    signals: bool = typer.Option(
+        False,
+        "--signals",
+        help="Use the experimental high-signal local classifier instead of broad prose.",
+    ),
 ) -> None:
     """Generate a grounded prose briefing for a day (on-demand; one LLM call).
 
@@ -291,6 +296,10 @@ def briefing(
     from openbird.routines.templates import get_template
 
     start, end = _day_window(day)
+    if signals:
+        _briefing_signals(day, start, end, as_json=as_json)
+        return
+
     # Open WITHOUT the cloud gate / LLM first; only construct the completion
     # provider when the day actually has capture content (an empty day returns the
     # deterministic no-activity line for free, never touching the model/cloud gate).
@@ -309,6 +318,82 @@ def briefing(
     if as_json:
         _console.print_json(
             json.dumps({"day_offset": day, "start": start, "end": end, "text": text})
+        )
+        return
+    _console.print(text)
+
+
+def _briefing_signals(day: int, start: float, end: float, *, as_json: bool) -> None:
+    """Run the opt-in signal-first briefing path.
+
+    The signal classifier is local-only in this experimental path. If the active
+    model route is remote, or local model construction/call fails, it degrades to
+    deterministic per-item fallback instead of silently using cloud.
+    """
+    from openbird.llm.provider import classify_models
+    from openbird.signals import SignalClassifier, render_signal_brief
+
+    store = _store_maintenance()
+    try:
+        rows = store.time_range_text(start, end, source="capture")
+    finally:
+        store.close()
+
+    settings = get_settings()
+    provider = None
+    local_model_status = "not_needed"
+    if rows:
+        remote = classify_models(settings)
+        if remote:
+            local_model_status = "disabled_remote_route"
+        else:
+            try:
+                provider = _provider()
+                local_model_status = "available"
+            except Exception:  # noqa: BLE001 - signal path degrades locally
+                # Provider construction can fail because the local route is not
+                # ready. The signal path is experimental/local-only, so it treats
+                # that as deterministic fallback rather than using remote
+                # completion.
+                local_model_status = "unavailable"
+
+    classifier = SignalClassifier(provider)
+    result = classifier.classify_window(
+        rows,
+        start_ts=start,
+        end_ts=end,
+        local_model_status=local_model_status,
+    )
+    text = render_signal_brief(result)
+    if as_json:
+        _console.print_json(
+            json.dumps(
+                {
+                    "day_offset": day,
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                    "signals": [
+                        {
+                            "candidate_id": s.candidate_id,
+                            "label": s.label,
+                            "confidence": s.confidence,
+                            "user_value": s.user_value,
+                            "short_label": s.short_label,
+                            "evidence_observation_ids": list(s.evidence_observation_ids),
+                            "reason_codes": list(s.reason_codes),
+                            "deterministic_fallback": s.deterministic_fallback,
+                        }
+                        for s in result.signals
+                    ],
+                    "hidden_count": result.hidden_count,
+                    "grouped_duplicates_count": result.grouped_duplicates_count,
+                    "low_confidence_count": result.low_confidence_count,
+                    "deterministic_fallback_count": result.deterministic_fallback_count,
+                    "sensitive_quarantine_count": result.sensitive_quarantine_count,
+                    "local_model_status": result.local_model_status,
+                }
+            )
         )
         return
     _console.print(text)

@@ -203,6 +203,20 @@ def test_run_window_uses_explicit_bounds_and_provider():
     assert seen["bounds"] == (10.0, 90.0)
 
 
+def test_briefing_signals_json_empty_day(monkeypatch, tmp_path):
+    """The opt-in signal briefing returns deterministic empty JSON without a model."""
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+
+    res = CliRunner().invoke(cli.app, ["briefing", "--signals", "--json", "--day", "0"])
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["signals"] == []
+    assert payload["local_model_status"] == "not_needed"
+    assert "No notable" in payload["text"]
+
+
 def test_timeline_cli_json_empty(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()  # get_settings() is lru_cached; pick up the temp data dir
