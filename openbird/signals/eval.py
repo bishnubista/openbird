@@ -72,15 +72,16 @@ def load_signal_eval_jsonl(path: str | Path) -> list[SignalEvalInput]:
     """Load and validate signal eval fixtures from UTF-8 JSONL."""
     fixture = Path(path)
     cases: list[SignalEvalInput] = []
-    for line_no, raw in enumerate(fixture.read_text(encoding="utf-8").splitlines(), start=1):
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        try:
-            obj = json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{fixture}:{line_no}: invalid JSON") from exc
-        cases.append(_case_from_obj(obj, fixture=fixture, line_no=line_no))
+    with fixture.open("r", encoding="utf-8") as handle:
+        for line_no, raw in enumerate(handle, start=1):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{fixture}:{line_no}: invalid JSON") from exc
+            cases.append(_case_from_obj(obj, fixture=fixture, line_no=line_no))
     if not cases:
         raise ValueError(f"{fixture}: no eval cases found")
     return cases
