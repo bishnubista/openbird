@@ -13,6 +13,7 @@ from openbird.types import Observation
 
 
 def _obs(idx: int, *, content_hash: str | None = None, app: str = "Code") -> Observation:
+    """Build a minimal capture observation for classifier tests."""
     return Observation(
         id=f"obs-{idx}",
         content_hash=content_hash or f"hash-{idx}",
@@ -26,21 +27,29 @@ def _obs(idx: int, *, content_hash: str | None = None, app: str = "Code") -> Obs
 
 
 class _BoomProvider:
+    """Provider stub that proves model failures degrade without leaking text."""
+
     def complete(self, messages, *, json_schema=None):  # pragma: no cover - raises
+        """Raise from completion to exercise per-item fallback."""
         raise RuntimeError("captured body must not leak")
 
 
 class _DictProvider:
+    """Provider stub returning a fixed structured completion payload."""
+
     def __init__(self, payload):
+        """Store the payload and captured calls for assertions."""
         self.payload = payload
         self.calls = []
 
     def complete(self, messages, *, json_schema=None):
+        """Return the configured payload while recording prompt metadata."""
         self.calls.append((messages, json_schema))
         return dict(self.payload)
 
 
 def test_high_value_marker_survives_volatile_and_duplicate_penalties():
+    """Blockers stay surfaceable despite duplicate and volatile UI penalties."""
     rows = [
         (_obs(1, content_hash="same"), "Build failed with timeout at 40% loading"),
         (_obs(2, content_hash="same"), "Build failed with timeout at 40% loading"),
@@ -57,6 +66,7 @@ def test_high_value_marker_survives_volatile_and_duplicate_penalties():
 
 
 def test_sensitive_candidates_are_quarantined_and_never_sent_to_model():
+    """Secret-pattern candidates are withheld before any provider call."""
     provider = _DictProvider(
         {
             "category": "open_loop",
@@ -80,6 +90,7 @@ def test_sensitive_candidates_are_quarantined_and_never_sent_to_model():
 
 
 def test_valid_model_output_is_grounded_by_evidence_id_and_text():
+    """Grounded model output can surface as a non-fallback signal."""
     provider = _DictProvider(
         {
             "category": "open_loop",
@@ -103,6 +114,7 @@ def test_valid_model_output_is_grounded_by_evidence_id_and_text():
 
 
 def test_ungrounded_model_output_degrades_to_deterministic_fallback():
+    """Ungrounded model claims are rejected in favor of deterministic fallback."""
     provider = _DictProvider(
         {
             "category": "commitment",
@@ -126,6 +138,7 @@ def test_ungrounded_model_output_degrades_to_deterministic_fallback():
 
 
 def test_hidden_model_output_cannot_suppress_deterministic_blocker():
+    """A model hide vote cannot suppress deterministic blocker evidence."""
     provider = _DictProvider(
         {
             "category": "unknown",
@@ -148,6 +161,7 @@ def test_hidden_model_output_cannot_suppress_deterministic_blocker():
 
 
 def test_blocker_keeps_precedence_over_commitment_marker():
+    """Blocker labels outrank commitment labels when both markers appear."""
     rows = [(_obs(1), "Build failed and needs to ship by tomorrow.")]
 
     result = SignalClassifier(None).classify_window(
@@ -158,6 +172,7 @@ def test_blocker_keeps_precedence_over_commitment_marker():
 
 
 def test_zero_snippet_budget_does_not_retain_text():
+    """A zero snippet budget must not retain captured body text."""
     rows = [(_obs(1), "Need to follow up on PR #53 after review.")]
 
     packets, _ = SignalClassifier(max_snippet_chars=0).build_packets(rows)
@@ -166,6 +181,7 @@ def test_zero_snippet_budget_does_not_retain_text():
 
 
 def test_evaluation_gate_blocks_silence_and_sensitive_leaks():
+    """Evaluation fails on missed must-surface items or sensitive leaks."""
     result = evaluate_signal_predictions(
         [
             EvaluationCase("a", "must_surface", None),
@@ -179,6 +195,7 @@ def test_evaluation_gate_blocks_silence_and_sensitive_leaks():
 
 
 def test_evaluation_gate_passes_balanced_signal_set():
+    """Evaluation passes when signal, noise, and quarantine expectations hold."""
     result = evaluate_signal_predictions(
         [
             EvaluationCase("a", "must_surface", SignalLabel.OPEN_LOOP),

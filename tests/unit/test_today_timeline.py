@@ -204,6 +204,7 @@ def test_run_window_uses_explicit_bounds_and_provider():
 
 
 def test_briefing_signals_json_empty_day(monkeypatch, tmp_path):
+    """The opt-in signal briefing returns deterministic empty JSON without a model."""
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
 

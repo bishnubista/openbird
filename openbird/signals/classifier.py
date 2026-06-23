@@ -189,6 +189,7 @@ class SignalClassifier:
         surface_threshold: float = 0.58,
         fallback_threshold: float = 0.72,
     ) -> None:
+        """Configure optional provider use, snippet budgets, and score thresholds."""
         self.provider = provider
         self.max_packets = max_packets
         self.max_snippet_chars = max_snippet_chars
@@ -203,6 +204,7 @@ class SignalClassifier:
         end_ts: float,
         local_model_status: str = "not_requested",
     ) -> BriefingSignals:
+        """Classify a capture window into ranked, surfaceable signal facts."""
         packets, grouped_duplicates = self.build_packets(rows)
         sensitive_count = sum(1 for p in packets if p.sensitive)
         eligible = self._eligible_packets(packets)
@@ -242,6 +244,7 @@ class SignalClassifier:
     def build_packets(
         self, rows: list[tuple[Observation, str]]
     ) -> tuple[list[CandidatePacket], int]:
+        """Group deduped observations into bounded candidate packets."""
         grouped: dict[str, list[tuple[Observation, str]]] = {}
         order: list[str] = []
         for obs, text in rows:
@@ -295,6 +298,7 @@ class SignalClassifier:
         return packets, duplicate_count
 
     def _eligible_packets(self, packets: list[CandidatePacket]) -> list[CandidatePacket]:
+        """Return bounded high-value packets while keeping quarantine out."""
         high_value = [
             p for p in packets
             if not p.sensitive and (
@@ -312,6 +316,7 @@ class SignalClassifier:
         ]
 
     def _classify_packet(self, packet: CandidatePacket) -> ClassifiedSignal | None:
+        """Ask the optional local model to classify one packet, failing closed."""
         if self.provider is None or packet.sensitive:
             return None
         complete = getattr(self.provider, "complete", None)
@@ -327,6 +332,7 @@ class SignalClassifier:
         return _validate_model_output(raw, packet)
 
     def _fallback(self, packet: CandidatePacket) -> ClassifiedSignal | None:
+        """Create a deterministic signal when score and label clear the floor."""
         if packet.sensitive:
             return None
         if packet.deterministic_score < self.fallback_threshold:
@@ -450,6 +456,7 @@ def _score_text(
     repeated: bool,
     near_duplicate: bool,
 ) -> tuple[list[str], list[str], SignalLabel, float, bool]:
+    """Assign deterministic tags, score, label, and quarantine state."""
     tags: list[str] = []
     reasons: list[str] = []
     score = 0.0
@@ -531,6 +538,7 @@ def _score_text(
 
 
 def _has_deterministic_floor(packet: CandidatePacket) -> bool:
+    """Return whether deterministic evidence must survive a model hide vote."""
     return (
         packet.deterministic_score >= 0.72
         and packet.deterministic_label
@@ -544,6 +552,7 @@ def _has_deterministic_floor(packet: CandidatePacket) -> bool:
 
 
 def _messages_for_packet(packet: CandidatePacket) -> list[dict[str, str]]:
+    """Build the fenced, untrusted-data classification prompt."""
     evidence = (
         f"- observation_ids={', '.join(packet.observation_ids)}\n"
         f"  {' '.join(packet.snippets)}"
@@ -574,6 +583,7 @@ def _messages_for_packet(packet: CandidatePacket) -> list[dict[str, str]]:
 
 
 def _validate_model_output(raw: dict[str, Any], packet: CandidatePacket) -> ClassifiedSignal | None:
+    """Validate model JSON, evidence IDs, grounding, and confidence bounds."""
     category = str(raw.get("category", "")).strip()
     if category not in _LLM_LABELS:
         return None
@@ -609,6 +619,7 @@ def _validate_model_output(raw: dict[str, Any], packet: CandidatePacket) -> Clas
 
 
 def _grounded(text: str, packet: CandidatePacket) -> bool:
+    """Check that model prose overlaps retained packet evidence."""
     needle_words = set(_normalized_words(text))
     if not needle_words:
         return False
@@ -617,10 +628,12 @@ def _grounded(text: str, packet: CandidatePacket) -> bool:
 
 
 def _normalized_words(text: str) -> list[str]:
+    """Return normalized terms used for cheap grounding and fingerprints."""
     return re.findall(r"[a-z0-9_.#/-]{3,}", text.lower())
 
 
 def _bounded_float(value: object, *, default: float) -> float:
+    """Coerce a value into the inclusive 0..1 range."""
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -631,6 +644,7 @@ def _bounded_float(value: object, *, default: float) -> float:
 
 
 def _fallback_title(packet: CandidatePacket) -> str:
+    """Return a canned, non-content title for deterministic fallback output."""
     if packet.deterministic_label == SignalLabel.BLOCKER:
         return "Possible blocker or failed workflow"
     if packet.deterministic_label == SignalLabel.COMMITMENT:
@@ -644,11 +658,13 @@ def _fallback_title(packet: CandidatePacket) -> str:
 
 
 def _fingerprint(text: str) -> str:
+    """Create a simple normalized prefix fingerprint for near-duplicate checks."""
     words = _normalized_words(text)
     return " ".join(words[:80])
 
 
 def _truncate(text: str, limit: int) -> str:
+    """Truncate text to a caller-owned character budget."""
     if limit <= 0:
         return ""
     if len(text) <= limit:
