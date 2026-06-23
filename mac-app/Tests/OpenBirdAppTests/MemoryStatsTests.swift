@@ -155,6 +155,19 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(model.modelRouteFooterLabel, "model route unknown")
         XCTAssertTrue(model.privacyTransmissionSummary.contains("not verified yet"))
         assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)
+        assertNoUnknownLocalRouteClaim(model.privacyTransmissionSummary)
+    }
+
+    func testPreflightErrorRouteStateIsCautious() {
+        let report = PreflightReport(error: "Could not parse preflight JSON.")
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.localModelStatusState, .attention)
+        XCTAssertEqual(model.modelRouteFooterLabel, "model route unknown")
+        XCTAssertTrue(model.localModelStatusSummary.contains("Could not parse preflight JSON."))
+        XCTAssertTrue(model.privacyTransmissionSummary.contains("could not be verified"))
+        assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)
+        assertNoUnknownLocalRouteClaim(model.privacyTransmissionSummary)
     }
 
     func testCloudBlockedRouteBlocksReadinessAndNamesRemoteModel() {
@@ -305,5 +318,14 @@ final class MemoryStatsTests: XCTestCase {
     ) {
         XCTAssertFalse(text.contains("Nothing leaves your device"), file: file, line: line)
         XCTAssertFalse(text.contains("keeps everything on this device"), file: file, line: line)
+    }
+
+    private func assertNoUnknownLocalRouteClaim(
+        _ text: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertFalse(text.contains("No remote model route is configured"), file: file, line: line)
+        XCTAssertFalse(text.contains("Model requests stay on this Mac"), file: file, line: line)
     }
 }

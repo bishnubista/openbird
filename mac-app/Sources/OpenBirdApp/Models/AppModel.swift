@@ -117,6 +117,9 @@ final class AppModel: ObservableObject {
     }
 
     var localModelStatusSummary: String {
+        if let error = report.error {
+            return "Preflight could not read model route: \(error)"
+        }
         if report.cloudBlocked {
             return "Remote model blocked: \(remoteModelRouteSummary). Use local Ollama or opt in."
         }
@@ -128,9 +131,6 @@ final class AppModel: ObservableObject {
         }
         if !hasDecodedModelRoute {
             return "Model route not verified yet. Re-check setup."
-        }
-        if let error = report.error {
-            return "Preflight could not read model route: \(error)"
         }
         if report.runtimeOK {
             return "Local Ollama route verified by preflight: \(requiredModelSummary)"
@@ -150,6 +150,9 @@ final class AppModel: ObservableObject {
     }
 
     var privacyTransmissionSummary: String {
+        if report.error != nil {
+            return "Model route could not be verified. Re-check setup before relying on transmission privacy."
+        }
         if report.cloudBlocked {
             return "Remote model configured (\(remoteModelRouteSummary)), but cloud use is blocked; captured memory stays local until you opt in or switch to local Ollama."
         }
@@ -166,6 +169,7 @@ final class AppModel: ObservableObject {
     }
 
     var modelRouteFooterLabel: String {
+        if report.error != nil { return "model route unknown" }
         if report.cloudBlocked { return "remote blocked" }
         if hasRemoteModelRoute { return "remote model" }
         if localModelStatusState == .unknown { return "model route unknown" }
@@ -180,7 +184,6 @@ final class AppModel: ObservableObject {
         report.llmModel != nil
             || report.embedModel != nil
             || report.ollamaReachable != nil
-            || report.error != nil
     }
 
     private var remoteModelRouteSummary: String {
