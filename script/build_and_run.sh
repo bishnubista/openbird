@@ -69,7 +69,9 @@ UV_BIN='$uv_bin_escaped'
 BIN_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="\$(cd "\$BIN_DIR/../../../.." && pwd)"
 if [[ ! -f "\$REPO_ROOT/pyproject.toml" ]]; then
-  echo "OpenBird dev bundle cannot find the source checkout at \$REPO_ROOT" >&2
+  echo "OpenBird dev bundle cannot find the source checkout at \$REPO_ROOT." >&2
+  echo "dist/OpenBird.app is a non-relocatable dev bundle; do not copy it to /Applications for beta testing." >&2
+  echo "Use Homebrew's openbird-app or build a signed/notarized DMG with script/package_dmg.sh." >&2
   exit 127
 fi
 export OPENBIRD_CAPTURE_HELPER="\$BIN_DIR/capture-helper"
