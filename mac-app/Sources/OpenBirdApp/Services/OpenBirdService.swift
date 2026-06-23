@@ -651,6 +651,8 @@ final class OpenBirdService: @unchecked Sendable {
                     .keys
                     .sorted()
                     .compactMap { remoteModelRoles[$0] }
+            } else if let remoteModels = cloud["remote_models"] as? [String] {
+                report.remoteModels = remoteModels
             }
             report.usesLocalOllama = cloud["uses_local_ollama"] as? Bool ?? true
             report.cloudBlocked = cloud["blocked"] as? Bool ?? false

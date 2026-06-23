@@ -114,6 +114,30 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertFalse(report.usesLocalOllama)
     }
 
+    func testParsePreflightPreservesLegacyArrayRemoteModels() {
+        let report = OpenBirdService.parsePreflight("""
+        {
+          "runtime_ok": true,
+          "cloud": {
+            "llm_model": "openai/gpt-4o-mini",
+            "embed_model": "openai/text-embedding-3-small",
+            "remote_models": [
+              "openai/gpt-4o-mini",
+              "openai/text-embedding-3-small"
+            ],
+            "uses_local_ollama": false,
+            "blocked": false
+          }
+        }
+        """)
+
+        XCTAssertEqual(report.remoteModelRoles, [:])
+        XCTAssertEqual(report.remoteModels, [
+            "openai/gpt-4o-mini",
+            "openai/text-embedding-3-small"
+        ])
+    }
+
     func testLocalRoutePrivacyCopyStaysRouteConditional() {
         let model = AppModel(service: OpenBirdService(), initialReport: localRuntimeOKReport())
 
