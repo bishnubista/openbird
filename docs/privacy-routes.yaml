@@ -89,6 +89,81 @@ routes:
     truth_surface:
       - cli.ingest_output
 
+  - id: chat.local
+    class: local
+    source: user prompt plus retrieved local memory
+    captured_fields:
+      - user_question
+      - retrieved_chunks
+      - citations
+    storage: []
+    egress:
+      condition: active_model_route_is_loopback
+      default: none
+    truth_surface:
+      - cli.cloud_banner
+      - app.privacyTransmissionSummary
+
+  - id: chat.remote
+    class: unknown
+    source: user prompt plus retrieved local memory
+    captured_fields:
+      - user_question
+      - retrieved_chunks
+      - citations
+    storage:
+      - local_db_for_retrieval_only
+    egress:
+      default: active_model_route
+      resolved_by:
+        - model.remote_ollama
+        - model.third_party_cloud
+      warning: captured memory leaves this machine
+    enforcement:
+      requires: OPENBIRD_ALLOW_CLOUD
+    truth_surface:
+      - preflight.cloud
+      - cli.CLOUD_ACTIVE
+      - app.CLOUD_ACTIVE
+
+  - id: routines.summary
+    class: unknown
+    source: scheduled time-window retrieval over local memory
+    captured_fields:
+      - retrieved_window_memory
+      - routine_prompt
+      - generated_summary
+    storage:
+      - routine_output_store_when_enabled
+    egress:
+      default: inherits_active_model_route
+      inherited_from:
+        - chat.local
+        - chat.remote
+    truth_surface:
+      - routine_run_output
+      - cli.cloud_banner
+
+  - id: meetings.audio
+    class: local
+    status: planned
+    source: ScreenCaptureKit/audio helper
+    captured_fields:
+      - audio_frames
+      - transcript_text
+      - speaker_metadata
+    storage:
+      - local_transcript_store_when_enabled
+      - sqlite.observations
+      - sqlite.content_blobs
+      - sqlite.chunks
+    egress:
+      default: none
+      remote_stt_requires_future_route: true
+    truth_surface:
+      - preflight.audio
+      - app.meeting_privacy_state
+
   - id: model.local_ollama
     class: local
     source: retrieved memory and user prompt
@@ -125,6 +200,26 @@ routes:
       - preflight.cloud
       - cli.CLOUD_ACTIVE
       - app.CLOUD_ACTIVE
+
+  - id: embedding.remote
+    class: unknown
+    source: local memory chunks sent for embedding
+    captured_fields:
+      - chunk_text
+      - embedding_request_metadata
+    storage:
+      - sqlite.vec_chunks
+    egress:
+      default: active_embedding_route
+      resolved_by:
+        - model.remote_ollama
+        - model.third_party_cloud
+      warning: captured chunks leave this machine
+    enforcement:
+      requires: OPENBIRD_ALLOW_CLOUD
+    truth_surface:
+      - preflight.cloud
+      - cli.CLOUD_ACTIVE
 
   - id: diagnostics.logs
     class: local

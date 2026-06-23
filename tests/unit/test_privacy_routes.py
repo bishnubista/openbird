@@ -16,7 +16,42 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def _routes() -> dict:
     data = yaml.safe_load((ROOT / "docs/privacy-routes.yaml").read_text())
-    return {route["id"]: route for route in data["routes"]}
+    routes = data["routes"]
+    ids = [route["id"] for route in routes]
+    assert len(ids) == len(set(ids)), "privacy-routes.yaml contains duplicate route ids"
+    return {route["id"]: route for route in routes}
+
+
+def test_privacy_route_inventory_has_expected_routes() -> None:
+    routes = _routes()
+
+    assert {
+        "capture.active_window",
+        "capture.pause",
+        "chat.local",
+        "chat.remote",
+        "data.export",
+        "diagnostics.logs",
+        "embedding.remote",
+        "ingest.files",
+        "meetings.audio",
+        "model.local_ollama",
+        "model.remote_ollama",
+        "model.third_party_cloud",
+        "routines.summary",
+    }.issubset(routes)
+
+
+def test_privacy_route_references_resolve() -> None:
+    routes = _routes()
+    referenced: set[str] = set()
+
+    for route in routes.values():
+        egress = route.get("egress", {})
+        for key in ("inherited_by", "inherited_from", "resolved_by"):
+            referenced.update(egress.get(key, []))
+
+    assert referenced.issubset(routes)
 
 
 def test_privacy_route_inventory_models_export_as_egress() -> None:

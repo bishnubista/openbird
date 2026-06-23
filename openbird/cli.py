@@ -1183,27 +1183,29 @@ def data_export(
             _console.print("[yellow]Aborted.[/]")
             raise typer.Exit(code=1)
 
+    count = 0
     store = _store_maintenance()
     try:
-        rows = store.export_observations(since_ts=since_ts, until_ts=until_ts, source=source)
+        flags = os.O_WRONLY | os.O_CREAT
+        flags |= os.O_TRUNC if overwrite else os.O_EXCL
+        fd = os.open(output, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fd = -1
+                for row in store.export_observations(
+                    since_ts=since_ts, until_ts=until_ts, source=source
+                ):
+                    fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+                    count += 1
+            output.chmod(0o600)
+        finally:
+            if fd >= 0:
+                os.close(fd)
     finally:
         store.close()
 
-    flags = os.O_WRONLY | os.O_CREAT
-    flags |= os.O_TRUNC if overwrite else os.O_EXCL
-    fd = os.open(output, flags, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fd = -1
-            for row in rows:
-                fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-        output.chmod(0o600)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-
-    _console.print(f"[green]Exported[/] {len(rows)} observation(s) to {output}.")
+    _console.print(f"[green]Exported[/] {count} observation(s) to {output}.")
 
 
 @data_app.command("integrity")

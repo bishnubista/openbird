@@ -16,6 +16,7 @@ from __future__ import annotations
 import struct
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -569,7 +570,7 @@ class MemoryStore:
         since_ts: float | None = None,
         until_ts: float | None = None,
         source: str | None = None,
-    ) -> list[dict]:
+    ) -> Iterator[dict]:
         """Return decrypted observations plus blob text for explicit user export.
 
         Export is a local maintenance read: it never embeds and never contacts a
@@ -591,9 +592,8 @@ class MemoryStore:
             sql += " AND o.source = ?"
             params.append(source)
         sql += " ORDER BY o.ts ASC"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [
-            {
+        for row in self.conn.execute(sql, params):
+            yield {
                 "id": row["id"],
                 "content_hash": row["content_hash"],
                 "ts": row["ts"],
@@ -604,8 +604,6 @@ class MemoryStore:
                 "source": row["source"],
                 "text": row["text"],
             }
-            for row in rows
-        ]
 
     @staticmethod
     def _row_to_observation(row) -> Observation:

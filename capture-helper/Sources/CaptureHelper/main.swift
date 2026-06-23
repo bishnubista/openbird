@@ -181,19 +181,22 @@ private func collectText(
     from element: AXUIElement,
     depth: Int,
     budget: TraversalBudget,
-    into parts: inout [String]
+    into parts: inout [String],
+    pauseFile: String?
 ) {
-    if depth > Limits.maxDepth || budget.expired { return }
+    if skipIfPaused(pauseFile) || depth > Limits.maxDepth || budget.expired { return }
     budget.nodesVisited += 1
 
     // Role/subrole policy BEFORE reading any value: never aggregate secure text
     // fields (passwords), and never descend into them.
+    if skipIfPaused(pauseFile) { return }
     if isSensitive(element) {
         budget.sensitiveSkipped += 1
         return
     }
 
     for attr in [kAXValueAttribute as String, kAXTitleAttribute as String] {
+        if skipIfPaused(pauseFile) { return }
         if let s = axString(element, attr), !s.isEmpty {
             parts.append(s)
             budget.bytesCollected += s.utf8.count
@@ -201,9 +204,16 @@ private func collectText(
         }
     }
 
+    if skipIfPaused(pauseFile) { return }
     for child in axChildren(element) {
-        if budget.expired { return }
-        collectText(from: child, depth: depth + 1, budget: budget, into: &parts)
+        if skipIfPaused(pauseFile) || budget.expired { return }
+        collectText(
+            from: child,
+            depth: depth + 1,
+            budget: budget,
+            into: &parts,
+            pauseFile: pauseFile
+        )
     }
 }
 
@@ -393,7 +403,7 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile:
     let budget = TraversalBudget(deadlineSeconds: Limits.deadlineSeconds)
     var parts: [String] = []
     if skipIfPaused(pauseFile) { return }
-    collectText(from: window, depth: 0, budget: budget, into: &parts)
+    collectText(from: window, depth: 0, budget: budget, into: &parts, pauseFile: pauseFile)
     if skipIfPaused(pauseFile) { return }
 
     var text = parts.joined(separator: "\n")

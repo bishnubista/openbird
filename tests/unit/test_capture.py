@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -627,7 +628,10 @@ def test_daemon_passes_pause_file_to_helper_boundary(allow_settings):
     assert "--allow" in argv
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="capture helper is macOS-only")
+@pytest.mark.skipif(
+    sys.platform != "darwin" or shutil.which("swift") is None,
+    reason="capture helper requires macOS and the Swift toolchain",
+)
 def test_swift_helper_pause_file_exits_before_accessibility(tmp_path):
     pause_file = tmp_path / "capture.paused"
     pause_file.write_text("")

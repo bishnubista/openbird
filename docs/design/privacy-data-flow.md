@@ -45,7 +45,7 @@ path as any other off-device model route.
 5. Deletion must remove every derived store: observations, blobs, chunks, FTS,
    vectors, and temporary/export scratch files owned by OpenBird.
 6. Release readiness requires positive proof. `release_gate_ok=true` requires
-   verified SQLCipher encryption and, on macOS, signed-helper/TCC proof.
+   SQLCipher encryption to be verified and, on macOS, signed-helper/TCC proof.
 
 ## Product Decisions
 
