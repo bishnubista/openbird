@@ -77,6 +77,8 @@ done
 sign "$APP_BUNDLE" "ai.openbird.OpenBird" "$ent_app"
 
 log "ad-hoc signed with stable identifiers"
-codesign --verify --deep --strict "$APP_BUNDLE" >/dev/null 2>&1 \
-  && log "signature verified" \
-  || log "warning: codesign --verify reported issues (continuing)"
+if codesign --verify --deep --strict "$APP_BUNDLE" >/dev/null 2>&1; then
+  log "signature verified"
+else
+  log "warning: codesign --verify reported issues (continuing)"
+fi

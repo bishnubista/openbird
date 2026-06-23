@@ -35,19 +35,11 @@ struct SetupView: View {
 
             VStack(spacing: 0) {
                 StepRow(
-                    state: model.ollamaState,
-                    title: "Ollama running",
-                    detail: ollamaDetail,
-                    actionLabel: model.ollamaState == .ok ? nil : "Get Ollama",
-                    action: { NSWorkspace.shared.open(URL(string: "https://ollama.com")!) }
-                )
-                Divider()
-                StepRow(
-                    state: model.modelsState,
-                    title: "Local models",
-                    detail: modelsDetail,
-                    actionLabel: model.report.missingModels.isEmpty ? nil : "Pull models",
-                    action: { Task { await model.pullMissingModels() } }
+                    state: model.localModelStatusState,
+                    title: "Active model route",
+                    detail: model.localModelStatusSummary,
+                    actionLabel: modelRouteActionLabel,
+                    action: modelRouteAction
                 )
                 Divider()
                 StepRow(
@@ -99,29 +91,28 @@ struct SetupView: View {
             // Privacy footer (handoff §4 lock line).
             HStack(spacing: OB.Space.s) {
                 Image(systemName: "lock.fill").font(.caption2)
-                Text("Nothing leaves your device. Pause anytime from the menu bar.")
+                Text("\(model.privacyTransmissionSummary) Pause anytime from the menu bar.")
                     .font(.caption)
             }
             .foregroundStyle(OB.textTertiary(scheme))
         }
     }
 
-    private var ollamaDetail: String {
-        switch model.ollamaState {
-        case .ok: return "Reachable at the local Ollama endpoint."
-        case .attention: return "Not reachable. Install and launch Ollama, then re-check."
-        default: return "Status unknown — re-check after launching Ollama."
+    private var modelRouteActionLabel: String? {
+        if model.hasRemoteModelRoute { return nil }
+        if model.report.ollamaReachable == false { return "Get Ollama" }
+        if !model.report.missingModels.isEmpty {
+            return "Pull models"
         }
+        return nil
     }
 
-    private var modelsDetail: String {
-        if model.report.missingModels.isEmpty && model.modelsState == .ok {
-            return "Ready: \(model.requiredModelSummary)"
-        }
+    private func modelRouteAction() {
         if !model.report.missingModels.isEmpty {
-            return "Missing: \(model.report.missingModels.joined(separator: ", "))"
+            Task { await model.pullMissingModels() }
+        } else {
+            NSWorkspace.shared.open(URL(string: "https://ollama.com")!)
         }
-        return "Start Ollama to verify required models."
     }
 
     private var encryptionDetail: String {
