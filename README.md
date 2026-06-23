@@ -146,6 +146,7 @@ openbird ingest <path>          # ingest a file or directory into memory
 openbird chat "<question>"      # grounded, cited answer over your memory
 openbird capture [--loop]       # run the capture daemon over the helper
 openbird briefing --signals     # experimental high-signal local briefing
+openbird eval signals <fixture.jsonl>  # deterministic local signal eval harness
 openbird routine list|run <name>  # scheduled routines (daily-briefing, yesterday's-work, weekly-summary)
 openbird meeting                # meeting capture (gated on signed audio helper)
 openbird data stats             # row counts + active embedding cohort
