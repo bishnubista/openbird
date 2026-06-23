@@ -14,7 +14,9 @@ struct SessionTimeline: View {
 
     @Environment(\.colorScheme) private var scheme
 
-    private let timeColumnWidth: CGFloat = 50
+    // Fits "10:52 PM" at 11pt monospaced-digit without wrapping; the connector inset
+    // is computed from this width, so the rail tracks it automatically.
+    private let timeColumnWidth: CGFloat = 58
     private let rowSpacing: CGFloat = 11
     private let nodeSize: CGFloat = 9
     private let nodeTop: CGFloat = 3
@@ -44,6 +46,7 @@ struct SessionTimeline: View {
             }
             .font(.system(size: 11))
             .monospacedDigit()
+            .lineLimit(1)                       // never wrap the " AM"/" PM" onto a second line
             .frame(width: timeColumnWidth, alignment: .trailing)
             .padding(.top, 1)
 
