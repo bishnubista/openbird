@@ -3,6 +3,8 @@ name = "openbird"
 version = "0.1.0"
 description = "OpenBird — open-source, local-first personal memory for macOS"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",

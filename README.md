@@ -284,4 +284,6 @@ TCC permissions, a signed helper, Ollama, or network access.
 
 ## License
 
-License to be selected before public release.
+Licensed under the [Apache License, Version 2.0](LICENSE). Contributions are
+accepted under the same license per the Apache-2.0 inbound=outbound terms
+(Section 5).
