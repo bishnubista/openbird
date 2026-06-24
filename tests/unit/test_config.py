@@ -216,7 +216,12 @@ def test_llm_model_default_is_ram_tiered(monkeypatch, total_bytes, expected):
     # Patch the memory probe at its module seam so the tier is deterministic.
     monkeypatch.setattr("openbird.config._total_memory_bytes", lambda: total_bytes)
     reset_settings_cache()
-    assert get_settings().llm_model == expected
+    try:
+        assert get_settings().llm_model == expected
+    finally:
+        # Clear the Settings cached from the monkeypatched probe so a later test
+        # can't read this stale value once monkeypatch unwinds (order-independence).
+        reset_settings_cache()
 
 
 def test_llm_model_env_override_beats_ram_tier(monkeypatch):
@@ -224,7 +229,10 @@ def test_llm_model_env_override_beats_ram_tier(monkeypatch):
     monkeypatch.setattr("openbird.config._total_memory_bytes", lambda: 32 * _GIB)
     monkeypatch.setenv("OPENBIRD_LLM_MODEL", "ollama/llama3.2")
     reset_settings_cache()
-    assert get_settings().llm_model == "ollama/llama3.2"
+    try:
+        assert get_settings().llm_model == "ollama/llama3.2"
+    finally:
+        reset_settings_cache()
 
 
 def test_total_memory_bytes_never_raises():
