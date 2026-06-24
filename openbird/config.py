@@ -224,6 +224,12 @@ class Settings:
         self.rerank_timeout = float(self.rerank_timeout)
         if not math.isfinite(self.rerank_timeout) or self.rerank_timeout <= 0:
             raise ValueError("rerank_timeout must be a finite, positive number")
+        # A negative rerank_top_n would silently fall through to the "rerank all"
+        # path (HTTPReranker only emits top_n when > 0); reject it so the surface is
+        # unambiguous (0 = rerank all candidates; >0 = cap how many to return).
+        self.rerank_top_n = int(self.rerank_top_n)
+        if self.rerank_top_n < 0:
+            raise ValueError("rerank_top_n must be >= 0 (0 = rerank all candidates)")
         self.data_dir = Path(self.data_dir).expanduser()
         if self.db_path is None:
             self.db_path = str(self.data_dir / "openbird.db")

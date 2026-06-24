@@ -24,6 +24,14 @@ from openbird.memory.store import MemoryStore
 from openbird.types import SearchHit
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_data_dir(tmp_path, monkeypatch):
+    # Several helpers build Settings(embed_dim=768) without an explicit data_dir;
+    # Settings.__post_init__ creates/chmods the data dir, so point it at a tmp dir
+    # to keep the suite hermetic (never touch the developer's ~/.openbird).
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+
+
 # --------------------------------------------------------------------------- #
 # config + wiring                                                              #
 # --------------------------------------------------------------------------- #
@@ -39,6 +47,15 @@ def test_rerank_timeout_must_be_finite_positive(tmp_path):
     for bad in (0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError):
             Settings(data_dir=tmp_path, embed_dim=768, rerank_timeout=bad)
+
+
+def test_rerank_top_n_must_be_non_negative(tmp_path):
+    # A negative top_n must be rejected, not silently treated as "rerank all".
+    with pytest.raises(ValueError):
+        Settings(data_dir=tmp_path, embed_dim=768, rerank_top_n=-1)
+    # 0 (rerank all) and positive caps are valid.
+    assert Settings(data_dir=tmp_path, embed_dim=768, rerank_top_n=0).rerank_top_n == 0
+    assert Settings(data_dir=tmp_path, embed_dim=768, rerank_top_n=5).rerank_top_n == 5
 
 
 def test_remote_rerank_host_is_cloud_classified(tmp_path):
@@ -75,14 +92,26 @@ class _FakeResp:
 
 
 def _patch_post(monkeypatch, *, resp=None, exc=None):
+    # The reranker issues its request inside `with httpx.Client(...) as c: c.post(...)`,
+    # so patch the Client (not module-level httpx.post).
     import httpx
 
-    def _post(url, json=None, timeout=None):
-        if exc is not None:
-            raise exc
-        return resp
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
 
-    monkeypatch.setattr(httpx, "post", _post)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, json=None):
+            if exc is not None:
+                raise exc
+            return resp
+
+    monkeypatch.setattr(httpx, "Client", _FakeClient)
 
 
 def _reranker():

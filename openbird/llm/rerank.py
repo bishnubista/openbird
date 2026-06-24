@@ -93,16 +93,23 @@ class HTTPReranker:
             payload["top_n"] = self.top_n
         url = self.host.rstrip("/") + "/v1/rerank"
 
-        # TRUE total wall-clock deadline. httpx's scalar timeout is per-phase
-        # (connect/read/write), so a slow-trickle server could exceed it; we run the
-        # single (no-retry) request on a daemon thread and join for at most
-        # `self.timeout`. If it overruns, we abandon the still-running daemon (its
-        # own httpx per-phase timeout reaps it) and fall back — search never hangs.
+        # TRUE total wall-clock deadline for the CALLER: httpx's scalar timeout is
+        # per-phase (connect/read/write), so we run the single (no-retry) request on
+        # a daemon thread and join for at most `self.timeout`. If it overruns we
+        # abandon the worker and fall back — search never hangs.
+        #
+        # Python can't force-kill the worker, but it can't linger unbounded either:
+        # the request runs inside an `httpx.Client` context manager, so when httpx's
+        # read timeout fires (≤ self.timeout for an accept-but-no-response server) the
+        # client is closed and the socket released. Only a malicious server trickling
+        # a byte just under the read timeout could extend a worker — and that requires
+        # a non-loopback rerank_host, which is cloud-gated (opt-in) anyway.
         box: dict = {}
 
         def _call() -> None:
             try:
-                box["resp"] = httpx.post(url, json=payload, timeout=self.timeout)
+                with httpx.Client(timeout=httpx.Timeout(self.timeout)) as client:
+                    box["resp"] = client.post(url, json=payload)
             except BaseException as exc:  # noqa: BLE001 - carried to the main thread
                 box["exc"] = exc
 
