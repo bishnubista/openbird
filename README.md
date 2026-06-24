@@ -50,7 +50,7 @@ uv sync --extra encryption   # core + SQLCipher gate; add --extra meetings or in
 
 # 2. Local models — generation default is RAM-tiered (see Configuration):
 ollama pull qwen3:4b    # ~16 GB Macs   (use qwen3:8b on 24/32 GB)
-ollama pull nomic-embed-text
+ollama pull embeddinggemma     # default embedder (needs Ollama >= 0.11.10)
 
 # 3. Verify the environment
 uv run openbird preflight    # reports ollama, sqlite-vec/FTS5, encryption, permissions
@@ -134,11 +134,17 @@ On first launch, Guided Setup checks the active model route. For the default
 local route it helps you install/launch Ollama if needed, then downloads the
 required local AI models through the local Ollama API. The current defaults are
 the RAM-tiered generation model (`qwen3:4b` on ~16 GB Macs, `qwen3:8b` on
-24/32 GB) plus `nomic-embed-text`, which need network access and roughly
-3 GB (`qwen3:4b`) to 6 GB (`qwen3:8b`) of Ollama-managed disk space. If
-`OLLAMA_HOST` / `OPENBIRD_OLLAMA_HOST` points
+24/32 GB) plus `embeddinggemma` (which requires Ollama ≥ 0.11.10), which need
+network access and roughly 3 GB (`qwen3:4b`) to 6 GB (`qwen3:8b`) of
+Ollama-managed disk space. If `OLLAMA_HOST` / `OPENBIRD_OLLAMA_HOST` points
 at a non-local Ollama server, OpenBird will not auto-download models to that
 host.
+
+> **Upgrading the embedding model.** The default embedder is `embeddinggemma`.
+> If you have an existing store from an older build (embedded with
+> `nomic-embed-text`), run `openbird reindex` once to rebuild the vector index
+> under the new model — the CLI guides you when it detects the change. To defer,
+> pin `OPENBIRD_EMBED_MODEL=ollama/nomic-embed-text`.
 
 ### CLI
 
@@ -181,7 +187,7 @@ Environment overrides (all optional):
 | `OPENBIRD_DATA_DIR` | `~/.openbird` | where the SQLite memory lives |
 | `OPENBIRD_LLM_BACKEND` | `litellm` | provider backend selector; `mlx` is reserved pending experiment promotion |
 | `OPENBIRD_LLM_MODEL` | RAM-tiered: `ollama/qwen3:4b` at/below ~18 GiB (16 GB Macs), `ollama/qwen3:8b` above (24/32 GB Macs) | any LiteLLM model string (e.g. `claude-...`, `gpt-...`); set explicitly to override the auto-selected tier |
-| `OPENBIRD_EMBED_MODEL` | `ollama/nomic-embed-text` | embedding model (dim pinned per cohort) |
+| `OPENBIRD_EMBED_MODEL` | `ollama/embeddinggemma` | embedding model (768-dim, needs Ollama ≥ 0.11.10; dim pinned per cohort). Changing it requires `openbird reindex` once; `ollama/nomic-embed-text` is the fallback for >2K-token chunks |
 | `OPENBIRD_REQUIRE_ENCRYPTION` | `0` | when `1`, opening the DB **fails closed** (raises) instead of falling back to a plaintext file if SQLCipher cannot be verified |
 | `OPENBIRD_RETENTION_DAYS` | `0` (keep forever) | default cutoff for `openbird data prune` when `--older-than` is omitted |
 
