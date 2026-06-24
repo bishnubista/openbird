@@ -481,7 +481,10 @@ def _ollama_ready() -> bool:
             if bare
         )
         info = check_ollama(required_models=required, timeout=2.0)
-    except Exception:
+    except ImportError:
+        # Only a missing/renamed import means "can't probe -> treat as unavailable".
+        # check_ollama never raises (it reports reachable=False), so any other
+        # exception is a real regression and must surface, not silently skip.
         return False
     return bool(info.get("reachable")) and not info.get("missing_models")
 
