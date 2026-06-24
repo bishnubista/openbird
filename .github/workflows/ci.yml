@@ -21,7 +21,7 @@ jobs:
     name: Python tests
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -37,7 +37,7 @@ jobs:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run ShellCheck on shell scripts
         run: shellcheck script/*.sh
 
@@ -45,7 +45,7 @@ jobs:
     name: Swift helpers build
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build capture + audio helpers
         # Both target .macOS(.v13), so they build on the stock runner SDK.
         # The mac-app target is intentionally NOT built here: it uses Liquid
