@@ -30,6 +30,27 @@ from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
 from openbird.types import Observation, SearchHit
 
 
+class EmbeddingCohortMismatch(ValueError):
+    """Opening a populated store whose embedding cohort differs from the provider's.
+
+    Raised by :meth:`MemoryStore._record_cohort` when a store already holds vectors
+    embedded under one cohort and the configured provider reports a different one
+    (e.g. the user switched ``OPENBIRD_EMBED_MODEL`` or its dimension). The remedy is
+    ``openbird reindex``, which re-embeds every chunk under the new cohort. Subclasses
+    :class:`ValueError` so existing ``except ValueError`` handlers still catch it,
+    while carrying the ``stored`` and ``current`` cohort keys so callers can render a
+    precise, content-free recovery hint.
+    """
+
+    def __init__(self, stored: str, current: str) -> None:
+        self.stored = stored
+        self.current = current
+        super().__init__(
+            f"Embedding cohort mismatch: store was built with {stored!r} "
+            f"but provider reports {current!r}. Reindex before reuse."
+        )
+
+
 @dataclass(frozen=True)
 class SessionSummary:
     """One capture session within a day's timeline (for the Today/day view).
@@ -184,10 +205,7 @@ class MemoryStore:
                     (cohort,),
                 )
             else:
-                raise ValueError(
-                    f"Embedding cohort mismatch: store was built with {row['value']!r} "
-                    f"but provider reports {cohort!r}. Reindex before reuse."
-                )
+                raise EmbeddingCohortMismatch(row["value"], cohort)
 
     # -- ingest ---------------------------------------------------------------
 
@@ -882,4 +900,4 @@ def check_database_integrity(
             pass
 
 
-__all__ = ["MemoryStore", "check_database_integrity"]
+__all__ = ["EmbeddingCohortMismatch", "MemoryStore", "check_database_integrity"]
