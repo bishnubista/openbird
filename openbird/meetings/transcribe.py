@@ -20,6 +20,7 @@ Two concerns live here:
 from __future__ import annotations
 
 import importlib.util
+import os
 from array import array
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -49,6 +50,44 @@ class MeetingsExtraNotInstalled(RuntimeError):
 def whisper_available() -> bool:
     """Return True iff `faster_whisper` is importable (no import side effects)."""
     return importlib.util.find_spec("faster_whisper") is not None
+
+
+def parakeet_available() -> bool:
+    """Return True iff `parakeet_mlx` is importable (no import side effects).
+
+    parakeet-mlx is the Apple-Silicon-only NVIDIA Parakeet (TDT) port and is the
+    preferred backend when present; it lives in the ``meetings-mlx`` extra.
+    """
+    return importlib.util.find_spec("parakeet_mlx") is not None
+
+
+def meetings_backend_available() -> bool:
+    """True iff ANY transcription backend (parakeet-mlx or faster-whisper) is present."""
+    return parakeet_available() or whisper_available()
+
+
+# Guidance naming BOTH backends, shown when neither is installed.
+_INSTALL_HINT_BOTH = (
+    "No meetings transcription backend is installed. Install one:\n"
+    "  faster-whisper (portable, CPU):            uv sync --extra meetings\n"
+    "  parakeet-mlx (Apple Silicon, recommended): uv sync --extra meetings-mlx"
+)
+
+
+class _BackendUnavailable(RuntimeError):
+    """A transcription backend's package/model is not installed/loadable.
+
+    Triggers fallback to the next backend; carries only a backend/class name (never
+    captured audio or text) so it is safe to surface.
+    """
+
+
+class _BackendInferenceError(RuntimeError):
+    """A transcription backend was available but its inference call failed.
+
+    Triggers fallback to the next backend. Carries only the failing exception's
+    class name — never the audio, transcript, or server payload.
+    """
 
 
 @dataclass
@@ -101,13 +140,109 @@ class TranscriptSegment:
         )
 
 
-class Transcriber:
-    """faster-whisper batch transcriber over sliding speech windows.
+class _FasterWhisperBackend:
+    """faster-whisper (CTranslate2) STT backend — the portable CPU fallback.
 
-    The constructor does **not** import faster-whisper; the model is loaded
-    lazily on first use so the class can be instantiated (and its non-whisper
-    helpers tested) even when the extra is absent. Any call that actually needs
-    whisper raises :class:`MeetingsExtraNotInstalled` with install guidance.
+    Takes 16 kHz mono float32 PCM (already resampled + capped by the caller) and
+    returns text. Translates its own failures into the typed backend errors so the
+    selector can fall back without a broad ``except``.
+    """
+
+    name = "whisper"
+
+    def __init__(self, model_size: str, *, device: str, compute_type: str) -> None:
+        self.model_size = model_size
+        self.device = device
+        self.compute_type = compute_type
+        self._model = None  # lazily constructed WhisperModel
+
+    def available(self) -> bool:
+        return whisper_available()
+
+    def _load(self):
+        if self._model is not None:
+            return self._model
+        if not whisper_available():
+            raise _BackendUnavailable("faster_whisper")
+        from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+
+        self._model = WhisperModel(
+            self.model_size, device=self.device, compute_type=self.compute_type
+        )
+        return self._model
+
+    def transcribe_pcm(self, samples, *, language: str | None = None) -> str:
+        model = self._load()  # raises _BackendUnavailable when the extra is absent
+        try:
+            whisper_segments, _info = model.transcribe(samples, language=language)
+            return " ".join(seg.text.strip() for seg in whisper_segments).strip()
+        except Exception as exc:  # noqa: BLE001 - translate to a typed, content-free error
+            # KeyboardInterrupt/SystemExit are not Exception subclasses, so they
+            # still propagate. Only the class name is carried — never audio/text.
+            raise _BackendInferenceError(type(exc).__name__) from exc
+
+
+class _ParakeetMLXBackend:
+    """NVIDIA Parakeet (TDT) via the Apple-Silicon ``parakeet-mlx`` port — best-effort.
+
+    Preferred on Apple Silicon (lower WER, ~10x real-time, <1 GB, robust on long
+    meetings), but Apple-Silicon-only and exercised best-effort: any import/load or
+    inference failure raises a typed error so :class:`Transcriber` falls back to
+    faster-whisper. It is therefore never able to break the default path.
+    """
+
+    name = "parakeet"
+
+    def __init__(self, model: str = "mlx-community/parakeet-tdt-0.6b-v3") -> None:
+        self.model_name = model
+        self._model = None
+
+    def available(self) -> bool:
+        return parakeet_available()
+
+    def _load(self):
+        if self._model is not None:
+            return self._model
+        if not parakeet_available():
+            raise _BackendUnavailable("parakeet_mlx")
+        try:
+            from parakeet_mlx import from_pretrained  # type: ignore[import-not-found]
+
+            self._model = from_pretrained(self.model_name)
+        except Exception as exc:  # noqa: BLE001 - unloadable -> typed, content-free
+            raise _BackendUnavailable(type(exc).__name__) from exc
+        return self._model
+
+    def transcribe_pcm(self, samples, *, language: str | None = None) -> str:
+        model = self._load()
+        try:
+            # parakeet-mlx accepts a float PCM array; result exposes `.text`. The
+            # exact API is exercised best-effort — any mismatch raises below and the
+            # Transcriber falls back to whisper.
+            result = model.transcribe(samples)
+            text = getattr(result, "text", None)
+            if text is None and isinstance(result, str):
+                text = result
+            return (text or "").strip()
+        except Exception as exc:  # noqa: BLE001 - translate to a typed, content-free error
+            raise _BackendInferenceError(type(exc).__name__) from exc
+
+
+_VALID_BACKENDS = ("auto", "parakeet", "whisper")
+
+
+class Transcriber:
+    """Batch transcriber over sliding speech windows with a pluggable backend.
+
+    Selects a transcription backend (``auto`` prefers parakeet-mlx when importable,
+    else faster-whisper; ``parakeet``/``whisper`` force one) resolved lazily on the
+    first transcribe, so constructing a ``Transcriber`` imports neither backend and
+    the non-inference helpers stay testable when no extra is installed.
+
+    The PCM for each window is built and capped BEFORE any backend runs, so the
+    ``_MAX_TRANSCRIBE_SAMPLES`` cap / :class:`MeetingsAudioTooLong` are NOT part of
+    the fallback contract and always propagate. The fallback catches ONLY the typed
+    backend errors (``_BackendUnavailable`` / ``_BackendInferenceError``).
     """
 
     def __init__(
@@ -116,55 +251,85 @@ class Transcriber:
         *,
         device: str = "cpu",
         compute_type: str = "int8",
+        backend: str | None = None,
     ) -> None:
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
-        self._model = None  # lazily constructed WhisperModel
-
-    def _load_model(self):
-        """Load (and cache) the WhisperModel, or raise if the extra is missing."""
-        if self._model is not None:
-            return self._model
-        if not whisper_available():
-            raise MeetingsExtraNotInstalled()
-        from faster_whisper import WhisperModel  # type: ignore[import-not-found]
-
-        self._model = WhisperModel(
-            self.model_size, device=self.device, compute_type=self.compute_type
+        choice = (
+            backend or os.environ.get("OPENBIRD_MEETINGS_BACKEND") or "auto"
+        ).strip().lower()
+        if choice not in _VALID_BACKENDS:
+            raise ValueError(
+                f"invalid meetings backend {choice!r}; choose from {_VALID_BACKENDS}"
+            )
+        self.backend_choice = choice
+        self._whisper = _FasterWhisperBackend(
+            model_size, device=device, compute_type=compute_type
         )
-        return self._model
+        self._parakeet = _ParakeetMLXBackend()
+
+    def _backend_order(self) -> list:
+        """The backends to try, in order. ``auto`` prefers parakeet, then whisper."""
+        if self.backend_choice == "whisper":
+            return [self._whisper]
+        if self.backend_choice == "parakeet":
+            return [self._parakeet]
+        # auto: prefer parakeet when importable; always keep whisper as fallback.
+        if self._parakeet.available():
+            return [self._parakeet, self._whisper]
+        return [self._whisper]
+
+    def _transcribe_pcm(self, samples) -> str:
+        """Run the selected backends with the narrow fallback contract.
+
+        Caller has already built + capped ``samples``. Only typed backend errors
+        trigger fallback; if every backend was merely UNAVAILABLE we surface the
+        dual-backend install guidance, otherwise we re-raise the last inference
+        error (a forced backend that failed has no fallback).
+        """
+        errors: list[Exception] = []
+        for backend in self._backend_order():
+            try:
+                return backend.transcribe_pcm(samples, language=None)
+            except (_BackendUnavailable, _BackendInferenceError) as exc:
+                errors.append(exc)
+                continue
+        # No backend succeeded. A real INFERENCE failure is the meaningful cause —
+        # surface the last one (don't let a later "whisper unavailable" sentinel
+        # mask a parakeet inference error). Only when EVERY attempted backend was
+        # merely unavailable do we show the dual-backend install guidance.
+        inference_errors = [e for e in errors if isinstance(e, _BackendInferenceError)]
+        if inference_errors:
+            raise inference_errors[-1]
+        raise MeetingsExtraNotInstalled(_INSTALL_HINT_BOTH)
 
     def transcribe_segment(self, segment: SpeechSegment) -> TranscriptSegment:
         """Transcribe one speech window into a :class:`TranscriptSegment`.
 
-        Raises :class:`MeetingsExtraNotInstalled` if faster-whisper is absent, or
+        Raises :class:`MeetingsExtraNotInstalled` if no backend is installed, or
         :class:`MeetingsAudioTooLong` if the window exceeds the sample cap.
 
-        NOTE: this is **synchronous and CPU-blocking** — ``model.transcribe`` runs
-        the whisper inference inline. Callers on an event loop must run it in an
-        executor/thread; never ``await`` around it on the loop thread.
+        NOTE: this is **synchronous and CPU/ANE-blocking** — inference runs inline.
+        Callers on an event loop must run it in an executor/thread.
 
-        The window's host-clock start time is preserved so downstream stitching
-        and citations stay on the shared clock.
+        The window's host-clock start time and track ("me vs others") are preserved
+        so downstream stitching and citations stay on the shared clock.
         """
-        # Build (and cap) the PCM BEFORE loading the model: an oversized/hostile
-        # window must be rejected without paying the lazy WhisperModel
-        # construction/download/load cost. _segment_to_pcm preflights the sample
-        # count before allocating, and resamples to 16 kHz mono float32 (Whisper's
-        # required rate) regardless of the helper's capture rate (e.g. SCK 48 kHz).
+        # Build (and cap) the PCM BEFORE selecting/loading a backend: an oversized/
+        # hostile window must be rejected without paying model construction/download,
+        # and the cap must propagate (NOT be swallowed by backend fallback).
+        # _segment_to_pcm preflights the sample count before allocating and resamples
+        # to 16 kHz mono float32 regardless of the helper's capture rate (SCK 48 kHz).
         samples = _segment_to_pcm(segment)
-        # Defense in depth: the preflight inside _segment_to_pcm already enforces
-        # the cap before allocating, but re-check the realized buffer so no path
-        # can ever feed an oversized array to whisper.
+        # Defense in depth: re-check the realized buffer so no path can ever feed an
+        # oversized array to a backend.
         if len(samples) > _MAX_TRANSCRIBE_SAMPLES:
             raise MeetingsAudioTooLong(
                 f"transcription window has {len(samples)} samples "
                 f"(> {_MAX_TRANSCRIBE_SAMPLES} cap); refusing to transcribe"
             )
-        model = self._load_model()
-        whisper_segments, _info = model.transcribe(samples, language=None)
-        text = " ".join(seg.text.strip() for seg in whisper_segments).strip()
+        text = self._transcribe_pcm(samples)
         return TranscriptSegment(
             track=segment.track,
             start_ts=segment.start_ts,
@@ -177,8 +342,8 @@ class Transcriber:
     ) -> list[TranscriptSegment]:
         """Transcribe many windows, then stitch overlaps into a clean transcript.
 
-        Raises :class:`MeetingsExtraNotInstalled` if faster-whisper is absent
-        (and there is at least one segment to transcribe).
+        Raises :class:`MeetingsExtraNotInstalled` if no backend is installed (and
+        there is at least one segment to transcribe).
         """
         raw = [self.transcribe_segment(s) for s in segments]
         return stitch_transcript(raw)

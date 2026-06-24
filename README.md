@@ -215,6 +215,22 @@ To bound growth:
   SQLCipher + `sqlite-vec`, WAL, encrypted backup behavior, disabled extension loading, private
   permissions, and a write/read performance smoke in a temporary workspace.
 
+## Meeting transcription backends
+
+Meeting speech-to-text runs **on-device** behind an optional extra. OpenBird picks a backend
+automatically (`OPENBIRD_MEETINGS_BACKEND=auto|parakeet|whisper`):
+
+- **parakeet-mlx (recommended on Apple Silicon)** — NVIDIA Parakeet (TDT) via the MLX port:
+  lower WER, ~10× real-time, <1 GB, robust on long meetings. Apple-Silicon-only.
+  `uv sync --extra meetings-mlx`.
+- **faster-whisper (portable fallback)** — CPU, multilingual, runs anywhere.
+  `uv sync --extra meetings`.
+
+`auto` prefers parakeet-mlx when installed and **falls back to faster-whisper** on any
+parakeet load/inference failure, so the default path never breaks. The mic track is "me" and the
+system-audio track is "others", so speaker attribution comes from the two-track capture itself (no
+diarization model). Live capture still requires the signed audio helper + TCC (see Release gates).
+
 ## Release gates
 
 Functional capture/audio require steps a dev build can't satisfy:
