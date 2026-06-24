@@ -193,3 +193,51 @@ def test_ollama_predicate_and_bare(model, is_ollama, bare):
 )
 def test_is_loopback_host(host, loopback):
     assert is_loopback_host(host) is loopback
+
+
+# --------------------------------------------------------------------------- #
+# RAM-tiered generation-model default                                         #
+# --------------------------------------------------------------------------- #
+
+_GIB = 1024**3
+
+
+@pytest.mark.parametrize(
+    "total_bytes, expected",
+    [
+        (16 * _GIB, "ollama/qwen3:4b"),       # 16 GB Mac -> small tier
+        (18 * _GIB, "ollama/qwen3:4b"),       # exactly at cutoff (<=) -> small tier
+        (18 * _GIB + 1, "ollama/qwen3:8b"),   # one byte over -> large tier
+        (32 * _GIB, "ollama/qwen3:8b"),       # 32 GB Mac -> large tier
+        (0, "ollama/qwen3:4b"),               # probe failure -> conservative tier
+    ],
+)
+def test_llm_model_default_is_ram_tiered(monkeypatch, total_bytes, expected):
+    # Patch the memory probe at its module seam so the tier is deterministic.
+    monkeypatch.setattr("openbird.config._total_memory_bytes", lambda: total_bytes)
+    reset_settings_cache()
+    try:
+        assert get_settings().llm_model == expected
+    finally:
+        # Clear the Settings cached from the monkeypatched probe so a later test
+        # can't read this stale value once monkeypatch unwinds (order-independence).
+        reset_settings_cache()
+
+
+def test_llm_model_env_override_beats_ram_tier(monkeypatch):
+    # An explicit OPENBIRD_LLM_MODEL must win over the hardware-derived default.
+    monkeypatch.setattr("openbird.config._total_memory_bytes", lambda: 32 * _GIB)
+    monkeypatch.setenv("OPENBIRD_LLM_MODEL", "ollama/llama3.2")
+    reset_settings_cache()
+    try:
+        assert get_settings().llm_model == "ollama/llama3.2"
+    finally:
+        reset_settings_cache()
+
+
+def test_total_memory_bytes_never_raises():
+    # Contract: the probe degrades to a non-negative int, never an exception.
+    from openbird.config import _total_memory_bytes
+
+    assert isinstance(_total_memory_bytes(), int)
+    assert _total_memory_bytes() >= 0

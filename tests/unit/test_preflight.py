@@ -28,7 +28,15 @@ from openbird.config import Settings
 # --------------------------------------------------------------------------- #
 
 
-def make_http_get(*, status=200, models=("llama3.2:latest", "nomic-embed-text:latest"), raise_exc=None):
+def make_http_get(
+    *,
+    status=200,
+    # Default serves BOTH qwen3 tiers (4b/8b) so the RAM-tiered default generation
+    # route resolves "present" regardless of the host's memory tier, plus the
+    # default embedder. Tests needing a specific gap pass an explicit `models`.
+    models=("qwen3:4b", "qwen3:8b", "nomic-embed-text:latest"),
+    raise_exc=None,
+):
     """Build a fake http_get(url, timeout) -> (status, body)."""
 
     def _get(url, timeout):
@@ -174,12 +182,12 @@ def mixed_probe(capability: str) -> str:
 def test_ollama_reachable_with_all_models():
     res = check_ollama(host="http://x:11434", http_get=make_http_get())
     assert res["reachable"] is True
-    assert res["models"] == {"llama3.2": True, "nomic-embed-text": True}
+    assert res["models"] == {"qwen3": True, "nomic-embed-text": True}
     assert res["missing_models"] == []
 
 
 def test_ollama_missing_model_is_reported():
-    res = check_ollama(http_get=make_http_get(models=("llama3.2:latest",)))
+    res = check_ollama(http_get=make_http_get(models=("qwen3:4b",)))
     assert res["reachable"] is True
     assert res["models"]["nomic-embed-text"] is False
     assert res["missing_models"] == ["nomic-embed-text"]
@@ -189,7 +197,7 @@ def test_ollama_unreachable_does_not_raise():
     res = check_ollama(http_get=make_http_get(raise_exc=ConnectionRefusedError()))
     assert res["reachable"] is False
     assert res["error"] == "ConnectionRefusedError"
-    assert res["missing_models"] == ["llama3.2", "nomic-embed-text"]
+    assert res["missing_models"] == ["qwen3", "nomic-embed-text"]
 
 
 def test_ollama_non_200_is_unreachable():
@@ -199,7 +207,7 @@ def test_ollama_non_200_is_unreachable():
 
 
 def test_ollama_matches_bare_model_name():
-    res = check_ollama(http_get=make_http_get(models=("llama3.2", "nomic-embed-text")))
+    res = check_ollama(http_get=make_http_get(models=("qwen3", "nomic-embed-text")))
     assert res["missing_models"] == []
 
 
@@ -577,9 +585,11 @@ def test_run_preflight_ollama_down_not_ok(settings):
 
 
 def test_run_preflight_missing_model_not_ok(settings):
+    # Serve the generation tiers but NOT the embedder, so exactly one model is
+    # missing and preflight reports not-ok.
     report = run_preflight(
         settings,
-        http_get=make_http_get(models=("llama3.2:latest",)),
+        http_get=make_http_get(models=("qwen3:4b", "qwen3:8b")),
         db_opener=plaintext_handle_opener(),
     )
     assert report["ok"] is False
@@ -854,6 +864,24 @@ def test_preflight_required_models_derived_from_settings(tmp_path):
     assert set(report["ollama"]["required_models"]) == {"mistral", "mxbai-embed-large"}
     assert report["ollama"]["missing_models"] == []
     assert report["runtime_ok"] is True
+
+
+def test_default_preflight_requires_exact_ram_tier_tag(monkeypatch, tmp_path):
+    # Regression for the RAM-tiered default: on a large-memory host the default
+    # generation route is the EXACT tag qwen3:8b. A server that only has qwen3:4b
+    # pulled must report qwen3:8b MISSING (not satisfied by the other tier) so
+    # preflight isn't green while the runtime would request an absent tag.
+    monkeypatch.setattr("openbird.config._total_memory_bytes", lambda: 32 * 1024**3)
+    s = Settings(data_dir=tmp_path, embed_dim=768)  # default route -> qwen3:8b
+    assert s.llm_model == "ollama/qwen3:8b"
+    report = run_preflight(
+        s,
+        http_get=make_http_get(models=("qwen3:4b", "nomic-embed-text:latest")),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert "qwen3:8b" in report["ollama"]["required_models"]
+    assert report["ollama"]["missing_models"] == ["qwen3:8b"]
+    assert report["runtime_ok"] is False
 
 
 def test_ollama_host_override_classified_as_remote(tmp_path):

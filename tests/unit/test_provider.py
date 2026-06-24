@@ -111,7 +111,9 @@ def test_default_factory_preserves_litellm_provider():
     provider = create_llm_provider(Settings(embed_dim=768))
     assert isinstance(provider, LiteLLMProvider)
     assert isinstance(provider, LLMProviderProtocol)
-    assert provider.llm_model == "ollama/llama3.2"
+    # Default generation model is RAM-tiered to qwen3 (4b/8b); assert the family
+    # rather than an exact tag so the test is host-memory-independent.
+    assert provider.llm_model in ("ollama/qwen3:4b", "ollama/qwen3:8b")
     assert provider.embed_model == "ollama/nomic-embed-text"
 
 

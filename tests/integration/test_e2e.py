@@ -461,10 +461,30 @@ def test_cli_preflight_runs_without_ollama(monkeypatch, tmp_path):
 
 
 def _ollama_ready() -> bool:
-    """True iff Ollama is reachable with the required models pulled."""
+    """True iff Ollama is reachable with the EXACT default-route models pulled.
+
+    Resolves the RAM-tiered generation tag (e.g. ``qwen3:8b`` on a 32 GB host) plus
+    the default embedder and checks those specific tags, rather than the family-level
+    ``_REQUIRED_MODELS`` fallback — otherwise a host with only the other tier pulled
+    would run the test and then fail when the runtime requests the exact tag.
+    """
     try:
-        info = check_ollama(timeout=2.0)
-    except Exception:
+        from openbird.config import Settings, _default_llm_model, ollama_bare_model
+
+        embed_default = Settings.__dataclass_fields__["embed_model"].default
+        required = tuple(
+            bare
+            for bare in (
+                ollama_bare_model(_default_llm_model()),
+                ollama_bare_model(embed_default),
+            )
+            if bare
+        )
+        info = check_ollama(required_models=required, timeout=2.0)
+    except ImportError:
+        # Only a missing/renamed import means "can't probe -> treat as unavailable".
+        # check_ollama never raises (it reports reachable=False), so any other
+        # exception is a real regression and must surface, not silently skip.
         return False
     return bool(info.get("reachable")) and not info.get("missing_models")
 

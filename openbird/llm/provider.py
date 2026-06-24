@@ -1,6 +1,7 @@
 """LLM provider seam plus the current LiteLLM/Ollama-backed implementation.
 
-Defaults to local Ollama (``ollama/llama3.2`` + ``ollama/nomic-embed-text``).
+Defaults to local Ollama (RAM-tiered ``ollama/qwen3:4b``/``qwen3:8b`` generation
+model + ``ollama/nomic-embed-text``).
 Embeddings are guarded to the configured dimension, and a stable ``cohort_key``
 identifies the (provider, model, dim, normalized) tuple so the memory store can
 refuse to mix incompatible embedding cohorts.
