@@ -114,7 +114,24 @@ def _provider():
     return provider
 
 
-def _store(*, provider=None):
+def _print_cohort_mismatch_hint(exc) -> None:
+    """Render a content-free recovery hint for an embedding-cohort mismatch.
+
+    The cohort keys are ``provider:model:dim:hash`` strings (no captured text), so
+    this is privacy-safe to print. Printed to the error console BEFORE the caller
+    raises ``typer.Exit`` — some callers (e.g. ``routine start``) catch a broad
+    ``Exception`` around the run and would otherwise swallow the Exit and log only
+    its class, leaving the user without the actionable next step.
+    """
+    _err_console.print(
+        f"[red]Embedding model changed[/] ({exc.stored} → {exc.current}).\n"
+        "Run [bold]openbird reindex[/] to rebuild the vector index under the new "
+        "model, then retry.\n"
+        "[dim](Or set OPENBIRD_EMBED_MODEL to the previous model to defer.)[/]"
+    )
+
+
+def _store(*, provider=None, settings=None):
     """Open the on-disk :class:`MemoryStore` with the cloud-checked provider.
 
     Always builds the provider through :func:`_provider` (unless one is passed
@@ -123,12 +140,23 @@ def _store(*, provider=None):
     a provider internally and bypass the CLI's confirm/banner. For delete-only
     maintenance (purge/stats) use :func:`_store_maintenance`, which does not gate
     on cloud opt-in since no captured content is sent anywhere.
+
+    Converts an :class:`EmbeddingCohortMismatch` (the user switched embed models on
+    a populated store) into a friendly ``openbird reindex`` hint + exit rather than
+    a raw traceback. This is the single shared seam every EMBED command — and the
+    capture daemon CLI — routes through, so the recovery path is uniform.
     """
-    from openbird.memory.store import MemoryStore
+    from openbird.memory.store import EmbeddingCohortMismatch, MemoryStore
 
     if provider is None:
         provider = _provider()
-    return MemoryStore(settings=get_settings(), provider=provider)
+    if settings is None:
+        settings = get_settings()
+    try:
+        return MemoryStore(settings=settings, provider=provider)
+    except EmbeddingCohortMismatch as exc:
+        _print_cohort_mismatch_hint(exc)
+        raise typer.Exit(code=1) from exc
 
 
 class _MaintenanceProvider:
@@ -1066,23 +1094,36 @@ def meeting() -> None:
     so the full pipeline cannot be driven from this CLI yet. This command reports
     the meetings readiness (the transcription extra) and exits.
     """
-    from openbird.meetings.transcribe import whisper_available
+    from openbird.meetings.transcribe import (
+        meetings_backend_available,
+        parakeet_available,
+        whisper_available,
+    )
 
     _console.print("[bold]OpenBird meetings[/] (manual-record, experimental)")
     _console.print(
         "- Audio capture requires the signed ScreenCaptureKit `audio-helper` "
         "with Screen-Recording + Microphone TCC."
     )
-    available = whisper_available()
-    state = "installed" if available else "not installed"
-    _console.print(f"- faster-whisper transcription extra: {state}.")
+    parakeet = parakeet_available()
+    whisper = whisper_available()
+    # On a host with both, `auto` prefers parakeet-mlx (recommended on Apple Silicon).
+    active = "parakeet-mlx" if parakeet else ("faster-whisper" if whisper else "none")
+    _console.print(
+        f"- transcription backends: parakeet-mlx "
+        f"[{'installed' if parakeet else 'not installed'}], "
+        f"faster-whisper [{'installed' if whisper else 'not installed'}] "
+        f"→ active (auto): [bold]{active}[/]."
+    )
     _console.print(
         "- Speaker labeling ('me vs others') is experimental; consent indicator "
         "and manual start are required by design."
     )
-    if not available:
+    if not meetings_backend_available():
         _console.print(
-            "[dim]Install with `uv sync --extra meetings` to enable transcription.[/]"
+            "[dim]Install a backend: `uv sync --extra meetings-mlx` "
+            "(parakeet-mlx, Apple Silicon, recommended) or "
+            "`uv sync --extra meetings` (faster-whisper).[/]"
         )
 
 

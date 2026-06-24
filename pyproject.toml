@@ -16,8 +16,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Heavy: pulls PyTorch. Only needed for meeting transcription.
+# Heavy: pulls PyTorch. Portable (CPU) meeting-transcription fallback backend.
 meetings = ["faster-whisper>=1.0"]
+# Preferred meeting-transcription backend on Apple Silicon (NVIDIA Parakeet via
+# the MLX port). Platform-marked to Darwin+arm64 so Linux/CI never resolves it,
+# even under `uv sync --all-extras` or a lock refresh.
+meetings-mlx = [
+    "parakeet-mlx>=0.3 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 # Heavy: cross-encoder reranker. Optional retrieval quality boost.
 rerank = ["sentence-transformers>=3.0"]
 # SQLCipher storage gate and macOS Keychain-backed DB key storage.

@@ -33,15 +33,24 @@ def make_http_get(
     status=200,
     # Default serves BOTH qwen3 tiers (4b/8b) so the RAM-tiered default generation
     # route resolves "present" regardless of the host's memory tier, plus the
-    # default embedder. Tests needing a specific gap pass an explicit `models`.
-    models=("qwen3:4b", "qwen3:8b", "nomic-embed-text:latest"),
+    # default embedder (embeddinggemma). Tests needing a gap pass explicit `models`.
+    models=("qwen3:4b", "qwen3:8b", "embeddinggemma:latest"),
     raise_exc=None,
+    version="0.11.10",  # meets the EmbeddingGemma minimum by default
 ):
-    """Build a fake http_get(url, timeout) -> (status, body)."""
+    """Build a fake http_get(url, timeout) -> (status, body), URL-aware.
+
+    Serves ``/api/tags`` (model list) and ``/api/version`` (version string) so the
+    EmbeddingGemma Ollama-version gate can be exercised. ``version=None`` makes the
+    version endpoint return an empty body (version unknown / advisory).
+    """
 
     def _get(url, timeout):
         if raise_exc is not None:
             raise raise_exc
+        if url.endswith("/api/version"):
+            body = json.dumps({"version": version}).encode("utf-8") if version else b""
+            return status, body
         body = json.dumps({"models": [{"name": m} for m in models]}).encode("utf-8")
         return status, body
 
@@ -182,22 +191,22 @@ def mixed_probe(capability: str) -> str:
 def test_ollama_reachable_with_all_models():
     res = check_ollama(host="http://x:11434", http_get=make_http_get())
     assert res["reachable"] is True
-    assert res["models"] == {"qwen3": True, "nomic-embed-text": True}
+    assert res["models"] == {"qwen3": True, "embeddinggemma": True}
     assert res["missing_models"] == []
 
 
 def test_ollama_missing_model_is_reported():
     res = check_ollama(http_get=make_http_get(models=("qwen3:4b",)))
     assert res["reachable"] is True
-    assert res["models"]["nomic-embed-text"] is False
-    assert res["missing_models"] == ["nomic-embed-text"]
+    assert res["models"]["embeddinggemma"] is False
+    assert res["missing_models"] == ["embeddinggemma"]
 
 
 def test_ollama_unreachable_does_not_raise():
     res = check_ollama(http_get=make_http_get(raise_exc=ConnectionRefusedError()))
     assert res["reachable"] is False
     assert res["error"] == "ConnectionRefusedError"
-    assert res["missing_models"] == ["qwen3", "nomic-embed-text"]
+    assert res["missing_models"] == ["qwen3", "embeddinggemma"]
 
 
 def test_ollama_non_200_is_unreachable():
@@ -207,8 +216,34 @@ def test_ollama_non_200_is_unreachable():
 
 
 def test_ollama_matches_bare_model_name():
-    res = check_ollama(http_get=make_http_get(models=("qwen3", "nomic-embed-text")))
+    res = check_ollama(http_get=make_http_get(models=("qwen3", "embeddinggemma")))
     assert res["missing_models"] == []
+
+
+def test_embeddinggemma_version_gate_ok_on_new_ollama():
+    # Default route requires embeddinggemma -> the Ollama-version gate fires and
+    # passes when the server meets the 0.11.10 minimum.
+    res = check_ollama(http_get=make_http_get(version="0.11.10"))
+    assert res["version"] == "0.11.10"
+    assert res["version_ok"] is True
+
+
+def test_embeddinggemma_version_gate_fails_on_old_ollama():
+    res = check_ollama(http_get=make_http_get(version="0.11.9"))
+    assert res["version"] == "0.11.9"
+    assert res["version_ok"] is False
+
+
+def test_version_gate_unknown_when_unreadable_is_advisory():
+    # version=None -> the version endpoint returns empty; gate is advisory (None).
+    res = check_ollama(http_get=make_http_get(version=None))
+    assert res["version_ok"] is None
+
+
+def test_no_version_gate_when_embeddinggemma_not_required():
+    # A non-embeddinggemma embedder route must NOT probe/gate the Ollama version.
+    res = check_ollama(required_models=("qwen3", "nomic-embed-text"), http_get=make_http_get())
+    assert "version_ok" not in res
 
 
 # --------------------------------------------------------------------------- #
@@ -218,7 +253,7 @@ def test_ollama_matches_bare_model_name():
 
 def test_embedding_no_probe_reports_config(settings):
     res = check_embedding(settings, probe=False)
-    assert res["model"] == "ollama/nomic-embed-text"
+    assert res["model"] == "ollama/embeddinggemma"
     assert res["configured_dim"] == 768
     assert res["probed"] is False
     assert res["dim_ok"] is None
@@ -593,7 +628,42 @@ def test_run_preflight_missing_model_not_ok(settings):
         db_opener=plaintext_handle_opener(),
     )
     assert report["ok"] is False
-    assert report["ollama"]["missing_models"] == ["nomic-embed-text"]
+    assert report["ollama"]["missing_models"] == ["embeddinggemma"]
+
+
+def test_runtime_not_ready_on_too_old_ollama_for_embeddinggemma(settings):
+    # All required models present, but Ollama < 0.11.10 can't serve embeddinggemma,
+    # so runtime must NOT report ready (the version gate is ENFORCED, not just
+    # recorded).
+    report = run_preflight(
+        settings,
+        http_get=make_http_get(version="0.11.9"),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["missing_models"] == []
+    assert report["ollama"]["version_ok"] is False
+    assert report["runtime_ok"] is False
+
+
+def test_runtime_ready_on_new_enough_ollama_for_embeddinggemma(settings):
+    report = run_preflight(
+        settings,
+        http_get=make_http_get(version="0.11.10"),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["version_ok"] is True
+    assert report["runtime_ok"] is True
+
+
+def test_runtime_unaffected_when_version_unreadable(settings):
+    # version unreadable -> advisory (None), must NOT block runtime readiness.
+    report = run_preflight(
+        settings,
+        http_get=make_http_get(version=None),
+        db_opener=plaintext_handle_opener(),
+    )
+    assert report["ollama"]["version_ok"] is None
+    assert report["runtime_ok"] is True
 
 
 def test_run_preflight_skip_probes_reports_unknown(settings):
@@ -876,7 +946,7 @@ def test_default_preflight_requires_exact_ram_tier_tag(monkeypatch, tmp_path):
     assert s.llm_model == "ollama/qwen3:8b"
     report = run_preflight(
         s,
-        http_get=make_http_get(models=("qwen3:4b", "nomic-embed-text:latest")),
+        http_get=make_http_get(models=("qwen3:4b", "embeddinggemma:latest")),
         db_opener=plaintext_handle_opener(),
     )
     assert "qwen3:8b" in report["ollama"]["required_models"]
@@ -1016,7 +1086,7 @@ def test_preflight_tagged_model_present_is_ok(tmp_path):
     s = Settings(data_dir=tmp_path, embed_dim=768, llm_model="ollama/llama3.2:3b")
     report = run_preflight(
         s,
-        http_get=make_http_get(models=("llama3.2:3b", "nomic-embed-text:latest")),
+        http_get=make_http_get(models=("llama3.2:3b", "embeddinggemma:latest")),
         db_opener=plaintext_handle_opener(),
     )
     assert report["ollama"]["missing_models"] == []

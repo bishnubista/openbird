@@ -45,7 +45,12 @@ from openbird.config import (
 # below derives the real required set from settings.llm_model/embed_model). The
 # generation default is RAM-tiered to qwen3 (qwen3:4b / qwen3:8b); the bare
 # "qwen3" family name matches any pulled tag in check_ollama's tag-aware compare.
-_REQUIRED_MODELS: tuple[str, ...] = ("qwen3", "nomic-embed-text")
+_REQUIRED_MODELS: tuple[str, ...] = ("qwen3", "embeddinggemma")
+
+# EmbeddingGemma requires Ollama >= 0.11.10 (older servers can't pull/serve it),
+# so preflight surfaces an actionable "update Ollama" message instead of an opaque
+# pull failure when the default embedder is in use on an old server.
+_EMBEDDINGGEMMA_MIN_OLLAMA = (0, 11, 10)
 
 
 # --------------------------------------------------------------------------- #
@@ -184,7 +189,50 @@ def check_ollama(
         present[req] = any(n == req or n.split(":", 1)[0] == req for n in names)
     result["models"] = present
     result["missing_models"] = [m for m, ok in present.items() if not ok]
+    # Version gate: EmbeddingGemma needs Ollama >= 0.11.10. Only probe/gate when it
+    # is actually required, so other routes never pay for or fail on it. version_ok
+    # is True when no gate applies or the server meets the minimum; False when too
+    # old; None when the version could not be determined (advisory, non-fatal).
+    needs_gemma = any(req.split(":", 1)[0] == "embeddinggemma" for req in required_models)
+    if needs_gemma:
+        result["version"], result["version_ok"] = _check_ollama_version(
+            base, http_get=http_get, timeout=timeout
+        )
     return result
+
+
+def _parse_semver(text: str) -> tuple[int, int, int] | None:
+    """Parse a leading ``major.minor.patch`` from an Ollama version string."""
+    import re
+
+    m = re.match(r"\s*v?(\d+)\.(\d+)\.(\d+)", text or "")
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _check_ollama_version(
+    base: str, *, http_get: HttpGetter, timeout: float
+) -> tuple[str | None, bool | None]:
+    """Probe ``/api/version`` and compare against the EmbeddingGemma minimum.
+
+    Returns ``(version_string_or_None, ok)`` where ``ok`` is True/False when the
+    version is known, or None when it can't be read (advisory only — never raises).
+    """
+    try:
+        status, body = http_get(urljoin(base.rstrip("/") + "/", "api/version"), timeout)
+    except Exception:  # noqa: BLE001 - version is advisory; never break preflight
+        return None, None
+    if status != 200 or not body:
+        return None, None
+    try:
+        version = json.loads(body.decode("utf-8")).get("version")
+    except (ValueError, AttributeError, TypeError):
+        return None, None
+    parsed = _parse_semver(version or "")
+    if parsed is None:
+        return version, None
+    return version, parsed >= _EMBEDDINGGEMMA_MIN_OLLAMA
 
 
 def check_embedding(
@@ -838,6 +886,11 @@ def _runtime_ok(report: dict[str, Any]) -> bool:
     # Local Ollama half of the route (if used) must be reachable with its models.
     if cloud.get("uses_local_ollama", True):
         if not (ollama.get("reachable") is True and not ollama.get("missing_models")):
+            return False
+        # EmbeddingGemma needs Ollama >= 0.11.10. A KNOWN-too-old server can't
+        # serve it, so it is NOT runtime-ready even if tags claim the model is
+        # present. version_ok None (unreadable) stays advisory and does not block.
+        if ollama.get("version_ok") is False:
             return False
 
     # Each remote role must be verified by ITS OWN probe (covers cloud-only,
