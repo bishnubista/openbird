@@ -28,14 +28,14 @@ def update_formula(path: Path, version: str, sha256: str) -> None:
 
     text = path.read_text()
     # OpenBird is a public repo, so the formula downloads the source tarball from
-    # the standard GitHub release-download URL — no token required. Bump the URL,
-    # version, and sha256 — each appears exactly once.
+    # the standard GitHub release-download URL — no token required. The URL already
+    # carries the version, so the formula has no explicit `version` line (a redundant
+    # one fails `brew audit --strict`). Bump the URL and sha256 — each appears once.
     url = (
         "https://github.com/bishnubista/openbird/releases/download/"
         f"v{version}/openbird-{version}.tar.gz"
     )
     text = replace_once(text, r'^  url ".+"$', f'  url "{url}"')
-    text = replace_once(text, r'^  version ".+"$', f'  version "{version}"')
     text = replace_once(text, r'^  sha256 ".+"$', f'  sha256 "{sha256}"')
     path.write_text(text)
 
