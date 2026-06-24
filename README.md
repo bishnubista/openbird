@@ -48,8 +48,8 @@ Requirements: macOS, [`uv`](https://docs.astral.sh/uv/), Swift 6+ (Xcode CLT), a
 # 1. Install deps
 uv sync --extra encryption   # core + SQLCipher gate; add --extra meetings or integrations as needed
 
-# 2. Local models
-ollama pull llama3.2
+# 2. Local models — generation default is RAM-tiered (see Configuration):
+ollama pull qwen3:4b    # ~16 GB Macs   (use qwen3:8b on 24/32 GB)
 ollama pull nomic-embed-text
 
 # 3. Verify the environment
@@ -133,8 +133,10 @@ while the DMG is downloading.
 On first launch, Guided Setup checks the active model route. For the default
 local route it helps you install/launch Ollama if needed, then downloads the
 required local AI models through the local Ollama API. The current defaults are
-`llama3.2` plus `nomic-embed-text`, which need network access and about 2.3 GB
-of Ollama-managed disk space. If `OLLAMA_HOST` / `OPENBIRD_OLLAMA_HOST` points
+the RAM-tiered generation model (`qwen3:4b` on ~16 GB Macs, `qwen3:8b` on
+24/32 GB) plus `nomic-embed-text`, which need network access and roughly
+3 GB (`qwen3:4b`) to 6 GB (`qwen3:8b`) of Ollama-managed disk space. If
+`OLLAMA_HOST` / `OPENBIRD_OLLAMA_HOST` points
 at a non-local Ollama server, OpenBird will not auto-download models to that
 host.
 
@@ -178,7 +180,7 @@ Environment overrides (all optional):
 |---|---|---|
 | `OPENBIRD_DATA_DIR` | `~/.openbird` | where the SQLite memory lives |
 | `OPENBIRD_LLM_BACKEND` | `litellm` | provider backend selector; `mlx` is reserved pending experiment promotion |
-| `OPENBIRD_LLM_MODEL` | `ollama/llama3.2` | any LiteLLM model string (e.g. `claude-...`, `gpt-...`) |
+| `OPENBIRD_LLM_MODEL` | RAM-tiered: `ollama/qwen3:4b` at/below ~18 GiB (16 GB Macs), `ollama/qwen3:8b` above (24/32 GB Macs) | any LiteLLM model string (e.g. `claude-...`, `gpt-...`); set explicitly to override the auto-selected tier |
 | `OPENBIRD_EMBED_MODEL` | `ollama/nomic-embed-text` | embedding model (dim pinned per cohort) |
 | `OPENBIRD_REQUIRE_ENCRYPTION` | `0` | when `1`, opening the DB **fails closed** (raises) instead of falling back to a plaintext file if SQLCipher cannot be verified |
 | `OPENBIRD_RETENTION_DAYS` | `0` (keep forever) | default cutoff for `openbird data prune` when `--older-than` is omitted |

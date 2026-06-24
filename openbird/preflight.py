@@ -42,8 +42,10 @@ from openbird.config import (
 
 # Models OpenBird depends on by default; preflight checks they are pulled. Used
 # as a fallback when settings do not name ollama/* models (route-aware path
-# below derives the real required set from settings.llm_model/embed_model).
-_REQUIRED_MODELS: tuple[str, ...] = ("llama3.2", "nomic-embed-text")
+# below derives the real required set from settings.llm_model/embed_model). The
+# generation default is RAM-tiered to qwen3 (qwen3:4b / qwen3:8b); the bare
+# "qwen3" family name matches any pulled tag in check_ollama's tag-aware compare.
+_REQUIRED_MODELS: tuple[str, ...] = ("qwen3", "nomic-embed-text")
 
 
 # --------------------------------------------------------------------------- #

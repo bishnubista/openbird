@@ -485,19 +485,44 @@ def test_rag_over_real_memory_store(mem_settings, fake_provider):
 
 
 def _ollama_available() -> bool:
+    """True only if Ollama is reachable AND the default route's EXACT models are pulled.
+
+    The live round-trip uses the default ``Settings`` models (the RAM-tiered qwen3
+    generation default + the default embedder). Guarding only on "Ollama running"
+    makes the test ERROR — not skip — when those tags aren't pulled on a dev box,
+    because litellm's completion-retry path then imports an optional dep. We resolve
+    the EXACT route tag (e.g. ``qwen3:8b`` on a 32 GB host, NOT just the ``qwen3``
+    family) and reuse ``check_ollama``'s tag-aware match so a host with only the
+    other tier's tag pulled still skips cleanly instead of erroring at runtime.
+    """
     if shutil.which("ollama") is None:
         return False
     try:
-        import httpx
+        from openbird.config import Settings, _default_llm_model, ollama_bare_model
+        from openbird.preflight import check_ollama
 
-        resp = httpx.get("http://localhost:11434/api/tags", timeout=2.0)
-        return resp.status_code == 200
+        # Resolve exact default model tags without instantiating Settings (which
+        # would touch the filesystem at collection time).
+        embed_default = Settings.__dataclass_fields__["embed_model"].default
+        required = tuple(
+            bare
+            for bare in (
+                ollama_bare_model(_default_llm_model()),
+                ollama_bare_model(embed_default),
+            )
+            if bare
+        )
+        info = check_ollama(required_models=required, timeout=2.0)
+        return bool(info.get("reachable")) and not info.get("missing_models")
     except Exception:
         return False
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not _ollama_available(), reason="Ollama is not running locally")
+@pytest.mark.skipif(
+    not _ollama_available(),
+    reason="Ollama not running or default-route models not pulled locally",
+)
 def test_live_ollama_round_trip(tmp_path):
     from openbird.config import Settings
     from openbird.llm.provider import LLMProvider

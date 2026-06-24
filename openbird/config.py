@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 from dataclasses import dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
@@ -45,6 +46,57 @@ def _default_data_dir() -> Path:
     if env:
         return Path(env).expanduser()
     return Path.home() / ".openbird"
+
+
+# Memory cutoff (bytes) separating the small-RAM (16 GB Mac) generation tier from
+# the large-RAM (24/32 GB) tier. 18 GiB cleanly splits the two real Apple-Silicon
+# SKUs: a 16 GB machine reports just under 16 GiB, a 24/32 GB machine well above
+# 18 GiB. Any 16–18 GiB host falls into the conservative (lighter-model) tier.
+_LLM_TIER_BYTES = 18 * 1024**3
+
+
+def _total_memory_bytes() -> int:
+    """Best-effort total physical memory in bytes; NEVER raises.
+
+    macOS-first: ``sysctl -n hw.memsize`` is the reliable source on Apple Silicon
+    (``os.sysconf("SC_PHYS_PAGES")`` is not dependable across macOS Python builds).
+    Falls back to POSIX sysconf (Linux/CI), then to ``0`` — which classifies as the
+    small (lighter-model) tier — if both are unavailable. Evaluated at call time so
+    the tier reflects the running machine, not import-time state.
+    """
+    try:
+        out = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        )
+        return int(out.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        # POSIX sysconf may return -1 for an indeterminate value; only trust a
+        # strictly-positive product so the non-negative "bytes" contract holds.
+        if pages > 0 and page_size > 0:
+            return pages * page_size
+    except (OSError, ValueError, AttributeError):
+        pass
+    return 0
+
+
+def _default_llm_model() -> str:
+    """Pick the default local generation model by total memory (RAM-tiered).
+
+    Small-memory machines (≈16 GB Macs, ``<= _LLM_TIER_BYTES``) default to the
+    lighter ``ollama/qwen3:4b``; larger machines (24/32 GB) to ``ollama/qwen3:8b``.
+    ``OPENBIRD_LLM_MODEL`` (or an explicit constructor arg) overrides this entirely.
+    """
+    if _total_memory_bytes() <= _LLM_TIER_BYTES:
+        return "ollama/qwen3:4b"
+    return "ollama/qwen3:8b"
 
 
 def data_dir_path() -> Path:
@@ -89,7 +141,9 @@ class Settings:
     # model names. "mlx" is intentionally reserved until the isolated experiment
     # has been promoted into production code.
     llm_backend: str = "litellm"
-    llm_model: str = "ollama/llama3.2"
+    # Generation model default is RAM-tiered (see _default_llm_model): qwen3:4b on
+    # ~16 GB Macs, qwen3:8b on 24/32 GB. OPENBIRD_LLM_MODEL overrides it.
+    llm_model: str = field(default_factory=_default_llm_model)
     embed_model: str = "ollama/nomic-embed-text"
     embed_dim: int = 768
 
