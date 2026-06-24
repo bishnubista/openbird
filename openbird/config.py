@@ -190,6 +190,18 @@ class Settings:
     # in sync with capture.daemon._DEFAULT_SESSION_GAP.
     session_gap_seconds: float = 300.0
 
+    # Optional cross-encoder reranker (between RRF fusion and MMR). DISABLED by
+    # default: an empty rerank_model is a no-op, so search behavior is unchanged.
+    # When set (e.g. "bge-reranker-v2-m3"), search reorders the fused candidates by
+    # a llama.cpp-compatible /v1/rerank endpoint at rerank_host, then falls back to
+    # RRF order on any error. A NON-loopback rerank_host is a remote route (sends
+    # query+chunk text off-device) and is cloud-gated exactly like the llm/embed
+    # roles.
+    rerank_model: str = ""
+    rerank_host: str | None = None
+    rerank_top_n: int = 0  # 0 = rerank all fused candidates
+    rerank_timeout: float = 10.0
+
     def __post_init__(self) -> None:
         # session_gap_seconds feeds numeric session-boundary arithmetic in the
         # capture daemon (_session_for). A NaN/inf gap freezes segmentation (every
@@ -201,6 +213,12 @@ class Settings:
             raise ValueError(
                 "session_gap_seconds must be a finite, non-negative number"
             )
+        # The reranker deadline is a HARD wall-clock bound on a synchronous call in
+        # the search path; a NaN/inf/<=0 value would disable the deadline and let a
+        # wedged rerank server hang every search. Reject it at the single source.
+        self.rerank_timeout = float(self.rerank_timeout)
+        if not math.isfinite(self.rerank_timeout) or self.rerank_timeout <= 0:
+            raise ValueError("rerank_timeout must be a finite, positive number")
         self.data_dir = Path(self.data_dir).expanduser()
         if self.db_path is None:
             self.db_path = str(self.data_dir / "openbird.db")
@@ -243,6 +261,8 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "llm_timeout": 60.0,
     "embed_timeout": 30.0,
     "llm_num_retries": 2,
+    "rerank_top_n": 0,
+    "rerank_timeout": 10.0,
 }
 
 # The localhost Ollama base URL used when nothing else is configured. Kept in

@@ -100,6 +100,14 @@ def classify_models(settings: Settings, *, ollama_host: str | None = None) -> di
         remote["llm"] = settings.llm_model
     if not is_local_model(settings.embed_model, ollama_host=host):
         remote["embed"] = settings.embed_model
+    # The reranker is a third model role: a NON-loopback rerank_host sends the
+    # query + candidate chunk text off-device, so it is cloud-gated exactly like
+    # llm/embed (opt-in + banner + refusal). A loopback (llama.cpp localhost) or
+    # disabled reranker is local. Imported locally to avoid an import cycle.
+    from openbird.llm.rerank import rerank_is_remote
+
+    if rerank_is_remote(settings):
+        remote["rerank"] = settings.rerank_model
     return remote
 
 

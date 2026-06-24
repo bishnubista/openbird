@@ -184,6 +184,29 @@ Environment overrides (all optional):
 | `OPENBIRD_EMBED_MODEL` | `ollama/nomic-embed-text` | embedding model (dim pinned per cohort) |
 | `OPENBIRD_REQUIRE_ENCRYPTION` | `0` | when `1`, opening the DB **fails closed** (raises) instead of falling back to a plaintext file if SQLCipher cannot be verified |
 | `OPENBIRD_RETENTION_DAYS` | `0` (keep forever) | default cutoff for `openbird data prune` when `--older-than` is omitted |
+| `OPENBIRD_RERANK_MODEL` | `""` (off) | cross-encoder reranker model name; empty disables reranking (search unchanged) |
+| `OPENBIRD_RERANK_HOST` | `http://localhost:8080` | llama.cpp `/v1/rerank` base URL; a non-loopback host is cloud-gated like llm/embed |
+
+## Optional reranker (higher retrieval accuracy)
+
+A cross-encoder reranker inserted between RRF fusion and MMR is the single biggest
+retrieval/citation-accuracy lever, but **Ollama cannot serve rerankers** (as of 2026), so OpenBird
+talks to a vendor-neutral `/v1/rerank` endpoint. It is **off by default** and **never breaks
+search** — any reranker error falls back to the RRF order.
+
+```bash
+# 1. Run a llama.cpp rerank server with a bge-reranker-v2-m3 GGUF (Metal-accelerated):
+llama-server --reranking --embedding --pooling rank \
+  -hf gpustack/bge-reranker-v2-m3-GGUF:Q4_K_M --port 8080
+
+# 2. Point OpenBird at it (loopback = on-device; nothing leaves your machine):
+export OPENBIRD_RERANK_MODEL=bge-reranker-v2-m3
+openbird chat "what did we decide about storage?"
+```
+
+A **non-loopback** `OPENBIRD_RERANK_HOST` sends the query + candidate chunk text off-device, so it
+is treated as a remote route and requires the same `OPENBIRD_ALLOW_CLOUD=1` opt-in (and shows the
+CLOUD ACTIVE banner) as a cloud llm/embed model.
 
 ## Storage growth & retention
 
