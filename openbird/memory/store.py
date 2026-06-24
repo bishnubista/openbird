@@ -13,6 +13,8 @@ resolves every hit back to a concrete observation for occurrence-aware citations
 
 from __future__ import annotations
 
+import logging
+import math
 import struct
 import time
 import uuid
@@ -28,6 +30,19 @@ from openbird.memory.migrations import ensure_schema_version
 from openbird.memory.search import mmr, rrf
 from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
 from openbird.types import Observation, SearchHit
+
+_log = logging.getLogger("openbird.memory")
+
+
+def _log_rerank_skip(reason: str) -> None:
+    """Log a reranker fallback with a STRUCTURED, content-free reason code.
+
+    The rerank server may echo documents in its error body, so we never log the
+    exception text, response body, query, or chunk text — only the short reason
+    code (``timeout|transport|http_<status>|bad_response|non_finite|error``).
+    Search continues on the RRF order.
+    """
+    _log.info("rerank_skipped reason=%s (fell back to RRF order)", reason)
 
 
 class EmbeddingCohortMismatch(ValueError):
@@ -91,6 +106,7 @@ class MemoryStore:
         *,
         settings: Settings | None = None,
         provider: LLMProviderProtocol | None = None,
+        reranker: object | None = None,
     ) -> None:
         """Open the store, load sqlite-vec, and apply the schema.
 
@@ -99,10 +115,27 @@ class MemoryStore:
             settings: Settings; defaults to :func:`get_settings`.
             provider: LLM provider for embeddings; defaults to the configured
                 provider implementation. Injectable so tests can mock embeddings.
+            reranker: Optional cross-encoder reranker (``rerank(query, docs) ->
+                scores``). ``None`` builds from settings (disabled unless
+                ``rerank_model`` is set); injectable so tests can supply a fake.
         """
         self.settings = settings or get_settings()
         self.provider = provider or create_llm_provider(self.settings)
         self.embed_dim = self.settings.embed_dim
+        if reranker is None:
+            from openbird.llm.rerank import build_reranker, rerank_is_remote
+
+            # Fail closed: a remote (non-loopback) rerank host sends query+chunk
+            # text off-device, so auto-building it without cloud opt-in must refuse
+            # — even on the store-direct path where a caller injected `provider`
+            # and skipped the CLI/provider cloud gate. Explicitly injected
+            # rerankers are a deliberate caller choice and bypass this.
+            if rerank_is_remote(self.settings) and not self.settings.allow_cloud:
+                from openbird.llm.provider import CloudOptInRequired
+
+                raise CloudOptInRequired({"rerank": self.settings.rerank_model})
+            reranker = build_reranker(self.settings)
+        self.reranker = reranker
 
         resolved = db_path if db_path is not None else self.settings.db_path
         if resolved == ":memory:":
@@ -363,11 +396,14 @@ class MemoryStore:
     # -- search ---------------------------------------------------------------
 
     def search(self, query: str, k: int = 10, *, semantic: bool = True) -> list[SearchHit]:
-        """Hybrid search: vector + BM25 -> RRF -> MMR dedup.
+        """Hybrid search: vector + BM25 -> RRF -> (optional rerank) -> MMR dedup.
 
         Each surviving hit is resolved back to its most recent observation
         (app/window/ts) so citations are occurrence-aware. ``semantic=False``
-        runs BM25 only (no embedding call).
+        runs BM25 only (no embedding call). When a cross-encoder reranker is
+        configured it reorders the fused candidates by query-relevance before the
+        MMR diversity pass; any reranker failure falls back to the RRF order so
+        search never breaks.
         """
         if not query.strip():
             return []
@@ -392,8 +428,53 @@ class MemoryStore:
 
         hits = [self._build_hit(rowid_int, score) for rowid_int, score in fused]
         hits = [h for h in hits if h is not None]
+        hits = self._rerank(query, hits)  # type: ignore[arg-type]
         deduped = mmr(hits, k=k)  # type: ignore[arg-type]
         return deduped
+
+    def _rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+        """Reorder fused hits by a cross-encoder reranker; fall back to RRF order.
+
+        No-op when no reranker is configured. Cross-encoder scores are uncalibrated
+        (logits, negatives, narrow probabilities), so they are NOT assigned to
+        ``SearchHit.score`` raw — MMR uses ``score`` directly. We min-max normalize
+        them to ``[0, 1]`` over THIS candidate set (all-equal keeps the RRF order),
+        reject non-finite, and tie-break by the original RRF position. ANY reranker
+        failure logs a structured, content-free reason and returns the RRF order —
+        search must never break because a reranker is down.
+        """
+        if self.reranker is None or len(hits) < 2:
+            return hits
+        from openbird.llm.rerank import RerankError
+
+        try:
+            scores = self.reranker.rerank(query, [h.text for h in hits])
+        except RerankError as exc:
+            _log_rerank_skip(exc.reason)
+            return hits
+        except Exception:  # noqa: BLE001 - a reranker must never break search
+            _log_rerank_skip("error")
+            return hits
+        if not isinstance(scores, list) or len(scores) != len(hits):
+            _log_rerank_skip("bad_response")
+            return hits
+        if any(not isinstance(s, (int, float)) or not math.isfinite(s) for s in scores):
+            _log_rerank_skip("non_finite")
+            return hits
+        lo, hi = min(scores), max(scores)
+        if hi <= lo:
+            return hits  # all-equal -> reranker added no signal; keep RRF order
+        span = hi - lo
+        # Pair each hit with (normalized score, original index) and sort by score
+        # desc, tie-breaking by the original RRF position for determinism.
+        order = sorted(
+            range(len(hits)),
+            key=lambda i: (-(scores[i] - lo) / span, i),
+        )
+        return [
+            hits[i].model_copy(update={"score": (scores[i] - lo) / span})
+            for i in order
+        ]
 
     def _bm25(self, query: str, limit: int) -> list[str]:
         """Return chunk rowids ranked by BM25 (best first)."""
