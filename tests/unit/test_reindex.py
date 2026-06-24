@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from openbird import cli
 from openbird.config import Settings, reset_settings_cache
-from openbird.memory.store import MemoryStore
+from openbird.memory.store import EmbeddingCohortMismatch, MemoryStore
 
 
 class _FakeProvider:
@@ -185,3 +185,71 @@ def test_reindex_fresh_uninitialized_db_succeeds(env, monkeypatch):
     res = CliRunner().invoke(cli.app, ["reindex", "--yes"])
     assert res.exit_code == 0, res.output
     assert "Reindexed 0" in res.output
+
+
+# --------------------------------------------------------------------------- #
+# Embedding-cohort-mismatch UX (PR2a safety net)                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_populated_store_with_changed_cohort_raises_mismatch(env):
+    # Opening a populated store under a DIFFERENT embedding cohort must raise the
+    # dedicated EmbeddingCohortMismatch (a ValueError subclass, for back-compat),
+    # carrying both cohort keys so callers can render a precise recovery hint.
+    settings = Settings(data_dir=env, embed_dim=768)
+    old = _FakeProvider(embed_dim=768, tag="old")
+    _populate(settings, old)
+
+    new = _FakeProvider(embed_dim=768, tag="new")
+    with pytest.raises(EmbeddingCohortMismatch) as ei:
+        MemoryStore(settings=settings, provider=new)
+    assert isinstance(ei.value, ValueError)
+    assert ei.value.stored == old.cohort_key()
+    assert ei.value.current == new.cohort_key()
+
+
+def test_empty_store_tolerates_cohort_change(env):
+    # An empty store (no vectors) must NOT raise — _record_cohort adopts the new
+    # cohort and rebuilds the vec table. Guards against a false mismatch on a fresh
+    # or post-purge store.
+    settings = Settings(data_dir=env, embed_dim=768)
+    MemoryStore(settings=settings, provider=_FakeProvider(768, "old")).close()
+    # Reopen empty under a different cohort: tolerated.
+    store = MemoryStore(settings=settings, provider=_FakeProvider(768, "new"))
+    try:
+        assert store.stats()["cohort_key"] == _FakeProvider(768, "new").cohort_key()
+    finally:
+        store.close()
+
+
+def test_chat_cli_renders_reindex_hint_on_cohort_mismatch(env, monkeypatch):
+    # The EMBED CLI path (chat -> _store) must convert a cohort mismatch into a
+    # friendly `openbird reindex` hint + non-zero exit, NOT a raw traceback.
+    settings = Settings(data_dir=env, embed_dim=768)
+    _populate(settings, _FakeProvider(embed_dim=768, tag="old"))
+
+    # Make the command's provider report a different cohort than the stored one.
+    monkeypatch.setattr(cli, "_provider", lambda: _FakeProvider(embed_dim=768, tag="new"))
+
+    result = CliRunner().invoke(cli.app, ["chat", "what did I work on?"])
+    assert result.exit_code == 1
+    assert "openbird reindex" in result.output
+    assert "Embedding model changed" in result.output
+    # The exception must be HANDLED, not surfaced as an unhandled traceback.
+    assert not isinstance(result.exception, EmbeddingCohortMismatch)
+
+
+def test_routine_run_cli_renders_reindex_hint_on_cohort_mismatch(env, monkeypatch):
+    # A second EMBED consumer of the shared _store() seam (routine run) must get the
+    # same friendly reindex hint + non-zero exit on a cohort mismatch, proving the
+    # recovery path is uniform across commands (not just chat).
+    settings = Settings(data_dir=env, embed_dim=768)
+    _populate(settings, _FakeProvider(embed_dim=768, tag="old"))
+
+    monkeypatch.setattr(cli, "_provider", lambda: _FakeProvider(embed_dim=768, tag="new"))
+
+    result = CliRunner().invoke(cli.app, ["routine", "run", "yesterday"])
+    assert result.exit_code == 1
+    assert "openbird reindex" in result.output
+    assert "Embedding model changed" in result.output
+    assert not isinstance(result.exception, EmbeddingCohortMismatch)

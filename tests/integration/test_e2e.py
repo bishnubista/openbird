@@ -317,7 +317,9 @@ def test_cli_capture_then_chat_roundtrip_with_fake_helper(tmp_path, monkeypatch)
     def fake_provider():
         return provider
 
-    def fake_store(*, provider=None):
+    def fake_store(*, provider=None, settings=settings):
+        # Mirror the real _store signature: capture now passes its resolved settings
+        # through _store(provider=..., settings=...). Default to the closure settings.
         return MemoryStore(
             db_path=db_path,
             settings=settings,

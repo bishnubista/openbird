@@ -55,8 +55,9 @@ def capture(
         CaptureSupervisorError,
         HelperUnavailableError,
     )
-    from openbird.cli import _provider
-    from openbird.memory.store import MemoryStore
+    # Function-local imports (and routing store construction through openbird.cli._store)
+    # avoid a module-level import cycle with the CLI package.
+    from openbird.cli import _provider, _store
 
     import logging
     import signal
@@ -67,8 +68,10 @@ def capture(
     # Build the cloud-checked provider: capture sends screen text to the
     # embedding model, so it must go through the same opt-in confirm + CLOUD
     # ACTIVE banner path as every other store-opening command — never silently.
+    # _store() also gives capture the same friendly embedding-cohort-mismatch
+    # recovery hint (run `openbird reindex`) instead of a raw traceback.
     provider = _provider()
-    store = MemoryStore(settings=settings, provider=provider)
+    store = _store(provider=provider, settings=settings)
     try:
         daemon = CaptureDaemon(
             store,
