@@ -29,17 +29,20 @@ and publishes the result.
   iCloud-backed). See `memory/openbird-signing.md`.
 - `gh auth status` is authenticated for `bishnubista/openbird`.
 
-## 1. Pick the version
+## 1. Confirm the version (source of truth: `pyproject.toml`)
 
-Releases are tagged `beta-dmg-<x.y.z>`. Bump from the current latest:
-`gh release list | grep beta-dmg`. Don't reuse a tag; don't silently replace an
-asset — a new tag gives testers a version + changelog anchor.
+The release version is `pyproject.toml`'s `version` — the single source of truth
+shared with the Homebrew channel (see the README "Versioning" section). The DMG is
+tagged `beta-dmg-<x.y.z>` using that exact number; the `beta-dmg-` prefix keeps the
+`v*` Homebrew workflow from firing. To release a NEW version, bump `pyproject.toml`
+on `main` (via PR) first, then tag. Don't reuse a tag or silently replace an asset —
+a new tag gives testers a version + changelog anchor.
 
 ## 2. Build + notarize (from `main`)
 
 ```bash
 export OPENBIRD_SWIFTPM_DISABLE_SANDBOX=1
-export OPENBIRD_APP_VERSION=<x.y.z>
+export OPENBIRD_APP_VERSION="$(awk -F'"' '/^version = / {print $2; exit}' pyproject.toml)"
 unset OPENBIRD_DMG_SKIP_NOTARIZE
 ./script/package_dmg.sh
 ```
@@ -50,9 +53,9 @@ The signing identity is **auto-derived** from the single "Developer ID Applicati
 identity in the keychain, and the notary profile defaults to `openbird-notary`.
 Override only if needed via env or a gitignored `script/release.env` (see
 `script/release.env.example`) — e.g. when multiple Developer ID identities exist.
-`OPENBIRD_APP_VERSION` must match the beta dmg version selected in step 1, so
-About/Finder show the tester-facing beta version instead of the Python package
-version.
+`OPENBIRD_APP_VERSION` is derived from `pyproject.toml` above (the single source of
+truth), so About/Finder show the canonical version. Tag the release
+`beta-dmg-$OPENBIRD_APP_VERSION`.
 The script: embeds a relocatable Python, installs `openbird[encryption,integrations]`
 (excludes `meetings`), prunes to interpreters, runs the relocation audit + run-from-
 moved-copy test, Developer ID-signs every nested Mach-O inside-out, then notarizes +

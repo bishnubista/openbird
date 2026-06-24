@@ -88,11 +88,14 @@ and **opens a pull request** with that formula bump. The PR is reviewed and
 merged through the normal protected-`main` flow rather than pushed directly, so
 branch protection on the formula is preserved.
 
-To cut the first Homebrew release:
+To cut a Homebrew release, tag the version that matches `pyproject.toml` (see
+[Versioning](#versioning)) — the workflow fails the build if the tag and
+`pyproject.toml` disagree:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+# pyproject.toml version must already be 0.2.0 on main
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 After the formula-bump pull request is merged, users can upgrade through the
@@ -281,6 +284,22 @@ uv run python -m pytest tests/integration/test_e2e.py -q
 
 The CI-safe E2E path uses fake capture/model providers, so it runs without macOS
 TCC permissions, a signed helper, Ollama, or network access.
+
+## Versioning
+
+`pyproject.toml`'s `version` is the **single source of truth** — `openbird doctor`
+reports it, and every distribution channel derives from it:
+
+- **Homebrew CLI** — tagged `v<version>` (e.g. `v0.2.0`). The release workflow
+  builds the source archive from that tag and **fails if the tag doesn't match
+  `pyproject.toml`**, so a brew install's version always equals its tag.
+- **Beta `.dmg`** — tagged `beta-dmg-<version>` (same number, different prefix so
+  the `v*` Homebrew workflow isn't triggered). The app's About/Finder version is
+  derived from `pyproject.toml` too.
+
+To release a new version: bump `pyproject.toml` on `main` first, then tag the
+matching `v<version>` and/or `beta-dmg-<version>`. The two channels share one
+version number; only the tag prefix differs.
 
 ## License
 
