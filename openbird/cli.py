@@ -1066,23 +1066,36 @@ def meeting() -> None:
     so the full pipeline cannot be driven from this CLI yet. This command reports
     the meetings readiness (the transcription extra) and exits.
     """
-    from openbird.meetings.transcribe import whisper_available
+    from openbird.meetings.transcribe import (
+        meetings_backend_available,
+        parakeet_available,
+        whisper_available,
+    )
 
     _console.print("[bold]OpenBird meetings[/] (manual-record, experimental)")
     _console.print(
         "- Audio capture requires the signed ScreenCaptureKit `audio-helper` "
         "with Screen-Recording + Microphone TCC."
     )
-    available = whisper_available()
-    state = "installed" if available else "not installed"
-    _console.print(f"- faster-whisper transcription extra: {state}.")
+    parakeet = parakeet_available()
+    whisper = whisper_available()
+    # On a host with both, `auto` prefers parakeet-mlx (recommended on Apple Silicon).
+    active = "parakeet-mlx" if parakeet else ("faster-whisper" if whisper else "none")
+    _console.print(
+        f"- transcription backends: parakeet-mlx "
+        f"[{'installed' if parakeet else 'not installed'}], "
+        f"faster-whisper [{'installed' if whisper else 'not installed'}] "
+        f"→ active (auto): [bold]{active}[/]."
+    )
     _console.print(
         "- Speaker labeling ('me vs others') is experimental; consent indicator "
         "and manual start are required by design."
     )
-    if not available:
+    if not meetings_backend_available():
         _console.print(
-            "[dim]Install with `uv sync --extra meetings` to enable transcription.[/]"
+            "[dim]Install a backend: `uv sync --extra meetings-mlx` "
+            "(parakeet-mlx, Apple Silicon, recommended) or "
+            "`uv sync --extra meetings` (faster-whisper).[/]"
         )
 
 

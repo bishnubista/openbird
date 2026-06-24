@@ -35,6 +35,8 @@ from openbird.meetings.transcribe import (
     Transcriber,
     TranscriptSegment,
     format_transcript,
+    meetings_backend_available,
+    parakeet_available,
     stitch_transcript,
     summarize_transcript,
     whisper_available,
@@ -253,16 +255,20 @@ def test_whisper_available_is_bool():
 
 
 def test_transcriber_construct_without_extra():
-    # Constructing must never import faster-whisper.
+    # Constructing must never import faster-whisper or parakeet (lazy backends).
     t = Transcriber(model_size="base")
     assert t.model_size == "base"
-    assert t._model is None
+    assert t.backend_choice == "auto"
+    assert t._whisper._model is None
+    assert t._parakeet._model is None
 
 
 def test_transcriber_raises_clear_error_when_extra_missing(monkeypatch):
     import openbird.meetings.transcribe as tr
 
+    # No backend available -> the dual-backend install guidance (names whisper).
     monkeypatch.setattr(tr, "whisper_available", lambda: False)
+    monkeypatch.setattr(tr, "parakeet_available", lambda: False)
     t = Transcriber()
     seg = tr.SpeechSegment(Track.SYSTEM, 0.0, 1.0, frames=[_frame(host_ts=0, loud=True)])
     with pytest.raises(MeetingsExtraNotInstalled) as exc:
@@ -286,9 +292,9 @@ def test_transcribe_segment_uses_loaded_model(monkeypatch):
         def transcribe(self, audio, language=None):
             return ([_FakeWhisperSeg("hello"), _FakeWhisperSeg("world")], {})
 
-    t = Transcriber()
+    t = Transcriber(backend="whisper")
     monkeypatch.setattr(tr, "whisper_available", lambda: True)
-    monkeypatch.setattr(t, "_load_model", lambda: _FakeModel())
+    monkeypatch.setattr(t._whisper, "_load", lambda: _FakeModel())
     seg = tr.SpeechSegment(
         Track.MIC, 4.0, 5.0, frames=[_frame(host_ts=4.0, loud=True, track=Track.MIC)]
     )
@@ -301,8 +307,8 @@ def test_transcribe_segment_uses_loaded_model(monkeypatch):
 def test_transcribe_segment_rejects_oversize_window(monkeypatch):
     """ A window exceeding the sample cap is refused before the model loads.
 
-    The cap must fire ahead of both ``model.transcribe`` AND ``_load_model``, so an
-    oversized/hostile window never pays the lazy WhisperModel construction cost.
+    The cap must fire ahead of both ``model.transcribe`` AND backend load, so an
+    oversized/hostile window never pays the lazy model construction cost.
     """
     import openbird.meetings.transcribe as tr
 
@@ -320,9 +326,9 @@ def test_transcribe_segment_rejects_oversize_window(monkeypatch):
         model_loaded = True
         return _FakeModel()
 
-    t = Transcriber()
+    t = Transcriber(backend="whisper")
     monkeypatch.setattr(tr, "whisper_available", lambda: True)
-    monkeypatch.setattr(t, "_load_model", _fake_load)
+    monkeypatch.setattr(t._whisper, "_load", _fake_load)
     # Shrink the cap so a tiny segment trips it without allocating millions.
     monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 2)
     seg = tr.SpeechSegment(
@@ -667,3 +673,157 @@ def test_resample_is_noop_at_16k():
     samples = [0.0, 0.5, -0.25, 0.75]
     out = _resample_to_16k(samples, 16_000)
     assert list(out) == samples  # already 16 kHz -> unchanged
+
+
+# --------------------------------------------------------------------------- #
+# Pluggable ASR backend: parakeet-mlx preferred, faster-whisper fallback       #
+# --------------------------------------------------------------------------- #
+
+
+def test_parakeet_and_backend_availability_are_bools():
+    assert isinstance(parakeet_available(), bool)
+    assert isinstance(meetings_backend_available(), bool)
+
+
+def test_invalid_backend_choice_rejected(monkeypatch):
+    monkeypatch.delenv("OPENBIRD_MEETINGS_BACKEND", raising=False)
+    with pytest.raises(ValueError):
+        Transcriber(backend="banana")
+
+
+def test_env_overrides_backend_choice(monkeypatch):
+    monkeypatch.setenv("OPENBIRD_MEETINGS_BACKEND", "whisper")
+    assert Transcriber().backend_choice == "whisper"
+    monkeypatch.setenv("OPENBIRD_MEETINGS_BACKEND", "parakeet")
+    assert Transcriber().backend_choice == "parakeet"
+
+
+def test_auto_prefers_parakeet_when_available(monkeypatch):
+    import openbird.meetings.transcribe as tr
+
+    monkeypatch.delenv("OPENBIRD_MEETINGS_BACKEND", raising=False)
+    monkeypatch.setattr(tr, "parakeet_available", lambda: True)
+    monkeypatch.setattr(tr, "whisper_available", lambda: True)
+    t = Transcriber()  # auto
+    order = [b.name for b in t._backend_order()]
+    assert order == ["parakeet", "whisper"]  # parakeet first, whisper as fallback
+
+
+def test_auto_uses_whisper_when_parakeet_absent(monkeypatch):
+    import openbird.meetings.transcribe as tr
+
+    monkeypatch.delenv("OPENBIRD_MEETINGS_BACKEND", raising=False)
+    monkeypatch.setattr(tr, "parakeet_available", lambda: False)
+    t = Transcriber()  # auto
+    assert [b.name for b in t._backend_order()] == ["whisper"]
+
+
+def test_parakeet_failure_falls_back_to_whisper(monkeypatch):
+    """auto: a parakeet load/inference failure transparently falls back to whisper,
+    preserving track attribution end-to-end."""
+    import openbird.meetings.transcribe as tr
+
+    monkeypatch.delenv("OPENBIRD_MEETINGS_BACKEND", raising=False)
+    monkeypatch.setattr(tr, "parakeet_available", lambda: True)
+    monkeypatch.setattr(tr, "whisper_available", lambda: True)
+
+    t = Transcriber()  # auto -> [parakeet, whisper]
+
+    def _boom(samples, *, language=None):
+        raise tr._BackendInferenceError("Synthetic")
+
+    class _FakeWhisperModel:
+        def transcribe(self, audio, language=None):
+            class _S:
+                text = "fallback text"
+            return ([_S()], {})
+
+    monkeypatch.setattr(t._parakeet, "transcribe_pcm", _boom)
+    monkeypatch.setattr(t._whisper, "_load", lambda: _FakeWhisperModel())
+
+    seg = tr.SpeechSegment(
+        Track.SYSTEM, 1.0, 2.0, frames=[_frame(host_ts=1.0, loud=True, track=Track.SYSTEM)]
+    )
+    out = t.transcribe_segment(seg)
+    assert out.text == "fallback text"
+    assert out.track == Track.SYSTEM  # "others" attribution preserved through fallback
+
+
+def test_forced_parakeet_inference_error_surfaces_when_no_fallback(monkeypatch):
+    # backend="parakeet" forces a single backend: an inference failure has no
+    # fallback and must surface the typed error (not a misleading "not installed").
+    import openbird.meetings.transcribe as tr
+
+    t = Transcriber(backend="parakeet")
+
+    def _boom(samples, *, language=None):
+        raise tr._BackendInferenceError("Synthetic")
+
+    monkeypatch.setattr(t._parakeet, "transcribe_pcm", _boom)
+    seg = tr.SpeechSegment(
+        Track.MIC, 0.0, 1.0, frames=[_frame(host_ts=0.0, loud=True, track=Track.MIC)]
+    )
+    with pytest.raises(tr._BackendInferenceError):
+        t.transcribe_segment(seg)
+
+
+def test_parakeet_inference_error_surfaces_when_whisper_unavailable(monkeypatch):
+    # auto with parakeet available (inference fails) + whisper UNAVAILABLE: the real
+    # parakeet inference error must surface, NOT whisper's "unavailable" sentinel
+    # (regression — a later unavailable backend must not mask an inference failure).
+    import openbird.meetings.transcribe as tr
+
+    monkeypatch.delenv("OPENBIRD_MEETINGS_BACKEND", raising=False)
+    monkeypatch.setattr(tr, "parakeet_available", lambda: True)
+    monkeypatch.setattr(tr, "whisper_available", lambda: False)
+
+    t = Transcriber()  # auto -> [parakeet, whisper]
+
+    def _boom(samples, *, language=None):
+        raise tr._BackendInferenceError("Synthetic")
+
+    monkeypatch.setattr(t._parakeet, "transcribe_pcm", _boom)
+    seg = tr.SpeechSegment(
+        Track.SYSTEM, 0.0, 1.0, frames=[_frame(host_ts=0.0, loud=True)]
+    )
+    with pytest.raises(tr._BackendInferenceError):
+        t.transcribe_segment(seg)
+
+
+def test_no_backend_available_raises_install_hint_naming_both(monkeypatch):
+    import openbird.meetings.transcribe as tr
+
+    monkeypatch.delenv("OPENBIRD_MEETINGS_BACKEND", raising=False)
+    monkeypatch.setattr(tr, "parakeet_available", lambda: False)
+    monkeypatch.setattr(tr, "whisper_available", lambda: False)
+    t = Transcriber()
+    seg = tr.SpeechSegment(Track.SYSTEM, 0.0, 1.0, frames=[_frame(host_ts=0, loud=True)])
+    with pytest.raises(MeetingsExtraNotInstalled) as exc:
+        t.transcribe_segment(seg)
+    msg = str(exc.value)
+    assert "faster-whisper" in msg and "parakeet" in msg.lower()
+
+
+def test_oversize_window_caps_before_backend_selection(monkeypatch):
+    # The sample cap must propagate (NOT be swallowed by backend fallback), even in
+    # auto mode with a parakeet that would otherwise be tried.
+    import openbird.meetings.transcribe as tr
+
+    monkeypatch.delenv("OPENBIRD_MEETINGS_BACKEND", raising=False)
+    monkeypatch.setattr(tr, "parakeet_available", lambda: True)
+    monkeypatch.setattr(tr, "_MAX_TRANSCRIBE_SAMPLES", 2)
+    called = False
+
+    def _should_not_run(samples, *, language=None):
+        nonlocal called
+        called = True
+        return "x"
+
+    t = Transcriber()
+    monkeypatch.setattr(t._parakeet, "transcribe_pcm", _should_not_run)
+    seg = tr.SpeechSegment(
+        Track.SYSTEM, 0.0, 1.0, frames=[_frame(host_ts=0.0, loud=True)]
+    )
+    with pytest.raises(tr.MeetingsAudioTooLong):
+        t.transcribe_segment(seg)
+    assert called is False  # cap fired before any backend ran
