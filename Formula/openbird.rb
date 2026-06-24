@@ -1,17 +1,7 @@
 class Openbird < Formula
   desc "Local-first macOS memory assistant with a native trust controller"
   homepage "https://github.com/bishnubista/openbird"
-  # OpenBird is a PRIVATE repo, so the browser release-download URL 404s without
-  # auth. Fetch the tarball from the GitHub API asset endpoint instead, which
-  # honors a token: set HOMEBREW_GITHUB_API_TOKEN (a PAT with `repo` scope, e.g.
-  # `export HOMEBREW_GITHUB_API_TOKEN=$(gh auth token)`) before installing. On
-  # GitHub's redirect to pre-signed storage, Homebrew drops the Authorization
-  # header automatically (different host), so the token never leaks downstream.
-  url "https://api.github.com/repos/bishnubista/openbird/releases/assets/451977727",
-      headers: [
-        "Accept: application/octet-stream",
-        "Authorization: token #{ENV.fetch("HOMEBREW_GITHUB_API_TOKEN", "")}",
-      ]
+  url "https://github.com/bishnubista/openbird/releases/download/v0.1.4/openbird-0.1.4.tar.gz"
   version "0.1.4"
   sha256 "57a5f5f6e62bc110d00655adbb1c57877b259b2deae14b046e346ec680e12e27"
 
