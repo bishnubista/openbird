@@ -71,14 +71,26 @@ uv run openbird chat "what did we decide about storage?"
 
 ### Homebrew install
 
-After a tagged release is published, install the CLI and app bundle with:
+Tap once, then choose the artifact you want:
 
 ```bash
 brew tap bishnubista/openbird https://github.com/bishnubista/openbird.git
+
+# CLI (formula): ingest / chat / routine — no capture, runs anywhere
 brew install bishnubista/openbird/openbird
 openbird --help
-openbird-app
+
+# Notarized app (cask): installs OpenBird.app to /Applications — capture-capable
+brew install --cask bishnubista/openbird/openbird
 ```
+
+The **cask** downloads the notarized `.dmg` and installs the signed
+`OpenBird.app` to `/Applications`, so macOS can grant (and persist) Screen
+Recording / Accessibility — this is the build to use for actual capture. The
+**formula** installs only the CLI (plus an unsigned staged app launched via
+`openbird-app`, which cannot obtain capture permissions — see the note below).
+`brew upgrade --cask openbird` updates the app in place; `brew uninstall --cask
+openbird --zap` also removes on-device memory (`~/.openbird`).
 
 The formula downloads the source archive attached to the matching GitHub tag
 release. On every `v*` tag, `.github/workflows/homebrew-release.yml` builds a

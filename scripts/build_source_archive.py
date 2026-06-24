@@ -13,7 +13,7 @@ from pathlib import Path
 # Authoritative exclusion list for the release archive. This is the only filter
 # that affects the produced tarball (the script does not use `git archive`, so
 # `.gitattributes export-ignore` rules would have no effect here).
-EXCLUDED_PREFIXES = ("Formula/", ".github/")
+EXCLUDED_PREFIXES = ("Formula/", "Casks/", ".github/")
 
 
 def tracked_files(repo: Path) -> list[str]:
