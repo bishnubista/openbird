@@ -45,6 +45,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Verify tag matches pyproject version
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          # pyproject.toml is the single source of truth for the version. A v-tag
+          # must match it, or the Homebrew package would report a different version
+          # than the tag (e.g. a v0.1.4 tag installing openbird==0.1.0). Bump
+          # pyproject before tagging.
+          pyproject_version="$(awk -F'"' '/^version = / {print $2; exit}' pyproject.toml)"
+          if [[ "$VERSION" != "$pyproject_version" ]]; then
+            echo "Tag version ($VERSION) != pyproject.toml version ($pyproject_version)." >&2
+            echo "Bump pyproject.toml to $VERSION on main before pushing the v$VERSION tag." >&2
+            exit 1
+          fi
+          echo "Tag and pyproject agree on version $VERSION."
+
       - name: Build source archive
         shell: bash
         run: |
