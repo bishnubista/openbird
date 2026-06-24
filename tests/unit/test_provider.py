@@ -104,7 +104,7 @@ def test_cohort_key_stable_and_dim_sensitive():
     c = _provider(512).cohort_key()
     assert a == b
     assert a != c
-    assert "nomic-embed-text" in a
+    assert "embeddinggemma" in a
 
 
 def test_default_factory_preserves_litellm_provider():
@@ -114,7 +114,7 @@ def test_default_factory_preserves_litellm_provider():
     # Default generation model is RAM-tiered to qwen3 (4b/8b); assert the family
     # rather than an exact tag so the test is host-memory-independent.
     assert provider.llm_model in ("ollama/qwen3:4b", "ollama/qwen3:8b")
-    assert provider.embed_model == "ollama/nomic-embed-text"
+    assert provider.embed_model == "ollama/embeddinggemma"
 
 
 def test_factory_propagates_normalized_flag_to_cohort_key():

@@ -144,7 +144,12 @@ class Settings:
     # Generation model default is RAM-tiered (see _default_llm_model): qwen3:4b on
     # ~16 GB Macs, qwen3:8b on 24/32 GB. OPENBIRD_LLM_MODEL overrides it.
     llm_model: str = field(default_factory=_default_llm_model)
-    embed_model: str = "ollama/nomic-embed-text"
+    # Default embedder: Google EmbeddingGemma (300M, native 768-dim, strongest
+    # sub-500M retrieval). Switching from a prior embedder changes the embedding
+    # cohort — existing stores must `openbird reindex` once (the CLI guides this;
+    # see EmbeddingCohortMismatch). nomic-embed-text remains a documented fallback
+    # for >2K-token chunks (EmbeddingGemma's context window is ~2K).
+    embed_model: str = "ollama/embeddinggemma"
     embed_dim: int = 768
 
     # LLM resilience: explicit timeouts and bounded retries so a

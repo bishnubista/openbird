@@ -102,7 +102,8 @@ class Openbird < Formula
       walks you through Ollama, first-launch local model download, and granting
       Accessibility / Screen Recording / Microphone permissions. The default
       Ollama route downloads the RAM-tiered qwen3 model (qwen3:4b on ~16 GB Macs,
-      qwen3:8b on 24/32 GB) + nomic-embed-text (roughly 3-6 GB) into
+      qwen3:8b on 24/32 GB) + embeddinggemma (needs Ollama >= 0.11.10; roughly
+      3-6 GB) into
       Ollama-managed storage. macOS requires you to toggle permissions yourself
       in System Settings; the app deep-links you to the right pane and re-checks.
       The CLI memory features (openbird ingest / chat / routine) work immediately
