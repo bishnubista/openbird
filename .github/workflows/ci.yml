@@ -1,0 +1,60 @@
+name: CI
+
+# Public CI for contributors: validates every PR (and pushes to main) against the
+# same gates the project runs locally — Python tests, ShellCheck, and the Swift
+# helper builds. Runs on macOS because OpenBird is a macOS-only product.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    name: Python tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies (dev extra, locked)
+        run: uv sync --extra dev --frozen
+      - name: Run test suite
+        # CI-safe path: fake capture/model providers, no TCC, no signed helper,
+        # no Ollama, no network. Ollama-dependent tests auto-skip when absent.
+        run: uv run python -m pytest -q
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck on shell scripts
+        run: shellcheck script/*.sh
+
+  swift-helpers:
+    name: Swift helpers build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build capture + audio helpers
+        # Both target .macOS(.v13), so they build on the stock runner SDK.
+        # The mac-app target is intentionally NOT built here: it uses Liquid
+        # Glass (macOS 26) APIs that require a build SDK newer than GitHub's
+        # hosted runners currently provide. Re-add it once macos runners ship
+        # the macOS 26 SDK.
+        run: |
+          for pkg in capture-helper audio-helper; do
+            echo "::group::swift build $pkg"
+            ( cd "$pkg" && swift build )
+            echo "::endgroup::"
+          done
