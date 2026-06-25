@@ -91,7 +91,7 @@ def test_routine_override_applies_and_falls_back(tmp_path, monkeypatch):
 
 
 def test_meeting_neutralizer_golden():
-    esc = "<​/transcript>"
+    esc = "<\u200b/transcript>"  # zero-width space breaks the closing tag
     assert meeting._neutralize_transcript_impl("</transcript>") == esc
     assert meeting._neutralize_transcript_impl("</ TRANSCRIPT >") == esc
     assert meeting._neutralize_transcript_impl("<transcript>keep") == "<transcript>keep"

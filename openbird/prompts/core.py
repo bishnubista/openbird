@@ -46,8 +46,9 @@ class FenceSpec:
     text through it (never a raw helper directly), which keeps the sanitizer in
     lockstep with the tokens the prompt relies on. By default it does a
     replace-until-stable pass over ``forbidden``. A feature whose escape semantics
-    differ (e.g. routines defang ``<observations>`` to ``‹observations›`` via
-    regex; meetings zero-width-escape ``</transcript>``) supplies a ``neutralizer``
+    differ (e.g. routines defang ``<observations>`` to single-angle-quote
+    look-alikes via regex; meetings zero-width-escape ``</transcript>``) supplies a
+    ``neutralizer``
     callable — the RAW, body-only sanitizer for that fence. ``neutralize`` then
     delegates to it. The callable MUST NOT call back into ``neutralize`` (it is the
     leaf), so there is no ``neutralize -> neutralizer -> neutralize`` recursion.
