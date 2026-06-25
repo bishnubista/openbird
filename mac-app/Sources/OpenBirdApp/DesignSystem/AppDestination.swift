@@ -13,7 +13,9 @@ enum AppDestination: String, CaseIterable, Identifiable {
         switch self {
         case .ask: return "Ask OpenBird"
         case .today: return "Today"
-        case .setup: return "Setup"
+        // The `.setup` case keeps its raw value (deep-links/tests stay valid) but presents
+        // as "Settings" — the durable permissions/capture/privacy pane (design rename).
+        case .setup: return "Settings"
         }
     }
 
@@ -22,7 +24,7 @@ enum AppDestination: String, CaseIterable, Identifiable {
         switch self {
         case .ask: return "magnifyingglass"
         case .today: return "calendar"
-        case .setup: return "gearshape"
+        case .setup: return "slider.horizontal.3"
         }
     }
 }

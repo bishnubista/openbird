@@ -8,13 +8,11 @@ import SwiftUI
 struct AskPaneView: View {
     @ObservedObject var askModel: AskPanelModel
     @ObservedObject var appModel: AppModel
-    @ObservedObject var timelineModel: TimelineModel
 
     var body: some View {
         AskContentView(
             askModel: askModel,
             appModel: appModel,
-            timelineModel: timelineModel,
             // In-window pane: no overlay to dismiss, so navigate AppModel directly
             // (it switches to the Today pane and focuses the source's day).
             onSelectCitation: { appModel.navigateToCitation($0) }

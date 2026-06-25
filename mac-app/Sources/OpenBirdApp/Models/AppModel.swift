@@ -235,7 +235,9 @@ final class AppModel: ObservableObject {
         if report.cloudBlocked { return "remote blocked" }
         if hasRemoteModelRoute { return "remote model" }
         if localModelStatusState == .unknown { return "model route unknown" }
-        return "local model"
+        // "on-device" (handoff sidebar footer copy) — truthful only on the local route;
+        // the remote/blocked/unknown branches above keep their honest labels.
+        return "on-device"
     }
 
     var hasRemoteModelRoute: Bool {

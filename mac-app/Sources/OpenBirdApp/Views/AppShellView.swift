@@ -12,7 +12,6 @@ struct AppShellView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var todayModel: TodayModel
     @ObservedObject var askModel: AskPanelModel
-    @ObservedObject var timelineModel: TimelineModel
     /// Summon the compact Spotlight Ask panel hard-scoped to a day offset (used by the
     /// Today pane's "Ask about this day"; 0=today, 1=yesterday, ...).
     var onAsk: (Int) -> Void = { _ in }
@@ -51,11 +50,11 @@ struct AppShellView: View {
     private var detailPane: some View {
         switch model.selection {
         case .ask:
-            AskPaneView(askModel: askModel, appModel: model, timelineModel: timelineModel)
+            AskPaneView(askModel: askModel, appModel: model)
         case .today:
             TodayView(model: todayModel, appModel: model, onAsk: onAsk)
         case .setup:
-            ContentView(model: model)
+            SettingsView(model: model)
         }
     }
 

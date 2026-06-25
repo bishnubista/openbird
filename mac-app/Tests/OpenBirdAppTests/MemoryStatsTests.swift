@@ -144,7 +144,9 @@ final class MemoryStatsTests: XCTestCase {
         let model = AppModel(service: OpenBirdService(), initialReport: localRuntimeOKReport())
 
         XCTAssertEqual(model.localModelStatusState, .ok)
-        XCTAssertEqual(model.modelRouteFooterLabel, "local model")
+        // Local route renders as "on-device" in the sidebar footer (handoff copy); the
+        // remote/blocked/unknown labels asserted elsewhere keep their honest wording.
+        XCTAssertEqual(model.modelRouteFooterLabel, "on-device")
         XCTAssertTrue(model.privacyTransmissionSummary.contains("Model requests stay on this Mac"))
         assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)
         assertNoAbsoluteDeviceClaim(model.localModelStatusSummary)

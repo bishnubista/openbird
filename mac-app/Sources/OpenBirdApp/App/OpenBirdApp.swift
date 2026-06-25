@@ -23,7 +23,6 @@ struct OpenBirdApp: App {
     @StateObject private var askModel: AskPanelModel
     @StateObject private var askPanel: AskPanelController
     @StateObject private var todayModel: TodayModel
-    @StateObject private var timelineModel: TimelineModel
 
     /// Construct the service, model, Ask-panel controller, and Today model TOGETHER,
     /// sharing the one `AppModel`/`OpenBirdService`, so there is never a second model
@@ -32,7 +31,6 @@ struct OpenBirdApp: App {
         let service = OpenBirdService()
         let model = AppModel(service: service)
         let askModel = AskPanelModel(service: service, appModel: model)
-        let timelineModel = TimelineModel(service: service)
         let todayModel = TodayModel(service: service)
         // Wire citation click-through: a clicked source switches to the Today pane
         // (done in AppModel) and focuses the citation's day/observation here. Strong
@@ -43,9 +41,8 @@ struct OpenBirdApp: App {
         _model = StateObject(wrappedValue: model)
         _askModel = StateObject(wrappedValue: askModel)
         _todayModel = StateObject(wrappedValue: todayModel)
-        _timelineModel = StateObject(wrappedValue: timelineModel)
         _askPanel = StateObject(wrappedValue: AskPanelController(
-            model: model, service: service, askModel: askModel, timelineModel: timelineModel))
+            model: model, service: service, askModel: askModel))
     }
 
     var body: some Scene {
@@ -57,7 +54,6 @@ struct OpenBirdApp: App {
                 model: model,
                 todayModel: todayModel,
                 askModel: askModel,
-                timelineModel: timelineModel,
                 askPanel: askPanel
             )
         }
@@ -77,7 +73,6 @@ private struct MainWindowRoot: View {
     @ObservedObject var model: AppModel
     @ObservedObject var todayModel: TodayModel
     @ObservedObject var askModel: AskPanelModel
-    @ObservedObject var timelineModel: TimelineModel
     let askPanel: AskPanelController
 
     @Environment(\.openWindow) private var openWindow
@@ -87,7 +82,6 @@ private struct MainWindowRoot: View {
             model: model,
             todayModel: todayModel,
             askModel: askModel,
-            timelineModel: timelineModel,
             onAsk: { day in askPanel.show(dayScope: day) },
             onAskExpanded: { askPanel.expand() }
         )

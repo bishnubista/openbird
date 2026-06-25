@@ -23,7 +23,12 @@ enum OB {
         static let setup: CGFloat = 14
         static let window: CGFloat = 13
         static let dropdown: CGFloat = 12
+        /// Setup permission row cards (handoff §4: row cards use r12, distinct from the
+        /// generic r11 `card`).
+        static let permissionRow: CGFloat = 12
         static let card: CGFloat = 11
+        /// Icon / app glyph tiles (handoff §"Radii": "9–6 buttons/tiles").
+        static let tile: CGFloat = 9
         static let control: CGFloat = 8
         static let pill: CGFloat = 999
     }
@@ -58,6 +63,13 @@ enum OB {
     static func fieldFill(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)
     }
+    /// Section-card fill (handoff `--card`) — the flat translucent panel behind Settings
+    /// sections, lighter than `fieldFill`.
+    static func cardFill(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
+    }
+    /// Amber warning accent (handoff `#ff9f0a`) — the setup banner + paused toggle.
+    static let amber = Color(hex: 0xFF9F0A)
 }
 
 /// The visual identity of a captured source app — a glyph + brand color — used to
