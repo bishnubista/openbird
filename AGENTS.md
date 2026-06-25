@@ -100,18 +100,38 @@ deadlines already cover those.
 - **Secrets** stay in the macOS Keychain / `~/openbird-codesign/` (not the repo).
   The signing identity and notary profile name are config, not secrets.
 
-## Release (beta .dmg)
+## Release
 
-Invoke the **`/release-dmg`** skill. `script/package_dmg.sh` builds the
-self-contained bundle, Developer ID-signs every nested Mach-O, notarizes, staples,
-and produces `dist/OpenBird.dmg` (it does not publish). The skill then publishes
-that dmg to GitHub Releases as a separate `gh release create` step. The signing
-identity auto-derives from the keychain; override via a gitignored
-`script/release.env`. See `.claude/skills/release-dmg/SKILL.md`.
+A full version release spans **both channels** (notarized dmg + Homebrew formula +
+cask) sharing one version. The ordered runbook lives in
+`.claude/skills/release/SKILL.md` (mirrored at `.agents/skills/release/SKILL.md`) —
+it sequences bump → dmg → cask → `v*` tag → verify and documents *why* the order is
+fixed. The pieces:
+
+- **Version bump** — `script/bump_version.sh <x.y.z>` edits `pyproject.toml` AND
+  re-locks `uv.lock` in one step (`pyproject.toml` is the single source of truth; the
+  lock pins the project's own version too). It refuses a dirty tree. Never bump the two
+  by hand separately — the CI **`version-consistency`** job fails if they disagree.
+- **Notarized .dmg** — see `.claude/skills/release-dmg/SKILL.md`.
+  `script/package_dmg.sh` builds the self-contained bundle, Developer ID-signs every
+  nested Mach-O, notarizes, staples, and produces `dist/OpenBird.dmg` (it does not
+  publish); publishing to GitHub Releases (tag `beta-dmg-<x.y.z>`, pinned Latest) is a
+  separate step. The signing identity auto-derives from the keychain; override via a
+  gitignored `script/release.env`.
+- **Homebrew** — the cask (`Casks/openbird.rb`, notarized app) is bumped to the
+  published dmg's sha256; the formula (`Formula/openbird.rb`, CLI source) is bumped by
+  pushing a `v<x.y.z>` tag, which triggers
+  `.github/workflows/homebrew-release.yml` to build the source tarball, auto-generate
+  release notes (`scripts/gen_changelog.py`), validate the formula edit inline, and open
+  a formula-bump PR. The CI **`homebrew-style`** job lints both packaging files.
 
 ## Handy commands
 
 - Tests: `uv run python -m pytest -q`
+- Release: bump a version with `script/bump_version.sh <x.y.z>` (atomic pyproject +
+  uv.lock); full flow in `.claude/skills/release/SKILL.md`.
+- Changelog from history: `scripts/gen_changelog.py --from <prev-tag> --to <tag-or-HEAD>`
+  (`--from beta-dmg-<prev>` for the dmg channel, `--from v<prev>` for the source channel).
 - Build the app bundle:
   `OPENBIRD_SWIFTPM_DISABLE_SANDBOX=1 ./script/build_and_run.sh --no-launch`
 - Diagnostics: `openbird doctor`
