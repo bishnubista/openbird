@@ -182,6 +182,15 @@ final class OpenBirdService: @unchecked Sendable {
     /// The capture daemon launched by the app (if any), so it can be stopped.
     private var captureProcess: Process?
 
+    /// Write end of the "death pipe" handed to the launched capture daemon as its
+    /// stdin. We hold it open for this app's lifetime and never write to it after
+    /// the one-shot handshake token. If the app dies for ANY reason (graceful quit,
+    /// crash, SIGKILL) the OS closes this fd, the daemon's stdin reaches EOF, and an
+    /// app-supervised daemon self-exits instead of orphaning. Retaining it here also
+    /// keeps ARC from closing it early. See `startCapture` and the Python
+    /// `OPENBIRD_SUPERVISOR_TOKEN` contract in `openbird/capture/daemon.py`.
+    private var captureSupervisorPipe: FileHandle?
+
     init(
         accessibilityProbe: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
         accessibilityPrompter: @escaping @Sendable () -> Void = {
@@ -306,6 +315,9 @@ final class OpenBirdService: @unchecked Sendable {
         if let proc = captureProcess {
             if proc.isRunning { return true }
             captureProcess = nil
+            // The launched daemon exited; drop our stale death-pipe write end.
+            try? captureSupervisorPipe?.close()
+            captureSupervisorPipe = nil
         }
         // An externally running helper counts as "capturing" — but the helper is
         // only alive intermittently between the daemon's re-spawn cadence, so a
@@ -416,8 +428,18 @@ final class OpenBirdService: @unchecked Sendable {
     /// the user opted into. Returns false if the CLI cannot be resolved.
     @discardableResult
     func startCapture(onExit: (@Sendable (Int32) -> Void)? = nil) -> Bool {
-        guard captureProcess?.isRunning != true, let cli = resolveOpenBirdCLI() else {
-            return captureProcess?.isRunning == true
+        // If a launched daemon is still running, leave it (and its death pipe)
+        // untouched. If one exists but has already exited, drop the now-stale
+        // death-pipe write fd so it is not retained across this re-spawn / early
+        // return (e.g. CLI unresolved or an external daemon already running).
+        if let proc = captureProcess {
+            if proc.isRunning { return true }
+            captureProcess = nil
+            try? captureSupervisorPipe?.close()
+            captureSupervisorPipe = nil
+        }
+        guard let cli = resolveOpenBirdCLI() else {
+            return false
         }
         // Resuming clears any pause gate so capture actually records. Done BEFORE
         // the adopt-external guard below: if we adopt an already-running daemon
@@ -445,6 +467,25 @@ final class OpenBirdService: @unchecked Sendable {
         if !allow.isEmpty {
             env["OPENBIRD_ALLOWLIST"] = allow.joined(separator: ",")
         }
+
+        // App-supervised self-exit ("death pipe"). Hand the daemon a pipe as its
+        // stdin and stamp a per-launch random token into the environment. We write
+        // that exact token through the pipe right after launch; the daemon arms its
+        // self-exit watcher ONLY after reading the matching token (a leaked env var
+        // alone cannot arm it — see openbird/capture/daemon.py SUPERVISOR_TOKEN_ENV).
+        // While this app lives we keep the write end open and never write again; when
+        // the app dies (quit/crash/SIGKILL) the OS closes it, the daemon's stdin hits
+        // EOF, and the daemon self-exits instead of orphaning under launchd.
+        let deathPipe = Pipe()
+        let supervisorWrite = deathPipe.fileHandleForWriting
+        // Mark the write end close-on-exec so the spawned child inherits ONLY the
+        // read end (its stdin). Otherwise a duplicate writer surviving exec would
+        // hold the pipe open forever and the EOF would never arrive.
+        _ = fcntl(supervisorWrite.fileDescriptor, F_SETFD, FD_CLOEXEC)
+        let token = UUID().uuidString
+        env["OPENBIRD_SUPERVISOR_TOKEN"] = token
+        process.standardInput = deathPipe
+
         process.environment = env
         // Discard helper stdout/stderr from the app: captured content must never
         // flow into the app's logs. The daemon persists to the local DB itself.
@@ -455,9 +496,17 @@ final class OpenBirdService: @unchecked Sendable {
         }
         do {
             try process.run()
+            // One-shot handshake: prove to the daemon that THIS pipe carries the
+            // app-supervisor token, then keep the write end open (held by the
+            // retained FileHandle below) and never write again.
+            if let handshake = (token + "\n").data(using: .utf8) {
+                try? supervisorWrite.write(contentsOf: handshake)
+            }
             captureProcess = process
+            captureSupervisorPipe = supervisorWrite
             return true
         } catch {
+            try? supervisorWrite.close()
             return false
         }
     }
@@ -477,6 +526,10 @@ final class OpenBirdService: @unchecked Sendable {
             proc.terminate()
         }
         captureProcess = nil
+        // Close our death-pipe write end. We already terminated the child above,
+        // so this is a redundant EOF backstop; closing it also releases the fd.
+        try? captureSupervisorPipe?.close()
+        captureSupervisorPipe = nil
     }
 
     /// Rebuild the on-disk vector index under the current embedding model via

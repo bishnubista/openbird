@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import select
 import shutil
 import subprocess
 import threading
@@ -135,6 +136,32 @@ _DEFAULT_SESSION_GAP = 300.0
 _DEFAULT_MAX_CONSECUTIVE_FAILURES = 5  # circuit breaker: stop after this many
 _BACKOFF_BASE = 1.0  # first retry delay (seconds), doubled each consecutive fail
 _BACKOFF_MAX = 60.0  # cap on the exponential backoff delay
+
+# App-supervised self-exit (orphan cleanup).
+#
+# An app-launched ``capture --loop`` daemon must self-exit when its supervising
+# app dies non-gracefully (the child is then reparented to launchd/PID 1 and
+# would otherwise run forever). We deliberately do NOT key this off ``getppid()
+# == 1``: a user who backgrounds the daemon by hand (``capture --loop &``,
+# ``nohup``) is ALSO reparented to PID 1 and must be left running untouched.
+#
+# Instead, the app stamps a per-launch random token into this env var AND writes
+# that exact token through an inherited "death pipe" (the child's stdin). The
+# daemon arms a stop-on-EOF watcher ONLY after it reads that exact token off
+# stdin; when the app dies the pipe's write end closes and the daemon observes
+# EOF and stops cleanly. A leaked env var alone cannot arm the watcher (the
+# secret token must also arrive on stdin), so manually-started daemons — which
+# never receive the token — keep today's behavior exactly. Every non-matching
+# path (wrong/absent token, premature EOF, read error) fails OPEN: we prefer a
+# missed cleanup over ever stopping the wrong daemon.
+SUPERVISOR_TOKEN_ENV = "OPENBIRD_SUPERVISOR_TOKEN"
+# Cap the handshake line read so a leaked env on an unrelated, chatty stdin
+# cannot make us buffer unbounded data before deciding it is not our token.
+_SUPERVISOR_TOKEN_MAX = 256
+# How long the supervisor watcher blocks in select before re-checking the stop
+# event. Short enough that a normal shutdown joins the watcher promptly; long
+# enough that it is not a busy-spin while idling for the app to die.
+_SUPERVISOR_SELECT_TIMEOUT = 0.2
 
 
 class IngestSink(Protocol):
@@ -730,6 +757,78 @@ class CaptureDaemon:
                 raise HelperExitError(f"capture helper exited with code {rc}")
         return stats
 
+    @staticmethod
+    def _watch_supervisor(token: str, fd: int, stop: "threading.Event") -> None:
+        """Watch an app-owned "death pipe" and request a clean stop on EOF.
+
+        Runs in a background daemon thread, blocking in the kernel on
+        :func:`os.read` (no busy-spin). The contract with the supervising app
+        (see :data:`SUPERVISOR_TOKEN_ENV`):
+
+          1. The app writes ``token + "\\n"`` through the pipe right after launch.
+             We arm ONLY after reading exactly that token off ``fd`` — a leaked
+             env var on an unrelated stdin will not carry the secret token, so
+             this fails open (returns without ever stopping the daemon).
+          2. Once armed, we wait until EOF. The app never writes again; it holds
+             the write end open for its lifetime, so EOF means the app process is
+             gone (graceful exit, crash, or SIGKILL all close the fd). We then set
+             ``stop`` for a clean shutdown.
+
+        Every other path — wrong/short token, EOF before the token arrives, an
+        over-long first line, or any OSError — returns WITHOUT setting ``stop``
+        (fail-open). We would rather miss a cleanup than stop the wrong daemon.
+
+        Stoppability: every read waits via :func:`select.select` with a short
+        timeout, re-checking ``stop`` between waits, so a normal shutdown
+        (``stop`` set by SIGINT / ``max_cycles`` / circuit breaker) makes this
+        thread return promptly even though the pipe never EOFs — it does not have
+        to block until the app dies. The thread is a daemon thread regardless.
+
+        ``fd`` is the daemon's stdin (FD 0) in production; tests inject a pipe
+        read end. The daemon never otherwise reads stdin, so FD 0 is reserved as
+        this liveness channel when armed.
+        """
+        expected = token.encode("utf-8", "replace")
+
+        def _read1() -> "bytes | None":
+            # Return one byte, b"" on EOF, or None when ``stop`` was requested
+            # before any byte arrived (lets the caller exit without blocking).
+            while not stop.is_set():
+                ready, _, _ = select.select([fd], [], [], _SUPERVISOR_SELECT_TIMEOUT)
+                if ready:
+                    return os.read(fd, 1)
+            return None
+
+        try:
+            line = bytearray()
+            while True:
+                chunk = _read1()
+                if chunk is None:
+                    return  # stop requested -> exit promptly, no spurious stop
+                if not chunk:
+                    return  # EOF before a full token line -> fail open, no stop
+                if chunk == b"\n":
+                    break
+                line += chunk
+                if len(line) > _SUPERVISOR_TOKEN_MAX:
+                    return  # over-long line: not our short token -> fail open
+            if bytes(line) != expected:
+                return  # not our token (e.g. leaked env on unrelated pipe)
+            # Armed: the supervising app proved itself. Now wait for the pipe to
+            # close (app gone) and request a clean stop.
+            while True:
+                chunk = _read1()
+                if chunk is None:
+                    return  # stop already requested elsewhere -> nothing to do
+                if not chunk:
+                    break  # EOF -> supervising app gone
+        except OSError:
+            return  # read error: fail open, never a spurious stop
+        if not stop.is_set():
+            # Privacy-safe: reason code only, never captured content/window/URL.
+            logger.info("capture supervisor: supervising app gone, exiting")
+            stop.set()
+
     def run_forever(
         self,
         *,
@@ -737,6 +836,7 @@ class CaptureDaemon:
         stop_event: "threading.Event | None" = None,
         max_consecutive_failures: int = _DEFAULT_MAX_CONSECUTIVE_FAILURES,
         max_cycles: int | None = None,
+        _supervisor_fd: int = 0,
     ) -> CaptureStats:
         """Supervise the one-shot helper, re-spawning it until stopped.
 
@@ -755,11 +855,20 @@ class CaptureDaemon:
           * :class:`HelperUnavailableError` is a *permanent* config error (no
             signed bundle) and is re-raised immediately, not retried.
 
+        App-supervised self-exit:
+          * When the app spawns this daemon it sets :data:`SUPERVISOR_TOKEN_ENV`
+            and writes the matching token through the inherited death pipe. We
+            then run :meth:`_watch_supervisor`, which sets ``stop`` when the app
+            process disappears (the pipe EOFs). Manually-started daemons have no
+            token and are unaffected. See :data:`SUPERVISOR_TOKEN_ENV`.
+
         Args:
             poll_interval: Seconds to idle between successful cycles.
             stop_event: Set to request a clean stop; created if omitted.
             max_consecutive_failures: Circuit-breaker threshold.
             max_cycles: Stop after this many cycles (deterministic for tests).
+            _supervisor_fd: Death-pipe fd to watch for the supervisor handshake
+                (defaults to stdin, FD 0). Injected by tests only.
 
         Returns:
             Aggregate :class:`CaptureStats` across all cycles.
@@ -768,46 +877,81 @@ class CaptureDaemon:
         total = CaptureStats()
         failures = 0
         cycles = 0
+        # Arm the app-supervised self-exit watcher only when the app handed us a
+        # token (env var). Manual daemons (no token) never start a watcher and so
+        # keep today's behavior exactly. The watcher is a daemon thread blocked in
+        # the kernel on os.read, so it never busy-spins and never blocks process
+        # exit; we still best-effort join it after the loop.
+        supervisor_thread: threading.Thread | None = None
+        supervisor_token = os.environ.get(SUPERVISOR_TOKEN_ENV)
+        if supervisor_token:
+            supervisor_thread = threading.Thread(
+                target=self._watch_supervisor,
+                args=(supervisor_token, _supervisor_fd, stop),
+                name="openbird-supervisor-watch",
+                daemon=True,
+            )
+            supervisor_thread.start()
         logger.info("capture supervisor: starting (poll_interval=%.1fs)", poll_interval)
-        while not stop.is_set():
-            try:
-                total = total._add(self.run(stop_event=stop))
-            except HelperUnavailableError:
-                # Missing signed bundle is permanent, not transient: don't retry.
-                raise
-            except Exception as exc:  # noqa: BLE001 - one bad cycle must not kill the loop
-                failures += 1
-                self.error_count += 1
-                # Metadata only: class + consecutive count, never the message.
-                logger.warning(
-                    "capture cycle failed: error_class=%s consecutive=%d",
-                    type(exc).__name__,
-                    failures,
-                )
-                if failures >= max_consecutive_failures:
-                    logger.error(
-                        "capture supervisor: circuit breaker tripped after %d "
-                        "consecutive failures; stopping",
+        try:
+            while not stop.is_set():
+                try:
+                    total = total._add(self.run(stop_event=stop))
+                except HelperUnavailableError:
+                    # Missing signed bundle is permanent, not transient: don't retry.
+                    raise
+                except Exception as exc:  # noqa: BLE001 - one bad cycle must not kill the loop
+                    failures += 1
+                    self.error_count += 1
+                    # Metadata only: class + consecutive count, never the message.
+                    logger.warning(
+                        "capture cycle failed: error_class=%s consecutive=%d",
+                        type(exc).__name__,
                         failures,
                     )
-                    # Surface sustained failure to the caller (CLI -> nonzero exit)
-                    # rather than returning as if the session ended normally.
-                    raise CaptureSupervisorError(
-                        f"capture helper failed {failures} consecutive times"
-                    )
-                delay = min(_BACKOFF_MAX, _BACKOFF_BASE * (2 ** (failures - 1)))
-                if stop.wait(delay):
+                    if failures >= max_consecutive_failures:
+                        logger.error(
+                            "capture supervisor: circuit breaker tripped after %d "
+                            "consecutive failures; stopping",
+                            failures,
+                        )
+                        # Surface sustained failure to the caller (CLI -> nonzero
+                        # exit) rather than returning as if the session ended OK.
+                        raise CaptureSupervisorError(
+                            f"capture helper failed {failures} consecutive times"
+                        )
+                    delay = min(_BACKOFF_MAX, _BACKOFF_BASE * (2 ** (failures - 1)))
+                    if stop.wait(delay):
+                        break
+                    continue
+                failures = 0
+                cycles += 1
+                if max_cycles is not None and cycles >= max_cycles:
                     break
-                continue
-            failures = 0
-            cycles += 1
-            if max_cycles is not None and cycles >= max_cycles:
-                break
-            # Interruptible idle between cycles (returns True if stop was set).
-            if stop.wait(poll_interval):
-                break
+                # Interruptible idle between cycles (returns True if stop was set).
+                if stop.wait(poll_interval):
+                    break
+        finally:
+            # On EVERY exit path (clean stop, max_cycles, circuit-breaker raise,
+            # HelperUnavailable raise): set stop so an armed watcher abandons its
+            # select/read wait, then best-effort join it. The watcher is a daemon
+            # thread, so this never blocks process exit regardless.
+            stop.set()
+            self._join_supervisor(supervisor_thread)
         logger.info("capture supervisor: stopped (cycles=%d)", cycles)
         return total
+
+    @staticmethod
+    def _join_supervisor(thread: "threading.Thread | None") -> None:
+        """Best-effort join of the supervisor-watch thread.
+
+        The thread may still be blocked in :func:`os.read` on the death pipe (no
+        EOF yet — e.g. a normal SIGINT/``max_cycles`` stop). It is a daemon
+        thread, so we never hang process exit on it; we just join briefly so a
+        long-lived embedding process does not accumulate live threads.
+        """
+        if thread is not None:
+            thread.join(timeout=1.0)
 
     @staticmethod
     def _shutdown(proc: subprocess.Popen[str]) -> None:
@@ -839,4 +983,5 @@ __all__ = [
     "DEFAULT_HELPER_CMD",
     "HELPER_PATH_ENV",
     "DEFAULT_SIGNED_HELPER_PATH",
+    "SUPERVISOR_TOKEN_ENV",
 ]
