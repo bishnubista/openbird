@@ -63,28 +63,39 @@ struct AppSidebar: View {
     // MARK: Footer
 
     private var footer: some View {
-        HStack(alignment: .top, spacing: OB.Space.s) {
-            FooterPulseDot(active: appModel.captureRunning && !appModel.capturePaused)
-                .padding(.top, 3)
-            Text(footerText)
+        // Two lines (handoff sidebar footer): a bold status word with the pulsing dot on
+        // top, then the dimmed detail line below — not one run-on caption.
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: OB.Space.sm) {
+                FooterPulseDot(active: appModel.captureRunning && !appModel.capturePaused)
+                Text(footerStatus)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(OB.textPrimary(scheme))
+            }
+            Text(footerDetail)
                 .font(.system(size: 11))
-                .foregroundStyle(OB.textSecondary(scheme))
+                .foregroundStyle(OB.textTertiary(scheme))
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(OB.Space.l)
+        .padding(.horizontal, OB.Space.ml)
+        .padding(.vertical, OB.Space.m)
         .overlay(alignment: .top) {
             Rectangle().fill(OB.separator(scheme)).frame(height: 0.5)
         }
     }
 
-    /// Real footer status: capture state, allowlist size, model route, and the
-    /// actual at-rest encryption state. Privacy words are derived from state, not
-    /// hardcoded, so the footer never claims local-only behavior for a remote route.
-    private var footerText: String {
-        let state = appModel.capturePaused
+    /// The bold status word: the live capture state (handoff "Capturing").
+    private var footerStatus: String {
+        appModel.capturePaused
             ? "Paused"
             : (appModel.captureRunning ? "Capturing" : "Idle")
+    }
+
+    /// Real footer detail line: allowlist size, model route, and the actual at-rest
+    /// encryption state. Words are derived from state, not hardcoded, so the footer never
+    /// claims local-only behavior for a remote route.
+    private var footerDetail: String {
         let n = appModel.allowlist.count
         let apps = "\(n) app\(n == 1 ? "" : "s") allowed"
         let encryption: String
@@ -93,7 +104,7 @@ struct AppSidebar: View {
         case .attention: encryption = "encryption off"
         default: encryption = "encryption unknown"
         }
-        return "\(state) · \(apps) · \(appModel.modelRouteFooterLabel) · \(encryption)"
+        return "\(apps) · \(appModel.modelRouteFooterLabel) · \(encryption)"
     }
 
     private var sidebarFill: Color {
@@ -154,17 +165,19 @@ private struct FooterPulseDot: View {
 
     var body: some View {
         Circle()
+            // Red while capturing (handoff #ff453a); a neutral dot otherwise.
             .fill(active ? OB.capturingDot : Color.secondary)
             .frame(width: 7, height: 7)
-            .scaleEffect(pulsing ? 1.0 : 0.7)
-            .opacity(pulsing ? 1.0 : 0.6)
+            // handoff `obPulse`: opacity 1→.35, scale 1→.85 over 1.7s, ease-in-out.
+            .scaleEffect(pulsing ? 0.85 : 1.0)
+            .opacity(pulsing ? 0.35 : 1.0)
             .onAppear { apply() }
             .onChange(of: active) { _ in apply() }
     }
 
     private func apply() {
         if active {
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+            withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
                 pulsing = true
             }
         } else {

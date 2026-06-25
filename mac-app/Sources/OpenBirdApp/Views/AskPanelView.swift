@@ -19,12 +19,6 @@ struct AskPanelView: View {
     @State private var draft = ""
     @FocusState private var inputFocused: Bool
 
-    private let suggestions = [
-        "Summarize the Memory sync",
-        "What's left on OB-142",
-        "Draft my standup",
-    ]
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             inputRow
@@ -202,7 +196,7 @@ struct AskPanelView: View {
     private var suggestionRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: OB.Space.sm) {
-                ForEach(suggestions, id: \.self) { suggestion in
+                ForEach(appModel.askSuggestions, id: \.self) { suggestion in
                     Button {
                         draft = suggestion
                         submit()

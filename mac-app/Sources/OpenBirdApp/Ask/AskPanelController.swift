@@ -14,12 +14,11 @@ import SwiftUI
 /// Both are AppKit-owned (no SwiftUI `Window` scene), so they open reliably even when no
 /// scene is mounted — the macOS-13-safe way to open the rich surface from the detached
 /// hotkey (Apple's `openWindow` is view-hierarchy-scoped). Created once in
-/// `OpenBirdApp.init()` with the shared `askModel`/`timelineModel`.
+/// `OpenBirdApp.init()` with the shared `askModel`.
 @MainActor
 final class AskPanelController: NSObject, ObservableObject {
     private let appModel: AppModel
     private let askModel: AskPanelModel
-    private let timelineModel: TimelineModel
 
     private var compactPanel: AskPanel?
     private var expandedWindow: AskExpandedWindow?
@@ -30,7 +29,9 @@ final class AskPanelController: NSObject, ObservableObject {
     private var anchorTopY: CGFloat?
 
     private let compactWidth: CGFloat = 620
-    private let expandedWidth: CGFloat = 960
+    // Single-column Ask (no side rails) — the expanded overlay no longer needs the wide
+    // chat+rails footprint, so it's snug around the readable chat column.
+    private let expandedWidth: CGFloat = 720
 
     /// Opens the SwiftUI main window (`Window(id: "main")`). Wired from the scene's
     /// `@Environment(\.openWindow)` because that environment value is only reachable
@@ -39,10 +40,9 @@ final class AskPanelController: NSObject, ObservableObject {
     /// app alive with no window). Falls back to fronting an existing window when unset.
     var openMainWindow: (() -> Void)?
 
-    init(model: AppModel, service: OpenBirdService, askModel: AskPanelModel, timelineModel: TimelineModel) {
+    init(model: AppModel, service: OpenBirdService, askModel: AskPanelModel) {
         self.appModel = model
         self.askModel = askModel
-        self.timelineModel = timelineModel
         super.init()
     }
 
@@ -241,7 +241,6 @@ final class AskPanelController: NSObject, ObservableObject {
         let root = ExpandedAskView(
             askModel: askModel,
             appModel: appModel,
-            timelineModel: timelineModel,
             onCollapse: { [weak self] in self?.collapse() },
             onClose: { [weak self] in self?.hide() },
             onSelectCitation: { [weak self] citation in self?.navigateToCitation(citation) }

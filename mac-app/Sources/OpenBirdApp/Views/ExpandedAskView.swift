@@ -8,7 +8,6 @@ import SwiftUI
 struct ExpandedAskView: View {
     @ObservedObject var askModel: AskPanelModel
     @ObservedObject var appModel: AppModel
-    @ObservedObject var timelineModel: TimelineModel
     var onCollapse: () -> Void
     var onClose: () -> Void
     /// Invoked when a citation is clicked — the controller dismisses this window and
@@ -19,7 +18,6 @@ struct ExpandedAskView: View {
         AskContentView(
             askModel: askModel,
             appModel: appModel,
-            timelineModel: timelineModel,
             onCollapse: onCollapse,
             onClose: onClose,
             onSelectCitation: onSelectCitation
