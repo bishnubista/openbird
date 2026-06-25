@@ -1892,3 +1892,107 @@ def test_nan_timestamp_frame_stores_finite_ts(allow_settings):
     stats = daemon.run_lines([line])
     assert stats.ingested == 1
     assert math.isfinite(store.calls[0]["ts"])
+
+
+# ---------------------------------------------------------------------------
+# capture CLI exit-code policy — a fully-failed session must not exit 0
+# ---------------------------------------------------------------------------
+
+
+def _invoke_capture(monkeypatch, tmp_path, *, loop: bool, stats: CaptureStats):
+    """Drive the capture CLI with the daemon stubbed to return ``stats``.
+
+    Stubs CaptureDaemon so its ``run`` (--once) and ``run_forever`` (--loop)
+    return a canned :class:`CaptureStats` without spawning a helper, and routes
+    the store/provider through fakes. Returns the CliRunner result.
+    """
+    from typer.testing import CliRunner
+
+    import openbird.capture.cli as capture_cli
+    import openbird.capture.daemon as daemon_mod
+    import openbird.cli as cli
+
+    settings = Settings(data_dir=tmp_path, allowlist=["com.apple.mail"])
+
+    class StubDaemon:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def run(self, *args, **kwargs) -> CaptureStats:
+            return stats
+
+        def run_forever(self, *args, **kwargs) -> CaptureStats:
+            return stats
+
+    class StubStore:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(capture_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(daemon_mod, "CaptureDaemon", StubDaemon)
+    monkeypatch.setattr(cli, "_provider", lambda: None)
+    # Accept **kwargs so the stub tolerates extra _store params the daemon may
+    # pass (e.g. reraise_cohort_mismatch=True from the --loop path) without a
+    # TypeError — keeps this stub forward-compatible across PRs.
+    monkeypatch.setattr(
+        cli, "_store", lambda *, provider=None, settings=None, **kwargs: StubStore()
+    )
+
+    argv = ["capture", "--helper", "fake", "--allow-unsigned"]
+    argv.append("--loop" if loop else "--once")
+    return CliRunner().invoke(cli.app, argv)
+
+
+def test_capture_once_failed_session_exits_nonzero(monkeypatch, tmp_path):
+    import openbird.capture.cli as capture_cli
+
+    # received events but ingested none while hitting errors == totally failing.
+    stats = CaptureStats(received=3, ingested=0, coalesced=0, rejected=0, errors=3)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=False, stats=stats)
+    assert res.exit_code == capture_cli._CAPTURE_NO_PROGRESS_EXIT, res.output
+    assert "received=3" in res.output
+    assert "ingested=0" in res.output
+
+
+def test_capture_loop_failed_session_exits_nonzero(monkeypatch, tmp_path):
+    import openbird.capture.cli as capture_cli
+
+    # This is the reported bug: a --loop session that ingests nothing while
+    # erroring used to print "complete" and exit 0.
+    stats = CaptureStats(received=3, ingested=0, coalesced=0, rejected=0, errors=3)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=True, stats=stats)
+    assert res.exit_code == capture_cli._CAPTURE_NO_PROGRESS_EXIT, res.output
+    assert "session complete" in res.output.lower()
+
+
+def test_no_progress_exit_code_is_distinct_from_reserved_codes():
+    import openbird.capture.cli as capture_cli
+
+    # 3/4 are HelperUnavailable/Supervisor; 5 is reserved for the reindex-required
+    # signal the mac app maps to its one-click Reindex affordance. A no-progress
+    # failure must NOT reuse 5, or the app would mis-route a broken session as
+    # "needs reindex". Pin the value so a future edit can't silently re-collide.
+    assert capture_cli._CAPTURE_NO_PROGRESS_EXIT == 6
+    assert capture_cli._CAPTURE_NO_PROGRESS_EXIT not in {3, 4, 5}
+
+
+def test_capture_normal_run_exits_zero(monkeypatch, tmp_path):
+    stats = CaptureStats(received=5, ingested=4, coalesced=0, rejected=1, errors=0)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=False, stats=stats)
+    assert res.exit_code == 0, res.output
+    assert "ingested=4" in res.output
+
+
+def test_capture_loop_clean_stop_with_some_errors_exits_zero(monkeypatch, tmp_path):
+    # Long --loop that ingested fine then got Ctrl-C; a few transient errors
+    # occurred. Because ingested > 0 this is a clean stop, NOT a failure.
+    stats = CaptureStats(received=10, ingested=8, coalesced=1, rejected=0, errors=2)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=True, stats=stats)
+    assert res.exit_code == 0, res.output
+
+
+def test_capture_quiet_session_zero_events_exits_zero(monkeypatch, tmp_path):
+    # Nothing received (received == 0) — nothing to do, not a failure.
+    stats = CaptureStats(received=0, ingested=0, coalesced=0, rejected=0, errors=0)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=True, stats=stats)
+    assert res.exit_code == 0, res.output
