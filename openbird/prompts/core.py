@@ -23,7 +23,8 @@ that is the (later) ``openbird prompts test`` harness. See ``prompts-plan.md``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 # Sentinel left in place of a stripped structural marker, so a redaction is
 # observable rather than silent. Kept identical to RAG's historical value so
@@ -41,26 +42,38 @@ class FenceSpec:
     ``[source_id: `` header) that must never survive verbatim from captured text
     even though they do not themselves bound the fence.
 
-    ``neutralize`` is the ONE sanitizer: every feature strips captured text
-    through it instead of hand-rolling its own ``str.replace`` chain, which is
-    what keeps the sanitizer in lockstep with the tokens the prompt relies on.
+    ``neutralize`` is the ONE sanitizer entrypoint: every feature strips captured
+    text through it (never a raw helper directly), which keeps the sanitizer in
+    lockstep with the tokens the prompt relies on. By default it does a
+    replace-until-stable pass over ``forbidden``. A feature whose escape semantics
+    differ (e.g. routines defang ``<observations>`` to single-angle-quote
+    look-alikes via regex; meetings zero-width-escape ``</transcript>``) supplies a
+    ``neutralizer``
+    callable — the RAW, body-only sanitizer for that fence. ``neutralize`` then
+    delegates to it. The callable MUST NOT call back into ``neutralize`` (it is the
+    leaf), so there is no ``neutralize -> neutralizer -> neutralize`` recursion.
     """
 
     open_token: str
     close_token: str
     extra_forbidden: tuple[str, ...] = ()
     redaction: str = _REDACTION
+    # Optional feature-specific raw sanitizer. None => the default replace loop.
+    # compare=False so two specs with the same tokens but distinct callables stay
+    # hashable/usable as frozen dataclasses without comparing function identities.
+    neutralizer: Callable[[str], str] | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
-        # Guard the two configs that make `neutralize` never converge (it would
-        # then hang every sanitization, repo-wide, since this is the one source
-        # of truth): an empty marker — `"x".replace("", r)` grows the string on
-        # every pass — and a redaction that itself contains a forbidden marker,
-        # which reintroduces that marker after each replacement.
+        # A non-empty marker is required regardless of neutralizer: the tokens
+        # still feed required_tokens()/the prompt. The redaction/convergence guard
+        # only governs the DEFAULT replace loop (a custom neutralizer owns its own
+        # termination), so it is skipped when a neutralizer is supplied.
         markers = (self.open_token, self.close_token, *self.extra_forbidden)
         if any(not marker for marker in markers):
             raise ValueError("FenceSpec markers must be non-empty")
-        if any(marker in self.redaction for marker in markers):
+        if self.neutralizer is None and any(
+            marker in self.redaction for marker in markers
+        ):
             raise ValueError(
                 "FenceSpec redaction must not contain a forbidden marker"
             )
@@ -89,7 +102,12 @@ class FenceSpec:
 
         Applied repeatedly until stable so an interleaved payload cannot re-form
         a marker after a single pass (e.g. ``<<<X<<<X>>>>>>`` style overlaps).
+
+        When a ``neutralizer`` callable is configured, delegate to it (the raw,
+        body-only sanitizer for this fence) instead of the default loop.
         """
+        if self.neutralizer is not None:
+            return self.neutralizer(text)
         if not text:
             return text
         cleaned = text

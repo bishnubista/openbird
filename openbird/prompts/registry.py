@@ -15,7 +15,12 @@ _REGISTRY: dict[str, PromptSpec] = {}
 # Feature modules whose import populates the registry. Imported lazily by
 # ensure_loaded() to avoid an import cycle at module-load time. PR3 adds the
 # routine/meeting/signal modules here.
-_FEATURE_MODULES: tuple[str, ...] = ("openbird.chat.rag",)
+_FEATURE_MODULES: tuple[str, ...] = (
+    "openbird.chat.rag",
+    "openbird.routines.templates",
+    "openbird.meetings.transcribe",
+    "openbird.signals.classifier",
+)
 _loaded = False
 
 
