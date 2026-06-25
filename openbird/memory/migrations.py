@@ -77,12 +77,115 @@ def _set_user_version(conn: sqlite3.Connection, version: int) -> None:
     conn.execute(f"PRAGMA user_version = {int(version)}")
 
 
+# The on-disk shape that schema version 1 REQUIRES, expressed as
+# table -> set of required columns. Version 1 is a frozen, released schema (it is
+# never edited — future shape changes append a migration and bump SCHEMA_VERSION),
+# so this contract can be pinned here. It is deliberately a *required-subset*
+# check, not an exact-equality check: additive, migration-free extras (e.g. a new
+# CREATE INDEX IF NOT EXISTS, or a column a forward migration will add) must not
+# make a legitimate v1 DB look invalid. We only assert that every table/column the
+# v1 query layer depends on is actually present (this is the `ts` column the
+# "no such column: ts" repro hit). Keep in sync with schema.sql if v1 ever needed
+# correcting — but it should not, by the freeze rule above.
+_V1_REQUIRED_SHAPE: dict[str, frozenset[str]] = {
+    "content_blobs": frozenset({"content_hash", "text"}),
+    "observations": frozenset(
+        {"id", "content_hash", "ts", "app", "window", "url", "session_id", "source"}
+    ),
+    "chunks": frozenset({"chunk_hash", "text", "rowid_int"}),
+    "blob_chunks": frozenset(
+        {"content_hash", "chunk_hash", "span_start", "span_end"}
+    ),
+    "fts_chunks": frozenset({"text"}),
+    "embedding_meta": frozenset({"key", "value"}),
+}
+
+
 def _db_has_existing_tables(conn: sqlite3.Connection) -> bool:
     """True if the DB already holds OpenBird's core tables (a legacy, pre-version DB)."""
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'observations' LIMIT 1"
     ).fetchone()
     return row is not None
+
+
+def _column_name(row: object) -> object:
+    """Pull the column name from a ``PRAGMA table_info`` row (dict or tuple).
+
+    table_info columns are: cid, name, type, notnull, dflt_value, pk. We want
+    ``name``, robust to either row_factory (see :func:`_scalar`).
+    """
+    if isinstance(row, dict):
+        return row["name"]
+    return row[1]
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the set of column names for ``table`` (empty if it does not exist).
+
+    Uses ``PRAGMA table_info`` — the canonical SQLite introspection for columns.
+    PRAGMA does not accept a bound parameter for the table name, so this is only
+    ever called with the hardcoded names from :data:`_V1_REQUIRED_SHAPE` (no
+    caller-/data-controlled value reaches the SQL), avoiding any injection risk.
+    """
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(_column_name(row)) for row in rows}
+
+
+def _v1_shape_mismatch(conn: sqlite3.Connection) -> str | None:
+    """Return why a non-empty DB is NOT the v1 shape, or ``None`` if it matches.
+
+    Validates that every table version 1 requires exists AND carries each of its
+    required columns. Returns the first concrete mismatch (a missing table or a
+    missing column) so the caller can raise an actionable error instead of
+    stamping a partial / pre-v1 DB to version 1 and then failing cryptically later
+    at query time (e.g. ``no such column: ts``).
+    """
+    for table, required_columns in _V1_REQUIRED_SHAPE.items():
+        present = _table_columns(conn, table)
+        if not present:
+            return f"required table {table!r} is missing"
+        missing = required_columns - present
+        if missing:
+            cols = ", ".join(sorted(missing))
+            return f"table {table!r} is missing required column(s): {cols}"
+    return None
+
+
+def _raise_partial_shape(mismatch: str) -> None:
+    """Raise the canonical "tables present but not the v1 shape" error."""
+    raise RuntimeError(
+        "Database has tables but does not match the OpenBird schema "
+        f"version 1 shape ({mismatch}). It looks like a partial, "
+        "pre-v1, or unsupported database. Refusing to use it to avoid "
+        "failing later at query time. Start from a fresh database, or "
+        "restore a known-good backup."
+    )
+
+
+def preflight_legacy_shape_guard(conn: sqlite3.Connection) -> None:
+    """Reject a partial/foreign legacy DB BEFORE the baseline schema is applied.
+
+    This MUST run before ``schema.sql`` is (re)applied. ``schema.sql`` uses
+    ``CREATE TABLE IF NOT EXISTS`` (which silently skips an already-present but
+    wrong-shaped table) and then ``CREATE INDEX ... ON observations(ts)`` — so an
+    existing ``observations`` table missing the ``ts`` column makes the *index*
+    creation raise a raw ``OperationalError: no such column: ts`` before
+    :func:`ensure_schema_version` ever runs. Catching the mismatch here turns that
+    cryptic, mid-``executescript`` failure into the clear, actionable migration
+    error.
+
+    Only a DB that is unstamped (``user_version == 0``) AND already has the core
+    tables is inspected: a fresh/empty DB (no tables yet) and an already-versioned
+    DB are both left for :func:`ensure_schema_version` to handle.
+    """
+    if _user_version(conn) != 0:
+        return
+    if not _db_has_existing_tables(conn):
+        return
+    mismatch = _v1_shape_mismatch(conn)
+    if mismatch is not None:
+        _raise_partial_shape(mismatch)
 
 
 def ensure_schema_version(conn: sqlite3.Connection) -> int:
@@ -92,8 +195,11 @@ def ensure_schema_version(conn: sqlite3.Connection) -> int:
     a fresh DB already has the version-1 tables present.
 
     Behavior:
-      * version 0, tables present  -> legacy pre-versioning DB whose shape equals
-        version 1; stamp to 1 without running migrations.
+      * version 0, tables present  -> legacy pre-versioning DB. Only adopted as
+        version 1 if its on-disk shape actually MATCHES version 1 (required tables
+        AND columns). If the tables exist but the shape does not match (a partial,
+        pre-v1, or foreign DB) this RAISES rather than stamping it as 1 and failing
+        cryptically later at query time.
       * version 0, no tables       -> fresh DB; stamp directly to SCHEMA_VERSION.
       * 0 < version < SCHEMA_VERSION -> run each pending migration (version >
         current) in ascending order, each in its own transaction + version stamp.
@@ -118,9 +224,27 @@ def ensure_schema_version(conn: sqlite3.Connection) -> int:
 
     if current == 0:
         # Distinguish a legacy DB (created before versioning, but already at the
-        # v1 shape) from a brand-new empty DB. Either way the on-disk shape is
-        # version 1, so we stamp and then continue the ladder from there.
-        baseline = 1 if _db_has_existing_tables(conn) else SCHEMA_VERSION
+        # v1 shape) from a brand-new empty DB.
+        #
+        #   * No tables  -> brand-new DB; stamp directly to SCHEMA_VERSION.
+        #   * Tables that match the v1 shape -> genuine legacy v1 DB; stamp to 1
+        #     and let the ladder upgrade it from there.
+        #   * Tables that do NOT match the v1 shape -> a partial / pre-v1 /
+        #     foreign DB. A bare presence check used to treat this as v1 and
+        #     stamp+continue, which "succeeded" here but then failed cryptically
+        #     at query time (e.g. ``no such column: ts``). Refuse loudly and
+        #     early instead — consistent with the newer-than-supported guard
+        #     above — rather than corrupting the version contract.
+        if _db_has_existing_tables(conn):
+            mismatch = _v1_shape_mismatch(conn)
+            if mismatch is not None:
+                # Defense in depth: normally preflight_legacy_shape_guard already
+                # caught this before schema.sql ran, but ensure_schema_version is
+                # also called directly (e.g. in tests) so it must stay self-safe.
+                _raise_partial_shape(mismatch)
+            baseline = 1
+        else:
+            baseline = SCHEMA_VERSION
         _stamp_in_txn(conn, baseline)
         current = baseline
         if current == SCHEMA_VERSION:
@@ -176,4 +300,5 @@ __all__ = [
     "MIGRATIONS",
     "SCHEMA_VERSION",
     "ensure_schema_version",
+    "preflight_legacy_shape_guard",
 ]
