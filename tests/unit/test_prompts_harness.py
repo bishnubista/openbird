@@ -63,6 +63,24 @@ def test_rag_payload_source_header_does_not_survive(tmp_path):
     assert report.deterministic_ok
 
 
+def test_refused_override_fails_instead_of_testing_default(tmp_path):
+    # A refused override (here: too-large) must FAIL, not silently test the
+    # bundled default and report PASS (CodeRabbit).
+    pd = tmp_path / "prompts"
+    pd.mkdir()
+    (pd / "rag.txt").write_bytes(b"x" * (64 * 1024 + 10))
+    settings = Settings(data_dir=tmp_path, prompts_dir=str(pd))
+    report = run_test("rag", settings=settings, use_llm=False)
+    assert not report.deterministic_ok
+    assert "refused" in report.detail
+
+
+def test_no_override_present_tests_default_and_passes(tmp_path):
+    # "No override at all" is a legitimate thing to test (source=default, ok=True).
+    report = run_test("rag", settings=_settings(tmp_path), use_llm=False)
+    assert report.deterministic_ok
+
+
 # -- the gate actually detects a hole -----------------------------------------
 
 
@@ -77,6 +95,26 @@ def test_deterministic_fails_when_neutralizer_is_a_noop(tmp_path, monkeypatch):
 
     report = run_test("meeting", settings=_settings(tmp_path), use_llm=False)
     assert not report.deterministic_ok
+
+
+def test_deterministic_fails_when_wrapper_fence_is_dropped(tmp_path, monkeypatch):
+    # A builder regression that drops the trusted fence wrapper entirely (but still
+    # inserts a token-free body in a stable slot) must NOT false-pass: the trusted
+    # open must be in the prefix and close in the suffix (Codex follow-up).
+    import openbird.prompts.harness as harness
+
+    def _no_fence_probe(key, system_prompt, payload):
+        from openbird.signals.classifier import _neutralize_capture_data_impl
+
+        return [
+            {"role": "system", "content": system_prompt},
+            # No <capture_data> wrapper at all — body sanitized but unfenced.
+            {"role": "user", "content": f"BODY:{_neutralize_capture_data_impl(payload)}:END"},
+        ]
+
+    monkeypatch.setattr(harness, "_build_probe", _no_fence_probe)
+    report = run_test("signal", settings=_settings(tmp_path), use_llm=False)
+    assert not report.deterministic_ok and not report.boundary_ok
 
 
 # -- model probe is advisory, never changes exit/deterministic ----------------
