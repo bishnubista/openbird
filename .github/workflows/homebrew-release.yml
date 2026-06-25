@@ -84,8 +84,13 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # --latest=false: this is the Homebrew *source* release, not the
+            # headline download. Without it, gh defaults to "automatic" and marks
+            # the newest release Latest, silently displacing the notarized
+            # beta-dmg-* release testers are meant to land on. Keep it explicit.
             gh release create "$TAG" \
               --verify-tag \
+              --latest=false \
               --title "OpenBird $TAG" \
               --notes "Source release for Homebrew."
           fi
