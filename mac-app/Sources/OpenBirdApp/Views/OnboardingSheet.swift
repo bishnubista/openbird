@@ -18,12 +18,16 @@ struct OnboardingSheet: View {
 
     private func start() {
         // Only start the capture daemon when there's something to capture — an empty
-        // allowlist would launch a no-op daemon (capture is allowlist-first). Either way
-        // we dismiss to the main window, which carries the full Setup tab + allowlist
-        // editor, so the setup path is never hidden behind a one-time sheet.
-        if !model.allowlist.isEmpty {
-            model.startCapture()
+        // allowlist would launch a no-op daemon (capture is allowlist-first). The initial
+        // `.task` refresh may still be in flight on a very fast click, so make sure the
+        // allowlist reflects real service state before deciding. Either way we dismiss to
+        // the Settings tab, which carries the full allowlist editor.
+        Task { @MainActor in
+            if model.lastRefresh == nil { await model.refresh() }
+            if !model.allowlist.isEmpty {
+                model.startCapture()
+            }
+            isPresented = false
         }
-        isPresented = false
     }
 }

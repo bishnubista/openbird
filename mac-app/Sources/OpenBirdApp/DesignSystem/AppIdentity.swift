@@ -12,7 +12,7 @@ import SwiftUI
 /// keeps the shared cache race-free (NSWorkspace is main-actor-friendly anyway).
 @MainActor
 enum AppIdentity {
-    struct Identity: Equatable {
+    struct Identity {
         let name: String
         let icon: NSImage?
         /// False when the app isn't installed (icon is nil; name derived from the id).

@@ -128,13 +128,16 @@ final class TodayModel: ObservableObject {
         briefingSourcesTotal = 0
         briefingGeneratedAt = nil
         if let result = await service.dailyBriefing(dayOffset: day) {
+            // A superseded generation must NOT write the cache. With the reload-on-open and
+            // refocus paths, two same-day loads can overlap; if an OLDER load finishes after
+            // a newer one, writing here would overwrite fresh data with stale, and the next
+            // cache-hit would then apply it. Drop the superseded result entirely.
+            guard generation == loadGeneration else { return }
             let now = Date()
-            briefingCache[key] = result       // cache regardless (keyed by absolute day)
+            briefingCache[key] = result
             briefingTimeCache[key] = now
-            if generation == loadGeneration {
-                apply(result)
-                briefingGeneratedAt = now
-            }
+            apply(result)
+            briefingGeneratedAt = now
         }
     }
 

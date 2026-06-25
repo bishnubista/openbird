@@ -178,7 +178,9 @@ struct SetupPermissionRow: View {
                 Text(subtitle)
                     .font(.system(size: 11.5))
                     .foregroundStyle(OB.textSecondary(scheme))
-                    .lineLimit(1)
+                    // The model-route subtitle is live status text that can be long —
+                    // let it wrap instead of truncating.
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: OB.Space.sm)
             status

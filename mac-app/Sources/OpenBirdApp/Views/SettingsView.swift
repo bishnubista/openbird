@@ -137,7 +137,9 @@ struct SettingsView: View {
         let n = model.allowlist.count
         let apps = "\(n) app\(n == 1 ? "" : "s") allowed"
         let enc = model.encryptionState == .ok ? "encrypted" : "plaintext"
-        return "\(apps) · \(enc) · running on \(model.modelRouteFooterLabel)"
+        // `modelRouteFooterLabel` already reads as a phrase ("on-device" / "remote model"),
+        // so don't prefix "running on" — that would render "running on on-device".
+        return "\(apps) · \(enc) · \(model.modelRouteFooterLabel)"
     }
 
     // MARK: Permissions & route
@@ -429,7 +431,12 @@ struct SettingsView: View {
     }
 
     private func addEntry() {
-        model.addToAllowlist(newBundleID)
+        // `.onSubmit` bypasses the Add button's disabled guard, so trim/guard here too —
+        // don't no-op-clear the field on an empty/whitespace submit. (`addToAllowlist`
+        // also guards, but keeping the intent explicit avoids a confusing field reset.)
+        let id = newBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty else { return }
+        model.addToAllowlist(id)
         newBundleID = ""
     }
 
