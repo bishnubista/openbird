@@ -125,10 +125,19 @@ struct SetupSheetView: View {
             SetupPermissionRow(
                 icon: "mic",
                 title: "System audio for meetings",
-                subtitle: "Transcribe calls locally · optional",
+                subtitle: "Capture shared audio for local transcription · optional",
                 state: model.screenRecordingState,
                 enableTitle: "Enable",
                 onEnable: { model.requestScreenRecording() }
+            )
+            SetupPermissionRow(
+                icon: "waveform",
+                title: "Meeting transcription",
+                subtitle: model.meetingTranscriptionSummary,
+                state: model.meetingTranscriptionState,
+                connectedLabel: "Ready",
+                enableTitle: nil,
+                onEnable: {}
             )
             SetupPermissionRow(
                 icon: "cpu",

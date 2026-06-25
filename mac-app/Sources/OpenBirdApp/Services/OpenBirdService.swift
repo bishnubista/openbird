@@ -4,6 +4,17 @@ import AVFoundation
 import CoreGraphics
 import Foundation
 
+/// Optional meeting speech-to-text backend readiness decoded from preflight.
+struct MeetingTranscriptionReadiness: Equatable {
+    let parakeetMLXAvailable: Bool
+    let fasterWhisperAvailable: Bool
+    let backendAvailable: Bool
+    let recommendedBackend: String
+    let recommendedExtra: String
+    let fallbackBackend: String
+    let fallbackExtra: String
+}
+
 /// A decoded, UI-friendly slice of `openbird preflight --json`.
 struct PreflightReport: Equatable {
     var ollamaReachable: Bool?           // nil = unknown / not probed
@@ -25,6 +36,7 @@ struct PreflightReport: Equatable {
     var helperPresent: Bool = false
     var runtimeOK: Bool = false
     var releaseOK: Bool = false
+    var meetingTranscription: MeetingTranscriptionReadiness?
     var error: String?
 
     func grant(_ capability: String) -> String { grants[capability] ?? "unknown" }
@@ -1150,6 +1162,18 @@ final class OpenBirdService: @unchecked Sendable {
             for cap in ["accessibility", "screen_recording", "microphone", "system_audio"] {
                 report.grants[cap] = macos[cap] as? String ?? "unknown"
             }
+        }
+        if let meetings = payload["meetings"] as? [String: Any],
+           let transcription = meetings["transcription"] as? [String: Any] {
+            report.meetingTranscription = MeetingTranscriptionReadiness(
+                parakeetMLXAvailable: transcription["parakeet_mlx_available"] as? Bool ?? false,
+                fasterWhisperAvailable: transcription["faster_whisper_available"] as? Bool ?? false,
+                backendAvailable: transcription["backend_available"] as? Bool ?? false,
+                recommendedBackend: transcription["recommended_backend"] as? String ?? "parakeet-mlx",
+                recommendedExtra: transcription["recommended_extra"] as? String ?? "meetings-mlx",
+                fallbackBackend: transcription["fallback_backend"] as? String ?? "faster-whisper",
+                fallbackExtra: transcription["fallback_extra"] as? String ?? "meetings"
+            )
         }
         return report
     }

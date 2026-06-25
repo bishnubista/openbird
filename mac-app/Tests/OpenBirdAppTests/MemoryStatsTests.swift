@@ -179,6 +179,45 @@ final class MemoryStatsTests: XCTestCase {
         ])
     }
 
+    func testParsePreflightDecodesMeetingTranscriptionReadiness() throws {
+        let report = OpenBirdService.parsePreflight("""
+        {
+          "runtime_ok": true,
+          "meetings": {
+            "transcription": {
+              "parakeet_mlx_available": true,
+              "faster_whisper_available": false,
+              "backend_available": true,
+              "recommended_backend": "parakeet-mlx",
+              "recommended_extra": "meetings-mlx",
+              "fallback_backend": "faster-whisper",
+              "fallback_extra": "meetings"
+            }
+          }
+        }
+        """)
+
+        let readiness = try XCTUnwrap(report.meetingTranscription)
+        XCTAssertTrue(readiness.parakeetMLXAvailable)
+        XCTAssertFalse(readiness.fasterWhisperAvailable)
+        XCTAssertTrue(readiness.backendAvailable)
+        XCTAssertEqual(readiness.recommendedBackend, "parakeet-mlx")
+        XCTAssertEqual(readiness.recommendedExtra, "meetings-mlx")
+        XCTAssertEqual(readiness.fallbackBackend, "faster-whisper")
+        XCTAssertEqual(readiness.fallbackExtra, "meetings")
+    }
+
+    func testParsePreflightLeavesMeetingTranscriptionUnknownWhenMissing() {
+        let report = OpenBirdService.parsePreflight("""
+        {
+          "runtime_ok": true,
+          "release_gate_ok": false
+        }
+        """)
+
+        XCTAssertNil(report.meetingTranscription)
+    }
+
     func testLocalRoutePrivacyCopyStaysRouteConditional() {
         let model = AppModel(service: OpenBirdService(), initialReport: localRuntimeOKReport())
 
@@ -200,6 +239,64 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertTrue(model.privacyTransmissionSummary.contains("not verified yet"))
         assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)
         assertNoUnknownLocalRouteClaim(model.privacyTransmissionSummary)
+    }
+
+    func testMeetingTranscriptionUnknownUntilPreflightReportsIt() {
+        let model = AppModel(service: OpenBirdService())
+
+        XCTAssertEqual(model.meetingTranscriptionState, .unknown)
+        XCTAssertEqual(
+            model.meetingTranscriptionSummary,
+            "Re-check setup to detect parakeet-mlx or faster-whisper."
+        )
+    }
+
+    func testMeetingTranscriptionPrefersParakeetWhenAvailable() {
+        var report = PreflightReport()
+        report.meetingTranscription = meetingReadiness(
+            parakeet: true,
+            whisper: true,
+            available: true
+        )
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.meetingTranscriptionState, .ok)
+        XCTAssertEqual(
+            model.meetingTranscriptionSummary,
+            "parakeet-mlx ready · Apple Silicon recommended"
+        )
+    }
+
+    func testMeetingTranscriptionReportsWhisperFallback() {
+        var report = PreflightReport()
+        report.meetingTranscription = meetingReadiness(
+            parakeet: false,
+            whisper: true,
+            available: true
+        )
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.meetingTranscriptionState, .ok)
+        XCTAssertEqual(
+            model.meetingTranscriptionSummary,
+            "faster-whisper ready · portable fallback"
+        )
+    }
+
+    func testMeetingTranscriptionMissingNamesCliEnvironmentInstall() {
+        var report = PreflightReport()
+        report.meetingTranscription = meetingReadiness(
+            parakeet: false,
+            whisper: false,
+            available: false
+        )
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.meetingTranscriptionState, .attention)
+        XCTAssertTrue(model.meetingTranscriptionSummary.contains("parakeet-mlx is recommended on Apple Silicon"))
+        XCTAssertTrue(model.meetingTranscriptionSummary.contains("faster-whisper is the portable fallback"))
+        XCTAssertTrue(model.meetingTranscriptionSummary.contains("openbird CLI environment"))
+        XCTAssertFalse(model.meetingTranscriptionSummary.contains("uv sync"))
     }
 
     func testPreflightErrorRouteStateIsCautious() {
@@ -462,6 +559,22 @@ final class MemoryStatsTests: XCTestCase {
         report.embedModel = "ollama/embeddinggemma"
         report.ollamaVersionOK = false
         return report
+    }
+
+    private func meetingReadiness(
+        parakeet: Bool,
+        whisper: Bool,
+        available: Bool
+    ) -> MeetingTranscriptionReadiness {
+        MeetingTranscriptionReadiness(
+            parakeetMLXAvailable: parakeet,
+            fasterWhisperAvailable: whisper,
+            backendAvailable: available,
+            recommendedBackend: "parakeet-mlx",
+            recommendedExtra: "meetings-mlx",
+            fallbackBackend: "faster-whisper",
+            fallbackExtra: "meetings"
+        )
     }
 
     private func remoteReport(

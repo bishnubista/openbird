@@ -180,6 +180,12 @@ struct SettingsView: View {
                     ? .affirm("Granted")
                     : .secondary("Enable") { model.requestMicrophone() }
             )
+            hairline
+            permissionRow(
+                icon: "waveform", title: "Meeting transcription", badge: .optional,
+                subtitle: model.meetingTranscriptionSummary,
+                trailing: meetingTranscriptionTrailing
+            )
         }
     }
 
@@ -193,6 +199,17 @@ struct SettingsView: View {
             return "Local Ollama · \(models)"
         }
         return model.localModelStatusSummary
+    }
+
+    private var meetingTranscriptionTrailing: RowTrailing {
+        switch model.meetingTranscriptionState {
+        case .ok:
+            return .affirm("Verified")
+        case .attention:
+            return .attention("Needs install")
+        case .unknown, .working:
+            return .empty
+        }
     }
 
     // MARK: Capture allowlist
