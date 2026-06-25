@@ -19,6 +19,21 @@ final class AppModelUXTests: XCTestCase {
         return try body()
     }
 
+    /// Build an `OpenBirdService` whose external-capture detection is stubbed to
+    /// "nothing running", so `AppModel.init`'s `isCaptureRunning()` call is hermetic
+    /// regardless of the host (a dev box may have a real `capture --loop` daemon).
+    private func serviceWithoutExternalCapture(
+        accessibilityProbe: @escaping @Sendable () -> Bool = { true },
+        openBirdCLIResolver: @escaping @Sendable () -> String? = { "/tmp/openbird" }
+    ) -> OpenBirdService {
+        OpenBirdService(
+            accessibilityProbe: accessibilityProbe,
+            openBirdCLIResolver: openBirdCLIResolver,
+            externalLoopDaemonProbe: { false },
+            captureHelperRunningProbe: { false }
+        )
+    }
+
     private func readyReport() -> PreflightReport {
         var report = PreflightReport()
         report.ollamaReachable = true
@@ -61,10 +76,9 @@ final class AppModelUXTests: XCTestCase {
 
     func testCanStartCaptureNowRequiresAccessibilityAllowlistAndCli() {
         withRestoredAllowlist {
-            let service = OpenBirdService(
-                accessibilityProbe: { true },
-                openBirdCLIResolver: { "/tmp/openbird" }
-            )
+            // Stub external-capture detection: `canStartCaptureNow` is `&& !captureRunning`,
+            // so a real `capture --loop` daemon on the host would otherwise flip it false.
+            let service = serviceWithoutExternalCapture()
             let model = AppModel(service: service, initialReport: readyReport())
 
             XCTAssertFalse(model.canStartCaptureNow)
@@ -99,7 +113,9 @@ final class AppModelUXTests: XCTestCase {
     /// actionable message — that is what drives the one-click Reindex affordance
     /// instead of the dead-end "stopped unexpectedly (exit 1)".
     func testCaptureExitReindexCodeFlagsReindexNeeded() async {
-        let service = OpenBirdService(openBirdCLIResolver: { "/tmp/openbird" })
+        // Stub external-capture detection so `captureRunning` starts false regardless
+        // of host state (a dev box may run a real `capture --loop` daemon).
+        let service = serviceWithoutExternalCapture()
         let model = AppModel(service: service, initialReport: readyReport())
 
         await model.handleCaptureExit(code: AppModel.captureReindexExitCode)
