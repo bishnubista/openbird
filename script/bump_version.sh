@@ -37,6 +37,17 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Require pyproject.toml and uv.lock to be clean before we touch them. This keeps
+# the bump isolated (no unrelated edits ride along in the commit) AND makes the
+# restore-on-error trap below safe: it reverts to the committed state, so it can
+# never discard pre-existing unstaged work in these files.
+if ! git diff --quiet -- pyproject.toml uv.lock \
+  || ! git diff --cached --quiet -- pyproject.toml uv.lock; then
+  echo "error: pyproject.toml / uv.lock have uncommitted changes." >&2
+  echo "       commit or stash them before bumping the version." >&2
+  exit 1
+fi
+
 current_version="$(awk -F'"' '/^version = / {print $2; exit}' pyproject.toml)"
 if [ -z "$current_version" ]; then
   echo "error: could not read current version from pyproject.toml" >&2
@@ -51,7 +62,8 @@ echo "bumping $current_version -> $new_version"
 
 # If anything below fails after we start editing, restore the two files we own so
 # the working tree is never left half-bumped (e.g. uv lock fails on a network
-# blip). Only these two paths are touched, so this cannot clobber unrelated work.
+# blip). The clean-state check above guarantees this reverts to the committed
+# version — it cannot discard unstaged work.
 restore_on_error() {
   echo "error: bump failed; restoring pyproject.toml and uv.lock" >&2
   git checkout -- pyproject.toml uv.lock 2>/dev/null || true

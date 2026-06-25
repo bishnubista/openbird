@@ -28,17 +28,34 @@ def test_groups_by_conventional_type() -> None:
     assert "### Maintenance\n- add encryption gate (#100)" in out
 
 
-def test_skips_release_plumbing() -> None:
+def test_skips_mechanical_release_plumbing() -> None:
     out = gen_changelog.build_changelog(
         [
             "feat(app): real feature (#1)",
             "chore(release): bump version to 0.3.0 (#112)",
+            "chore(release): sync uv.lock self-version to 0.3.0 (#113)",
             "chore(homebrew): bump cask to 0.3.0 (#114)",
+            "chore(homebrew): update formula for v0.3.0 (#115)",
         ]
     )
     assert "real feature (#1)" in out
-    assert "bump version" not in out
-    assert "bump cask" not in out
+    for noise in ("bump version", "sync uv.lock", "bump cask", "update formula"):
+        assert noise not in out
+
+
+def test_substantive_chore_is_not_dropped() -> None:
+    # Regression: a blanket chore(release)/chore(homebrew) skip silently omitted
+    # real work (e.g. #38). Only the narrow mechanical patterns are plumbing; the
+    # rest must surface under Maintenance.
+    out = gen_changelog.build_changelog(
+        [
+            "chore(release): release-dmg skill + auto-derived signing config (#38)",
+            "chore(homebrew): satisfy Homebrew/FormulaPathMethods cop (#116)",
+        ]
+    )
+    assert "### Maintenance" in out
+    assert "release-dmg skill + auto-derived signing config (#38)" in out
+    assert "satisfy Homebrew/FormulaPathMethods cop (#116)" in out
 
 
 def test_pr_number_optional() -> None:

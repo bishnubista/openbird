@@ -40,8 +40,20 @@ _SECTIONS: list[tuple[str, str]] = [
 _MAINT_TYPES = {"refactor", "docs", "test", "build", "ci", "style", "chore"}
 
 # Pure release plumbing — version bumps and formula/cask pin updates — is noise in
-# a user-facing changelog. Drop these (type, scope) pairs.
-_SKIP_TYPE_SCOPES = {("chore", "release"), ("chore", "homebrew")}
+# a user-facing changelog. Match it by the (narrow, specific) commit DESCRIPTION,
+# not by (type, scope): a blanket chore(release)/chore(homebrew) skip would also
+# drop substantive work that happens to use those scopes (e.g. "chore(release):
+# release-dmg skill + auto-derived signing config"). Anything not matched here
+# flows through to its normal section so nothing real is silently lost.
+_RELEASE_PLUMBING_RE = re.compile(
+    r"^(?:"
+    r"bump (?:the )?version to \d"  # "bump version to 0.3.0"
+    r"|bump (?:the )?cask to \d"  # "bump cask to 0.3.0"
+    r"|update (?:the )?formula for v\d"  # "update formula for v0.3.0"
+    r"|sync uv\.lock\b"  # "sync uv.lock self-version to 0.3.0"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _git_subjects(rev_range: str) -> list[str]:
@@ -75,10 +87,10 @@ def build_changelog(subjects: list[str]) -> str:
             buckets["Other"].append(_format_entry(subject, None))
             continue
         ctype = match["type"]
-        scope = match["scope"]
-        if (ctype, scope) in _SKIP_TYPE_SCOPES:
+        desc = match["desc"]
+        if ctype == "chore" and _RELEASE_PLUMBING_RE.match(desc):
             continue
-        entry = _format_entry(match["desc"], match["pr"])
+        entry = _format_entry(desc, match["pr"])
         if ctype in heading_for_type:
             buckets[heading_for_type[ctype]].append(entry)
         elif ctype in _MAINT_TYPES:
