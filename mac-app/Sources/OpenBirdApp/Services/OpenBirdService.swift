@@ -586,8 +586,13 @@ final class OpenBirdService: @unchecked Sendable {
         let supervisorWrite = deathPipe.fileHandleForWriting
         // Mark the write end close-on-exec so the spawned child inherits ONLY the
         // read end (its stdin). Otherwise a duplicate writer surviving exec would
-        // hold the pipe open forever and the EOF would never arrive.
-        _ = fcntl(supervisorWrite.fileDescriptor, F_SETFD, FD_CLOEXEC)
+        // hold the pipe open forever and the EOF would never arrive. If this fails
+        // the self-exit contract is broken, so refuse to launch an unsupervised
+        // daemon rather than orphan one under launchd.
+        guard fcntl(supervisorWrite.fileDescriptor, F_SETFD, FD_CLOEXEC) != -1 else {
+            try? supervisorWrite.close()
+            return false
+        }
         let token = UUID().uuidString
         env["OPENBIRD_SUPERVISOR_TOKEN"] = token
         process.standardInput = deathPipe
@@ -604,9 +609,16 @@ final class OpenBirdService: @unchecked Sendable {
             try process.run()
             // One-shot handshake: prove to the daemon that THIS pipe carries the
             // app-supervisor token, then keep the write end open (held by the
-            // retained FileHandle below) and never write again.
-            if let handshake = (token + "\n").data(using: .utf8) {
-                try? supervisorWrite.write(contentsOf: handshake)
+            // retained FileHandle below) and never write again. The daemon arms its
+            // self-exit watcher ONLY after reading this token, so a failed write
+            // would leave the daemon running unsupervised (orphan-prone). Tear the
+            // just-spawned daemon back down and report failure instead.
+            do {
+                try supervisorWrite.write(contentsOf: Data((token + "\n").utf8))
+            } catch {
+                process.terminate()
+                try? supervisorWrite.close()
+                return false
             }
             captureProcess = process
             captureSupervisorPipe = supervisorWrite
