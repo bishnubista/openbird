@@ -19,6 +19,9 @@ struct AskContentView: View {
     /// Window-only actions. Both nil in pane mode, which hides the buttons entirely.
     var onCollapse: (() -> Void)?
     var onClose: (() -> Void)?
+    /// Invoked when a citation (chat chip or Sources card) is clicked — navigates to
+    /// that source. Defaults to a no-op so previews/tests render without wiring it.
+    var onSelectCitation: (ChatCitation) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var scheme
     @State private var draft = ""
@@ -81,7 +84,7 @@ struct AskContentView: View {
             chatColumn
             if showS {
                 verticalSeparator
-                SourcesRail(citations: display.citations)
+                SourcesRail(citations: display.citations, onSelectCitation: onSelectCitation)
             }
         }
     }
@@ -238,8 +241,12 @@ struct AskContentView: View {
                         if askModel.thread.isEmpty && !askModel.busy {
                             emptyPrompt
                         } else {
-                            ChatThreadView(turns: askModel.thread, busy: askModel.busy)
-                                .id("chat-tail")
+                            ChatThreadView(
+                                turns: askModel.thread,
+                                busy: askModel.busy,
+                                onSelectCitation: onSelectCitation
+                            )
+                            .id("chat-tail")
                         }
                     }
                     .padding(18)

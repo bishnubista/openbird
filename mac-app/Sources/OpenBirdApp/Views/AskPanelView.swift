@@ -11,6 +11,9 @@ struct AskPanelView: View {
     /// Promote the compact panel to the expanded window (chat + Sources/Timeline rails).
     var onExpand: () -> Void
     var onSizeChange: (CGSize) -> Void
+    /// Invoked when a source chip is clicked — navigates to that citation's source
+    /// (and the controller dismisses the panel). Defaults to a no-op for previews.
+    var onSelectCitation: (ChatCitation) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var scheme
     @State private var draft = ""
@@ -163,6 +166,14 @@ struct AskPanelView: View {
     }
 
     private func sourceChip(_ c: ChatCitation) -> some View {
+        Button { onSelectCitation(c) } label: {
+            sourceChipLabel(c)
+        }
+        .buttonStyle(.plain)
+        .help("Open this source in Today")
+    }
+
+    private func sourceChipLabel(_ c: ChatCitation) -> some View {
         let identity = SourceIdentity.forApp(c.app)
         return HStack(spacing: OB.Space.s) {
             Text(identity.glyph)
@@ -177,6 +188,7 @@ struct AskPanelView: View {
         .padding(.horizontal, OB.Space.sm)
         .padding(.vertical, OB.Space.s)
         .background(OB.fieldFill(scheme), in: Capsule())
+        .contentShape(Capsule())
     }
 
     private func groundedLabel(_ result: ChatResult) -> String {

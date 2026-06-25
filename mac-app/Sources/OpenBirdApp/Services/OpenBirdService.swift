@@ -64,15 +64,49 @@ enum AccessibilityRequestOutcome: Equatable {
 /// willTerminate handler). The static `run`/`runAsync` helpers operate on locals
 /// guarded by their own lock. This lets the main-queue termination handler capture
 /// the service without a strict-concurrency violation.
-/// One cited source behind a chat answer (decoded from `chat --json`). Extra
-/// fields in the JSON (observation_id, chunk_id) are intentionally ignored.
+/// One cited source behind a chat answer (decoded from `chat --json`).
+///
+/// `observationId` / `chunkId` carry the source's stable identity so a clicked
+/// citation can navigate the user to the originating occurrence. They are
+/// OPTIONAL because not every emitted citation is guaranteed to carry them (older
+/// CLI builds, or any future un-grounded/synthetic citation): navigation falls
+/// back to the citation `ts` (the day) when `observationId` is absent.
 struct ChatCitation: Codable, Identifiable, Equatable {
     let index: Int
+    let observationId: String?
+    let chunkId: String?
     let app: String?
     let window: String?
     let ts: Double
     let snippet: String
     var id: Int { index }
+
+    enum CodingKeys: String, CodingKey {
+        case index
+        case observationId = "observation_id"
+        case chunkId = "chunk_id"
+        case app, window, ts, snippet
+    }
+
+    /// Memberwise init with `observationId`/`chunkId` defaulted to nil so the common
+    /// callers (tests, previews) stay terse while decode still populates the ids.
+    init(
+        index: Int,
+        observationId: String? = nil,
+        chunkId: String? = nil,
+        app: String?,
+        window: String?,
+        ts: Double,
+        snippet: String
+    ) {
+        self.index = index
+        self.observationId = observationId
+        self.chunkId = chunkId
+        self.app = app
+        self.window = window
+        self.ts = ts
+        self.snippet = snippet
+    }
 }
 
 /// A grounded chat answer plus its citations (decoded from `openbird chat --json`).

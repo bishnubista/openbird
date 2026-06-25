@@ -6,6 +6,9 @@ import SwiftUI
 /// empty state before the first answer.
 struct SourcesRail: View {
     let citations: [ChatCitation]
+    /// Invoked when a source card is clicked — navigates to that citation's source.
+    /// Defaults to a no-op so previews/tests can render without wiring navigation.
+    var onSelectCitation: (ChatCitation) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var scheme
 
@@ -54,6 +57,14 @@ struct SourcesRail: View {
     }
 
     private func card(_ c: ChatCitation) -> some View {
+        Button { onSelectCitation(c) } label: {
+            cardLabel(c)
+        }
+        .buttonStyle(.plain)
+        .help("Open this source in Today")
+    }
+
+    private func cardLabel(_ c: ChatCitation) -> some View {
         let identity = SourceIdentity.forApp(c.app)
         let title = Self.cardTitle(c)
         return HStack(alignment: .top, spacing: 10) {
@@ -93,5 +104,6 @@ struct SourcesRail: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(OB.separator(scheme), lineWidth: 0.5)
         )
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
