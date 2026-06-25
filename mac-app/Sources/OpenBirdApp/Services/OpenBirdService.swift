@@ -322,11 +322,23 @@ final class OpenBirdService: @unchecked Sendable {
         // then make the precise, testable decision in
         // `externalCaptureRunning(pgrepOutput:ownPID:)`.
         //
-        // `-f` matches against the full argv (the subcommand/flags live in argv,
-        // not in `comm`). `-l` with `-f` is documented by `man pgrep` to print
-        // "the process ID and the full argument list" — that argv is what the pure
-        // filter inspects to reject unrelated processes (e.g. an editor that merely
-        // has the string open, or the daemon's transient `--once` passes).
+        return externalLoopDaemonRunning()
+    }
+
+    /// Is a long-lived external `openbird capture --loop` daemon running (one this
+    /// app did not launch)? This is the NARROW, authoritative signal for "a
+    /// supervising daemon already exists" — used both by `isCaptureRunning()` and
+    /// by the pre-spawn duplicate guard in `startCapture()`. The transient
+    /// `capture-helper` is deliberately NOT consulted here: it lives only between
+    /// the daemon's re-spawn cadence, and a lone helper (e.g. from a bounded
+    /// `--once` pass) does not imply a supervising loop daemon.
+    ///
+    /// `-f` matches against the full argv (the subcommand/flags live in argv, not
+    /// in `comm`). `-l` with `-f` is documented by `man pgrep` to print "the
+    /// process ID and the full argument list" — that argv is what the pure filter
+    /// inspects to reject unrelated processes (e.g. an editor that merely has the
+    /// string open, or the daemon's transient `--once` passes).
+    func externalLoopDaemonRunning() -> Bool {
         let result = Self.run(
             "/usr/bin/pgrep",
             arguments: ["-fl", "openbird(-cli)? capture( |$)"]
@@ -407,8 +419,23 @@ final class OpenBirdService: @unchecked Sendable {
         guard captureProcess?.isRunning != true, let cli = resolveOpenBirdCLI() else {
             return captureProcess?.isRunning == true
         }
-        // Resuming also clears any pause gate so capture actually records.
+        // Resuming clears any pause gate so capture actually records. Done BEFORE
+        // the adopt-external guard below: if we adopt an already-running daemon
+        // while a stale `capture.paused` sidecar exists, the daemon would keep
+        // honoring the pause while the UI reports capture resumed.
         _ = try? setCapturePaused(false)
+        // Advisory pre-spawn guard: if a long-lived external `capture --loop`
+        // daemon is ALREADY running — an orphan from a prior app instance that
+        // died non-gracefully, or one the user started by hand — do not spawn a
+        // second one (two daemons double-capture). Only the supervising loop
+        // counts here, NOT a transient `capture-helper` (a lone helper, e.g. from
+        // a bounded `--once` pass, does not imply a running daemon). Best-effort
+        // only: a TOCTOU window remains before `run()`, so the Python daemon's
+        // flock is the real authority (a losing spawn exits code 7, handled
+        // benignly upstream). We do NOT adopt/track the external PID — out of scope.
+        if externalLoopDaemonRunning() {
+            return true
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cli)
