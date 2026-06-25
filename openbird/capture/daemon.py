@@ -628,6 +628,11 @@ class CaptureDaemon:
         argv = self._resolve_helper()
         proc = subprocess.Popen(
             argv,
+            # Detach the helper from FD 0. When the app supervises us, FD 0 is the
+            # death pipe carrying the supervisor token; an inherited stdin would let
+            # the helper consume that token before _watch_supervisor() arms on it
+            # (and the helper never reads stdin anyway).
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -917,9 +922,12 @@ class CaptureDaemon:
                         )
                         # Surface sustained failure to the caller (CLI -> nonzero
                         # exit) rather than returning as if the session ended OK.
+                        # `from None`: surface only the circuit-breaker summary,
+                        # never chain the helper exception's message/traceback into
+                        # what reaches the CLI (privacy-safe; also silences B904).
                         raise CaptureSupervisorError(
                             f"capture helper failed {failures} consecutive times"
-                        )
+                        ) from None
                     delay = min(_BACKOFF_MAX, _BACKOFF_BASE * (2 ** (failures - 1)))
                     if stop.wait(delay):
                         break

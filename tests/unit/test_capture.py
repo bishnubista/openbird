@@ -1491,8 +1491,11 @@ def test_watch_supervisor_alive_does_not_stop():
         time.sleep(0.2)
         assert not stop.is_set(), "a live supervisor must never trigger a stop"
     finally:
-        os.close(w)  # release the watcher's blocking read
-        os.close(r)
+        stop.set()  # ask the watcher to abandon its select/read wait
+        os.close(w)  # close the write end so any pending read sees EOF
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+        os.close(r)  # only now the watcher is gone; safe to free the fd
 
 
 def test_watch_supervisor_wrong_token_fails_open():
@@ -1671,6 +1674,34 @@ def test_run_forever_circuit_breaker_joins_watcher(allow_settings, monkeypatch):
     finally:
         os.close(w)
         os.close(r)
+
+
+def test_spawn_detaches_helper_stdin(allow_settings, monkeypatch):
+    # Under app supervision the daemon's FD 0 is the death pipe carrying the
+    # supervisor token. The helper must NOT inherit that channel, or it could
+    # consume the token before _watch_supervisor() arms on it. _spawn() pins
+    # stdin to DEVNULL so the helper is severed from the control channel.
+    import openbird.capture.daemon as daemon_mod
+
+    captured: dict[str, object] = {}
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["kwargs"] = kwargs
+            self.stdout = None
+            self.stderr = None  # no stderr-drain thread to join
+
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", _FakePopen)
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=("capture-helper",),
+        require_signed_helper=False,
+    )
+
+    daemon._spawn()
+
+    assert captured["kwargs"].get("stdin") is subprocess.DEVNULL
 
 
 def test_run_clean_exit_zero_is_not_a_failure(allow_settings):
