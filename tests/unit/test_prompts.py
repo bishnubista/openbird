@@ -120,6 +120,22 @@ def test_render_custom_persona_cannot_remove_required_tokens():
     assert "<OPEN>" in text and "</CLOSE>" in text
 
 
+def test_render_persona_tokens_cannot_rescue_a_tampered_scaffold():
+    # The validator must look at the scaffold ONLY, before the persona is added.
+    # A tampered preamble+epilogue that dropped the tokens must still fail even
+    # when the persona itself contains both tokens (which would otherwise satisfy
+    # a naive "tokens present in rendered output" check).
+    spec = _spec()
+    broken = dataclasses.replace(
+        spec,
+        security_preamble="PREAMBLE no tokens",
+        security_epilogue="EPILOGUE no tokens",
+    )
+    with pytest.raises(PromptValidationError) as exc:
+        render(broken, persona="here are the tokens <OPEN> and </CLOSE> in persona")
+    assert "<OPEN>" in exc.value.missing and "</CLOSE>" in exc.value.missing
+
+
 # -- RAG wiring: behavior-preserving + single source --------------------------
 
 

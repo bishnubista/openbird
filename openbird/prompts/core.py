@@ -147,13 +147,22 @@ def render(spec: PromptSpec, persona: str | None = None) -> str:
     required fence token did not survive (a framework/tamper bug, not user error).
     """
     chosen = spec.default_persona if persona is None else persona
+    # Validate the framework-owned scaffold ONLY, BEFORE the (user-swappable)
+    # persona is mixed in. Validating the fully composed prompt would let a
+    # persona that happens to contain the fence tokens mask a tampered
+    # preamble/epilogue that dropped them — the persona is exactly the part we
+    # do not trust to carry the security invariant.
+    scaffold = "\n\n".join(
+        part
+        for part in (spec.security_preamble.rstrip(), spec.security_epilogue.rstrip())
+        if part
+    )
+    missing = [tok for tok in spec.fence.required_tokens() if tok not in scaffold]
+    if missing:
+        raise PromptValidationError(spec.key, missing)
     parts = [
         spec.security_preamble.rstrip(),
         chosen.strip(),
         spec.security_epilogue.rstrip(),
     ]
-    rendered = "\n\n".join(part for part in parts if part) + "\n"
-    missing = [tok for tok in spec.fence.required_tokens() if tok not in rendered]
-    if missing:
-        raise PromptValidationError(spec.key, missing)
-    return rendered
+    return "\n\n".join(part for part in parts if part) + "\n"
