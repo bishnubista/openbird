@@ -17,5 +17,10 @@ struct AskPaneView: View {
             timelineModel: timelineModel
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // This is the GENERIC in-window Ask surface (sidebar `.ask` / `openbird://ask`),
+        // reached without going through the controller. It shares the one `askModel`, so
+        // a day scope set by Today's compact panel would otherwise leak here — clear it
+        // on appear so the in-window Ask is always unscoped.
+        .onAppear { askModel.dayScope = nil }
     }
 }

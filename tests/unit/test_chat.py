@@ -414,6 +414,97 @@ def test_temporal_dedup_keeps_distinct_sessions_with_same_content():
     assert len(result.used_hits) == 2  # distinct (session, hash) -> two episodes
 
 
+# -- explicit day-scope window (the app's "Ask about this day") ------------------
+
+
+def test_explicit_window_hard_scopes_to_that_day(mem_settings, fake_provider):
+    """`answer(window=...)` confines retrieval+citations to the window, isolating days.
+
+    Seed TWO calendar days. A NON-temporal question (no "today"/"yesterday" phrase)
+    that is semantically closer to the OTHER day's text must still only ever ground
+    in the scoped day — proving the scope is a hard filter, not a ranking hint.
+    """
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        day0_start = dt.datetime(2026, 6, 13, 0, 0, 0).timestamp()
+        day0_end = dt.datetime(2026, 6, 13, 23, 59, 59).timestamp()
+        d13 = dt.datetime(2026, 6, 13, 10, 0, 0).timestamp()
+        d12 = dt.datetime(2026, 6, 12, 10, 0, 0).timestamp()
+        # The query mentions "rocket"; the OTHER day (12th) is the one that matches
+        # it semantically, so an unscoped path would prefer the 12th.
+        store.add_observation(
+            "Filed the quarterly expense report.",
+            source="capture", app="Numbers", ts=d13,
+        )
+        store.add_observation(
+            "Watched the rocket launch livestream.",
+            source="capture", app="Browser", ts=d12,
+        )
+
+        chatter = RAG(store, EchoCiteAllLLM())
+        result = chatter.answer(
+            "what about the rocket?", window=(day0_start, day0_end)
+        )
+
+        # Only the 13th's observation is in the window; the matching 12th is excluded.
+        assert result.grounded
+        assert len(result.used_hits) == 1
+        assert result.citations[0].ts == d13
+        for c in result.citations:
+            assert day0_start <= c.ts <= day0_end  # every citation within the day
+    finally:
+        store.close()
+
+
+def test_explicit_window_overrides_temporal_phrase(mem_settings, fake_provider):
+    """An explicit window wins over the query-phrase temporal detection.
+
+    The question says "yesterday", but the caller scopes to a DIFFERENT day; the
+    answer must follow the explicit window, not the phrase.
+    """
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        # Scope window = the 12th; question phrase "yesterday" would otherwise
+        # resolve relative to _now (the 14th) -> the 13th.
+        win_start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        win_end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        d12 = dt.datetime(2026, 6, 12, 9, 0, 0).timestamp()
+        d13 = dt.datetime(2026, 6, 13, 9, 0, 0).timestamp()
+        store.add_observation("Twelfth-day note.", source="capture", app="Notes", ts=d12)
+        store.add_observation("Thirteenth-day note.", source="capture", app="Notes", ts=d13)
+
+        chatter = RAG(store, EchoCiteAllLLM())
+        chatter._now = lambda: dt.datetime(2026, 6, 14, 12, 0, 0).timestamp()
+        result = chatter.answer("what did I do yesterday?", window=(win_start, win_end))
+
+        assert result.grounded
+        assert len(result.used_hits) == 1
+        assert result.citations[0].ts == d12  # explicit window, not phrase "yesterday"
+    finally:
+        store.close()
+
+
+def test_explicit_window_empty_day_returns_no_activity():
+    """A scoped day with no observations yields the explicit no-activity message."""
+    chatter = RAG(_TemporalStore([]), EchoCiteAllLLM())
+    result = chatter.answer("anything?", window=(0.0, 100.0))
+    assert not result.grounded
+    assert result.citations == []
+    assert "time window" in result.answer.lower()
+
+
+def test_explicit_window_requires_time_range_capable_store():
+    """A search-only store cannot honor a hard scope, so the scope is refused."""
+    store = StubStore([_hit(_obs("o"), "text")])  # no time_range_text
+    chatter = RAG(store, EchoCiteAllLLM())
+    with pytest.raises(TypeError):
+        chatter.answer("q", window=(0.0, 100.0))
+
+
 # -- raw-string fallback path ---------------------------------------------------
 
 
@@ -677,4 +768,77 @@ def test_chat_cli_blank_question_exits_2():
     from openbird import cli
 
     res = CliRunner().invoke(cli.app, ["chat", "   ", "--json"])
+    assert res.exit_code == 2
+
+
+def test_chat_cli_day_passes_window_to_rag(monkeypatch):
+    """`chat --day N` forwards that day's inclusive window to RAG.answer()."""
+    from typer.testing import CliRunner
+
+    from openbird import cli
+    from openbird.chat.rag import AnswerResult
+
+    captured = {}
+
+    class _FakeRAG:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def answer(self, q, **kw):
+            captured["window"] = kw.get("window")
+            return AnswerResult(answer="ok", citations=[], grounded=False)
+
+    class _FakeStore:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "_provider", lambda: object())
+    monkeypatch.setattr(cli, "_store", lambda **_k: _FakeStore())
+    monkeypatch.setattr("openbird.chat.rag.RAG", _FakeRAG)
+
+    res = CliRunner().invoke(cli.app, ["chat", "q", "--day", "1", "--json"])
+    assert res.exit_code == 0
+    # The forwarded window is exactly day -1's bounds (shared with timeline/briefing).
+    assert captured["window"] == cli._day_window(1)
+    start, end = captured["window"]
+    assert start < end
+
+
+def test_chat_cli_without_day_is_unscoped(monkeypatch):
+    """Omitting `--day` forwards window=None — retrieval stays unscoped."""
+    from typer.testing import CliRunner
+
+    from openbird import cli
+    from openbird.chat.rag import AnswerResult
+
+    captured = {}
+
+    class _FakeRAG:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def answer(self, q, **kw):
+            captured["window"] = kw.get("window", "MISSING")
+            return AnswerResult(answer="ok", citations=[], grounded=False)
+
+    class _FakeStore:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "_provider", lambda: object())
+    monkeypatch.setattr(cli, "_store", lambda **_k: _FakeStore())
+    monkeypatch.setattr("openbird.chat.rag.RAG", _FakeRAG)
+
+    res = CliRunner().invoke(cli.app, ["chat", "q", "--json"])
+    assert res.exit_code == 0
+    assert captured["window"] is None
+
+
+def test_chat_cli_negative_day_exits_2():
+    """`chat --day -1` is rejected before touching the provider/store (matches timeline)."""
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    res = CliRunner().invoke(cli.app, ["chat", "q", "--day", "-1", "--json"])
     assert res.exit_code == 2

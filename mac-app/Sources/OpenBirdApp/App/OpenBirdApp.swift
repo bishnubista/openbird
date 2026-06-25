@@ -51,7 +51,7 @@ struct OpenBirdApp: App {
                 todayModel: todayModel,
                 askModel: askModel,
                 timelineModel: timelineModel,
-                onAsk: { askPanel.show() },
+                onAsk: { day in askPanel.show(dayScope: day) },
                 onAskExpanded: { askPanel.expand() }
             )
             .task {

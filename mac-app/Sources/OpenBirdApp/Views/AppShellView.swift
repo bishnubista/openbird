@@ -13,8 +13,9 @@ struct AppShellView: View {
     @ObservedObject var todayModel: TodayModel
     @ObservedObject var askModel: AskPanelModel
     @ObservedObject var timelineModel: TimelineModel
-    /// Summon the compact Spotlight Ask panel (the `openbird://ask` deep-link).
-    var onAsk: () -> Void = {}
+    /// Summon the compact Spotlight Ask panel hard-scoped to a day offset (used by the
+    /// Today pane's "Ask about this day"; 0=today, 1=yesterday, ...).
+    var onAsk: (Int) -> Void = { _ in }
     /// Open the expanded Ask overlay window (the `openbird://ask-expanded` E2E deep-link).
     var onAskExpanded: () -> Void = {}
 

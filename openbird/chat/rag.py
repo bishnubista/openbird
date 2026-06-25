@@ -191,22 +191,48 @@ class RAG:
 
     # -- public API -----------------------------------------------------------
 
-    def answer(self, query: str, *, k: int = 10, semantic: bool = True) -> AnswerResult:
+    def answer(
+        self,
+        query: str,
+        *,
+        k: int = 10,
+        semantic: bool = True,
+        window: tuple[float, float] | None = None,
+    ) -> AnswerResult:
         """Answer ``query`` grounded in retrieved memory, with valid citations.
 
         Retrieves with the store, dedupes by document/session, builds a grounded
         (injection-resistant) prompt, asks the provider, then validates and
         repairs citations so only real, in-context observations are cited.
+
+        When ``window`` is an explicit inclusive ``(start_ts, end_ts)`` (the app's
+        "Ask about this day" passes the selected calendar day), retrieval is
+        HARD-SCOPED to that span: it routes through the observation time-range
+        scan, so every cited occurrence is guaranteed to fall inside the window.
+        An explicit ``window`` takes precedence over the query-phrase temporal
+        detection. When ``None`` behavior is unchanged — generic hybrid retrieval,
+        with the phrase-based temporal path still applying to queries like
+        "what did I do yesterday?".
         """
         if not query or not query.strip():
             return AnswerResult(answer="", citations=[], used_hits=[])
 
+        # An explicit caller-supplied window hard-scopes retrieval to that span.
+        # It can only be honored via the time-range scan, so refuse a store that
+        # lacks it rather than silently widening back to global hybrid search.
+        if window is not None:
+            if not hasattr(self.store, "time_range_text"):
+                raise TypeError(
+                    "explicit day scope requires a store exposing time_range_text()"
+                )
+            return self._answer_temporal(query, window)
+
         # Temporal/activity intent ("what did I do yesterday?") must use the
         # observation time-range scan, not semantic chunk similarity — otherwise
         # chronology is missed and ranking keys on irrelevant similarity.
-        window = self._temporal_window(query)
-        if window is not None and hasattr(self.store, "time_range_text"):
-            return self._answer_temporal(query, window)
+        phrase_window = self._temporal_window(query)
+        if phrase_window is not None and hasattr(self.store, "time_range_text"):
+            return self._answer_temporal(query, phrase_window)
 
         hits = self.store.search(query, k=k, semantic=semantic)
         context = self._assemble_context(hits)
@@ -516,6 +542,7 @@ def answer(
     k: int = 10,
     semantic: bool = True,
     max_context: int = _DEFAULT_MAX_CONTEXT,
+    window: tuple[float, float] | None = None,
 ) -> AnswerResult:
     """Convenience one-shot: build a :class:`RAG` and answer ``query``.
 
@@ -526,12 +553,14 @@ def answer(
         k: Retrieval depth passed to the store.
         semantic: Whether to use hybrid (vector+BM25) vs BM25-only retrieval.
         max_context: Max deduped chunks to ground the answer on.
+        window: Optional inclusive ``(start_ts, end_ts)`` that hard-scopes
+            retrieval to a single day/span (see :meth:`RAG.answer`).
 
     Returns:
         An :class:`AnswerResult` with the answer text and validated citations.
     """
     return RAG(store, provider, max_context=max_context).answer(
-        query, k=k, semantic=semantic
+        query, k=k, semantic=semantic, window=window
     )
 
 

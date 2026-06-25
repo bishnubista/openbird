@@ -72,7 +72,20 @@ final class AskPanelController: NSObject, ObservableObject {
 
     /// Show the compact Spotlight panel (closing the expanded window first). The single
     /// "Ask" entry point for the hotkey, the menu, the sidebar, and the deep-link.
-    func show() {
+    ///
+    /// `dayScope` hard-scopes every ask in the panel to one calendar day
+    /// (0=today, 1=yesterday, ...): the Today view's "Ask about this day" passes the
+    /// viewed day; the generic entry points (hotkey, menu, deep-link) pass nil, which
+    /// CLEARS any prior scope so the global Ask never inherits a stale day.
+    func show(dayScope: Int? = nil) {
+        askModel.dayScope = dayScope
+        showPanel()
+    }
+
+    /// Order the compact panel front WITHOUT touching `askModel.dayScope`. Used by
+    /// `show(dayScope:)` (after setting the scope) and by `collapse()` (which must
+    /// PRESERVE the active scope when returning from the expanded surface).
+    private func showPanel() {
         orderOutExpanded()
         let p = compactPanel ?? makeCompactPanel()
         compactPanel = p
@@ -84,17 +97,24 @@ final class AskPanelController: NSObject, ObservableObject {
         focusInput(of: p)
     }
 
-    /// Hide all Ask surfaces.
+    /// Hide all Ask surfaces. Ends any Today-scoped compact session, so the next
+    /// Ask starts unscoped unless it is itself opened from Today.
     func hide() {
         compactPanel?.orderOut(nil)
         anchorTopY = nil
         orderOutExpanded()
+        askModel.dayScope = nil
     }
 
     /// Compact → expanded: swap the floating panel for the persistent window with rails.
+    /// The expanded window is a GENERIC global Ask surface, so entering it CLEARS any
+    /// day scope — a scope set by Today's compact panel must not leak into it (and
+    /// the in-window Ask pane shares the same model). Scope is intentionally confined
+    /// to the compact Today-initiated session.
     func expand() {
         compactPanel?.orderOut(nil)
         anchorTopY = nil
+        askModel.dayScope = nil
         let w = expandedWindow ?? makeExpandedWindow()
         expandedWindow = w
         centerExpanded(w)
@@ -104,10 +124,13 @@ final class AskPanelController: NSObject, ObservableObject {
         focusInput(of: w)
     }
 
-    /// Expanded → compact: return to the floating panel.
+    /// Expanded → compact: return to the floating panel. The scope was already
+    /// cleared by `expand()` (the expanded surface is generic), so this returns an
+    /// unscoped compact panel — it must NOT route through `show()` (which would
+    /// re-clear and re-anchor identically, but keeping it explicit avoids surprise).
     func collapse() {
         orderOutExpanded()
-        show()
+        showPanel()
     }
 
     private func orderOutExpanded() {
