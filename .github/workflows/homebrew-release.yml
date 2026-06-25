@@ -141,6 +141,29 @@ jobs:
             --version "${{ steps.release.outputs.version }}" \
             --sha256 "$archive_sha256"
 
+      - name: Verify the formula edit before opening the PR
+        # The formula-bump PR is bot-authored via GITHUB_TOKEN, so it never
+        # triggers CI (recursion suppression) — #115 merged entirely unvalidated.
+        # Validate the bot's edit inline instead: the formula must now pin THIS
+        # release's source tarball URL and the exact sha256 we just built and
+        # published. A mismatch means update_homebrew_formula.py misfired; fail
+        # loudly rather than open a PR that ships a wrong/unfetchable archive.
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_url="releases/download/v${VERSION}/openbird-${VERSION}.tar.gz"
+          if ! grep -qF "$expected_url" Formula/openbird.rb; then
+            echo "::error::Formula URL does not reference the v${VERSION} archive ($expected_url)." >&2
+            exit 1
+          fi
+          if ! grep -qF "sha256 \"${archive_sha256}\"" Formula/openbird.rb; then
+            echo "::error::Formula sha256 does not match the built archive (${archive_sha256})." >&2
+            exit 1
+          fi
+          echo "Formula correctly pins v${VERSION} and sha256 ${archive_sha256}."
+
       - name: Open formula-bump pull request
         env:
           GH_TOKEN: ${{ github.token }}

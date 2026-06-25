@@ -87,6 +87,18 @@ jobs:
       - name: Run ShellCheck on shell scripts
         run: shellcheck script/*.sh
 
+  homebrew-style:
+    name: Homebrew style
+    runs-on: macos-latest # brew is preinstalled here; brew style needs no setup
+    steps:
+      - uses: actions/checkout@v5
+      - name: Lint the Homebrew formula and cask
+        # Static `brew style` (rubocop) over the packaging files. Nothing in CI
+        # used to lint these, so the Homebrew/FormulaPathMethods offense fixed in
+        # #116 sat on main since before v0.2.0. Run it on every PR so hand-edits
+        # to the formula/cask can't reintroduce style debt.
+        run: brew style Formula/openbird.rb Casks/openbird.rb
+
   swift-helpers:
     name: Swift helpers build
     runs-on: macos-latest
