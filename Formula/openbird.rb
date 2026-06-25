@@ -16,7 +16,7 @@ class Openbird < Formula
   def install
     odie "OpenBird requires Apple's Swift toolchain. Install Xcode Command Line Tools first." unless which("swift")
 
-    python = Formula["python@3.13"].opt_bin/"python3.13"
+    python = formula_opt_bin("python@3.13")/"python3.13"
     venv = libexec/"venv"
 
     system "uv", "venv", "--python", python, venv
