@@ -35,6 +35,8 @@ enum ModelRouteProvisioningState: Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    static let embeddingGemmaMinimumOllamaVersion = "0.11.10"
+
     /// The active navigation pane in the single app window. Runtime single source of
     /// truth that the sidebar, the menu bar, and the deep-link router all read/write —
     /// switching panes never opens a second window. Held on this long-lived model, so it
@@ -208,7 +210,7 @@ final class AppModel: ObservableObject {
         }
         if report.ollamaReachable == true {
             if report.ollamaVersionOK == false {
-                return "Ollama is too old for embeddinggemma. Update Ollama to 0.11.10 or newer, then re-check."
+                return "Ollama is too old for embeddinggemma. Update Ollama to \(Self.embeddingGemmaMinimumOllamaVersion) or newer, then re-check."
             }
             if report.missingModels.isEmpty { return "Local model route is not runtime-ready. Re-check setup." }
             if !report.autoPullAllowed {
@@ -381,7 +383,7 @@ final class AppModel: ObservableObject {
                 return "Next: launch Ollama, then re-check setup."
             }
             if report.ollamaReachable == true && report.ollamaVersionOK == false {
-                return "Next: update Ollama to 0.11.10 or newer for embeddinggemma, then re-check setup."
+                return "Next: update Ollama to \(Self.embeddingGemmaMinimumOllamaVersion) or newer for embeddinggemma, then re-check setup."
             }
             if !report.missingModels.isEmpty {
                 if !report.autoPullAllowed {

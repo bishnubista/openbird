@@ -362,9 +362,10 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(model.localModelStatusState, .attention)
         XCTAssertEqual(model.modelRouteProvisioningState, .ollamaTooOldForEmbeddingGemma)
         XCTAssertEqual(model.modelRouteActionLabel, "Update Ollama")
+        let minimumOllamaVersion = AppModel.embeddingGemmaMinimumOllamaVersion
         XCTAssertTrue(model.localModelStatusSummary.contains("Ollama is too old for embeddinggemma"))
-        XCTAssertTrue(model.localModelStatusSummary.contains("0.11.10 or newer"))
-        XCTAssertTrue(model.nextStepSummary.contains("update Ollama to 0.11.10 or newer for embeddinggemma"))
+        XCTAssertTrue(model.localModelStatusSummary.contains("\(minimumOllamaVersion) or newer"))
+        XCTAssertTrue(model.nextStepSummary.contains("update Ollama to \(minimumOllamaVersion) or newer for embeddinggemma"))
 
         var openedURL: URL?
         model.performModelRouteAction { openedURL = $0 }
