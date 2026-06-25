@@ -712,9 +712,17 @@ def ingest(
         _err_console.print(f"[red]No such path:[/] {path}")
         raise typer.Exit(code=2)
 
-    files = _collect_files(path, glob=glob, max_bytes=max_bytes)
+    files, escaped = _collect_files(path, glob=glob, max_bytes=max_bytes)
     if not files:
-        _err_console.print("[yellow]No matching files to ingest.[/]")
+        if escaped:
+            # Everything that matched escaped the selected root via a symlink —
+            # surface the refusal so this is not silently a no-op.
+            _err_console.print(
+                "[yellow]No matching files to ingest[/] "
+                f"({escaped} skipped: symlink escapes the selected directory)."
+            )
+        else:
+            _err_console.print("[yellow]No matching files to ingest.[/]")
         raise typer.Exit(code=1)
 
     store = _store()
@@ -734,33 +742,75 @@ def ingest(
                 text,
                 app="ingest",
                 window=fp.name,
-                url=fp.resolve().as_uri(),
+                # Use the literal selected path (containment already verified in
+                # _collect_files), never a resolved path that could point
+                # outside the selected root.
+                url=fp.as_uri(),
                 source="ingest",
             )
             ingested += 1
     finally:
         store.close()
 
-    _console.print(
-        f"[green]Ingested[/] {ingested} file(s); skipped {skipped}."
-    )
+    msg = f"[green]Ingested[/] {ingested} file(s); skipped {skipped}."
+    if escaped:
+        msg += f" Refused {escaped} symlink(s) that escape the selected directory."
+    _console.print(msg)
 
 
-def _collect_files(path: Path, *, glob: str, max_bytes: int) -> list[Path]:
-    """Resolve PATH to a sorted list of regular files under the size cap."""
+def _is_within(candidate: Path, root: Path) -> bool:
+    """True iff ``candidate``'s real path is contained within ``root``'s real path.
+
+    Both sides are canonicalized with ``Path.resolve()`` (which follows symlinks),
+    so a symlink whose target lives outside ``root`` is rejected. ``root`` itself
+    counts as contained (a directory is its own ancestor for our purposes).
+    """
+    try:
+        real_candidate = candidate.resolve()
+        real_root = root.resolve()
+    except OSError:
+        return False
+    return real_candidate == real_root or real_candidate.is_relative_to(real_root)
+
+
+def _collect_files(
+    path: Path, *, glob: str, max_bytes: int
+) -> tuple[list[Path], int]:
+    """Resolve PATH to a sorted list of in-root regular files under the size cap.
+
+    Returns ``(files, escaped)`` where ``escaped`` counts candidates skipped
+    because their real (symlink-resolved) path lies outside the selected root —
+    a directory walk must never ingest content from outside the directory the
+    user selected. ``rglob`` does not recurse *into* symlinked directories, and
+    the containment check below additionally rejects symlinked files (and the
+    symlinked-directory entries themselves) whose target escapes the root.
+    """
     if path.is_file():
+        # A single explicit file argument: honor it as long as it resolves
+        # within its own parent directory (the intuitive root for one path). A
+        # symlink to an arbitrary external location is refused.
+        root = path.parent
         candidates = [path]
     else:
-        candidates = sorted(p for p in path.rglob(glob) if p.is_file())
+        root = path
+        candidates = sorted(path.rglob(glob))
+
     out: list[Path] = []
+    escaped = 0
     for p in candidates:
+        if not _is_within(p, root):
+            # Symlink (file or dir) whose real target escapes the selected root.
+            escaped += 1
+            continue
         try:
+            if not p.is_file():
+                continue
             if p.stat().st_size > max_bytes:
                 continue
         except OSError:
             continue
         out.append(p)
-    return out
+    return out, escaped
 
 
 # --------------------------------------------------------------------------- #
