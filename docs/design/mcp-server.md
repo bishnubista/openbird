@@ -103,8 +103,8 @@ can actually enforce in SQL/retrieval.
 |---|---|---|---|
 | `memory_stats()` | `MemoryStore.stats()` | n/a (counts only, content-free) | 1 |
 | `timeline(since, until)` | `day_sessions(start, end, source=…)` | time + source (in SQL) | 1 |
-| `search_memory(query, limit=10)` | `MemoryStore.search(query, k)` | **none yet** — time/app scope blocked on Phase 0 API | 1 (unscoped) → scoped after Phase 0 |
-| `ask_memory(question, limit=10)` | `RAG.answer(question, k)` | none yet (same) | 2 (or after scoped search) |
+| `search_memory(query, since?, until?, apps?, limit=10)` | scoped search (Phase 0) | time + apps (in SQL) | **blocked until Phase 0 scoped retrieval lands** |
+| `ask_memory(question, since?, until?, apps?)` | `RAG.answer` over scoped search | time + apps (in SQL) | after scoped search (Phase 2) |
 
 Optional MCP **resources** (phase 2): expose a daily briefing as a read-only
 resource (`openbird://briefing/today`).
@@ -112,12 +112,14 @@ resource (`openbird://briefing/today`).
 Design rules for tools:
 - **Mandatory result cap** (`limit`, hard max e.g. 50) so one call can't siphon the
   whole store. This is enforceable today (it's just `k`).
-- **Scope is Phase 0 work, enforced in retrieval.** Add `since`/`until`/`apps`
-  parameters to a new scoped search path that filters **in the SQL/candidate
-  generation**, plus an optional server-side scope **floor**
-  (`OPENBIRD_MCP_MAX_AGE_DAYS`, `OPENBIRD_MCP_SCOPE_APPS`) the client cannot widen.
-  Until that lands, `search_memory` ships **unscoped** and the consent copy says so
-  ("queries your entire memory"); we do not advertise time/app limits we can't keep.
+- **Scope is enforced in retrieval — no unscoped fallback.** `search_memory` (and
+  `ask_memory`) must **not** ship until Phase 0 adds a scoped search path that filters
+  `since`/`until`/`apps` **in the SQL/candidate generation**, plus an optional
+  server-side scope **floor** (`OPENBIRD_MCP_MAX_AGE_DAYS`, `OPENBIRD_MCP_SCOPE_APPS`)
+  the client cannot widen. We do **not** ship an unscoped `search_memory` guarded only
+  by consent copy — that would make scope a copy-only safeguard rather than a
+  mechanism, defeating its purpose. Until scoped retrieval exists, Phase 1 exposes only
+  `memory_stats` (content-free) and `timeline` (time + source enforced in SQL).
 - **Egress redaction:** run `redact.scrub()` (and `scrub_metadata`) over every
   field returned. Captured text is *usually* already scrubbed at capture, but
   `source="mcp"`/`ingest` content may not be — scrub on the way out as
@@ -227,8 +229,9 @@ to Open Question 1.
      `search_memory` with consent copy that says so.)
 3. **Phase 1** — server hosted **in the signed app** (§8) over **stdio** +
    `mcp_enable` gate + consent + `MCP ACTIVE` indicator + `memory_stats` + `timeline`
-   (+ unscoped or scoped `search_memory`) + egress redaction + content-free audit
-   logging, using the read-only open path. Works with Claude Code / Claude Desktop.
+   + egress redaction + content-free audit logging, using the read-only open path.
+   **No `search_memory` until Phase 0's scoped retrieval lands** (no unscoped
+   fallback). Works with Claude Code / Claude Desktop.
 4. **Phase 2** — streamable-http via `FastMCP(host=…, port=…)` + bearer auth +
    `mcp_allow_remote` gate + the bind classifier → unlocks claude.ai. `ask_memory`
    and the briefing resource land here (or with scoped search). Resources optional.
