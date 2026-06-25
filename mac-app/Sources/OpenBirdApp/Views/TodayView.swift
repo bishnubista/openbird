@@ -15,11 +15,10 @@ struct TodayView: View {
 
     var body: some View {
         mainColumn
-            .task {
-                if model.timeline == nil {
-                    await model.load()
-                }
-            }
+            // Reload every time the pane opens (not just once) so returning to Today after
+            // capture has run reflects new activity. `load()` keeps the current timeline
+            // visible while re-fetching and reuses the cached briefing, so there's no flash.
+            .task { await model.load() }
     }
 
     private var mainColumn: some View {

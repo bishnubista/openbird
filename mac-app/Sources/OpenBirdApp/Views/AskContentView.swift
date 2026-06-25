@@ -25,11 +25,10 @@ struct AskContentView: View {
     @State private var draft = ""
     @FocusState private var inputFocused: Bool
 
-    private let suggestions = [
-        "Summarize the Memory sync",
-        "What's left on OB-142",
-        "Draft my standup",
-    ]
+    /// Readable single-column width. Without the old side rails, both the wide in-window
+    /// pane and the expanded overlay would stretch messages edge-to-edge (user bubbles far
+    /// right, answers far left); capping + centering keeps the conversation legible.
+    private let contentMaxWidth: CGFloat = 680
 
     /// Drives the header's grounded/thinking indicator from the current thread.
     private var display: SourcesDisplay {
@@ -116,13 +115,19 @@ struct AskContentView: View {
                         }
                     }
                     .padding(18)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // Cap + center the conversation so it stays legible in wide containers
+                    // (the expanded overlay and the in-window pane) rather than stretching
+                    // user bubbles and answers to opposite edges.
+                    .frame(maxWidth: contentMaxWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity)
                 }
                 .onChange(of: askModel.thread.count) { _ in
                     withAnimation { proxy.scrollTo("chat-tail", anchor: .bottom) }
                 }
             }
             AskFollowUpBar(draft: $draft, isBusy: askModel.busy, focused: $inputFocused, onSubmit: submit)
+                .frame(maxWidth: contentMaxWidth)
+                .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity)
     }
@@ -134,7 +139,7 @@ struct AskContentView: View {
                 .foregroundStyle(OB.textSecondary(scheme))
             if appModel.askUnavailableReason == nil {
                 HStack(spacing: OB.Space.sm) {
-                    ForEach(suggestions, id: \.self) { suggestion in
+                    ForEach(appModel.askSuggestions, id: \.self) { suggestion in
                         Button { askModel.ask(suggestion) } label: {
                             Text(suggestion)
                                 .font(.system(size: 12.5))

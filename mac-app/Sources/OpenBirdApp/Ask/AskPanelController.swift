@@ -29,7 +29,9 @@ final class AskPanelController: NSObject, ObservableObject {
     private var anchorTopY: CGFloat?
 
     private let compactWidth: CGFloat = 620
-    private let expandedWidth: CGFloat = 960
+    // Single-column Ask (no side rails) — the expanded overlay no longer needs the wide
+    // chat+rails footprint, so it's snug around the readable chat column.
+    private let expandedWidth: CGFloat = 720
 
     /// Opens the SwiftUI main window (`Window(id: "main")`). Wired from the scene's
     /// `@Environment(\.openWindow)` because that environment value is only reachable

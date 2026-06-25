@@ -156,6 +156,17 @@ final class AppModel: ObservableObject {
         askUnavailableReason ?? "Ask about your work to get a grounded, cited answer."
     }
 
+    /// Default Ask prompt chips for the empty state — one source of truth for the compact
+    /// Spotlight panel and the in-window/expanded Ask. Generic, grounded-question shaped
+    /// (not demo ticket names), so they work against the user's real captured memory.
+    /// Only shown when memory has content (`askUnavailableReason == nil`); when there's no
+    /// data the views show that reason instead, so we never offer a prompt that can't answer.
+    let askSuggestions = [
+        "Summarize my day",
+        "What did I work on yesterday?",
+        "What should I follow up on?",
+    ]
+
     var localModelStatusState: StepState {
         if report.error != nil { return .attention }
         if report.cloudBlocked { return .attention }

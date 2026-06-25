@@ -92,6 +92,11 @@ private struct MainWindowRoot: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshPermissionStates()
+            // Refresh the day view on refocus while it's open, so activity captured in the
+            // background shows up without manually leaving and returning to the pane.
+            if model.selection == .today {
+                Task { await todayModel.load() }
+            }
         }
     }
 }

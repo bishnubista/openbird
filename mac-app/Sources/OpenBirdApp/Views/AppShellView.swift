@@ -35,8 +35,8 @@ struct AppShellView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         // One coherent floor that fits every pane: sidebar (222) + the widest pane's
-        // usable content. The Ask rails collapse responsively below this, so the chat
-        // column is never clipped (Codex review).
+        // usable content (Settings cards / Today). The Ask pane centers its single chat
+        // column, so it stays legible at any width above this floor.
         .frame(minWidth: 920, minHeight: 560)
         .background(GlassBackdrop())
         .background(WindowConfigurator())   // draggable by background (macOS-13-safe)
