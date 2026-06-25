@@ -117,10 +117,13 @@ def capture(
     _report_and_finish(stats, once=once)
 
 
-# Exit code reserved for a session that tried to capture but ingested nothing.
-# Codes 3 and 4 are already taken (HelperUnavailableError / CaptureSupervisorError),
-# so a fully-failed capture session uses 5.
-_CAPTURE_NO_PROGRESS_EXIT = 5
+# Exit code for a session that tried to capture but ingested nothing.
+# Codes 3 and 4 are taken (HelperUnavailableError / CaptureSupervisorError), and
+# 5 is reserved for CAPTURE_EXIT_REINDEX_REQUIRED (cohort-mismatch -> the mac app
+# maps 5 to its one-click "reindex required" affordance; see AppModel
+# .captureReindexExitCode). A no-progress failure is unrelated to reindex, so it
+# uses 6 — otherwise the app would mis-route a broken session as "needs reindex".
+_CAPTURE_NO_PROGRESS_EXIT = 6
 
 
 def _report_and_finish(stats, *, once: bool) -> None:

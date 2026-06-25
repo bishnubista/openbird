@@ -1817,21 +1817,36 @@ def _invoke_capture(monkeypatch, tmp_path, *, loop: bool, stats: CaptureStats):
 
 
 def test_capture_once_failed_session_exits_nonzero(monkeypatch, tmp_path):
+    import openbird.capture.cli as capture_cli
+
     # received events but ingested none while hitting errors == totally failing.
     stats = CaptureStats(received=3, ingested=0, coalesced=0, rejected=0, errors=3)
     res = _invoke_capture(monkeypatch, tmp_path, loop=False, stats=stats)
-    assert res.exit_code == 5, res.output
+    assert res.exit_code == capture_cli._CAPTURE_NO_PROGRESS_EXIT, res.output
     assert "received=3" in res.output
     assert "ingested=0" in res.output
 
 
 def test_capture_loop_failed_session_exits_nonzero(monkeypatch, tmp_path):
+    import openbird.capture.cli as capture_cli
+
     # This is the reported bug: a --loop session that ingests nothing while
     # erroring used to print "complete" and exit 0.
     stats = CaptureStats(received=3, ingested=0, coalesced=0, rejected=0, errors=3)
     res = _invoke_capture(monkeypatch, tmp_path, loop=True, stats=stats)
-    assert res.exit_code == 5, res.output
+    assert res.exit_code == capture_cli._CAPTURE_NO_PROGRESS_EXIT, res.output
     assert "session complete" in res.output.lower()
+
+
+def test_no_progress_exit_code_is_distinct_from_reserved_codes():
+    import openbird.capture.cli as capture_cli
+
+    # 3/4 are HelperUnavailable/Supervisor; 5 is reserved for the reindex-required
+    # signal the mac app maps to its one-click Reindex affordance. A no-progress
+    # failure must NOT reuse 5, or the app would mis-route a broken session as
+    # "needs reindex". Pin the value so a future edit can't silently re-collide.
+    assert capture_cli._CAPTURE_NO_PROGRESS_EXIT == 6
+    assert capture_cli._CAPTURE_NO_PROGRESS_EXIT not in {3, 4, 5}
 
 
 def test_capture_normal_run_exits_zero(monkeypatch, tmp_path):
