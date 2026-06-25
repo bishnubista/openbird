@@ -211,19 +211,33 @@ class RoutineTemplate:
 
     def _summarize(self, provider: object, start: float, end: float, context: str) -> str:
         """Build the fenced prompt from rendered ``context`` and call the provider."""
-        messages = [
-            {"role": "system", "content": _resolve_system_prompt()},
-            {
-                "role": "user",
-                "content": (
-                    f"{self.prompt}\n\n"
-                    f"Time window: {_fmt(start)} -> {_fmt(end)}.\n\n"
-                    f"<observations>\n{context}\n</observations>"
-                ),
-            },
-        ]
+        messages = build_routine_messages(
+            _resolve_system_prompt(), self.prompt, start, end, context
+        )
         result = provider.complete(messages)  # type: ignore[attr-defined]
         return result if isinstance(result, str) else str(result)
+
+
+def build_routine_messages(
+    system_prompt: str, user_prompt: str, start: float, end: float, context: str
+) -> list[dict]:
+    """Build the routine summary messages (pure; system prompt is a parameter).
+
+    ``context`` must already be a rendered, fence-defanged activity log (see
+    :func:`render_context` / :func:`render_context_text`). Used by both runtime
+    (:meth:`RoutineTemplate._summarize`) and the offline ``prompts test`` harness.
+    """
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                f"{user_prompt}\n\n"
+                f"Time window: {_fmt(start)} -> {_fmt(end)}.\n\n"
+                f"<observations>\n{context}\n</observations>"
+            ),
+        },
+    ]
 
 
 def _defang_fence(text: str) -> str:
