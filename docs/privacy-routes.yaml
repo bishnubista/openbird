@@ -221,6 +221,29 @@ routes:
       - preflight.cloud
       - cli.CLOUD_ACTIVE
 
+  - id: rerank.remote
+    class: unknown
+    source: user query plus retrieved local memory chunks sent to a cross-encoder
+    captured_fields:
+      - user_question
+      - retrieved_chunk_text
+      - rerank_request_metadata
+    storage:
+      - local_db_for_retrieval_only
+    egress:
+      condition: rerank_host_is_not_loopback
+      default: active_rerank_route
+      resolved_by:
+        - model.remote_ollama
+        - model.third_party_cloud
+      warning: query and candidate chunk text leave this machine
+    enforcement:
+      requires: OPENBIRD_ALLOW_CLOUD
+    truth_surface:
+      - preflight.cloud
+      - cli.CLOUD_ACTIVE
+      - app.CLOUD_ACTIVE
+
   - id: diagnostics.logs
     class: local
     source: runtime diagnostics

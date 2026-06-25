@@ -26,7 +26,10 @@ from openbird.config import Settings, get_settings
 from openbird.llm.base import LLMProviderProtocol
 from openbird.llm.provider import create_llm_provider
 from openbird.memory import ingest
-from openbird.memory.migrations import ensure_schema_version
+from openbird.memory.migrations import (
+    ensure_schema_version,
+    preflight_legacy_shape_guard,
+)
 from openbird.memory.search import mmr, rrf
 from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
 from openbird.types import Observation, SearchHit
@@ -43,6 +46,17 @@ def _log_rerank_skip(reason: str) -> None:
     Search continues on the RRF order.
     """
     _log.info("rerank_skipped reason=%s (fell back to RRF order)", reason)
+
+
+def _log_vector_skip(reason: str) -> None:
+    """Log a vector/embedding fallback with a STRUCTURED, content-free reason code.
+
+    The embedding provider's error may echo the query or contents in its message,
+    so we never log the exception text, response body, or query — only the short
+    exception-type ``reason`` code. Search continues on BM25-only ranking, exactly
+    as :func:`_log_rerank_skip` keeps search alive when a reranker is down.
+    """
+    _log.info("vector_skipped reason=%s (fell back to BM25-only ranking)", reason)
 
 
 class EmbeddingCohortMismatch(ValueError):
@@ -183,7 +197,17 @@ class MemoryStore:
         shape exists we run :func:`ensure_schema_version`, which stamps
         ``PRAGMA user_version`` and runs any pending forward migrations — and
         refuses to open a DB written by a newer build.
+
+        BEFORE applying schema.sql we run :func:`preflight_legacy_shape_guard`: a
+        legacy unstamped DB whose tables don't match the v1 shape would otherwise
+        make schema.sql's ``CREATE INDEX ... ON observations(ts)`` raise a cryptic
+        ``no such column: ts`` (because ``CREATE TABLE IF NOT EXISTS`` skips the
+        wrong-shaped table). The guard turns that into a clear migration error.
         """
+        # Reject a partial / pre-v1 / foreign legacy DB up front, before any of
+        # schema.sql's column-dependent DDL (e.g. idx_observations_ts) can fail
+        # with a raw OperationalError.
+        preflight_legacy_shape_guard(self.conn)
         sql = _SCHEMA_PATH.read_text(encoding="utf-8")
         # executescript runs in autocommit (it issues its own COMMIT); fine since
         # we manage explicit transactions elsewhere.
@@ -400,10 +424,12 @@ class MemoryStore:
 
         Each surviving hit is resolved back to its most recent observation
         (app/window/ts) so citations are occurrence-aware. ``semantic=False``
-        runs BM25 only (no embedding call). When a cross-encoder reranker is
-        configured it reorders the fused candidates by query-relevance before the
-        MMR diversity pass; any reranker failure falls back to the RRF order so
-        search never breaks.
+        runs BM25 only (no embedding call). When ``semantic=True`` but the
+        embedding provider fails (Ollama down, timeout, transport, ...), the
+        vector stage is skipped and search degrades to BM25-only ranking rather
+        than crashing. When a cross-encoder reranker is configured it reorders the
+        fused candidates by query-relevance before the MMR diversity pass; any
+        reranker failure falls back to the RRF order so search never breaks.
         """
         if not query.strip():
             return []
@@ -416,9 +442,16 @@ class MemoryStore:
             rankings.append(bm25_ids)
 
         if semantic:
-            vec_ids = self._vector(query, pool)
-            if vec_ids:
-                rankings.append(vec_ids)
+            try:
+                vec_ids = self._vector(query, pool)
+            except Exception as exc:  # noqa: BLE001 - embedding failure must never break search
+                # An embedding/provider failure (Ollama down, timeout, transport,
+                # dim mismatch, ...) must degrade to BM25-only ranking, not discard
+                # the already-successful BM25 hits. Mirrors _rerank's RRF fallback.
+                _log_vector_skip(type(exc).__name__)
+            else:
+                if vec_ids:
+                    rankings.append(vec_ids)
 
         if not rankings:
             return []

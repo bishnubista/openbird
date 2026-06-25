@@ -7,6 +7,7 @@ behaviors that must stay reliable in production.
 
 from __future__ import annotations
 
+import pathlib
 import sqlite3
 import sys
 import threading
@@ -165,6 +166,30 @@ def test_busy_timeout_set_on_plaintext_and_sqlcipher_paths(monkeypatch, tmp_path
 # --------------------------------------------------------------------------- #
 
 
+# The canonical v1 schema lives in schema.sql. Tests that need a "real v1 shape"
+# DB apply it directly so they validate against the actual on-disk contract (and
+# stay correct if v1 ever needs the unlikely correction the freeze rule allows).
+_SCHEMA_SQL = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "openbird"
+    / "memory"
+    / "schema.sql"
+).read_text(encoding="utf-8")
+
+
+def _make_v1_shaped_db(path) -> sqlite3.Connection:
+    """Create a DB carrying the real v1 shape but left at user_version=0.
+
+    Mirrors a genuine legacy pre-versioning DB: schema.sql was applied (so every
+    v1 table/column is present) but PRAGMA user_version was never stamped.
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA_SQL)
+    conn.execute("PRAGMA user_version = 0")
+    conn.commit()
+    return conn
+
+
 def test_fresh_db_is_stamped_to_current_version(tmp_path):
     db = str(tmp_path / "fresh.db")
     s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
@@ -198,16 +223,146 @@ def test_fresh_store_ships_session_index(tmp_path):
         s.close()
 
 
-def test_legacy_unversioned_db_is_adopted_as_v1(tmp_path):
-    """A DB with the v1 shape but user_version=0 is stamped to 1, not migrated."""
-    conn = sqlite3.connect(tmp_path / "legacy.db")
-    # Recreate just enough of the v1 shape that _db_has_existing_tables sees it.
-    conn.execute("CREATE TABLE observations (id TEXT PRIMARY KEY)")
-    conn.execute("PRAGMA user_version = 0")
-    conn.commit()
-    assert ensure_schema_version(conn) == SCHEMA_VERSION
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    conn.close()
+def test_legacy_unversioned_db_with_real_v1_shape_is_adopted_as_v1(tmp_path):
+    """A DB with the REAL v1 shape but user_version=0 is stamped to 1, not migrated.
+
+    This is the genuine legacy path: schema.sql was applied long ago, but
+    PRAGMA user_version was never set. It must be adopted as version 1.
+    """
+    conn = _make_v1_shaped_db(tmp_path / "legacy.db")
+    try:
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        # And the adopted DB is actually usable: the `ts` column the original bug
+        # tripped over is present, so a real query against it succeeds.
+        conn.execute(
+            "INSERT INTO content_blobs (content_hash, text) VALUES ('h', 't')"
+        )
+        conn.execute(
+            "INSERT INTO observations (id, content_hash, ts, source) "
+            "VALUES ('o', 'h', 1.0, 'capture')"
+        )
+        rows = conn.execute(
+            "SELECT id FROM observations WHERE ts >= 0 ORDER BY ts"
+        ).fetchall()
+        assert [r[0] for r in rows] == ["o"]
+    finally:
+        conn.close()
+
+
+def test_v0_db_with_partial_shape_raises_instead_of_failing_later(tmp_path):
+    """A v0 DB with tables but the WRONG shape RAISES at migrate() time.
+
+    Repro of the original bug: a pre-v1/partial DB whose `observations` table is
+    missing the `ts` column used to be stamped to v1 and "succeed", then blow up
+    with `no such column: ts` at query time. The presence check is now a SHAPE
+    check, so this fails loudly and early — and the DB is left UNSTAMPED.
+    """
+    # Start from the real v1 shape, then break exactly the `ts` column on
+    # observations — isolating the precise defect the original repro hit.
+    conn = _make_v1_shaped_db(tmp_path / "partial.db")
+    try:
+        conn.execute("DROP TABLE observations")
+        conn.execute(
+            "CREATE TABLE observations ("
+            "id TEXT PRIMARY KEY, content_hash TEXT, app TEXT, "
+            "window TEXT, url TEXT, session_id TEXT, source TEXT)"  # no `ts`
+        )
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+
+        with pytest.raises(RuntimeError) as exc:
+            ensure_schema_version(conn)
+        msg = str(exc.value)
+        assert "does not match" in msg
+        assert "ts" in msg  # names the concrete missing column
+
+        # The DB was NOT silently stamped — it stays at version 0.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_v0_db_missing_a_required_table_raises(tmp_path):
+    """A v0 DB with `observations` present but other required tables missing RAISES."""
+    conn = sqlite3.connect(tmp_path / "missing_table.db")
+    try:
+        # Full observations shape, but the rest of the v1 tables are absent.
+        conn.execute(
+            "CREATE TABLE observations ("
+            "id TEXT PRIMARY KEY, content_hash TEXT, ts REAL, app TEXT, "
+            "window TEXT, url TEXT, session_id TEXT, source TEXT)"
+        )
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+
+        with pytest.raises(RuntimeError, match="does not match"):
+            ensure_schema_version(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_fresh_empty_db_still_stamps_to_current_version(tmp_path):
+    """A brand-new empty DB (no tables) is stamped directly to SCHEMA_VERSION."""
+    conn = sqlite3.connect(tmp_path / "empty.db")
+    try:
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_store_open_on_partial_db_raises_clear_error_not_raw_operationalerror(tmp_path):
+    """End-to-end repro: opening a MemoryStore on a partial v0 DB raises the CLEAR
+    migration error, NOT a raw ``OperationalError: no such column: ts``.
+
+    This is the actual production path. ``_apply_schema`` runs ``schema.sql``
+    first, and schema.sql creates ``idx_observations_ts ON observations(ts)``.
+    Without the preflight guard, a pre-existing ``observations`` table missing
+    ``ts`` makes that CREATE INDEX raise a cryptic OperationalError mid-script —
+    exactly the failure mode this fix exists to prevent.
+    """
+    db = str(tmp_path / "partial_store.db")
+    # Build the partial DB out-of-band so MemoryStore opens an EXISTING wrong DB.
+    seed = sqlite3.connect(db)
+    seed.execute("CREATE TABLE observations (id TEXT PRIMARY KEY, app TEXT)")  # no ts
+    seed.execute("PRAGMA user_version = 0")
+    seed.commit()
+    seed.close()
+
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    with pytest.raises(RuntimeError) as exc:
+        MemoryStore(db_path=db, settings=settings, provider=FakeProvider(embed_dim=64))
+    msg = str(exc.value)
+    assert "does not match" in msg
+    assert not isinstance(exc.value, sqlite3.OperationalError)
+    # The partial DB was never stamped.
+    check = sqlite3.connect(db)
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 0
+    finally:
+        check.close()
+
+
+def test_store_open_on_real_v1_legacy_db_succeeds(tmp_path):
+    """The genuine legacy path still works through the real store-open code path:
+    an unstamped DB with the real v1 shape opens and is stamped to SCHEMA_VERSION."""
+    db = str(tmp_path / "legacy_store.db")
+    _make_v1_shaped_db(db).close()
+
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    s = MemoryStore(db_path=db, settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        ver = s.conn.execute("PRAGMA user_version").fetchone()
+        assert int(next(iter(ver.values()))) == SCHEMA_VERSION
+        # And it is fully usable end-to-end.
+        s.add_observation("legacy db still works", source="capture", ts=1.0)
+        assert s.time_range(0.0, 10.0)
+    finally:
+        s.close()
 
 
 def test_migration_ladder_upgrades_old_db(tmp_path, monkeypatch):

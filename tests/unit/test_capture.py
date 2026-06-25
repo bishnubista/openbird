@@ -687,6 +687,128 @@ def test_swift_helper_pause_file_exits_before_accessibility(tmp_path):
     assert "capture: skipped_paused" in res.stderr
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin" or shutil.which("swift") is None,
+    reason="capture helper requires macOS and the Swift toolchain",
+)
+def test_swift_helper_rejects_non_pipe_stdout(tmp_path):
+    """stdout pointing at a regular file is NOT a private pipe -> fail closed.
+
+    Exercises the hardened ``stdoutIsPrivatePipe`` boundary end-to-end through the
+    real helper: a redirected regular file is the canonical leak vector (captured
+    content persisting to disk), so the helper must exit non-zero with a
+    privacy-safe reason and write nothing to the file. No --pause-file is passed,
+    so execution reaches the stdout check rather than short-circuiting on pause.
+    """
+    out_file = tmp_path / "stdout.txt"
+    with out_file.open("wb") as fh:
+        res = subprocess.run(
+            [
+                "swift",
+                "run",
+                "--quiet",
+                "CaptureHelper",
+                "--no-prompt",
+                "--allow",
+                "com.apple.mail",
+            ],
+            cwd=ROOT / "capture-helper",
+            text=True,
+            stdout=fh,  # a regular file: not a FIFO/socket
+            stderr=subprocess.PIPE,
+            timeout=120,
+            check=False,
+        )
+
+    assert res.returncode == 3, res.stderr
+    assert "not a private pipe" in res.stderr
+    # Fail closed BEFORE any capture: nothing (content or otherwise) is written.
+    assert out_file.read_bytes() == b""
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or shutil.which("swiftc") is None,
+    reason="pure-function check requires macOS and the Swift toolchain",
+)
+def test_stdout_pipe_stat_decision_is_correct(tmp_path):
+    """Unit-test the factored pure decision ``stdoutPipeStatIsPrivate``.
+
+    The hardened ownership/permission logic is not reachable as distinct branches
+    by driving the real helper (we cannot easily hand it a pipe owned by another
+    user). So the rule is factored into a pure, I/O-free Swift function that maps
+    (mode, uid, euid) -> accept/reject; we compile and assert its boundaries here.
+    This mirrors the project's existing "test the factored logic" convention.
+
+    Asserted policy (``nlink`` distinguishes a nameless kernel endpoint from a
+    path-openable named one — mode bits alone cannot):
+      * nameless FIFO/socket (nlink==0) + owned-by-us -> accept regardless of
+        group/other bits (anon ``subprocess.PIPE`` is 0660, socketpair 0666; both
+        are unreachable by path so the bits are inert);
+      * named FIFO (nlink>0) owned-by-us, 0600       -> accept;
+      * named FIFO (nlink>0) owned-by-us, 0660       -> REJECT (group members could
+        open it by path) — the bug Codex flagged;
+      * wrong type (regular file)                    -> reject;
+      * owned by another uid                         -> reject.
+    """
+    src = ROOT / "capture-helper" / "Sources" / "CaptureHelper" / "main.swift"
+    # Extract just the pure function from main.swift so the harness exercises the
+    # SHIPPING source (no copy to drift), compiled standalone without AppKit/AX.
+    text = src.read_text()
+    start = text.index("func stdoutPipeStatIsPrivate(")
+    end = text.index("\n}", start) + len("\n}")
+    pure_fn = text[start:end]
+
+    harness = f"""
+import Foundation
+{pure_fn}
+let euid: uid_t = 501
+let other: uid_t = 502
+let nameless: nlink_t = 0   // anonymous pipe / socketpair
+let named: nlink_t = 1      // mkfifo FIFO / bound socket
+// type-only masks
+let fifo = mode_t(S_IFIFO)
+let sock = mode_t(S_IFSOCK)
+let reg  = mode_t(S_IFREG)
+func check(_ name: String, _ got: Bool, _ want: Bool) {{
+    if got != want {{ FileHandle.standardError.write(Data("FAIL \\(name): got=\\(got) want=\\(want)\\n".utf8)); exit(1) }}
+}}
+// Nameless endpoints: owner-only check; bits are inert (no path to open by).
+check("anon-pipe-0660-grouprw", stdoutPipeStatIsPrivate(mode: fifo | 0o660, uid: euid, euid: euid, nlink: nameless), true)
+check("socketpair-0666", stdoutPipeStatIsPrivate(mode: sock | 0o666, uid: euid, euid: euid, nlink: nameless), true)
+check("anon-pipe-other-owner", stdoutPipeStatIsPrivate(mode: fifo | 0o660, uid: other, euid: euid, nlink: nameless), false)
+// Named endpoints: require owner-only bits (no group/other).
+check("named-fifo-0600", stdoutPipeStatIsPrivate(mode: fifo | 0o600, uid: euid, euid: euid, nlink: named), true)
+check("named-fifo-0660-grouprw-REJECT", stdoutPipeStatIsPrivate(mode: fifo | 0o660, uid: euid, euid: euid, nlink: named), false)
+check("named-fifo-world-readable", stdoutPipeStatIsPrivate(mode: fifo | 0o604, uid: euid, euid: euid, nlink: named), false)
+check("named-fifo-other-owner", stdoutPipeStatIsPrivate(mode: fifo | 0o600, uid: other, euid: euid, nlink: named), false)
+// Wrong type is always rejected.
+check("regular-file-rejected", stdoutPipeStatIsPrivate(mode: reg | 0o600, uid: euid, euid: euid, nlink: named), false)
+print("ok")
+"""
+    harness_path = tmp_path / "pure_check.swift"
+    harness_path.write_text(harness)
+    bin_path = tmp_path / "pure_check"
+    compile_res = subprocess.run(
+        ["swiftc", str(harness_path), "-o", str(bin_path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=120,
+        check=False,
+    )
+    assert compile_res.returncode == 0, compile_res.stderr
+    run_res = subprocess.run(
+        [str(bin_path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+    assert run_res.returncode == 0, run_res.stderr
+    assert run_res.stdout.strip() == "ok"
+
+
 def test_daemon_scrubs_before_ingest(allow_settings):
     store = FakeStore()
     daemon = CaptureDaemon(store, settings=allow_settings)
@@ -1770,6 +1892,110 @@ def test_nan_timestamp_frame_stores_finite_ts(allow_settings):
     stats = daemon.run_lines([line])
     assert stats.ingested == 1
     assert math.isfinite(store.calls[0]["ts"])
+
+
+# ---------------------------------------------------------------------------
+# capture CLI exit-code policy — a fully-failed session must not exit 0
+# ---------------------------------------------------------------------------
+
+
+def _invoke_capture(monkeypatch, tmp_path, *, loop: bool, stats: CaptureStats):
+    """Drive the capture CLI with the daemon stubbed to return ``stats``.
+
+    Stubs CaptureDaemon so its ``run`` (--once) and ``run_forever`` (--loop)
+    return a canned :class:`CaptureStats` without spawning a helper, and routes
+    the store/provider through fakes. Returns the CliRunner result.
+    """
+    from typer.testing import CliRunner
+
+    import openbird.capture.cli as capture_cli
+    import openbird.capture.daemon as daemon_mod
+    import openbird.cli as cli
+
+    settings = Settings(data_dir=tmp_path, allowlist=["com.apple.mail"])
+
+    class StubDaemon:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def run(self, *args, **kwargs) -> CaptureStats:
+            return stats
+
+        def run_forever(self, *args, **kwargs) -> CaptureStats:
+            return stats
+
+    class StubStore:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(capture_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(daemon_mod, "CaptureDaemon", StubDaemon)
+    monkeypatch.setattr(cli, "_provider", lambda: None)
+    # Accept **kwargs so the stub tolerates extra _store params the daemon may
+    # pass (e.g. reraise_cohort_mismatch=True from the --loop path) without a
+    # TypeError — keeps this stub forward-compatible across PRs.
+    monkeypatch.setattr(
+        cli, "_store", lambda *, provider=None, settings=None, **kwargs: StubStore()
+    )
+
+    argv = ["capture", "--helper", "fake", "--allow-unsigned"]
+    argv.append("--loop" if loop else "--once")
+    return CliRunner().invoke(cli.app, argv)
+
+
+def test_capture_once_failed_session_exits_nonzero(monkeypatch, tmp_path):
+    import openbird.capture.cli as capture_cli
+
+    # received events but ingested none while hitting errors == totally failing.
+    stats = CaptureStats(received=3, ingested=0, coalesced=0, rejected=0, errors=3)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=False, stats=stats)
+    assert res.exit_code == capture_cli._CAPTURE_NO_PROGRESS_EXIT, res.output
+    assert "received=3" in res.output
+    assert "ingested=0" in res.output
+
+
+def test_capture_loop_failed_session_exits_nonzero(monkeypatch, tmp_path):
+    import openbird.capture.cli as capture_cli
+
+    # This is the reported bug: a --loop session that ingests nothing while
+    # erroring used to print "complete" and exit 0.
+    stats = CaptureStats(received=3, ingested=0, coalesced=0, rejected=0, errors=3)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=True, stats=stats)
+    assert res.exit_code == capture_cli._CAPTURE_NO_PROGRESS_EXIT, res.output
+    assert "session complete" in res.output.lower()
+
+
+def test_no_progress_exit_code_is_distinct_from_reserved_codes():
+    import openbird.capture.cli as capture_cli
+
+    # 3/4 are HelperUnavailable/Supervisor; 5 is reserved for the reindex-required
+    # signal the mac app maps to its one-click Reindex affordance. A no-progress
+    # failure must NOT reuse 5, or the app would mis-route a broken session as
+    # "needs reindex". Pin the value so a future edit can't silently re-collide.
+    assert capture_cli._CAPTURE_NO_PROGRESS_EXIT == 6
+    assert capture_cli._CAPTURE_NO_PROGRESS_EXIT not in {3, 4, 5}
+
+
+def test_capture_normal_run_exits_zero(monkeypatch, tmp_path):
+    stats = CaptureStats(received=5, ingested=4, coalesced=0, rejected=1, errors=0)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=False, stats=stats)
+    assert res.exit_code == 0, res.output
+    assert "ingested=4" in res.output
+
+
+def test_capture_loop_clean_stop_with_some_errors_exits_zero(monkeypatch, tmp_path):
+    # Long --loop that ingested fine then got Ctrl-C; a few transient errors
+    # occurred. Because ingested > 0 this is a clean stop, NOT a failure.
+    stats = CaptureStats(received=10, ingested=8, coalesced=1, rejected=0, errors=2)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=True, stats=stats)
+    assert res.exit_code == 0, res.output
+
+
+def test_capture_quiet_session_zero_events_exits_zero(monkeypatch, tmp_path):
+    # Nothing received (received == 0) — nothing to do, not a failure.
+    stats = CaptureStats(received=0, ingested=0, coalesced=0, rejected=0, errors=0)
+    res = _invoke_capture(monkeypatch, tmp_path, loop=True, stats=stats)
+    assert res.exit_code == 0, res.output
 
 
 class _CohortProvider:

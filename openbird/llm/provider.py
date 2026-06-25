@@ -68,6 +68,33 @@ class CloudOptInRequired(RuntimeError):
 _LOCAL_MODEL_PREFIXES: tuple[str, ...] = ("mlx/", "mlx-community/", "mlx_community/")
 
 
+# --- Cloud-egress route registry (privacy manifest enforcement) -------------- #
+#
+# This is the AUTHORITATIVE enumeration of the runtime's cloud-egress surface:
+# every role that :func:`classify_models` can emit (i.e. every code path that can
+# send captured memory off this machine) maps to the route id that MUST declare
+# it in ``docs/privacy-routes.yaml``. The privacy-route tests cross-check this
+# registry against the manifest so:
+#
+#   * a NEW egress role added to ``classify_models`` without a manifest entry
+#     fails the test (under-declared egress), and
+#   * a manifest route claiming cloud egress that no role here gates fails too
+#     (over-declared / orphaned route).
+#
+# Keep these keys in lock-step with the ``remote[...]`` keys set by
+# :func:`classify_models`. A fully automatic "discover every socket call" check
+# is infeasible (network calls are buried inside LiteLLM/httpx), so this explicit
+# registry is the testable proxy: all three runtime egress call sites
+# (``litellm.completion``, ``litellm.embedding``, the rerank ``/v1/rerank`` POST)
+# are gated EXCLUSIVELY through ``classify_models`` + the cloud opt-in, so the set
+# of roles it can emit IS the cloud-egress surface.
+CLOUD_EGRESS_ROUTES: dict[str, str] = {
+    "llm": "chat.remote",
+    "embed": "embedding.remote",
+    "rerank": "rerank.remote",
+}
+
+
 def is_local_model(model: str, *, ollama_host: str | None = None) -> bool:
     """Return True if ``model`` runs on this machine (no data leaves the device).
 
@@ -452,6 +479,7 @@ __all__ = [
     "LLMTimeoutError",
     "is_local_model",
     "classify_models",
+    "CLOUD_EGRESS_ROUTES",
     "cloud_active",
     "cloud_banner",
 ]

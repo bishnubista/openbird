@@ -265,14 +265,104 @@ final class OpenBirdService: @unchecked Sendable {
         return isCapturePaused()
     }
 
-    /// Whether a capture daemon launched by this app is still running.
+    /// Whether a capture daemon is running — whether this app launched it, an
+    /// external `capture-helper` is mid-spawn, or an external
+    /// `openbird capture --loop` daemon is supervising.
     func isCaptureRunning() -> Bool {
         if let proc = captureProcess {
             if proc.isRunning { return true }
             captureProcess = nil
         }
-        // Also treat an externally running helper as "capturing" for status.
-        return Self.run("/usr/bin/pgrep", arguments: ["-x", "capture-helper"]).exitCode == 0
+        // An externally running helper counts as "capturing" — but the helper is
+        // only alive intermittently between the daemon's re-spawn cadence, so a
+        // miss here does NOT mean capture is stopped. Hence the loop check below.
+        if Self.run("/usr/bin/pgrep", arguments: ["-x", "capture-helper"]).exitCode == 0 {
+            return true
+        }
+        // The long-lived parent is `openbird capture --loop` (the CLI/wrapper),
+        // which stays alive across helper re-spawns, so it is the reliable signal
+        // for an externally-started daemon. `pgrep -x openbird` is too broad (it
+        // matches any subcommand, e.g. a transient `openbird doctor`), and
+        // `pgrep -f capture` is far too broad (it hits Chrome `video_capture`,
+        // `cameracaptured`, …). So we over-match on the argv with a narrow regex,
+        // then make the precise, testable decision in
+        // `externalCaptureRunning(pgrepOutput:ownPID:)`.
+        //
+        // `-f` matches against the full argv (the subcommand/flags live in argv,
+        // not in `comm`). `-l` with `-f` is documented by `man pgrep` to print
+        // "the process ID and the full argument list" — that argv is what the pure
+        // filter inspects to reject unrelated processes (e.g. an editor that merely
+        // has the string open, or the daemon's transient `--once` passes).
+        let result = Self.run(
+            "/usr/bin/pgrep",
+            arguments: ["-fl", "openbird(-cli)? capture( |$)"]
+        )
+        guard result.exitCode == 0 else { return false }
+        return Self.externalCaptureRunning(
+            pgrepOutput: result.stdout,
+            ownPID: ProcessInfo.processInfo.processIdentifier
+        )
+    }
+
+    /// Pure decision: given `pgrep -fl` output, is there a live external
+    /// `openbird capture --loop` daemon? Factored out so the matching rules are
+    /// unit-testable without spawning processes.
+    ///
+    /// Each `pgrep -fl` line is `"<pid> <full argv>"`. A line counts as a running
+    /// external capture daemon when ALL hold:
+    ///   1. ADJACENCY: some token T whose path basename is exactly the CLI
+    ///      (`openbird` or `openbird-cli`) is immediately followed by the token
+    ///      `capture`. This is the real typer invocation shape — the subcommand
+    ///      always sits directly after the program. The basename rule rejects mere
+    ///      substrings like `video_capture`, and the adjacency requirement rejects
+    ///      a lone `openbird` token that happens to share a line with an unrelated
+    ///      `capture`/`--loop`. Checked across ALL tokens (not just argv[0]) because
+    ///      the real daemon launches as `…/python3 …/openbird capture --loop`.
+    ///   2. the `--loop` flag appears as a token AFTER that `capture` (a bounded
+    ///      `--once` pass is not a long-running daemon).
+    ///   3. it is not this process (`ownPID`, so the app never reports itself) and
+    ///      no token's basename is `pgrep` (so this very query never self-matches).
+    ///
+    /// Privacy-safe: operates only on process argv (binary + subcommand flags) —
+    /// no window titles, URLs, or captured content are read or logged.
+    ///
+    /// Known limitation (accepted): `pgrep -fl` flattens argv into a single
+    /// space-joined string, so true argv boundaries are lost. A contrived process
+    /// whose SINGLE argument is literally the string `…/openbird capture --loop`
+    /// (e.g. an editor opening a file with that exact name incl. spaces) would still
+    /// match. This is inherent to any pgrep/ps text source; the adjacency + basename
+    /// rules make it require a precisely-crafted path, and the only consequence is a
+    /// status badge reading "capturing" — never a data/privacy effect.
+    static func externalCaptureRunning(pgrepOutput: String, ownPID: Int32) -> Bool {
+        for line in pgrepOutput.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+
+            // Split the leading PID off the argv.
+            let parts = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard parts.count == 2, let pid = Int32(parts[0]) else { continue }
+            if pid == ownPID { continue }
+
+            let tokens = String(parts[1]).split(separator: " ").map(String.init)
+
+            // Rule 3 (pgrep self): reject only when a token's basename is `pgrep`,
+            // never on a whole-line substring (a path could legitimately contain it).
+            if tokens.contains(where: { ($0 as NSString).lastPathComponent == "pgrep" }) {
+                continue
+            }
+
+            // Rules 1 & 2: find `<…/openbird|…/openbird-cli> capture` as ADJACENT
+            // tokens, then require `--loop` somewhere after that `capture`.
+            for index in tokens.indices.dropLast() {
+                let exe = (tokens[index] as NSString).lastPathComponent
+                guard exe == "openbird" || exe == "openbird-cli" else { continue }
+                guard tokens[index + 1] == "capture" else { continue }
+                if tokens[(index + 2)...].contains("--loop") {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// Launch `openbird capture --loop` via the bundled wrapper, injecting the

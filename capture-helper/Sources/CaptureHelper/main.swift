@@ -38,14 +38,57 @@ private func diag(_ message: String) {
 
 // MARK: - Trust / TCC
 
+/// Pure accept/reject decision for a stdout-target `stat`/`fstat` result, split
+/// out from any I/O so it can be unit-tested directly (given stat fields ->
+/// accept/reject) without a real pipe or Accessibility access.
+///
+/// A stdout target qualifies as a **private pipe** only when ALL hold:
+///   * type is a FIFO (anonymous `subprocess.PIPE` / named `mkfifo`) or a socket
+///     (a `socketpair` IPC channel) — never a TTY or a redirected regular file,
+///     which could persist captured content to scrollback or a log;
+///   * it is owned by the current effective user (`st_uid == euid`) — a pipe
+///     owned by another user must never receive captured screen content;
+///   * its permission bits are safe **for its kind**, decided by `nlink`:
+///     - A **nameless** endpoint (`nlink == 0`: an anonymous `pipe(2)` from
+///       `subprocess.PIPE`, or a `socketpair`) has NO filesystem path, so no other
+///       process can `open()` it by name regardless of its mode bits. Darwin
+///       reports such pipes as 0660 (and socketpairs as 0666); those group/other
+///       bits are inert because the only handles in existence are the two the
+///       kernel handed the daemon and this helper. We require type + owner only.
+///     - A **named** endpoint (`nlink > 0`: a `mkfifo` FIFO, or a bound socket)
+///       IS openable by path, so its bits matter: we require NO group or other
+///       permission bits at all (the same 0600 rigor as the audio `--out`
+///       named-FIFO policy), rejecting a same-user 0660 FIFO that group members
+///       could otherwise read.
+///
+/// Using `nlink` (not mode alone) is what lets us safely tolerate the legitimate
+/// daemon's 0660 anonymous pipe WITHOUT also accepting a group/world-accessible
+/// *named* FIFO — `fstat` mode by itself cannot tell the two apart.
+func stdoutPipeStatIsPrivate(mode: mode_t, uid: uid_t, euid: uid_t, nlink: nlink_t) -> Bool {
+    let type = mode & S_IFMT
+    guard type == S_IFIFO || type == S_IFSOCK else { return false }
+    guard uid == euid else { return false }
+    if nlink == 0 {
+        // Nameless kernel endpoint: unreachable by path; bits are inert.
+        return true
+    }
+    // Named endpoint (path-openable): require owner-only bits (no group/other).
+    return (mode & (mode_t(S_IRWXG) | mode_t(S_IRWXO))) == 0
+}
+
 /// Whether stdout is a private pipe/socket (opened by the Python daemon), not a
-/// TTY or a redirected regular file. Captured AX text is only ever written here,
-/// so we refuse to run unless this holds (fail-closed privacy boundary).
+/// TTY or a redirected regular file, owned by us, with no world access. Captured
+/// AX text is only ever written here, so we refuse to run unless this holds
+/// (fail-closed privacy boundary).
+///
+/// Uses `fstat` on the already-open fd (not `stat` on a path) so the bits we
+/// validate belong to the exact file the helper will write to — closing the
+/// TOCTOU window a path-based check would leave open.
 private func stdoutIsPrivatePipe() -> Bool {
     var st = stat()
     guard fstat(FileHandle.standardOutput.fileDescriptor, &st) == 0 else { return false }
-    let mode = st.st_mode & S_IFMT
-    return mode == S_IFIFO || mode == S_IFSOCK
+    return stdoutPipeStatIsPrivate(
+        mode: st.st_mode, uid: st.st_uid, euid: geteuid(), nlink: st.st_nlink)
 }
 
 /// Prompt for (and report) Accessibility trust. Returns whether we are trusted.

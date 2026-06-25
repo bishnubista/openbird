@@ -33,6 +33,26 @@ jobs:
         # no Ollama, no network. Ollama-dependent tests auto-skip when absent.
         run: uv run python -m pytest -q
 
+  encryption-gate:
+    name: Encryption gate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies (encryption extra, locked)
+        # sqlcipher3-wheels ships prebuilt macOS universal2 wheels, so no system
+        # build deps (OpenSSL/SQLCipher toolchain) are needed on the runner.
+        run: uv sync --extra encryption --frozen
+      - name: Run encryption gate
+        # CI-safe: the gate monkeypatches the key provider, so it never touches
+        # the macOS Keychain and needs no network. It proves the real OpenBird
+        # SQLCipher opener (WAL, sqlite-vec, 0o600 perms, encrypted backup,
+        # disabled extension loading) works end-to-end.
+        run: uv run --extra encryption python scripts/encryption_gate.py
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
