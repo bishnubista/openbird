@@ -23,6 +23,7 @@ struct SettingsView: View {
                     permissionsCard
                     allowlistCard
                     privacyCard
+                    promptCustomizationCard
                     trustCard
                 }
                 .padding(.horizontal, 24)
@@ -391,6 +392,66 @@ struct SettingsView: View {
         case .attention: return "Running plaintext — enable SQLCipher (bundled with the Homebrew build) to encrypt stored text"
         default: return "Encryption status could not be verified"
         }
+    }
+
+    // MARK: Prompt customization
+
+    private var promptCustomizationCard: some View {
+        sectionCard {
+            sectionLabel("Prompt customization")
+            permissionRow(
+                icon: "text.quote",
+                title: "Effective prompts directory",
+                badge: nil,
+                subtitle: model.promptDirectoryPath,
+                trailing: .secondary("Open") { model.openPromptsFolder() }
+            )
+            hairline
+            VStack(alignment: .leading, spacing: 9) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Persona overrides")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(OB.textPrimary(scheme))
+                    Text("Edit the persona files that wrap Ask, routine, meeting, and signal prompts.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(OB.textSecondary(scheme))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    ForEach(PromptPersonaKey.allCases) { key in
+                        promptEditButton(key)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            hairline
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield").font(.system(size: 11))
+                Text("OpenBird keeps the security scaffold app-owned; these files change only the persona.")
+                    .font(.system(size: 11.5))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(OB.textTertiary(scheme))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16).padding(.vertical, 11)
+        }
+    }
+
+    private func promptEditButton(_ key: PromptPersonaKey) -> some View {
+        Button { model.editPromptPersona(key) } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(key.label)
+                    .font(.system(size: 12.5, weight: .semibold))
+            }
+            .foregroundStyle(OB.textPrimary(scheme))
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(OB.fieldFill(scheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(OB.separator(scheme), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: Trust controls

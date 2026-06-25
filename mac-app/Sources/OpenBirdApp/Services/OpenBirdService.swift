@@ -67,10 +67,42 @@ enum PrivacyPane: String {
     }
 }
 
+enum PromptPersonaKey: String, CaseIterable, Identifiable {
+    case rag
+    case routine
+    case meeting
+    case signal
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .rag: return "Ask"
+        case .routine: return "Routines"
+        case .meeting: return "Meetings"
+        case .signal: return "Signals"
+        }
+    }
+}
+
 enum AccessibilityRequestOutcome: Equatable {
     case alreadyGranted
     case needsPrompt
 }
+
+enum PromptEditOutcome: Equatable {
+    case launched
+    case cliMissing
+    case failed(Int)
+}
+
+struct ProcessResult: Sendable {
+    let exitCode: Int
+    let stdout: String
+    let stderr: String
+}
+
+typealias PromptEditRunner = @Sendable (String, [String], [String: String]) -> ProcessResult
 
 /// `@unchecked Sendable`: the only mutable instance state is `captureProcess`,
 /// which is touched solely on the main actor (AppModel actions and the main-queue
@@ -254,6 +286,8 @@ final class OpenBirdService: @unchecked Sendable {
     private let accessibilityProbe: @Sendable () -> Bool
     private let accessibilityPrompter: @Sendable () -> Void
     private let privacyPaneOpener: @Sendable (PrivacyPane) -> Void
+    private let promptFolderOpener: @Sendable (URL) -> Void
+    private let promptEditRunner: PromptEditRunner
     private let openBirdCLIResolver: (@Sendable () -> String?)?
     /// Status-path probe for a long-lived external `openbird capture --loop` daemon.
     /// Defaults to the real `pgrep`-based body; injectable so `isCaptureRunning()` (and
@@ -288,6 +322,10 @@ final class OpenBirdService: @unchecked Sendable {
             guard let url = pane.url else { return }
             NSWorkspace.shared.open(url)
         },
+        promptFolderOpener: @escaping @Sendable (URL) -> Void = { url in
+            NSWorkspace.shared.open(url)
+        },
+        promptEditRunner: PromptEditRunner? = nil,
         openBirdCLIResolver: (@Sendable () -> String?)? = nil,
         externalLoopDaemonProbe: @escaping @Sendable () -> Bool = {
             OpenBirdService.realExternalLoopDaemonRunning()
@@ -299,6 +337,10 @@ final class OpenBirdService: @unchecked Sendable {
         self.accessibilityProbe = accessibilityProbe
         self.accessibilityPrompter = accessibilityPrompter
         self.privacyPaneOpener = privacyPaneOpener
+        self.promptFolderOpener = promptFolderOpener
+        self.promptEditRunner = promptEditRunner ?? { path, arguments, environment in
+            OpenBirdService.run(path, arguments: arguments, timeout: 30, environment: environment)
+        }
         self.openBirdCLIResolver = openBirdCLIResolver
         self.externalLoopDaemonProbe = externalLoopDaemonProbe
         self.captureHelperRunningProbe = captureHelperRunningProbe
@@ -311,12 +353,43 @@ final class OpenBirdService: @unchecked Sendable {
     /// The OpenBird data directory (`~/.openbird` or `$OPENBIRD_DATA_DIR`). Static
     /// so the launch-time DB-key bootstrap can resolve paths before any instance
     /// exists.
-    static func dataDirectoryURL() -> URL {
-        if let override = ProcessInfo.processInfo.environment["OPENBIRD_DATA_DIR"],
+    static func dataDirectoryURL(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        if let override = environment["OPENBIRD_DATA_DIR"],
            !override.isEmpty {
             return URL(fileURLWithPath: NSString(string: override).expandingTildeInPath)
         }
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openbird")
+    }
+
+    /// The effective prompt persona override directory, mirroring Python
+    /// `Settings.prompts_dir` behavior. `OPENBIRD_PROMPTS_DIR` is intentionally
+    /// treated as a literal path string: Python does not expand `~` for this
+    /// explicit override, so the Settings display must not either.
+    static func promptDirectoryPath(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        if let override = environment["OPENBIRD_PROMPTS_DIR"], !override.isEmpty {
+            return override
+        }
+        return dataDirectoryURL(environment: environment)
+            .appendingPathComponent("prompts", isDirectory: true)
+            .path
+    }
+
+    static func promptDirectoryURL(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        fileURL(forEffectivePath: promptDirectoryPath(environment: environment))
+    }
+
+    private static func fileURL(forEffectivePath path: String) -> URL {
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent(path, isDirectory: true)
     }
 
     /// The resolved DB file, mirroring Python `Settings` precedence (`config.py`):
@@ -716,6 +789,38 @@ final class OpenBirdService: @unchecked Sendable {
             attributes: [.posixPermissions: 0o700]
         )
         NSWorkspace.shared.open(dataDirectory)
+    }
+
+    var promptDirectoryPath: String {
+        Self.promptDirectoryPath()
+    }
+
+    func openPromptsFolder() {
+        let directory = Self.promptDirectoryURL()
+        try? fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        promptFolderOpener(directory)
+    }
+
+    func editPromptPersona(_ key: PromptPersonaKey) async -> PromptEditOutcome {
+        guard let cli = resolveOpenBirdCLI() else { return .cliMissing }
+        var environment = Self.childEnvironment()
+        // A GUI-launched Settings button cannot drive terminal editors like vim.
+        // Force Launch Services to open the scaffolded .txt persona file.
+        environment["EDITOR"] = "/usr/bin/open"
+        let result = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: self.promptEditRunner(
+                    cli,
+                    ["prompts", "edit", key.rawValue],
+                    environment
+                ))
+            }
+        }
+        return result.exitCode == 0 ? .launched : .failed(result.exitCode)
     }
 
     func openBundleFolder() {
@@ -1271,12 +1376,6 @@ final class OpenBirdService: @unchecked Sendable {
             }
         }
     }
-}
-
-private struct ProcessResult {
-    let exitCode: Int
-    let stdout: String
-    let stderr: String
 }
 
 private enum OllamaPullError: Error, CustomStringConvertible {
