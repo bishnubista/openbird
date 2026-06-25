@@ -178,6 +178,16 @@ final class OpenBirdService: @unchecked Sendable {
     private let accessibilityPrompter: @Sendable () -> Void
     private let privacyPaneOpener: @Sendable (PrivacyPane) -> Void
     private let openBirdCLIResolver: (@Sendable () -> String?)?
+    /// Status-path probe for a long-lived external `openbird capture --loop` daemon.
+    /// Defaults to the real `pgrep`-based body; injectable so `isCaptureRunning()` (and
+    /// thus `AppModel.init`) can be made hermetic in tests regardless of host process
+    /// state. NOTE: the safety-critical pre-spawn guard in `startCapture()` deliberately
+    /// does NOT route through this seam — see `externalLoopDaemonRunning()`.
+    private let externalLoopDaemonProbe: @Sendable () -> Bool
+    /// Status-path probe for a transient external `capture-helper`. Defaults to the real
+    /// `pgrep -x capture-helper`; injectable so a stray helper on the host cannot flip
+    /// `isCaptureRunning()` under test.
+    private let captureHelperRunningProbe: @Sendable () -> Bool
 
     /// The capture daemon launched by the app (if any), so it can be stopped.
     private var captureProcess: Process?
@@ -192,12 +202,20 @@ final class OpenBirdService: @unchecked Sendable {
             guard let url = pane.url else { return }
             NSWorkspace.shared.open(url)
         },
-        openBirdCLIResolver: (@Sendable () -> String?)? = nil
+        openBirdCLIResolver: (@Sendable () -> String?)? = nil,
+        externalLoopDaemonProbe: @escaping @Sendable () -> Bool = {
+            OpenBirdService.realExternalLoopDaemonRunning()
+        },
+        captureHelperRunningProbe: @escaping @Sendable () -> Bool = {
+            OpenBirdService.run("/usr/bin/pgrep", arguments: ["-x", "capture-helper"]).exitCode == 0
+        }
     ) {
         self.accessibilityProbe = accessibilityProbe
         self.accessibilityPrompter = accessibilityPrompter
         self.privacyPaneOpener = privacyPaneOpener
         self.openBirdCLIResolver = openBirdCLIResolver
+        self.externalLoopDaemonProbe = externalLoopDaemonProbe
+        self.captureHelperRunningProbe = captureHelperRunningProbe
     }
 
     private var dataDirectory: URL {
@@ -310,7 +328,8 @@ final class OpenBirdService: @unchecked Sendable {
         // An externally running helper counts as "capturing" — but the helper is
         // only alive intermittently between the daemon's re-spawn cadence, so a
         // miss here does NOT mean capture is stopped. Hence the loop check below.
-        if Self.run("/usr/bin/pgrep", arguments: ["-x", "capture-helper"]).exitCode == 0 {
+        // Routed through the injectable probe so tests can run hermetically.
+        if captureHelperRunningProbe() {
             return true
         }
         // The long-lived parent is `openbird capture --loop` (the CLI/wrapper),
@@ -322,23 +341,43 @@ final class OpenBirdService: @unchecked Sendable {
         // then make the precise, testable decision in
         // `externalCaptureRunning(pgrepOutput:ownPID:)`.
         //
-        return externalLoopDaemonRunning()
+        // Routed through the injectable probe (default == real body) so the
+        // status/init path is hermetic under test.
+        return externalLoopDaemonProbe()
     }
 
     /// Is a long-lived external `openbird capture --loop` daemon running (one this
     /// app did not launch)? This is the NARROW, authoritative signal for "a
-    /// supervising daemon already exists" — used both by `isCaptureRunning()` and
-    /// by the pre-spawn duplicate guard in `startCapture()`. The transient
-    /// `capture-helper` is deliberately NOT consulted here: it lives only between
-    /// the daemon's re-spawn cadence, and a lone helper (e.g. from a bounded
-    /// `--once` pass) does not imply a supervising loop daemon.
+    /// supervising daemon already exists" — used by `isCaptureRunning()` (the
+    /// status/init path, via the injectable `externalLoopDaemonProbe`) and by the
+    /// pre-spawn duplicate guard in `startCapture()`. The transient `capture-helper`
+    /// is deliberately NOT consulted here: it lives only between the daemon's
+    /// re-spawn cadence, and a lone helper (e.g. from a bounded `--once` pass) does
+    /// not imply a supervising loop daemon.
+    ///
+    /// This instance method honors the injected probe, so the status surface stays
+    /// hermetic in tests. The safety-critical pre-spawn guard in `startCapture()`
+    /// must NOT be defeatable by a test stub, so it calls
+    /// `realExternalLoopDaemonRunning()` directly instead of this method.
+    func externalLoopDaemonRunning() -> Bool {
+        externalLoopDaemonProbe()
+    }
+
+    /// The real `pgrep`-based detection of a long-lived external
+    /// `openbird capture --loop` daemon. This is the default backing for
+    /// `externalLoopDaemonProbe` AND the direct, non-overridable call used by the
+    /// `startCapture()` duplicate-spawn guard. Static (captures no `self`) so it can
+    /// back the `@Sendable` default closure.
     ///
     /// `-f` matches against the full argv (the subcommand/flags live in argv, not
     /// in `comm`). `-l` with `-f` is documented by `man pgrep` to print "the
     /// process ID and the full argument list" — that argv is what the pure filter
     /// inspects to reject unrelated processes (e.g. an editor that merely has the
     /// string open, or the daemon's transient `--once` passes).
-    func externalLoopDaemonRunning() -> Bool {
+    ///
+    /// Privacy-safe: operates only on process argv (binary + subcommand flags) — no
+    /// window titles, URLs, or captured content are read or logged.
+    static func realExternalLoopDaemonRunning() -> Bool {
         let result = Self.run(
             "/usr/bin/pgrep",
             arguments: ["-fl", "openbird(-cli)? capture( |$)"]
@@ -433,7 +472,10 @@ final class OpenBirdService: @unchecked Sendable {
         // only: a TOCTOU window remains before `run()`, so the Python daemon's
         // flock is the real authority (a losing spawn exits code 7, handled
         // benignly upstream). We do NOT adopt/track the external PID — out of scope.
-        if externalLoopDaemonRunning() {
+        // Calls the REAL detection directly (not the injectable status probe): a
+        // test stub that fakes "no daemon" for the status surface must never be able
+        // to silently disable this double-spawn safeguard.
+        if Self.realExternalLoopDaemonRunning() {
             return true
         }
 
