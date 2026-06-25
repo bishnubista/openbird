@@ -52,6 +52,10 @@ app.add_typer(routine_app, name="routine")
 app.add_typer(eval_app, name="eval")
 register_capture_command(app)
 
+from openbird.prompts.cli import prompts_app  # noqa: E402 - after app is defined
+
+app.add_typer(prompts_app, name="prompts")
+
 _console = Console()
 _err_console = Console(stderr=True)
 
