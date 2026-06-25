@@ -13,6 +13,10 @@ final class AskPanelModel: ObservableObject {
     struct Turn: Identifiable, Equatable {
         let id = UUID()
         let question: String
+        /// Day scope captured at ask time (0=today, 1=yesterday, ...), nil when
+        /// unscoped. Snapshotted per turn so a later `dayScope` change cannot
+        /// retarget an already in-flight ask.
+        var dayScope: Int?
         var result: ChatResult?
         var error: String?
     }
@@ -20,25 +24,35 @@ final class AskPanelModel: ObservableObject {
     @Published private(set) var thread: [Turn] = []
     @Published private(set) var busy = false
 
+    /// Optional day scope (0=today, 1=yesterday, ...) applied to subsequent asks in
+    /// this thread. Set by the Today view's "Ask about this day" so answers are
+    /// hard-scoped to the viewed day; nil for the generic/global Ask, which stays
+    /// unscoped. Forwarded to the CLI as `--day N`.
+    @Published var dayScope: Int?
+
     /// The in-flight turn. A completion whose turn is no longer active (because
     /// `clear()` ran, or a newer ask superseded it) is dropped instead of mutating
     /// `busy`/`thread`, so a slow CLI call can never pin the UI in a stale state.
     private var activeTurnID: UUID?
 
-    /// Seam: produce a `ChatResult` for a question, or throw. Defaults to the real
-    /// CLI-backed `askChat`; tests inject a stub so no subprocess is spawned.
-    private let performAsk: @Sendable (String) throws -> ChatResult
+    /// Seam: produce a `ChatResult` for (question, dayScope), or throw. Defaults to
+    /// the real CLI-backed `askChat`; tests inject a stub so no subprocess is spawned.
+    private let performAsk: @Sendable (String, Int?) throws -> ChatResult
     // Strong ref: AppModel never refers back to AskPanelModel, so there is no retain
     // cycle, and a strong hold avoids a dangling `unowned` if ownership ever changes.
     private let appModel: AppModel
 
     init(service: OpenBirdService, appModel: AppModel) {
         self.appModel = appModel
-        self.performAsk = { try service.askChat($0) }
+        self.performAsk = { try service.askChat($0, dayOffset: $1) }
     }
 
-    /// Test seam: inject the ask implementation directly.
-    init(appModel: AppModel, performAsk: @escaping @Sendable (String) throws -> ChatResult) {
+    /// Test seam: inject the ask implementation directly. The closure receives the
+    /// question and the turn's captured day scope, so tests can assert forwarding.
+    init(
+        appModel: AppModel,
+        performAsk: @escaping @Sendable (String, Int?) throws -> ChatResult
+    ) {
         self.appModel = appModel
         self.performAsk = performAsk
     }
@@ -72,7 +86,7 @@ final class AskPanelModel: ObservableObject {
             return nil
         }
         busy = true
-        let turn = Turn(question: q)
+        let turn = Turn(question: q, dayScope: dayScope)   // snapshot the scope now
         activeTurnID = turn.id
         thread.append(turn)
         return turn
@@ -85,10 +99,11 @@ final class AskPanelModel: ObservableObject {
     func complete(_ turn: Turn) async {
         let perform = performAsk
         let q = turn.question
+        let scope = turn.dayScope
         let outcome: Result<ChatResult, Error>
         do {
             outcome = .success(try await Task.detached(priority: .userInitiated) {
-                try perform(q)
+                try perform(q, scope)
             }.value)
         } catch {
             outcome = .failure(error)

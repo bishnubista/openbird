@@ -7,8 +7,10 @@ import SwiftUI
 struct TodayView: View {
     @ObservedObject var model: TodayModel
     @ObservedObject var appModel: AppModel
-    /// Summon the Spotlight Ask panel (the header "Ask about this day" button).
-    var onAsk: () -> Void
+    /// Summon the Spotlight Ask panel hard-scoped to a day offset (0=today,
+    /// 1=yesterday, ...). The "Ask about this day" buttons pass the currently
+    /// viewed day so answers are confined to it.
+    var onAsk: (Int) -> Void
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -50,7 +52,7 @@ struct TodayView: View {
     }
 
     private var askButton: some View {
-        Button(action: onAsk) {
+        Button(action: { onAsk(model.dayOffset) }) {
             HStack(spacing: OB.Space.s) {
                 BirdLogo().fill(OB.accent).frame(width: 15, height: 15)
                 Text("Ask about this day")
@@ -198,7 +200,7 @@ struct TodayView: View {
                 }
 
                 Button("Ask about this day") {
-                    onAsk()
+                    onAsk(model.dayOffset)
                 }
                 .buttonStyle(.bordered)
             }

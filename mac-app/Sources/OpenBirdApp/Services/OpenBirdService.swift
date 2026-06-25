@@ -749,14 +749,22 @@ final class OpenBirdService: @unchecked Sendable {
     /// OPENBIRD_DATA_DIR) and decodes the structured answer + citations. The LLM
     /// call can take a while, so the timeout is generous. Synchronous — callers
     /// run it off the main actor.
-    func askChat(_ question: String, timeout: TimeInterval = 90) throws -> ChatResult {
+    ///
+    /// When `dayOffset` is non-nil the CLI receives `--day N` (0=today,
+    /// 1=yesterday, ...), which HARD-SCOPES retrieval and every citation to that
+    /// calendar day. The Today view's "Ask about this day" passes the viewed day;
+    /// the generic/global Ask passes nil so retrieval stays unscoped.
+    func askChat(
+        _ question: String, dayOffset: Int? = nil, timeout: TimeInterval = 90
+    ) throws -> ChatResult {
         guard let cli = resolveOpenBirdCLI() else { throw ChatError.cliMissing }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cli)
         // The question goes via STDIN, never argv — chat text must not be visible
         // to local process inspection (consistent with the capture pipeline).
-        process.arguments = ["chat", "--json", "--stdin"]
+        // `--day N` (day scope) is config, not content, so it's safe in argv.
+        process.arguments = Self.chatArguments(dayOffset: dayOffset)
         process.environment = Self.childEnvironment()
 
         let stdinPipe = Pipe()
@@ -828,6 +836,18 @@ final class OpenBirdService: @unchecked Sendable {
             throw ChatError.decode
         }
         return decoded
+    }
+
+    /// Build the `openbird chat` argv. The question is fed via stdin (`--stdin`),
+    /// never argv; `--day N` is appended ONLY when a day scope is requested, so the
+    /// unscoped path is byte-for-byte unchanged. Pure + static so it's unit-testable
+    /// without spawning a process.
+    static func chatArguments(dayOffset: Int?) -> [String] {
+        var args = ["chat", "--json", "--stdin"]
+        if let dayOffset {
+            args += ["--day", String(dayOffset)]
+        }
+        return args
     }
 
     static func chatFailureSummary(exitCode: Int32, stderr: String) -> String {

@@ -835,6 +835,12 @@ def chat(
     no_semantic: bool = typer.Option(
         False, "--no-semantic", help="BM25-only retrieval (skip the embedding call)."
     ),
+    day: Optional[int] = typer.Option(
+        None,
+        "--day",
+        help="Hard-scope the answer to one calendar day's observations "
+        "(0=today, 1=yesterday, ...). Omit for unscoped retrieval.",
+    ),
     json_out: bool = typer.Option(
         False, "--json", help="Emit the answer + citations as JSON (used by the app UI)."
     ),
@@ -850,10 +856,18 @@ def chat(
     prompt, asks the LLM, then prints the answer plus occurrence-level citations
     (app / window / time + a short snippet) that name where each fact came from.
 
+    Pass ``--day N`` (0=today, 1=yesterday, ..., matching ``timeline``/``briefing``)
+    to HARD-SCOPE the answer to that calendar day: retrieval and every citation are
+    confined to that day's observations. Without ``--day`` retrieval is unscoped.
+
     Pass ``--stdin`` (or omit the argument) to read the question from stdin; the
     app UI uses this so chat text never lands in the process argument list.
     """
     import sys
+
+    if day is not None and day < 0:
+        _err_console.print("[red]--day must be >= 0.[/]")
+        raise typer.Exit(code=2)
 
     if stdin or question is None:
         question = sys.stdin.read()
@@ -864,11 +878,16 @@ def chat(
 
     from openbird.chat.rag import RAG
 
+    # An explicit --day hard-scopes retrieval to that calendar day's window
+    # (shared with `timeline`/`briefing` via `_day_window`), so the answer and
+    # every citation are confined to that day. Omitted -> unscoped.
+    window = _day_window(day) if day is not None else None
+
     provider = _provider()
     store = _store(provider=provider)
     try:
         rag = RAG(store, provider)
-        result = rag.answer(question, k=k, semantic=not no_semantic)
+        result = rag.answer(question, k=k, semantic=not no_semantic, window=window)
     finally:
         store.close()
 
