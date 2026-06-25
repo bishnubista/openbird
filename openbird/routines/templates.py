@@ -116,14 +116,34 @@ class RoutineTemplate:
         get_text = getattr(store, "time_range_text", None)
         if callable(get_text):
             rows = get_text(start, end) if source is None else get_text(start, end, source=source)
-            observations = [obs for obs, _ in rows]
-            context = render_context_text(rows)
-        else:
-            observations = store.time_range(start, end)  # type: ignore[attr-defined]
-            context = render_context(observations)
+            return self.run_rows(provider, start, end, rows)
+        observations = store.time_range(start, end)  # type: ignore[attr-defined]
         if not observations:
             return f"[{self.name}] No activity recorded in the selected window."
+        return self._summarize(provider, start, end, render_context(observations))
 
+    def run_rows(
+        self,
+        provider: object,
+        start: float,
+        end: float,
+        rows: list[tuple[Observation, str]],
+    ) -> str:
+        """Summarize PRE-FETCHED ``(observation, blob-text)`` rows for ``[start, end]``.
+
+        Split out of :meth:`run_window` so a caller can fetch the grounding rows
+        once (via ``store.time_range_text``) and derive BOTH the prose summary
+        *and* a faithful source trail (see :func:`select_briefing_sources`) from
+        the **same** rows — guaranteeing the trail reflects exactly the
+        observations the prose was built from. Empty rows return the deterministic
+        no-activity line without calling the model.
+        """
+        if not rows:
+            return f"[{self.name}] No activity recorded in the selected window."
+        return self._summarize(provider, start, end, render_context_text(rows))
+
+    def _summarize(self, provider: object, start: float, end: float, context: str) -> str:
+        """Build the fenced prompt from rendered ``context`` and call the provider."""
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {
@@ -207,6 +227,81 @@ def render_context_text(rows: list[tuple[Observation, str]]) -> str:
     return "\n".join(lines)
 
 
+# Default cap for the briefing source trail. The trail is a "what this is based
+# on" affordance, not the full timeline (the timeline view already shows every
+# session), so we surface the most recent grounding groups and report the total.
+DEFAULT_BRIEFING_SOURCES = 12
+
+
+def select_briefing_sources(
+    rows: list[tuple[Observation, str]],
+    *,
+    limit: int = DEFAULT_BRIEFING_SOURCES,
+) -> tuple[list[dict], int]:
+    """Build the briefing's source trail from the SAME rows the prose summarized.
+
+    ``rows`` are the ``(observation, blob-text)`` pairs that
+    :meth:`RoutineTemplate.run_rows` rendered into the model context, so the trail
+    is *faithful by construction*: it can only ever point at observations the prose
+    was actually built from. Occurrences are grouped by ``content_hash`` — the same
+    dedup unit :func:`render_context_text` collapses the prompt to — and each group
+    contributes ONE source, anchored to its most recent occurrence (the
+    ``observation_id`` the UI focuses).
+
+    Returns ``(sources, total_groups)``. ``sources`` is ordered most-recent-first
+    and capped to ``limit``; ``total_groups`` is the full count of distinct
+    grounding groups so the caller can render "showing N of M" instead of silently
+    truncating. Each source dict carries ``observation_id``, ``app``, ``window``,
+    ``ts``, and a privacy-safe ``snippet`` (reusing the chat citation snippet
+    helpers, so captured text is collapsed, length-capped, and marker-neutralized —
+    never a raw blob).
+
+    An empty window yields ``([], 0)``, matching the deterministic no-activity line.
+    """
+    # Local import: keep the routines package import-light and avoid a hard
+    # dependency cycle with the chat layer at module load.
+    from openbird.chat.rag import _SNIPPET_LEN, _neutralize, _truncate
+
+    grouped: dict[str, dict] = {}
+    order: list[str] = []
+    for obs, text in rows:
+        key = obs.content_hash
+        entry = grouped.get(key)
+        if entry is None:
+            entry = {"rep": obs, "text": text}
+            grouped[key] = entry
+            order.append(key)
+        elif obs.ts >= entry["rep"].ts:
+            # Anchor each group to its MOST RECENT occurrence so the focused
+            # observation matches the freshest capture of that content.
+            entry["rep"] = obs
+            entry["text"] = text
+
+    total = len(order)
+    # Most-recent-first by the representative occurrence's timestamp.
+    ranked = sorted(order, key=lambda k: grouped[k]["rep"].ts, reverse=True)
+
+    sources: list[dict] = []
+    for key in ranked[: max(0, limit)]:
+        e = grouped[key]
+        obs: Observation = e["rep"]
+        # Defense in depth: neutralize the chat citation fence markers (same
+        # handling as chat citation snippets) AND defang the routines
+        # ``<observations>`` fence, so the snippet is safe to display or re-embed
+        # regardless of context, then collapse + length-cap like a chat citation.
+        snippet = _truncate(_neutralize(_defang_fence(e["text"])), _SNIPPET_LEN)
+        sources.append(
+            {
+                "observation_id": obs.id,
+                "app": obs.app,
+                "window": obs.window or obs.url,
+                "ts": obs.ts,
+                "snippet": snippet,
+            }
+        )
+    return sources, total
+
+
 def _fmt(ts: float) -> str:
     """Format a unix timestamp as a human-readable local datetime."""
     return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
@@ -258,6 +353,8 @@ __all__ = [
     "RoutineTemplate",
     "render_context",
     "render_context_text",
+    "select_briefing_sources",
+    "DEFAULT_BRIEFING_SOURCES",
     "DAILY_BRIEFING",
     "YESTERDAYS_WORK",
     "WEEKLY_SUMMARY",

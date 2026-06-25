@@ -89,6 +89,7 @@ struct TodayView: View {
                 }
             }
             briefingBody
+            briefingSourceTrail
             if let timeline = model.timeline {
                 statChips(timeline)
             }
@@ -96,6 +97,81 @@ struct TodayView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(OB.Space.l)
         .glassSurface(cornerRadius: OB.Radius.card)
+    }
+
+    // MARK: Source trail (what the briefing is based on)
+
+    /// A clickable trail of the occurrences the briefing prose was grounded in.
+    /// Each row reuses the SAME citation navigation as chat sources
+    /// (`appModel.navigateToCitation`), focusing that observation in this day. Only
+    /// shown when the day actually has grounding sources (an empty day shows none,
+    /// matching the deterministic no-activity prose).
+    @ViewBuilder
+    private var briefingSourceTrail: some View {
+        if !model.briefingSources.isEmpty {
+            VStack(alignment: .leading, spacing: OB.Space.s) {
+                Text(sourceTrailHeader)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(OB.textTertiary(scheme))
+                ForEach(Array(model.briefingSources.enumerated()), id: \.element.id) { index, source in
+                    sourceRow(source, index: index + 1)
+                }
+            }
+            .padding(.top, OB.Space.xs)
+        }
+    }
+
+    /// "BASED ON · 5" or "BASED ON · 12 of 47" when the CLI capped the trail — the
+    /// total is surfaced so truncation is never silent.
+    private var sourceTrailHeader: String {
+        let shown = model.briefingSources.count
+        let total = model.briefingSourcesTotal
+        return total > shown ? "BASED ON · \(shown) of \(total)" : "BASED ON · \(shown)"
+    }
+
+    private func sourceRow(_ source: BriefingSource, index: Int) -> some View {
+        let identity = SourceIdentity.forApp(source.app)
+        let title = SourcesRail.cardTitle(source.asCitation(index: index))
+        return Button {
+            appModel.navigateToCitation(source.asCitation(index: index))
+        } label: {
+            HStack(alignment: .top, spacing: OB.Space.sm) {
+                Text(identity.glyph)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 20, height: 20)
+                    .background(identity.color,
+                                in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(OB.textPrimary(scheme))
+                        .lineLimit(1)
+                    Text("\(source.app ?? "unknown") · \(CitationFormatting.shortTime(source.ts))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(OB.textSecondary(scheme))
+                    if !source.snippet.isEmpty {
+                        Text(source.snippet)
+                            .font(.system(size: 11))
+                            .foregroundStyle(OB.textTertiary(scheme))
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(OB.Space.sm)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(OB.fieldFill(scheme),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(OB.separator(scheme), lineWidth: 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("Open this source in \(model.dayTitle)")
     }
 
     @ViewBuilder

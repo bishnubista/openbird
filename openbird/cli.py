@@ -330,7 +330,7 @@ def briefing(
     if day < 0:
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
-    from openbird.routines.templates import get_template
+    from openbird.routines.templates import get_template, select_briefing_sources
 
     start, end = _day_window(day)
     if signals:
@@ -347,14 +347,29 @@ def briefing(
             store.close()
             provider = _provider()
             store = _store(provider=provider)
-        text = get_template("yesterday").run_window(
-            store, provider, start, end, source="capture"
-        )
+        # Fetch the grounding rows ONCE, then derive both the prose and the source
+        # trail from the SAME rows so the trail is faithful by construction: it can
+        # only point at observations the prose was actually built from (identical
+        # [start, end] window and source="capture" the template consumes).
+        rows = store.time_range_text(start, end, source="capture")
+        text = get_template("yesterday").run_rows(provider, start, end, rows)
+        sources, total_sources = select_briefing_sources(rows)
     finally:
         store.close()
     if as_json:
         _console.print_json(
-            json.dumps({"day_offset": day, "start": start, "end": end, "text": text})
+            json.dumps(
+                {
+                    "day_offset": day,
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                    "sources": sources,
+                    # Full count of distinct grounding groups; > len(sources) means
+                    # the trail was capped (UI shows "N of M"), never silent.
+                    "sources_total": total_sources,
+                }
+            )
         )
         return
     _console.print(text)

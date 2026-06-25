@@ -6,6 +6,13 @@ import Foundation
 final class TodayModel: ObservableObject {
     @Published private(set) var timeline: DayTimeline?
     @Published private(set) var briefing: String?
+    /// The current briefing's source trail (the occurrences the prose was grounded
+    /// in) and the full grounding-group count. Empty when there is no briefing or
+    /// the day had no activity. `briefingSourcesTotal > briefingSources.count` means
+    /// the CLI capped the trail, so the view shows "N of M" rather than silently
+    /// truncating. Privacy: ids + already-redacted snippets only — no raw blobs.
+    @Published private(set) var briefingSources: [BriefingSource] = []
+    @Published private(set) var briefingSourcesTotal = 0
     /// When the currently-shown briefing was generated (real fetch time, cached per
     /// day so reopening Today keeps the original time). Drives the "generated H:MM"
     /// label on the briefing card.
@@ -32,7 +39,7 @@ final class TodayModel: ObservableObject {
     /// Per-day briefing cache (this app session), keyed by ABSOLUTE local day (not
     /// the relative offset) so a session left open across midnight doesn't serve a
     /// stale briefing for what is now a different calendar day.
-    private var briefingCache: [String: String] = [:]
+    private var briefingCache: [String: DayBriefing] = [:]
     /// Generation time per cached briefing (keyed by the same absolute-day key), so
     /// a cache hit reuses the original "generated H:MM" instead of stamping now.
     private var briefingTimeCache: [String: Date] = [:]
@@ -110,23 +117,32 @@ final class TodayModel: ObservableObject {
         guard generation == loadGeneration else { return }
         let key = dayKey(day)
         if let cached = briefingCache[key] {
-            briefing = cached   // still current (no await since the guard above)
+            apply(cached)   // still current (no await since the guard above)
             briefingGeneratedAt = briefingTimeCache[key]
             return
         }
         loadingBriefing = true
         defer { if generation == loadGeneration { loadingBriefing = false } }
         briefing = nil
+        briefingSources = []
+        briefingSourcesTotal = 0
         briefingGeneratedAt = nil
-        if let text = await service.dailyBriefing(dayOffset: day) {
+        if let result = await service.dailyBriefing(dayOffset: day) {
             let now = Date()
-            briefingCache[key] = text         // cache regardless (keyed by absolute day)
+            briefingCache[key] = result       // cache regardless (keyed by absolute day)
             briefingTimeCache[key] = now
             if generation == loadGeneration {
-                briefing = text
+                apply(result)
                 briefingGeneratedAt = now
             }
         }
+    }
+
+    /// Publish a fetched/cached briefing into the view-facing fields.
+    private func apply(_ briefing: DayBriefing) {
+        self.briefing = briefing.text
+        briefingSources = briefing.sources
+        briefingSourcesTotal = briefing.sourcesTotal
     }
 
     /// Re-fetch both, bypassing the briefing cache for the current day.

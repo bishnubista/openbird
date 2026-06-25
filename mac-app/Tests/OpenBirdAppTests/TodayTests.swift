@@ -33,8 +33,68 @@ final class TodayTimelineDecodingTests: XCTestCase {
     }
 
     func testParseBriefingExtractsText() {
-        XCTAssertEqual(OpenBirdService.parseBriefing("{\"text\": \"You worked on X.\"}"), "You worked on X.")
+        let briefing = OpenBirdService.parseBriefing("{\"text\": \"You worked on X.\"}")
+        XCTAssertEqual(briefing?.text, "You worked on X.")
+        // No sources key -> empty trail, total defaults to 0 (a stale-CLI briefing).
+        XCTAssertEqual(briefing?.sources, [])
+        XCTAssertEqual(briefing?.sourcesTotal, 0)
         XCTAssertNil(OpenBirdService.parseBriefing("nope"))
+    }
+
+    func testParseBriefingDecodesSourceTrail() {
+        // Mirrors `openbird briefing --json` (cli.py -> select_briefing_sources).
+        let json = """
+        {
+          "day_offset": 0,
+          "start": 1.0,
+          "end": 2.0,
+          "text": "You edited rag.py and took notes.",
+          "sources": [
+            {"observation_id": "o2", "app": "Code", "window": "rag.py",
+             "ts": 1700000060.0, "snippet": "edited rag.py"},
+            {"observation_id": "o1", "app": "Notes", "window": null,
+             "ts": 1700000000.0, "snippet": "took notes"}
+          ],
+          "sources_total": 5
+        }
+        """
+        let briefing = OpenBirdService.parseBriefing(json)
+        XCTAssertEqual(briefing?.text, "You edited rag.py and took notes.")
+        XCTAssertEqual(briefing?.sources.count, 2)
+        XCTAssertEqual(briefing?.sourcesTotal, 5)   // capped: 2 of 5 surfaced
+        let first = try? XCTUnwrap(briefing?.sources.first)
+        XCTAssertEqual(first?.observationId, "o2")
+        XCTAssertEqual(first?.window, "rag.py")
+        XCTAssertEqual(first?.ts, 1_700_000_060.0)
+        XCTAssertNil(briefing?.sources.last?.window)   // null window decodes to nil
+    }
+
+    func testParseBriefingEmptyDayHasNoSources() {
+        let json = """
+        {"day_offset": 0, "start": 1.0, "end": 2.0,
+         "text": "[yesterday] No activity recorded in the selected window.",
+         "sources": [], "sources_total": 0}
+        """
+        let briefing = OpenBirdService.parseBriefing(json)
+        XCTAssertEqual(briefing?.sources, [])
+        XCTAssertEqual(briefing?.sourcesTotal, 0)
+    }
+
+    /// A briefing source maps to a `ChatCitation` carrying the navigable fields, so
+    /// a clicked source reuses the chat citation navigation unchanged.
+    func testBriefingSourceMapsToCitation() {
+        let source = BriefingSource(
+            observationId: "obs-7", app: "Code", window: "rag.py",
+            ts: 1_700_000_000.0, snippet: "edited rag.py"
+        )
+        let citation = source.asCitation(index: 3)
+        XCTAssertEqual(citation.index, 3)
+        XCTAssertEqual(citation.observationId, "obs-7")
+        XCTAssertNil(citation.chunkId)
+        XCTAssertEqual(citation.app, "Code")
+        XCTAssertEqual(citation.window, "rag.py")
+        XCTAssertEqual(citation.ts, 1_700_000_000.0)
+        XCTAssertEqual(citation.snippet, "edited rag.py")
     }
 }
 
