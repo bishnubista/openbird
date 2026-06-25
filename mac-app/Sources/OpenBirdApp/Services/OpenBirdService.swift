@@ -1165,17 +1165,34 @@ final class OpenBirdService: @unchecked Sendable {
         }
         if let meetings = payload["meetings"] as? [String: Any],
            let transcription = meetings["transcription"] as? [String: Any] {
-            report.meetingTranscription = MeetingTranscriptionReadiness(
-                parakeetMLXAvailable: transcription["parakeet_mlx_available"] as? Bool ?? false,
-                fasterWhisperAvailable: transcription["faster_whisper_available"] as? Bool ?? false,
-                backendAvailable: transcription["backend_available"] as? Bool ?? false,
-                recommendedBackend: transcription["recommended_backend"] as? String ?? "parakeet-mlx",
-                recommendedExtra: transcription["recommended_extra"] as? String ?? "meetings-mlx",
-                fallbackBackend: transcription["fallback_backend"] as? String ?? "faster-whisper",
-                fallbackExtra: transcription["fallback_extra"] as? String ?? "meetings"
-            )
+            report.meetingTranscription = Self.parseMeetingTranscription(transcription)
         }
         return report
+    }
+
+    private static func parseMeetingTranscription(
+        _ payload: [String: Any]
+    ) -> MeetingTranscriptionReadiness? {
+        guard
+            let parakeetMLXAvailable = payload["parakeet_mlx_available"] as? Bool,
+            let fasterWhisperAvailable = payload["faster_whisper_available"] as? Bool,
+            let backendAvailable = payload["backend_available"] as? Bool,
+            let recommendedBackend = payload["recommended_backend"] as? String,
+            let recommendedExtra = payload["recommended_extra"] as? String,
+            let fallbackBackend = payload["fallback_backend"] as? String,
+            let fallbackExtra = payload["fallback_extra"] as? String
+        else {
+            return nil
+        }
+        return MeetingTranscriptionReadiness(
+            parakeetMLXAvailable: parakeetMLXAvailable,
+            fasterWhisperAvailable: fasterWhisperAvailable,
+            backendAvailable: backendAvailable,
+            recommendedBackend: recommendedBackend,
+            recommendedExtra: recommendedExtra,
+            fallbackBackend: fallbackBackend,
+            fallbackExtra: fallbackExtra
+        )
     }
 
     private static func run(

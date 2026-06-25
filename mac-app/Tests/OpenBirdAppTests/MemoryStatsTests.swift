@@ -218,6 +218,23 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertNil(report.meetingTranscription)
     }
 
+    func testParsePreflightLeavesPartialMeetingTranscriptionPayloadUnknown() {
+        let report = OpenBirdService.parsePreflight("""
+        {
+          "runtime_ok": true,
+          "meetings": {
+            "transcription": {
+              "parakeet_mlx_available": false,
+              "backend_available": false,
+              "recommended_backend": "parakeet-mlx"
+            }
+          }
+        }
+        """)
+
+        XCTAssertNil(report.meetingTranscription)
+    }
+
     func testLocalRoutePrivacyCopyStaysRouteConditional() {
         let model = AppModel(service: OpenBirdService(), initialReport: localRuntimeOKReport())
 
