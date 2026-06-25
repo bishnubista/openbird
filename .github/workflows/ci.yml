@@ -53,6 +53,32 @@ jobs:
         # disabled extension loading) works end-to-end.
         run: uv run --extra encryption python scripts/encryption_gate.py
 
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-latest # pure metadata check; no macOS toolchain needed
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Assert uv.lock agrees with pyproject.toml
+        # pyproject.toml is the source of truth, but uv.lock pins the project's
+        # own version too. A bump that edits only pyproject leaves the lock stale
+        # (the #112/#113 regression). `uv lock --check` fails if the lockfile is
+        # out of date; the explicit compare gives a self-describing error and a
+        # pointer to the fix. Keep both — belt and suspenders on the release gate.
+        run: |
+          uv lock --check
+          pyproject_v="$(awk -F'"' '/^version = / {print $2; exit}' pyproject.toml)"
+          lock_v="$(grep -A1 '^name = "openbird"$' uv.lock \
+            | awk -F'"' '/^version = / {print $2; exit}')"
+          echo "pyproject.toml=$pyproject_v  uv.lock=$lock_v"
+          if [ "$pyproject_v" != "$lock_v" ]; then
+            echo "::error::pyproject.toml ($pyproject_v) and uv.lock ($lock_v) disagree. Run script/bump_version.sh <x.y.z> and commit both files." >&2
+            exit 1
+          fi
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
