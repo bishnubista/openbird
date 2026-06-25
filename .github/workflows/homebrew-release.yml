@@ -83,6 +83,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Auto-generate notes from the conventional-commit history since the
+          # previous v* tag, so the source release stops shipping a bare stub
+          # (v0.3.0 did). Fall back to the stub if there is no prior tag or the
+          # generator is unavailable at this commit / produces nothing.
+          notes_file="$RUNNER_TEMP/notes.md"
+          prev_tag="$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)"
+          {
+            echo "Source release for the Homebrew CLI channel (\`brew install openbird\`)."
+            echo
+            if [[ -n "$prev_tag" ]] \
+              && python3 scripts/gen_changelog.py --from "$prev_tag" --to "$TAG" > "$RUNNER_TEMP/changes.md" 2>/dev/null \
+              && [[ -s "$RUNNER_TEMP/changes.md" ]]; then
+              echo "## What's new since ${prev_tag}"
+              echo
+              cat "$RUNNER_TEMP/changes.md"
+            fi
+          } > "$notes_file"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             # --latest=false: this is the Homebrew *source* release, not the
             # headline download. Without it, gh defaults to "automatic" and marks
@@ -92,7 +109,7 @@ jobs:
               --verify-tag \
               --latest=false \
               --title "OpenBird $TAG" \
-              --notes "Source release for Homebrew."
+              --notes-file "$notes_file"
           fi
 
           # Idempotent, non-destructive upload. `gh release upload --clobber`
