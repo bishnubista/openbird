@@ -7,6 +7,7 @@ import Foundation
 /// A decoded, UI-friendly slice of `openbird preflight --json`.
 struct PreflightReport: Equatable {
     var ollamaReachable: Bool?           // nil = unknown / not probed
+    var ollamaVersionOK: Bool?           // nil = not required / unreadable / older CLI
     var ollamaHost: String?
     var requiredModels: [String] = []
     var missingModels: [String] = []
@@ -1123,6 +1124,7 @@ final class OpenBirdService: @unchecked Sendable {
             report.requiredModels = ollama["required_models"] as? [String] ?? []
             report.missingModels = ollama["missing_models"] as? [String] ?? []
             report.autoPullAllowed = ollama["auto_pull_allowed"] as? Bool ?? false
+            report.ollamaVersionOK = ollama["version_ok"] as? Bool
         }
         if let cloud = payload["cloud"] as? [String: Any] {
             report.llmModel = cloud["llm_model"] as? String

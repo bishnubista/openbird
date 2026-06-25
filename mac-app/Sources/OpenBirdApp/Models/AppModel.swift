@@ -26,6 +26,7 @@ enum ModelRouteProvisioningState: Equatable {
     case unknown
     case remoteRoute
     case ollamaUnavailable
+    case ollamaTooOldForEmbeddingGemma
     case modelsMissing(canPull: Bool)
     case pulling
     case runtimeReady
@@ -34,6 +35,8 @@ enum ModelRouteProvisioningState: Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    static let embeddingGemmaMinimumOllamaVersion = "0.11.10"
+
     /// The active navigation pane in the single app window. Runtime single source of
     /// truth that the sidebar, the menu bar, and the deep-link router all read/write —
     /// switching panes never opens a second window. Held on this long-lived model, so it
@@ -206,6 +209,9 @@ final class AppModel: ObservableObject {
             return "Local Ollama route verified by preflight: \(requiredModelSummary)"
         }
         if report.ollamaReachable == true {
+            if report.ollamaVersionOK == false {
+                return "Ollama is too old for embeddinggemma. Update Ollama to \(Self.embeddingGemmaMinimumOllamaVersion) or newer, then re-check."
+            }
             if report.missingModels.isEmpty { return "Local model route is not runtime-ready. Re-check setup." }
             if !report.autoPullAllowed {
                 return "Ollama connected, but automatic model download is disabled for this host."
@@ -262,6 +268,9 @@ final class AppModel: ObservableObject {
         if !hasDecodedModelRoute { return .unknown }
         if report.runtimeOK { return .runtimeReady }
         if report.ollamaReachable == false { return .ollamaUnavailable }
+        if report.ollamaReachable == true && report.ollamaVersionOK == false {
+            return .ollamaTooOldForEmbeddingGemma
+        }
         if !report.missingModels.isEmpty {
             return .modelsMissing(canPull: canPullMissingModels)
         }
@@ -272,6 +281,8 @@ final class AppModel: ObservableObject {
         switch modelRouteProvisioningState {
         case .ollamaUnavailable:
             return "Get Ollama"
+        case .ollamaTooOldForEmbeddingGemma:
+            return "Update Ollama"
         case .modelsMissing(let canPull):
             return canPull ? "Download models" : nil
         case .error:
@@ -290,7 +301,7 @@ final class AppModel: ObservableObject {
 
     func performModelRouteAction(openURL: (URL) -> Void) {
         switch modelRouteProvisioningState {
-        case .ollamaUnavailable:
+        case .ollamaUnavailable, .ollamaTooOldForEmbeddingGemma:
             if let url = URL(string: "https://ollama.com") {
                 openURL(url)
             }
@@ -370,6 +381,9 @@ final class AppModel: ObservableObject {
             }
             if report.ollamaReachable == false {
                 return "Next: launch Ollama, then re-check setup."
+            }
+            if report.ollamaReachable == true && report.ollamaVersionOK == false {
+                return "Next: update Ollama to \(Self.embeddingGemmaMinimumOllamaVersion) or newer for embeddinggemma, then re-check setup."
             }
             if !report.missingModels.isEmpty {
                 if !report.autoPullAllowed {
