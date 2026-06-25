@@ -264,6 +264,20 @@ private struct CaptureControls: View {
                 .tint(.red)
                 Label("Capturing", systemImage: "dot.radiowaves.left.and.right")
                     .foregroundStyle(.green)
+            } else if model.captureNeedsReindex {
+                // Capture died because the index needs rebuilding under the current
+                // embedding model. Offer the fix inline rather than a dead-end error.
+                Button {
+                    model.reindexNow()
+                } label: {
+                    Label(model.isReindexing ? "Reindexing…" : "Reindex now",
+                          systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isReindexing)
+                if model.isReindexing {
+                    ProgressView().controlSize(.small)
+                }
             } else {
                 Button {
                     model.startCapture()

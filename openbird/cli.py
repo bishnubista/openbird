@@ -131,7 +131,7 @@ def _print_cohort_mismatch_hint(exc) -> None:
     )
 
 
-def _store(*, provider=None, settings=None):
+def _store(*, provider=None, settings=None, reraise_cohort_mismatch=False):
     """Open the on-disk :class:`MemoryStore` with the cloud-checked provider.
 
     Always builds the provider through :func:`_provider` (unless one is passed
@@ -145,6 +145,11 @@ def _store(*, provider=None, settings=None):
     a populated store) into a friendly ``openbird reindex`` hint + exit rather than
     a raw traceback. This is the single shared seam every EMBED command — and the
     capture daemon CLI — routes through, so the recovery path is uniform.
+
+    ``reraise_cohort_mismatch``: the long-running ``capture --loop`` daemon needs
+    to translate the mismatch into its OWN distinct exit code (so the mac app can
+    tell "needs reindex" apart from a generic crash), so it passes True to get the
+    typed exception back instead of the generic ``typer.Exit(code=1)``.
     """
     from openbird.memory.store import EmbeddingCohortMismatch, MemoryStore
 
@@ -155,6 +160,8 @@ def _store(*, provider=None, settings=None):
     try:
         return MemoryStore(settings=settings, provider=provider)
     except EmbeddingCohortMismatch as exc:
+        if reraise_cohort_mismatch:
+            raise
         _print_cohort_mismatch_hint(exc)
         raise typer.Exit(code=1) from exc
 

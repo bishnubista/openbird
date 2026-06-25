@@ -12,6 +12,12 @@ from openbird.config import get_settings
 _console = Console()
 _err_console = Console(stderr=True)
 
+# Capture-daemon exit codes. 0 = clean. 3/4 are raised below for helper/supervisor
+# failures. 5 means the on-disk index was built under a different embedding model
+# (cohort mismatch): recoverable by `openbird reindex`. The mac app maps this code
+# to an actionable "Reindex" affordance instead of the generic "stopped (exit 1)".
+CAPTURE_EXIT_REINDEX_REQUIRED = 5
+
 
 def register_capture_command(app: typer.Typer) -> None:
     """Register capture commands on the root OpenBird CLI."""
@@ -57,7 +63,8 @@ def capture(
     )
     # Function-local imports (and routing store construction through openbird.cli._store)
     # avoid a module-level import cycle with the CLI package.
-    from openbird.cli import _provider, _store
+    from openbird.cli import _print_cohort_mismatch_hint, _provider, _store
+    from openbird.memory.store import EmbeddingCohortMismatch
 
     import logging
     import signal
@@ -68,10 +75,18 @@ def capture(
     # Build the cloud-checked provider: capture sends screen text to the
     # embedding model, so it must go through the same opt-in confirm + CLOUD
     # ACTIVE banner path as every other store-opening command — never silently.
-    # _store() also gives capture the same friendly embedding-cohort-mismatch
-    # recovery hint (run `openbird reindex`) instead of a raw traceback.
     provider = _provider()
-    store = _store(provider=provider, settings=settings)
+    # `reraise_cohort_mismatch=True`: unlike one-shot commands, the daemon exits
+    # with a DISTINCT code so the mac app can offer a one-click reindex instead of
+    # showing a generic "stopped unexpectedly (exit 1)". Terminal users still get
+    # the readable hint on stderr.
+    try:
+        store = _store(
+            provider=provider, settings=settings, reraise_cohort_mismatch=True
+        )
+    except EmbeddingCohortMismatch as exc:
+        _print_cohort_mismatch_hint(exc)
+        raise typer.Exit(code=CAPTURE_EXIT_REINDEX_REQUIRED) from exc
     try:
         daemon = CaptureDaemon(
             store,

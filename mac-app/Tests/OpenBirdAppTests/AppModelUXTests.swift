@@ -92,4 +92,61 @@ final class AppModelUXTests: XCTestCase {
             XCTAssertFalse(noCLIModel.canStartCaptureNow)
         }
     }
+
+    // MARK: - Capture exit-code mapping
+
+    /// The reindex-required exit code must flip `captureNeedsReindex` and surface an
+    /// actionable message — that is what drives the one-click Reindex affordance
+    /// instead of the dead-end "stopped unexpectedly (exit 1)".
+    func testCaptureExitReindexCodeFlagsReindexNeeded() async {
+        let service = OpenBirdService(openBirdCLIResolver: { "/tmp/openbird" })
+        let model = AppModel(service: service, initialReport: readyReport())
+
+        await model.handleCaptureExit(code: AppModel.captureReindexExitCode)
+
+        XCTAssertTrue(model.captureNeedsReindex)
+        XCTAssertFalse(model.captureRunning)
+        XCTAssertTrue(model.lastActionMessage.lowercased().contains("reindex"))
+    }
+
+    /// A generic non-zero exit keeps the original "stopped unexpectedly" message and
+    /// must NOT offer reindex — that would mis-route an unrelated crash.
+    func testGenericCaptureExitDoesNotOfferReindex() async {
+        let service = OpenBirdService(openBirdCLIResolver: { "/tmp/openbird" })
+        let model = AppModel(service: service, initialReport: readyReport())
+
+        await model.handleCaptureExit(code: 1)
+
+        XCTAssertFalse(model.captureNeedsReindex)
+        XCTAssertTrue(model.lastActionMessage.contains("exit 1"))
+    }
+
+    /// The capture "no-progress" failure code (Python `_CAPTURE_NO_PROGRESS_EXIT`,
+    /// value 6 — a session that received events but ingested none) must NOT be
+    /// mistaken for the reindex-required code (5). Pinning 6 here guards the
+    /// cross-component contract: if either side ever re-collides on 5, a broken
+    /// capture session would wrongly surface the one-click Reindex affordance.
+    func testCaptureNoProgressExitDoesNotOfferReindex() async {
+        let noProgressExitCode: Int32 = 6
+        XCTAssertNotEqual(noProgressExitCode, AppModel.captureReindexExitCode)
+
+        let service = OpenBirdService(openBirdCLIResolver: { "/tmp/openbird" })
+        let model = AppModel(service: service, initialReport: readyReport())
+
+        await model.handleCaptureExit(code: noProgressExitCode)
+
+        XCTAssertFalse(model.captureNeedsReindex)
+        XCTAssertTrue(model.lastActionMessage.contains("exit 6"))
+    }
+
+    /// A clean exit (code 0) reports a plain stop, no reindex prompt.
+    func testCleanCaptureExitReportsStopped() async {
+        let service = OpenBirdService(openBirdCLIResolver: { "/tmp/openbird" })
+        let model = AppModel(service: service, initialReport: readyReport())
+
+        await model.handleCaptureExit(code: 0)
+
+        XCTAssertFalse(model.captureNeedsReindex)
+        XCTAssertEqual(model.lastActionMessage, "Capture stopped.")
+    }
 }

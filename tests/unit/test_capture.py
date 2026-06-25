@@ -1996,3 +1996,57 @@ def test_capture_quiet_session_zero_events_exits_zero(monkeypatch, tmp_path):
     stats = CaptureStats(received=0, ingested=0, coalesced=0, rejected=0, errors=0)
     res = _invoke_capture(monkeypatch, tmp_path, loop=True, stats=stats)
     assert res.exit_code == 0, res.output
+
+
+class _CohortProvider:
+    """Deterministic embedder with a configurable cohort tag, so two instances can
+    represent DIFFERENT embedding models over the same on-disk store."""
+
+    def __init__(self, embed_dim: int = 768, tag: str = "a") -> None:
+        self.embed_dim = embed_dim
+        self.tag = tag
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [
+            [float((i + len(self.tag) + len(t)) % 7 + 1) for i in range(self.embed_dim)]
+            for t in texts
+        ]
+
+    def cohort_key(self) -> str:
+        return f"fake:{self.tag}:{self.embed_dim}:deadbeef"
+
+
+def test_capture_exits_reindex_required_on_cohort_mismatch(tmp_path, monkeypatch):
+    """`openbird capture --loop` must exit CAPTURE_EXIT_REINDEX_REQUIRED (5), NOT the
+    generic 1, when the on-disk index was built under a different embedding model.
+
+    The mac app discards the daemon's stderr and maps exit codes to UI, so a distinct
+    code is the only channel that lets it offer a one-click reindex instead of a
+    dead-end "stopped unexpectedly (exit 1)".
+    """
+    from typer.testing import CliRunner
+
+    import openbird.capture.cli as capture_cli
+    from openbird import cli
+    from openbird.capture.cli import CAPTURE_EXIT_REINDEX_REQUIRED
+    from openbird.config import reset_settings_cache
+
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    settings = Settings(data_dir=tmp_path, embed_dim=768)
+
+    # Populate the store under the "old" embedding cohort.
+    old = _CohortProvider(tag="old")
+    store = MemoryStore(settings=settings, provider=old)
+    store.add_observation("hello local memory", source="ingest", window="w")
+    store.close()
+
+    # The active embed model is now a DIFFERENT cohort -> store-open mismatch.
+    new = _CohortProvider(tag="new")
+    monkeypatch.setattr(cli, "_provider", lambda: new)
+    monkeypatch.setattr(capture_cli, "get_settings", lambda: settings)
+
+    res = CliRunner().invoke(cli.app, ["capture", "--loop"])
+    assert res.exit_code == CAPTURE_EXIT_REINDEX_REQUIRED, res.output
+    assert "reindex" in res.output.lower()
+    reset_settings_cache()
