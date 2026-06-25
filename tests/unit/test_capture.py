@@ -10,16 +10,20 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from openbird.capture import adapters, redact, volatility
 from openbird.capture.daemon import (
+    SUPERVISOR_TOKEN_ENV,
     CaptureDaemon,
     CaptureStats,
     CaptureSupervisorError,
@@ -1431,6 +1435,242 @@ def test_run_forever_nonzero_helper_exit_trips_breaker(allow_settings, monkeypat
     with pytest.raises(CaptureSupervisorError):
         daemon.run_forever(poll_interval=0.0, max_consecutive_failures=3)
     assert daemon.error_count == 3  # each non-zero exit counted, breaker tripped
+
+
+# ---------------------------------------------------------------------------
+# App-supervised self-exit (orphan cleanup via the death-pipe handshake).
+# ---------------------------------------------------------------------------
+
+
+def _supervisor_daemon(allow_settings, *, events: int = 1) -> CaptureDaemon:
+    return CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=_oneshot_emitter(events),
+        require_signed_helper=False,
+        duplicate_window=0,
+    )
+
+
+def test_watch_supervisor_arms_then_stops_on_eof():
+    # The exact token followed by EOF (write end closed) => stop is set.
+    r, w = os.pipe()
+    try:
+        os.write(w, b"tok-123\n")
+        stop = threading.Event()
+        t = threading.Thread(
+            target=CaptureDaemon._watch_supervisor,
+            args=("tok-123", r, stop),
+            daemon=True,
+        )
+        t.start()
+        os.close(w)  # supervising app "dies" -> read end EOFs
+        w = -1
+        assert stop.wait(2.0), "watcher must stop the daemon when the pipe closes"
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+    finally:
+        os.close(r)
+        if w != -1:
+            os.close(w)
+
+
+def test_watch_supervisor_alive_does_not_stop():
+    # Token matched but the write end stays OPEN => no EOF => no stop.
+    r, w = os.pipe()
+    try:
+        os.write(w, b"tok-abc\n")
+        stop = threading.Event()
+        t = threading.Thread(
+            target=CaptureDaemon._watch_supervisor,
+            args=("tok-abc", r, stop),
+            daemon=True,
+        )
+        t.start()
+        # Give the watcher time to consume the token and block on the next read.
+        time.sleep(0.2)
+        assert not stop.is_set(), "a live supervisor must never trigger a stop"
+    finally:
+        os.close(w)  # release the watcher's blocking read
+        os.close(r)
+
+
+def test_watch_supervisor_wrong_token_fails_open():
+    # A DIFFERENT first line (e.g. a leaked env on an unrelated pipe) must NOT
+    # arm: even after EOF the watcher returns without ever setting stop.
+    r, w = os.pipe()
+    try:
+        os.write(w, b"not-the-token\n")
+        stop = threading.Event()
+        t = threading.Thread(
+            target=CaptureDaemon._watch_supervisor,
+            args=("expected-token", r, stop),
+            daemon=True,
+        )
+        t.start()
+        os.close(w)  # EOF after a non-matching token
+        w = -1
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+        assert not stop.is_set(), "a non-matching token must fail open (no stop)"
+    finally:
+        os.close(r)
+        if w != -1:
+            os.close(w)
+
+
+def test_watch_supervisor_eof_before_token_fails_open():
+    # Pipe closes before any full token line arrives => fail open (no stop).
+    r, w = os.pipe()
+    try:
+        os.close(w)  # immediate EOF, no token written
+        w = -1
+        stop = threading.Event()
+        CaptureDaemon._watch_supervisor("tok", r, stop)  # runs inline, returns
+        assert not stop.is_set()
+    finally:
+        os.close(r)
+        if w != -1:
+            os.close(w)
+
+
+def test_run_forever_stops_when_supervisor_pipe_closes(allow_settings, monkeypatch):
+    # End-to-end through run_forever: the env token + a death pipe whose write
+    # end is closed makes the loop stop promptly and return aggregated stats.
+    monkeypatch.setenv(SUPERVISOR_TOKEN_ENV, "tok-loop")
+    r, w = os.pipe()
+    try:
+        os.write(w, b"tok-loop\n")
+        os.close(w)  # supervisor already gone -> EOF
+        w = -1
+        daemon = _supervisor_daemon(allow_settings, events=1)
+        # High max_cycles + poll_interval=0: only the supervisor watch can stop it.
+        stats = daemon.run_forever(
+            poll_interval=0.0, max_cycles=10_000, _supervisor_fd=r
+        )
+        # Stopped well before exhausting max_cycles (the watch broke the loop).
+        assert stats.received < 10_000
+    finally:
+        os.close(r)
+        if w != -1:
+            os.close(w)
+
+
+def test_run_forever_runs_while_supervisor_alive(allow_settings, monkeypatch):
+    # Token present and the death pipe stays OPEN => the watch must NOT stop the
+    # loop; it ends normally via max_cycles (received == cycles * events).
+    monkeypatch.setenv(SUPERVISOR_TOKEN_ENV, "tok-alive")
+    r, w = os.pipe()
+    try:
+        os.write(w, b"tok-alive\n")  # arm, but keep write end open (alive)
+        daemon = _supervisor_daemon(allow_settings, events=2)
+        stats = daemon.run_forever(
+            poll_interval=0.0, max_cycles=3, _supervisor_fd=r
+        )
+        assert stats.received == 6  # 3 cycles x 2 events: loop ran to max_cycles
+    finally:
+        os.close(w)  # release the watcher
+        os.close(r)
+
+
+def test_run_forever_no_token_ignores_pipe(allow_settings, monkeypatch):
+    # No token env => NO watcher is started, so even a closed/irrelevant fd has
+    # no effect: manual daemons keep today's behavior exactly.
+    monkeypatch.delenv(SUPERVISOR_TOKEN_ENV, raising=False)
+    r, w = os.pipe()
+    try:
+        os.close(w)  # would EOF immediately IF anything watched it
+        w = -1
+        daemon = _supervisor_daemon(allow_settings, events=2)
+        stats = daemon.run_forever(
+            poll_interval=0.0, max_cycles=3, _supervisor_fd=r
+        )
+        assert stats.received == 6  # unaffected: ran the full 3 cycles
+    finally:
+        os.close(r)
+        if w != -1:
+            os.close(w)
+
+
+def _no_supervisor_thread_alive() -> bool:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not any(
+            t.name == "openbird-supervisor-watch" and t.is_alive()
+            for t in threading.enumerate()
+        ):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_run_forever_max_cycles_joins_watcher_with_open_pipe(
+    allow_settings, monkeypatch
+):
+    # The supervisor pipe stays OPEN (never EOFs), yet a normal max_cycles stop
+    # must still join the watcher: the select-based wait re-checks stop, so no
+    # watcher thread is left alive after run_forever returns.
+    monkeypatch.setenv(SUPERVISOR_TOKEN_ENV, "tok-join")
+    r, w = os.pipe()
+    try:
+        os.write(w, b"tok-join\n")  # arm, write end stays open (app alive)
+        daemon = _supervisor_daemon(allow_settings, events=1)
+        daemon.run_forever(poll_interval=0.0, max_cycles=2, _supervisor_fd=r)
+        assert _no_supervisor_thread_alive(), "watcher must be joined on max_cycles"
+    finally:
+        os.close(w)
+        os.close(r)
+
+
+def test_run_forever_helper_unavailable_joins_watcher(allow_settings, monkeypatch):
+    # The HelperUnavailableError path raises out of the loop; the finally block
+    # must still set stop + join the armed watcher (pipe stays open).
+    monkeypatch.setenv(SUPERVISOR_TOKEN_ENV, "tok-unavail")
+    r, w = os.pipe()
+    try:
+        os.write(w, b"tok-unavail\n")  # arm, write end stays open
+        daemon = CaptureDaemon(
+            FakeStore(),
+            settings=allow_settings,
+            helper_cmd=_oneshot_emitter(1),
+            require_signed_helper=False,
+        )
+
+        def _raise_unavailable(*_a, **_k):
+            raise HelperUnavailableError("no signed helper")
+
+        monkeypatch.setattr(daemon, "run", _raise_unavailable)
+        with pytest.raises(HelperUnavailableError):
+            daemon.run_forever(poll_interval=0.0, max_cycles=5, _supervisor_fd=r)
+        assert _no_supervisor_thread_alive(), "watcher must be joined on raise"
+    finally:
+        os.close(w)
+        os.close(r)
+
+
+def test_run_forever_circuit_breaker_joins_watcher(allow_settings, monkeypatch):
+    # The circuit-breaker raise path must also set stop + join the armed watcher.
+    import openbird.capture.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_BACKOFF_BASE", 0.0)
+    monkeypatch.setenv(SUPERVISOR_TOKEN_ENV, "tok-cb")
+    r, w = os.pipe()
+    try:
+        os.write(w, b"tok-cb\n")  # arm, write end stays open
+        daemon = CaptureDaemon(
+            FakeStore(),
+            settings=allow_settings,
+            helper_cmd=[sys.executable, "-c", "import sys; sys.exit(2)"],
+            require_signed_helper=False,
+        )
+        with pytest.raises(CaptureSupervisorError):
+            daemon.run_forever(
+                poll_interval=0.0, max_consecutive_failures=2, _supervisor_fd=r
+            )
+        assert _no_supervisor_thread_alive(), "watcher must be joined on breaker"
+    finally:
+        os.close(w)
+        os.close(r)
 
 
 def test_run_clean_exit_zero_is_not_a_failure(allow_settings):
