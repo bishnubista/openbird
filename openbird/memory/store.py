@@ -45,6 +45,17 @@ def _log_rerank_skip(reason: str) -> None:
     _log.info("rerank_skipped reason=%s (fell back to RRF order)", reason)
 
 
+def _log_vector_skip(reason: str) -> None:
+    """Log a vector/embedding fallback with a STRUCTURED, content-free reason code.
+
+    The embedding provider's error may echo the query or contents in its message,
+    so we never log the exception text, response body, or query — only the short
+    exception-type ``reason`` code. Search continues on BM25-only ranking, exactly
+    as :func:`_log_rerank_skip` keeps search alive when a reranker is down.
+    """
+    _log.info("vector_skipped reason=%s (fell back to BM25-only ranking)", reason)
+
+
 class EmbeddingCohortMismatch(ValueError):
     """Opening a populated store whose embedding cohort differs from the provider's.
 
@@ -400,10 +411,12 @@ class MemoryStore:
 
         Each surviving hit is resolved back to its most recent observation
         (app/window/ts) so citations are occurrence-aware. ``semantic=False``
-        runs BM25 only (no embedding call). When a cross-encoder reranker is
-        configured it reorders the fused candidates by query-relevance before the
-        MMR diversity pass; any reranker failure falls back to the RRF order so
-        search never breaks.
+        runs BM25 only (no embedding call). When ``semantic=True`` but the
+        embedding provider fails (Ollama down, timeout, transport, ...), the
+        vector stage is skipped and search degrades to BM25-only ranking rather
+        than crashing. When a cross-encoder reranker is configured it reorders the
+        fused candidates by query-relevance before the MMR diversity pass; any
+        reranker failure falls back to the RRF order so search never breaks.
         """
         if not query.strip():
             return []
@@ -416,9 +429,16 @@ class MemoryStore:
             rankings.append(bm25_ids)
 
         if semantic:
-            vec_ids = self._vector(query, pool)
-            if vec_ids:
-                rankings.append(vec_ids)
+            try:
+                vec_ids = self._vector(query, pool)
+            except Exception as exc:  # noqa: BLE001 - embedding failure must never break search
+                # An embedding/provider failure (Ollama down, timeout, transport,
+                # dim mismatch, ...) must degrade to BM25-only ranking, not discard
+                # the already-successful BM25 hits. Mirrors _rerank's RRF fallback.
+                _log_vector_skip(type(exc).__name__)
+            else:
+                if vec_ids:
+                    rankings.append(vec_ids)
 
         if not rankings:
             return []

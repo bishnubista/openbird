@@ -243,6 +243,67 @@ def test_search_empty_query(store):
     assert store.search("   ") == []
 
 
+def test_search_falls_back_to_bm25_when_embedding_fails(store):
+    """A failing embedding provider must NOT break search.
+
+    Regression: hybrid search discarded already-successful BM25 hits when the
+    vector stage raised (Ollama down / timeout / transport). It must degrade to
+    BM25-only ranking, mirroring the reranker's RRF fallback.
+    """
+    store.add_observation(
+        "The quarterly budget meeting is scheduled for Friday afternoon.",
+        source="capture",
+        app="Calendar",
+        ts=500.0,
+    )
+
+    # Ingestion is done; now make the SEARCH-time embedding call fail.
+    def _boom(texts):
+        raise RuntimeError("ollama unreachable")
+
+    store.provider.embed = _boom  # type: ignore[method-assign]
+
+    # semantic=True previously raised; it must now return the BM25 hit instead.
+    hits = store.search("budget meeting", k=5, semantic=True)
+    assert hits, "search must still return BM25 results when embedding fails"
+    assert "budget" in hits[0].text.lower()
+
+
+def test_search_embedding_failure_log_is_content_free(store, caplog):
+    """The vector fallback log carries only an exception-type reason code.
+
+    Privacy guard: never log the query text or the provider's (possibly
+    content-echoing) exception message.
+    """
+    store.add_observation("alpha bravo charlie secret payload", source="capture", ts=1.0)
+
+    def _boom(texts):
+        raise RuntimeError("ECHOED SENSITIVE TEXT from provider body")
+
+    store.provider.embed = _boom  # type: ignore[method-assign]
+
+    with caplog.at_level("INFO", logger="openbird.memory"):
+        store.search("SENSITIVE QUERY alpha", k=5, semantic=True)
+    blob = " ".join(r.getMessage() for r in caplog.records)
+    assert "vector_skipped" in blob
+    assert "RuntimeError" in blob  # exception type is the reason code
+    assert "SENSITIVE QUERY" not in blob
+    assert "ECHOED SENSITIVE TEXT" not in blob
+
+
+def test_search_semantic_false_unaffected_by_broken_embedding(store):
+    """semantic=False must never touch the embedding provider."""
+    store.add_observation("budget meeting notes", source="capture", ts=1.0)
+
+    def _boom(texts):  # would raise if (incorrectly) called
+        raise AssertionError("embed() must not be called when semantic=False")
+
+    store.provider.embed = _boom  # type: ignore[method-assign]
+    hits = store.search("budget meeting", k=5, semantic=False)
+    assert hits, "BM25-only search must work"
+    assert "budget" in hits[0].text.lower()
+
+
 def test_stats_reports_cohort_and_dim(store):
     s = store.stats()
     assert s["embed_dim"] == 768
