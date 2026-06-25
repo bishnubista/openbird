@@ -547,8 +547,16 @@ final class OpenBirdService: @unchecked Sendable {
         // Resuming clears any pause gate so capture actually records. Done BEFORE
         // the adopt-external guard below: if we adopt an already-running daemon
         // while a stale `capture.paused` sidecar exists, the daemon would keep
-        // honoring the pause while the UI reports capture resumed.
-        _ = try? setCapturePaused(false)
+        // honoring the pause while the UI reports capture resumed. If clearing the
+        // gate fails (or the sidecar survives), fail the launch rather than report
+        // success while capture stays silently paused.
+        do {
+            if try setCapturePaused(false) {
+                return false  // sidecar still present -> daemon would stay paused
+            }
+        } catch {
+            return false
+        }
         // Advisory pre-spawn guard: if a long-lived external `capture --loop`
         // daemon is ALREADY running — an orphan from a prior app instance that
         // died non-gracefully, or one the user started by hand — do not spawn a
