@@ -18,6 +18,12 @@ _err_console = Console(stderr=True)
 # to an actionable "Reindex" affordance instead of the generic "stopped (exit 1)".
 CAPTURE_EXIT_REINDEX_REQUIRED = 5
 
+# Another `capture --loop` daemon already holds the single-instance lock. This is
+# a BENIGN outcome, not a crash: the app may optimistically spawn a daemon that
+# loses the race, and it should treat this code as "already capturing" rather than
+# surfacing an error. (6 is reserved for _CAPTURE_NO_PROGRESS_EXIT below.)
+CAPTURE_EXIT_ALREADY_RUNNING = 7
+
 
 def register_capture_command(app: typer.Typer) -> None:
     """Register capture commands on the root OpenBird CLI."""
@@ -61,6 +67,7 @@ def capture(
         CaptureSupervisorError,
         HelperUnavailableError,
     )
+    from openbird.capture.lock import acquire_capture_lock
     # Function-local imports (and routing store construction through openbird.cli._store)
     # avoid a module-level import cycle with the CLI package.
     from openbird.cli import _print_cohort_mismatch_hint, _provider, _store
@@ -87,6 +94,8 @@ def capture(
     except EmbeddingCohortMismatch as exc:
         _print_cohort_mismatch_hint(exc)
         raise typer.Exit(code=CAPTURE_EXIT_REINDEX_REQUIRED) from exc
+    # Released in the finally below. Only ever held in --loop mode.
+    capture_lock = None
     try:
         daemon = CaptureDaemon(
             store,
@@ -98,6 +107,18 @@ def capture(
             if once:
                 stats = daemon.run(max_events=max_events)
             else:
+                # Single-instance: refuse to start a 2nd concurrent --loop daemon,
+                # which would double-capture the same events. The flock is
+                # authoritative (kernel releases it on any death); the app's
+                # pre-spawn check is only an advisory optimization. --once is
+                # intentionally lock-free so diagnostics can run concurrently.
+                capture_lock = acquire_capture_lock(settings.data_dir)
+                if capture_lock is None:
+                    _err_console.print(
+                        "[yellow]capture: another capture daemon is already "
+                        "running; exiting[/]"
+                    )
+                    raise typer.Exit(code=CAPTURE_EXIT_ALREADY_RUNNING)
                 # Continuous capture: supervise the one-shot helper, re-spawning
                 # it on a cadence until SIGINT/SIGTERM requests a clean stop.
                 logging.basicConfig(
@@ -127,6 +148,10 @@ def capture(
             _err_console.print(f"[red]Capture supervisor aborted:[/] {exc}")
             raise typer.Exit(code=4) from None
     finally:
+        # Release before closing the store; releasing only closes the fd (the
+        # sentinel file is never unlinked — see capture/lock.py).
+        if capture_lock is not None:
+            capture_lock.release()
         store.close()
 
     _report_and_finish(stats, once=once)

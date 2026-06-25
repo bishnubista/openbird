@@ -149,4 +149,28 @@ final class AppModelUXTests: XCTestCase {
         XCTAssertFalse(model.captureNeedsReindex)
         XCTAssertEqual(model.lastActionMessage, "Capture stopped.")
     }
+
+    /// The "already running" exit code (Python `CAPTURE_EXIT_ALREADY_RUNNING`,
+    /// value 7) means a daemon we optimistically spawned lost the single-instance
+    /// flock race to another daemon. It is BENIGN — capture is still running — so
+    /// it must NOT surface as "stopped unexpectedly (exit 7)". Pinning 7 also
+    /// guards the cross-component contract with the Python CLI.
+    func testCaptureAlreadyRunningExitIsBenign() async {
+        XCTAssertEqual(AppModel.captureAlreadyRunningExitCode, 7)
+        XCTAssertNotEqual(
+            AppModel.captureAlreadyRunningExitCode, AppModel.captureReindexExitCode)
+
+        let service = OpenBirdService(openBirdCLIResolver: { "/tmp/openbird" })
+        let model = AppModel(service: service, initialReport: readyReport())
+
+        await model.handleCaptureExit(code: AppModel.captureAlreadyRunningExitCode)
+
+        // The contract: exit 7 is benign — never the reindex prompt, and never
+        // the "stopped unexpectedly (exit N)" failure message. (Whether
+        // captureRunning ends true depends on whether the lock holder is still
+        // alive, which is host-dependent, so we don't pin it here.)
+        XCTAssertFalse(model.captureNeedsReindex)
+        XCTAssertFalse(model.lastActionMessage.contains("unexpectedly"))
+        XCTAssertFalse(model.lastActionMessage.contains("exit 7"))
+    }
 }

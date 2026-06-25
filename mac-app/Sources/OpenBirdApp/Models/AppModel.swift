@@ -77,6 +77,12 @@ final class AppModel: ObservableObject {
     /// `openbird/capture/cli.py`; keep the two in sync.
     static let captureReindexExitCode: Int32 = 5
 
+    /// Capture daemon exit code meaning another `capture --loop` daemon already
+    /// holds the single-instance lock. BENIGN — capture is still running via the
+    /// other daemon, so this must never surface as an "unexpected" failure. Mirrors
+    /// `CAPTURE_EXIT_ALREADY_RUNNING` in `openbird/capture/cli.py`.
+    static let captureAlreadyRunningExitCode: Int32 = 7
+
     private let service: OpenBirdService
     private var captureStopRequested = false
     /// Delayed post-start check that confirms capture is actually storing memory.
@@ -617,6 +623,15 @@ final class AppModel: ObservableObject {
             // Offer a one-click reindex instead of a dead-end error.
             captureNeedsReindex = true
             lastActionMessage = "Capture needs a reindex (your embedding model changed). Click Reindex, then start capture."
+        } else if code == Self.captureAlreadyRunningExitCode {
+            // A daemon we optimistically spawned lost the single-instance race;
+            // another daemon already held the lock. Benign — NOT an unexpected
+            // failure. Trust the `isCaptureRunning()` re-check above rather than
+            // forcing `true`: if the lock holder exited during the race window,
+            // no daemon may remain and we must not get stuck claiming it runs.
+            lastActionMessage = captureRunning
+                ? "Capture is already running."
+                : "Capture stopped."
         } else {
             lastActionMessage = code == 0
                 ? "Capture stopped."
