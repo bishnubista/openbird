@@ -20,6 +20,13 @@ final class TodayModel: ObservableObject {
     /// 0 = today, 1 = yesterday, … Defaults to today, matching the "Today's
     /// Activity" menu entry that opens this view.
     @Published var dayOffset = 0
+    /// Source observation a clicked chat citation asked us to focus, set by
+    /// `focus(dayOffset:observationId:)`. The day view renders *sessions* (not
+    /// individual observations), so there is no per-observation row to scroll to yet;
+    /// this is carried so the field is ready when observation-level rows land and so a
+    /// view can highlight the owning session when a match becomes available.
+    /// Privacy: an opaque id only — never captured text/window/URL.
+    @Published private(set) var focusedObservationId: String?
 
     private let service: OpenBirdService
     /// Per-day briefing cache (this app session), keyed by ABSOLUTE local day (not
@@ -135,5 +142,21 @@ final class TodayModel: ObservableObject {
         guard offset >= 0, offset != dayOffset else { return }
         dayOffset = offset
         await load()
+    }
+
+    /// Focus the day view on a clicked chat citation: switch to its day (reloading
+    /// the timeline/briefing if it changed) and record the source observation to
+    /// focus. Opening the correct day is the guaranteed behavior; the observation id
+    /// is best-effort context for highlighting once the day's sessions are loaded.
+    /// Invoked via `AppModel.citationNavigator`. Privacy: `observationId` is an opaque
+    /// id; no captured content is read here.
+    func focus(dayOffset offset: Int, observationId: String?) async {
+        focusedObservationId = observationId
+        let target = max(0, offset)
+        if target == dayOffset {
+            if timeline == nil { await load() }   // first open of an already-current day
+        } else {
+            await setDay(target)
+        }
     }
 }

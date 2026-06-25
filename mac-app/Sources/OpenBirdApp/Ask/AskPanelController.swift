@@ -32,6 +32,13 @@ final class AskPanelController: NSObject, ObservableObject {
     private let compactWidth: CGFloat = 620
     private let expandedWidth: CGFloat = 960
 
+    /// Opens the SwiftUI main window (`Window(id: "main")`). Wired from the scene's
+    /// `@Environment(\.openWindow)` because that environment value is only reachable
+    /// inside a `View`. Used by citation click-through so navigating from an Ask
+    /// overlay still works when the main window was closed (the MenuBarExtra keeps the
+    /// app alive with no window). Falls back to fronting an existing window when unset.
+    var openMainWindow: (() -> Void)?
+
     init(model: AppModel, service: OpenBirdService, askModel: AskPanelModel, timelineModel: TimelineModel) {
         self.appModel = model
         self.askModel = askModel
@@ -137,6 +144,34 @@ final class AskPanelController: NSObject, ObservableObject {
         expandedWindow?.orderOut(nil)
     }
 
+    // MARK: - Citation click-through
+
+    /// A chat citation was clicked in an Ask OVERLAY surface (the compact Spotlight
+    /// panel or the expanded window). Dismiss the overlay, bring the main app window
+    /// forward, and route to the source's day/observation in the Today pane. The
+    /// in-window Ask *pane* doesn't use this — it navigates `AppModel` directly since
+    /// it already lives inside the main window (no overlay to dismiss).
+    func navigateToCitation(_ citation: ChatCitation) {
+        hide()
+        NSApp.activate(ignoringOtherApps: true)
+        showMainWindow()
+        appModel.navigateToCitation(citation)
+    }
+
+    /// Ensure the main window exists and is frontmost. Prefer the injected SwiftUI
+    /// opener (it RECREATES the window if the user closed it — the MenuBarExtra keeps
+    /// the app running with no window); fall back to fronting an existing window when
+    /// the opener wasn't wired (e.g. unit context).
+    private func showMainWindow() {
+        if let openMainWindow {
+            openMainWindow()
+            return
+        }
+        for window in NSApp.windows where window.identifier?.rawValue == "main" {
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
     /// Route first-responder into the SwiftUI field on the next runloop turn, after the
     /// window is key (a borderless window won't auto-focus it otherwise).
     private func focusInput(of window: NSWindow) {
@@ -154,7 +189,8 @@ final class AskPanelController: NSObject, ObservableObject {
             appModel: appModel,
             onEscape: { [weak self] in self?.hide() },
             onExpand: { [weak self] in self?.expand() },
-            onSizeChange: { [weak self] size in self?.handleCompactSize(size) }
+            onSizeChange: { [weak self] size in self?.handleCompactSize(size) },
+            onSelectCitation: { [weak self] citation in self?.navigateToCitation(citation) }
         )
         let hosting = NSHostingView(rootView: root)
         hosting.autoresizingMask = [.width, .height]
@@ -207,7 +243,8 @@ final class AskPanelController: NSObject, ObservableObject {
             appModel: appModel,
             timelineModel: timelineModel,
             onCollapse: { [weak self] in self?.collapse() },
-            onClose: { [weak self] in self?.hide() }
+            onClose: { [weak self] in self?.hide() },
+            onSelectCitation: { [weak self] citation in self?.navigateToCitation(citation) }
         )
         let hosting = NSHostingView(rootView: root)
         hosting.autoresizingMask = [.width, .height]

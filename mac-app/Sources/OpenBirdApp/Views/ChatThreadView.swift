@@ -8,6 +8,9 @@ import SwiftUI
 struct ChatThreadView: View {
     let turns: [AskPanelModel.Turn]
     let busy: Bool
+    /// Invoked when a source chip is clicked — navigates to that citation's source.
+    /// Defaults to a no-op so previews/tests can render without wiring navigation.
+    var onSelectCitation: (ChatCitation) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var scheme
 
@@ -65,6 +68,14 @@ struct ChatThreadView: View {
     }
 
     private func sourceChip(_ c: ChatCitation) -> some View {
+        Button { onSelectCitation(c) } label: {
+            sourceChipLabel(c)
+        }
+        .buttonStyle(.plain)
+        .help("Open this source in Today")
+    }
+
+    private func sourceChipLabel(_ c: ChatCitation) -> some View {
         let identity = SourceIdentity.forApp(c.app)
         return HStack(spacing: OB.Space.s) {
             Text(identity.glyph)
@@ -84,6 +95,7 @@ struct ChatThreadView: View {
             RoundedRectangle(cornerRadius: OB.Radius.control, style: .continuous)
                 .strokeBorder(OB.separator(scheme), lineWidth: 0.5)
         )
+        .contentShape(RoundedRectangle(cornerRadius: OB.Radius.control, style: .continuous))
     }
 
     private func groundedLabel(_ result: ChatResult) -> String {

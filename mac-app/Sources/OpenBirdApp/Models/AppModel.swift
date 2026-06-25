@@ -40,6 +40,13 @@ final class AppModel: ObservableObject {
     /// persists for the app session (the window can close and reopen on the same pane);
     /// it intentionally resets to `.today` on a full relaunch.
     @Published var selection: AppDestination = .today
+    /// Navigation seam invoked when a chat citation is clicked: it focuses the
+    /// Today/day view on the citation's day and (best-effort) observation. Wired in
+    /// `OpenBirdApp.init` to the shared `TodayModel` so AppModel never imports the
+    /// day model directly; defaults to a no-op so unit tests and previews construct an
+    /// `AppModel` without it. Privacy: only an integer day offset and an opaque
+    /// observation id flow through here — never captured text/window/URL.
+    var citationNavigator: ((_ dayOffset: Int, _ observationId: String?) -> Void)?
     @Published private(set) var report = PreflightReport()
     @Published private(set) var capturePaused = false
     @Published private(set) var captureRunning = false
@@ -697,4 +704,34 @@ final class AppModel: ObservableObject {
 
     func openDataFolder() { service.openDataFolder() }
     func openBundleFolder() { service.openBundleFolder() }
+
+    // MARK: - Citation navigation
+
+    /// Open the Today/day view on the day a chat citation came from and focus its
+    /// source observation. Switches the pane to `.today`, then hands the computed day
+    /// offset + observation id to the wired `citationNavigator` (the shared
+    /// `TodayModel`). When `observationId` is absent — older citations may lack it —
+    /// the day still opens (the documented minimum behavior). Privacy: only the day
+    /// offset and the opaque observation id leave this method; the snippet/app/window
+    /// are never read here.
+    func navigateToCitation(_ citation: ChatCitation) {
+        let offset = Self.dayOffset(forTimestamp: citation.ts)
+        selection = .today
+        citationNavigator?(offset, citation.observationId)
+    }
+
+    /// Day offset (0=today, 1=yesterday, …) of the local calendar day containing
+    /// `ts`. Mirrors `TodayModel`'s day keying and the Python `_day_bounds` (local
+    /// calendar days) so a citation maps to the SAME day the timeline/briefing show.
+    /// A future timestamp clamps to 0 (today) since the Today view has no future days.
+    nonisolated static func dayOffset(
+        forTimestamp ts: Double,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> Int {
+        let citationDay = calendar.startOfDay(for: Date(timeIntervalSince1970: ts))
+        let today = calendar.startOfDay(for: now)
+        let days = calendar.dateComponents([.day], from: citationDay, to: today).day ?? 0
+        return max(0, days)
+    }
 }

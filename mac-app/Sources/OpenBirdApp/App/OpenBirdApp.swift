@@ -33,9 +33,16 @@ struct OpenBirdApp: App {
         let model = AppModel(service: service)
         let askModel = AskPanelModel(service: service, appModel: model)
         let timelineModel = TimelineModel(service: service)
+        let todayModel = TodayModel(service: service)
+        // Wire citation click-through: a clicked source switches to the Today pane
+        // (done in AppModel) and focuses the citation's day/observation here. Strong
+        // captures are fine — these models live for the app's lifetime.
+        model.citationNavigator = { dayOffset, observationId in
+            Task { await todayModel.focus(dayOffset: dayOffset, observationId: observationId) }
+        }
         _model = StateObject(wrappedValue: model)
         _askModel = StateObject(wrappedValue: askModel)
-        _todayModel = StateObject(wrappedValue: TodayModel(service: service))
+        _todayModel = StateObject(wrappedValue: todayModel)
         _timelineModel = StateObject(wrappedValue: timelineModel)
         _askPanel = StateObject(wrappedValue: AskPanelController(
             model: model, service: service, askModel: askModel, timelineModel: timelineModel))
@@ -46,26 +53,51 @@ struct OpenBirdApp: App {
         // selectable detail panes (no second `Window` scene). Today's surface is now a
         // pane, reached by setting `model.selection`, never by opening another window.
         Window("OpenBird", id: "main") {
-            AppShellView(
+            MainWindowRoot(
                 model: model,
                 todayModel: todayModel,
                 askModel: askModel,
                 timelineModel: timelineModel,
-                onAsk: { day in askPanel.show(dayScope: day) },
-                onAskExpanded: { askPanel.expand() }
+                askPanel: askPanel
             )
-            .task {
-                askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
-                await model.refresh()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                model.refreshPermissionStates()
-            }
         }
         .windowStyle(.hiddenTitleBar)
 
         MenuBarExtra("OpenBird", systemImage: model.menuBarSymbol) {
             MenuBarView(model: model, openAskPanel: { askPanel.show() })
+        }
+    }
+}
+
+/// The main window's root view. Exists so it can read `@Environment(\.openWindow)`
+/// (only reachable from inside a `View`) and hand the controller a way to RE-OPEN the
+/// main window — needed when a citation is clicked from an Ask overlay after the user
+/// closed the main window (the MenuBarExtra keeps the app alive with no window).
+private struct MainWindowRoot: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var todayModel: TodayModel
+    @ObservedObject var askModel: AskPanelModel
+    @ObservedObject var timelineModel: TimelineModel
+    let askPanel: AskPanelController
+
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        AppShellView(
+            model: model,
+            todayModel: todayModel,
+            askModel: askModel,
+            timelineModel: timelineModel,
+            onAsk: { day in askPanel.show(dayScope: day) },
+            onAskExpanded: { askPanel.expand() }
+        )
+        .task {
+            askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
+            askPanel.openMainWindow = { openWindow(id: "main") }
+            await model.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshPermissionStates()
         }
     }
 }

@@ -14,7 +14,10 @@ struct AskPaneView: View {
         AskContentView(
             askModel: askModel,
             appModel: appModel,
-            timelineModel: timelineModel
+            timelineModel: timelineModel,
+            // In-window pane: no overlay to dismiss, so navigate AppModel directly
+            // (it switches to the Today pane and focuses the source's day).
+            onSelectCitation: { appModel.navigateToCitation($0) }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // This is the GENERIC in-window Ask surface (sidebar `.ask` / `openbird://ask`),

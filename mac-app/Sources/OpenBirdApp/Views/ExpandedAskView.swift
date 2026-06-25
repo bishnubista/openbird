@@ -11,6 +11,9 @@ struct ExpandedAskView: View {
     @ObservedObject var timelineModel: TimelineModel
     var onCollapse: () -> Void
     var onClose: () -> Void
+    /// Invoked when a citation is clicked — the controller dismisses this window and
+    /// routes to the source's day in Today. Defaults to a no-op for previews.
+    var onSelectCitation: (ChatCitation) -> Void = { _ in }
 
     var body: some View {
         AskContentView(
@@ -18,7 +21,8 @@ struct ExpandedAskView: View {
             appModel: appModel,
             timelineModel: timelineModel,
             onCollapse: onCollapse,
-            onClose: onClose
+            onClose: onClose,
+            onSelectCitation: onSelectCitation
         )
         .glassSurface(cornerRadius: OB.Radius.window)
         .padding(24)                       // room for the cast glass shadow
