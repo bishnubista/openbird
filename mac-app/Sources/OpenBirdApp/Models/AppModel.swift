@@ -257,6 +257,29 @@ final class AppModel: ObservableObject {
         return "on-device"
     }
 
+    var meetingTranscriptionState: StepState {
+        guard let readiness = report.meetingTranscription else { return .unknown }
+        if readiness.backendAvailable
+            || readiness.parakeetMLXAvailable
+            || readiness.fasterWhisperAvailable {
+            return .ok
+        }
+        return .attention
+    }
+
+    var meetingTranscriptionSummary: String {
+        guard let readiness = report.meetingTranscription else {
+            return "Re-check setup to detect parakeet-mlx or faster-whisper."
+        }
+        if readiness.parakeetMLXAvailable {
+            return "\(readiness.recommendedBackend) ready · Apple Silicon recommended"
+        }
+        if readiness.fasterWhisperAvailable {
+            return "\(readiness.fallbackBackend) ready · portable fallback"
+        }
+        return "No meeting transcription backend installed. \(readiness.recommendedBackend) is recommended on Apple Silicon; \(readiness.fallbackBackend) is the portable fallback. Install one in the openbird CLI environment."
+    }
+
     var hasRemoteModelRoute: Bool {
         !report.remoteModelRoles.isEmpty || !report.remoteModels.isEmpty
     }

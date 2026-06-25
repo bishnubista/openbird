@@ -698,6 +698,64 @@ def test_run_preflight_reflects_privacy_config(tmp_path):
     assert report["privacy"]["ocr_enabled"] is True
 
 
+def test_run_preflight_reports_parakeet_meeting_backend(monkeypatch, settings):
+    import openbird.meetings.transcribe as transcribe
+
+    monkeypatch.setattr(transcribe, "parakeet_available", lambda: True)
+    monkeypatch.setattr(transcribe, "whisper_available", lambda: False)
+
+    report = run_preflight(
+        settings,
+        http_get=make_http_get(),
+        db_opener=plaintext_handle_opener(),
+    )
+
+    transcription = report["meetings"]["transcription"]
+    assert transcription["parakeet_mlx_available"] is True
+    assert transcription["faster_whisper_available"] is False
+    assert transcription["backend_available"] is True
+    assert transcription["recommended_backend"] == "parakeet-mlx"
+    assert transcription["recommended_extra"] == "meetings-mlx"
+
+
+def test_run_preflight_reports_whisper_meeting_backend(monkeypatch, settings):
+    import openbird.meetings.transcribe as transcribe
+
+    monkeypatch.setattr(transcribe, "parakeet_available", lambda: False)
+    monkeypatch.setattr(transcribe, "whisper_available", lambda: True)
+
+    report = run_preflight(
+        settings,
+        http_get=make_http_get(),
+        db_opener=plaintext_handle_opener(),
+    )
+
+    transcription = report["meetings"]["transcription"]
+    assert transcription["parakeet_mlx_available"] is False
+    assert transcription["faster_whisper_available"] is True
+    assert transcription["backend_available"] is True
+    assert transcription["fallback_backend"] == "faster-whisper"
+    assert transcription["fallback_extra"] == "meetings"
+
+
+def test_run_preflight_reports_missing_meeting_backend(monkeypatch, settings):
+    import openbird.meetings.transcribe as transcribe
+
+    monkeypatch.setattr(transcribe, "parakeet_available", lambda: False)
+    monkeypatch.setattr(transcribe, "whisper_available", lambda: False)
+
+    report = run_preflight(
+        settings,
+        http_get=make_http_get(),
+        db_opener=plaintext_handle_opener(),
+    )
+
+    transcription = report["meetings"]["transcription"]
+    assert transcription["parakeet_mlx_available"] is False
+    assert transcription["faster_whisper_available"] is False
+    assert transcription["backend_available"] is False
+
+
 # --------------------------------------------------------------------------- #
 # cloud section + route-aware runtime_ok / host agreement            #
 # --------------------------------------------------------------------------- #

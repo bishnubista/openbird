@@ -4,6 +4,17 @@ import AVFoundation
 import CoreGraphics
 import Foundation
 
+/// Optional meeting speech-to-text backend readiness decoded from preflight.
+struct MeetingTranscriptionReadiness: Equatable {
+    let parakeetMLXAvailable: Bool
+    let fasterWhisperAvailable: Bool
+    let backendAvailable: Bool
+    let recommendedBackend: String
+    let recommendedExtra: String
+    let fallbackBackend: String
+    let fallbackExtra: String
+}
+
 /// A decoded, UI-friendly slice of `openbird preflight --json`.
 struct PreflightReport: Equatable {
     var ollamaReachable: Bool?           // nil = unknown / not probed
@@ -25,6 +36,7 @@ struct PreflightReport: Equatable {
     var helperPresent: Bool = false
     var runtimeOK: Bool = false
     var releaseOK: Bool = false
+    var meetingTranscription: MeetingTranscriptionReadiness?
     var error: String?
 
     func grant(_ capability: String) -> String { grants[capability] ?? "unknown" }
@@ -1151,7 +1163,36 @@ final class OpenBirdService: @unchecked Sendable {
                 report.grants[cap] = macos[cap] as? String ?? "unknown"
             }
         }
+        if let meetings = payload["meetings"] as? [String: Any],
+           let transcription = meetings["transcription"] as? [String: Any] {
+            report.meetingTranscription = Self.parseMeetingTranscription(transcription)
+        }
         return report
+    }
+
+    private static func parseMeetingTranscription(
+        _ payload: [String: Any]
+    ) -> MeetingTranscriptionReadiness? {
+        guard
+            let parakeetMLXAvailable = payload["parakeet_mlx_available"] as? Bool,
+            let fasterWhisperAvailable = payload["faster_whisper_available"] as? Bool,
+            let backendAvailable = payload["backend_available"] as? Bool,
+            let recommendedBackend = payload["recommended_backend"] as? String,
+            let recommendedExtra = payload["recommended_extra"] as? String,
+            let fallbackBackend = payload["fallback_backend"] as? String,
+            let fallbackExtra = payload["fallback_extra"] as? String
+        else {
+            return nil
+        }
+        return MeetingTranscriptionReadiness(
+            parakeetMLXAvailable: parakeetMLXAvailable,
+            fasterWhisperAvailable: fasterWhisperAvailable,
+            backendAvailable: backendAvailable,
+            recommendedBackend: recommendedBackend,
+            recommendedExtra: recommendedExtra,
+            fallbackBackend: fallbackBackend,
+            fallbackExtra: fallbackExtra
+        )
     }
 
     private static func run(

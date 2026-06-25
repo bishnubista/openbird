@@ -666,6 +666,27 @@ def check_macos_capabilities(
     }
 
 
+def check_meeting_transcription_backends() -> dict[str, Any]:
+    """Report optional meeting transcription backend availability.
+
+    Uses the meetings module's import-spec probes only: this answers "is the
+    backend package importable?" without importing model runtimes or weights.
+    Meeting transcription is optional, so this report is informational and must
+    not participate in runtime/release gates.
+    """
+    from openbird.meetings import transcribe
+
+    return {
+        "parakeet_mlx_available": transcribe.parakeet_available(),
+        "faster_whisper_available": transcribe.whisper_available(),
+        "backend_available": transcribe.meetings_backend_available(),
+        "recommended_backend": "parakeet-mlx",
+        "recommended_extra": "meetings-mlx",
+        "fallback_backend": "faster-whisper",
+        "fallback_extra": "meetings",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Aggregation                                                                 #
 # --------------------------------------------------------------------------- #
@@ -808,6 +829,9 @@ def run_preflight(
             "ocr_enabled": bool(settings.ocr_enabled),
         },
         "macos": macos,
+        "meetings": {
+            "transcription": check_meeting_transcription_backends(),
+        },
         # Provider backend readiness. Two unwired-MLX cases must NOT report READY:
         #   * the reserved ``mlx`` *backend* (factory raises NotImplementedError);
         #   * ``mlx/*`` *model strings* under the default litellm backend — litellm
@@ -936,6 +960,7 @@ __all__ = [
     "check_completion",
     "check_sqlite_vec",
     "check_encryption",
+    "check_meeting_transcription_backends",
     "check_macos_capabilities",
     "_packaged_helper_probe",
     "HelperProbe",
