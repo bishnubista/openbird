@@ -1,6 +1,6 @@
 cask "openbird" do
-  version "0.2.0"
-  sha256 "b8ef05ca9e553467ed0b1f1e92222aa15122bfe44db5da423e373a09d13f9b16"
+  version "0.3.0"
+  sha256 "26ca007a5dedca962cd64f9d73969665c873fe63a7a617083c27650074f5b9bc"
 
   url "https://github.com/bishnubista/openbird/releases/download/beta-dmg-#{version}/OpenBird.dmg"
   name "OpenBird"
