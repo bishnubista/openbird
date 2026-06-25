@@ -328,6 +328,18 @@ final class OpenBirdService: @unchecked Sendable {
         captureProcess = nil
     }
 
+    /// Rebuild the on-disk vector index under the current embedding model via
+    /// `openbird reindex --yes`. Needed after the default embed model changes:
+    /// an index built under the old model trips `EmbeddingCohortMismatch` and the
+    /// capture daemon exits `CAPTURE_EXIT_REINDEX_REQUIRED`. Re-embeds every stored
+    /// observation, so it is long-running (hence the generous timeout) and callers
+    /// run it off the main actor. Returns true on a clean (exit 0) reindex.
+    func reindex(timeout: TimeInterval = 600) async -> Bool {
+        guard let cli = resolveOpenBirdCLI() else { return false }
+        let result = await runAsync(cli, arguments: ["reindex", "--yes"], timeout: timeout)
+        return result.exitCode == 0
+    }
+
     // MARK: - Helpers
 
     func helperStatuses() -> [HelperStatus] {

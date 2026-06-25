@@ -43,6 +43,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var report = PreflightReport()
     @Published private(set) var capturePaused = false
     @Published private(set) var captureRunning = false
+    /// True when capture last died because the on-disk index needs rebuilding under
+    /// the current embedding model (capture daemon exit code `captureReindexExitCode`).
+    /// Drives the one-click "Reindex" affordance instead of a dead-end error.
+    @Published private(set) var captureNeedsReindex = false
+    /// True while a user-triggered `reindex` is running (disables the button).
+    @Published private(set) var isReindexing = false
     @Published private(set) var helpers: [HelperStatus] = []
     @Published private(set) var allowlist: [String] = []
     // TCC grants are checked from the APP's own process (that is where macOS
@@ -65,6 +71,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var chatBusy = false
     @Published private(set) var chatResult: ChatResult?
     @Published private(set) var chatError: String?
+
+    /// Capture daemon exit code meaning "index built under a different embedding
+    /// model — run `openbird reindex`". Mirrors `CAPTURE_EXIT_REINDEX_REQUIRED` in
+    /// `openbird/capture/cli.py`; keep the two in sync.
+    static let captureReindexExitCode: Int32 = 5
 
     private let service: OpenBirdService
     private var captureStopRequested = false
@@ -570,22 +581,12 @@ final class AppModel: ObservableObject {
         let observationsBeforeStart = memoryStats.observations
         if service.startCapture(onExit: { [weak self] code in
             Task { @MainActor in
-                guard let self else { return }
-                self.captureRunning = self.service.isCaptureRunning()
-                self.captureHealthCheckTask?.cancel()
-                self.captureHealthCheckTask = nil
-                await self.refreshMemoryStats()
-                if self.captureStopRequested {
-                    self.captureStopRequested = false
-                } else {
-                    self.lastActionMessage = code == 0
-                        ? "Capture stopped."
-                        : "Capture stopped unexpectedly (exit \(code)). Re-check setup."
-                }
+                await self?.handleCaptureExit(code: code)
             }
         }) {
             captureRunning = true
             capturePaused = false
+            captureNeedsReindex = false
             lastActionMessage = "Capture started for \(allowlist.count) app(s). Waiting for memory updates."
             captureHealthCheckTask = Task {
                 await refreshMemoryStats()
@@ -601,14 +602,60 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// React to the capture daemon terminating. Extracted from the `onExit` closure
+    /// so the exit-code → state mapping (notably the reindex-required code) is unit
+    /// testable without spawning a real process.
+    func handleCaptureExit(code: Int32) async {
+        captureRunning = service.isCaptureRunning()
+        captureHealthCheckTask?.cancel()
+        captureHealthCheckTask = nil
+        await refreshMemoryStats()
+        if captureStopRequested {
+            captureStopRequested = false
+        } else if code == Self.captureReindexExitCode {
+            // Recoverable: the index was built under a different embedding model.
+            // Offer a one-click reindex instead of a dead-end error.
+            captureNeedsReindex = true
+            lastActionMessage = "Capture needs a reindex (your embedding model changed). Click Reindex, then start capture."
+        } else {
+            lastActionMessage = code == 0
+                ? "Capture stopped."
+                : "Capture stopped unexpectedly (exit \(code)). Re-check setup."
+        }
+    }
+
     func stopCapture() {
         captureStopRequested = true
         captureHealthCheckTask?.cancel()
         captureHealthCheckTask = nil
         service.stopCapture()
         captureRunning = false
+        captureNeedsReindex = false
         lastActionMessage = "Capture stopped."
         Task { await refreshMemoryStats() }
+    }
+
+    /// Rebuild the vector index under the current embedding model, then resume
+    /// capture. Invoked from the "Reindex" affordance shown after capture exits
+    /// with `captureReindexExitCode`. Re-embeds all stored memory, so it can take
+    /// a few minutes; `isReindexing` gates the button so it cannot run twice.
+    func reindexNow() {
+        guard !isReindexing else { return }
+        isReindexing = true
+        lastActionMessage = "Reindexing memory… (this can take a few minutes)"
+        Task {
+            let ok = await service.reindex()
+            isReindexing = false
+            if ok {
+                captureNeedsReindex = false
+                await refreshMemoryStats()
+                // Resume capture once; if it still exits with the reindex code the
+                // onExit handler re-sets the flag — it never auto-reindexes again.
+                startCapture()
+            } else {
+                lastActionMessage = "Reindex failed. Run `openbird reindex` in Terminal, then try again."
+            }
+        }
     }
 
     /// Stop the app-launched capture daemon, then terminate the app. Used by the
