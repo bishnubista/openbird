@@ -58,6 +58,21 @@ def test_neutralize_empty_passthrough():
     assert fence.neutralize("") == ""
 
 
+def test_fencespec_rejects_empty_marker():
+    # An empty marker makes neutralize() never converge (str.replace("", r) grows
+    # the string every pass) — reject at construction.
+    with pytest.raises(ValueError, match="non-empty"):
+        FenceSpec(open_token="", close_token="<C>")
+    with pytest.raises(ValueError, match="non-empty"):
+        FenceSpec(open_token="<O>", close_token="<C>", extra_forbidden=("",))
+
+
+def test_fencespec_rejects_redaction_containing_a_marker():
+    # A redaction that reintroduces a forbidden marker loops forever.
+    with pytest.raises(ValueError, match="redaction"):
+        FenceSpec(open_token="A", close_token="<C>", redaction="xAx")
+
+
 def test_required_tokens_are_only_the_fence_delimiters():
     fence = FenceSpec(open_token="<O>", close_token="<C>", extra_forbidden=("X",))
     assert fence.required_tokens() == ("<O>", "<C>")

@@ -51,6 +51,20 @@ class FenceSpec:
     extra_forbidden: tuple[str, ...] = ()
     redaction: str = _REDACTION
 
+    def __post_init__(self) -> None:
+        # Guard the two configs that make `neutralize` never converge (it would
+        # then hang every sanitization, repo-wide, since this is the one source
+        # of truth): an empty marker — `"x".replace("", r)` grows the string on
+        # every pass — and a redaction that itself contains a forbidden marker,
+        # which reintroduces that marker after each replacement.
+        markers = (self.open_token, self.close_token, *self.extra_forbidden)
+        if any(not marker for marker in markers):
+            raise ValueError("FenceSpec markers must be non-empty")
+        if any(marker in self.redaction for marker in markers):
+            raise ValueError(
+                "FenceSpec redaction must not contain a forbidden marker"
+            )
+
     @property
     def forbidden(self) -> tuple[str, ...]:
         """All markers stripped from captured text (fence delimiters + extras)."""
