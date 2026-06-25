@@ -1809,7 +1809,12 @@ def _invoke_capture(monkeypatch, tmp_path, *, loop: bool, stats: CaptureStats):
     monkeypatch.setattr(capture_cli, "get_settings", lambda: settings)
     monkeypatch.setattr(daemon_mod, "CaptureDaemon", StubDaemon)
     monkeypatch.setattr(cli, "_provider", lambda: None)
-    monkeypatch.setattr(cli, "_store", lambda *, provider=None, settings=None: StubStore())
+    # Accept **kwargs so the stub tolerates extra _store params the daemon may
+    # pass (e.g. reraise_cohort_mismatch=True from the --loop path) without a
+    # TypeError — keeps this stub forward-compatible across PRs.
+    monkeypatch.setattr(
+        cli, "_store", lambda *, provider=None, settings=None, **kwargs: StubStore()
+    )
 
     argv = ["capture", "--helper", "fake", "--allow-unsigned"]
     argv.append("--loop" if loop else "--once")
