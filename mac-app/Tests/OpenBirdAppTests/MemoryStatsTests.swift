@@ -63,7 +63,8 @@ final class MemoryStatsTests: XCTestCase {
             "host": "http://localhost:11434",
             "required_models": ["llama3.2", "nomic-embed-text"],
             "missing_models": [],
-            "auto_pull_allowed": true
+            "auto_pull_allowed": true,
+            "version_ok": true
           },
           "cloud": {
             "llm_model": "ollama/llama3.2",
@@ -80,12 +81,50 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(report.requiredModels, ["llama3.2", "nomic-embed-text"])
         XCTAssertEqual(report.missingModels, [])
         XCTAssertTrue(report.autoPullAllowed)
+        XCTAssertEqual(report.ollamaVersionOK, true)
         XCTAssertEqual(report.llmModel, "ollama/llama3.2")
         XCTAssertEqual(report.embedModel, "ollama/nomic-embed-text")
         XCTAssertEqual(report.remoteModelRoles, [:])
         XCTAssertEqual(report.remoteModels, [])
         XCTAssertTrue(report.usesLocalOllama)
         XCTAssertFalse(report.cloudBlocked)
+    }
+
+    func testParsePreflightDecodesTooOldOllamaVersionGate() {
+        let report = OpenBirdService.parsePreflight("""
+        {
+          "runtime_ok": false,
+          "ollama": {
+            "reachable": true,
+            "required_models": ["qwen3:8b", "embeddinggemma"],
+            "missing_models": [],
+            "version_ok": false
+          },
+          "cloud": {
+            "llm_model": "ollama/qwen3:8b",
+            "embed_model": "ollama/embeddinggemma",
+            "uses_local_ollama": true
+          }
+        }
+        """)
+
+        XCTAssertEqual(report.ollamaVersionOK, false)
+        XCTAssertEqual(report.embedModel, "ollama/embeddinggemma")
+    }
+
+    func testParsePreflightLeavesMissingOllamaVersionUnknown() {
+        let report = OpenBirdService.parsePreflight("""
+        {
+          "runtime_ok": true,
+          "ollama": {
+            "reachable": true,
+            "required_models": ["llama3.2", "nomic-embed-text"],
+            "missing_models": []
+          }
+        }
+        """)
+
+        XCTAssertNil(report.ollamaVersionOK)
     }
 
     func testParsePreflightDecodesRoleKeyedRemoteModels() {
@@ -315,6 +354,34 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(model.modelRouteActionLabel, "Get Ollama")
     }
 
+    func testTooOldOllamaForEmbeddingGemmaShowsSpecificSetupCopyAndAction() {
+        var report = embeddingGemmaTooOldOllamaReport()
+        report.missingModels = ["embeddinggemma"]
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.localModelStatusState, .attention)
+        XCTAssertEqual(model.modelRouteProvisioningState, .ollamaTooOldForEmbeddingGemma)
+        XCTAssertEqual(model.modelRouteActionLabel, "Update Ollama")
+        XCTAssertTrue(model.localModelStatusSummary.contains("Ollama is too old for embeddinggemma"))
+        XCTAssertTrue(model.localModelStatusSummary.contains("0.11.10 or newer"))
+        XCTAssertTrue(model.nextStepSummary.contains("update Ollama to 0.11.10 or newer for embeddinggemma"))
+
+        var openedURL: URL?
+        model.performModelRouteAction { openedURL = $0 }
+        XCTAssertEqual(openedURL?.absoluteString, "https://ollama.com")
+    }
+
+    func testUnknownOllamaVersionKeepsLegacyRuntimeNotReadyCopy() {
+        var report = embeddingGemmaTooOldOllamaReport()
+        report.ollamaVersionOK = nil
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.modelRouteProvisioningState, .unknown)
+        XCTAssertNil(model.modelRouteActionLabel)
+        XCTAssertTrue(model.localModelStatusSummary.contains("Local model route is not runtime-ready"))
+        XCTAssertFalse(model.localModelStatusSummary.contains("too old"))
+    }
+
     func testPullProgressLineDecodesPercent() throws {
         let progress = try XCTUnwrap(OpenBirdService.parsePullProgressLine(
             #"{"status":"pulling manifest","completed":25,"total":100}"#,
@@ -382,6 +449,17 @@ final class MemoryStatsTests: XCTestCase {
         report.remoteModels = []
         report.usesLocalOllama = true
         report.autoPullAllowed = true
+        return report
+    }
+
+    private func embeddingGemmaTooOldOllamaReport() -> PreflightReport {
+        var report = localRuntimeOKReport()
+        report.runtimeOK = false
+        report.requiredModels = ["qwen3:8b", "embeddinggemma"]
+        report.missingModels = []
+        report.llmModel = "ollama/qwen3:8b"
+        report.embedModel = "ollama/embeddinggemma"
+        report.ollamaVersionOK = false
         return report
     }
 
