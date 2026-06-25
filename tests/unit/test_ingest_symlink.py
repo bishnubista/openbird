@@ -153,3 +153,33 @@ def test_ingest_command_does_not_store_external_symlink_content(
     assert url == ok.as_uri()
     # The stored URL must not point at the external secret.
     assert secret.name not in url
+
+
+def test_ingest_relative_path_does_not_crash(tmp_path, monkeypatch):
+    """Regression: a relative path argument must still ingest and produce a valid
+    absolute ``file://`` URL.
+
+    ``Path.as_uri()`` raises ``ValueError: relative path can't be expressed as a
+    file URI`` on a relative path, so ``openbird ingest notes.txt`` (run from the
+    file's directory) used to crash after the symlink fix switched to ``as_uri``.
+    The path must be absolutized first (without ``resolve()`` following symlinks
+    back out of the selected root)."""
+    work = tmp_path / "work"
+    work.mkdir()
+    note = work / "notes.txt"
+    note.write_text("RELATIVE_OK")
+
+    fake = _FakeStore()
+    monkeypatch.setattr(cli, "_store", lambda *a, **k: fake)
+    monkeypatch.chdir(work)
+
+    res = CliRunner().invoke(cli.app, ["ingest", "notes.txt"])
+
+    assert res.exit_code == 0, res.output
+    assert len(fake.observations) == 1
+    stored = fake.observations[0]
+    assert stored["text"] == "RELATIVE_OK"
+    url = stored["url"]
+    # Absolute, URI-valid, and points at the file — no ValueError.
+    assert url.startswith("file:///")
+    assert url.endswith("notes.txt")

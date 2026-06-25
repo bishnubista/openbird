@@ -744,8 +744,11 @@ def ingest(
                 window=fp.name,
                 # Use the literal selected path (containment already verified in
                 # _collect_files), never a resolved path that could point
-                # outside the selected root.
-                url=fp.as_uri(),
+                # outside the selected root. ``absolute()`` makes a relative
+                # input (e.g. ``openbird ingest notes.txt``) URI-expressible
+                # without resolving symlinks back out of the root the way
+                # ``resolve()`` would.
+                url=fp.absolute().as_uri(),
                 source="ingest",
             )
             ingested += 1
