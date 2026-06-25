@@ -171,6 +171,12 @@ class Settings:
     # env vars (see resolved_ollama_host) then the localhost default.
     ollama_host: str | None = None
 
+    # Directory holding user persona overrides for swappable system prompts
+    # (``<prompts_dir>/<key>.txt``). None resolves to ``<data dir>/prompts`` in
+    # __post_init__. OPENBIRD_PROMPTS_DIR overrides. The dir is created lazily by
+    # ``openbird prompts edit``; runtime reads tolerate its absence.
+    prompts_dir: str | None = None
+
     allowlist: list[str] = field(default_factory=list)
     blocklist: list[str] = field(default_factory=lambda: list(_DEFAULT_BLOCKLIST))
 
@@ -233,6 +239,8 @@ class Settings:
         self.data_dir = Path(self.data_dir).expanduser()
         if self.db_path is None:
             self.db_path = str(self.data_dir / "openbird.db")
+        if self.prompts_dir is None:
+            self.prompts_dir = str(self.data_dir / "prompts")
         # Ensure the data directory exists with private (0700) permissions.
         self.data_dir.mkdir(parents=True, exist_ok=True)
         try:

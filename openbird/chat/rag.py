@@ -20,14 +20,19 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from openbird.prompts import FenceSpec, PromptSpec, render
+from openbird.prompts import registry as _prompt_registry
 from openbird.types import Citation, SearchHit
+
+logger = logging.getLogger(__name__)
 
 # Phrases that signal a temporal/activity question ("what did I do yesterday?"),
 # which must use the observation time-range scan, not semantic chunk similarity.
@@ -119,6 +124,37 @@ _RAG_PROMPT = PromptSpec(
     ),
 )
 _SYSTEM_PROMPT = render(_RAG_PROMPT)
+
+# Make the RAG prompt discoverable by key (CLI, override loader).
+_prompt_registry.register(_RAG_PROMPT)
+
+
+def _resolve_system_prompt() -> str:
+    """Render the RAG system prompt, applying a user persona override if present.
+
+    Resolves ``<prompts_dir>/rag.txt`` or ``OPENBIRD_PROMPT_RAG`` via the loader.
+    A missing/refused override (``persona is None``) renders the bundled default,
+    so a bad override degrades to the default prompt rather than breaking chat.
+    Any unexpected error falls back to the default ``_SYSTEM_PROMPT`` and logs a
+    reason code only (never captured text or the persona body).
+    """
+    try:
+        from openbird.config import get_settings
+        from openbird.prompts.loader import resolve_persona
+
+        resolution = resolve_persona(
+            "rag", prompts_dir=Path(get_settings().prompts_dir or "")
+        )
+        if resolution.persona is None and not resolution.ok:
+            logger.warning(
+                "rag persona override refused (source=%s reason=%s); using default",
+                resolution.source,
+                resolution.reason,
+            )
+        return render(_RAG_PROMPT, resolution.persona)
+    except Exception:  # pragma: no cover - defensive; never break chat on config
+        logger.warning("rag persona resolution failed; using default prompt")
+        return _SYSTEM_PROMPT
 
 _RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -214,6 +250,10 @@ class RAG:
         self.provider = provider
         self.max_context = max(1, max_context)
         self._now: Callable[[], float] = time.time  # injectable clock for tests
+        # Resolve the (optionally overridden) system prompt once at construction,
+        # mirroring get_settings()'s process-wide caching: a long-running process
+        # uses the override that existed at startup.
+        self._system_prompt = _resolve_system_prompt()
 
     # -- public API -----------------------------------------------------------
 
@@ -451,7 +491,7 @@ class RAG:
             "use source_id values that appear in the context."
         )
         return [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": user_content},
         ]
 
