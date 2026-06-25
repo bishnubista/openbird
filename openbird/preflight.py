@@ -65,6 +65,8 @@ class _EmbedProvider(Protocol):
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 
+    def cohort_key(self) -> str: ...
+
 
 # Inject points (all defaulted) so the aggregation is testable with fakes.
 HttpGetter = Callable[[str, float], "tuple[int, bytes]"]
@@ -271,6 +273,65 @@ def check_embedding(
     except Exception as exc:
         result["error"] = type(exc).__name__
     return result
+
+
+def check_embedding_cohort(
+    settings: Settings,
+    *,
+    provider_factory: ProviderFactory | None = None,
+    db_opener: DbOpener | None = None,
+) -> dict[str, Any]:
+    """Report whether stored vectors need rebuilding under the active embedder.
+
+    This is a metadata-only check: it reads the stored cohort marker and vector
+    count, then compares them to ``provider.cohort_key()``. It never reads
+    captured text, windows, URLs, or embedding payloads, and it never calls
+    ``embed``.
+    """
+    result: dict[str, Any] = {
+        "stored_cohort": None,
+        "current_cohort": None,
+        "vector_count": 0,
+        "reindex_needed": False,
+    }
+    conn = None
+    try:
+        opener = db_opener or _default_db_opener
+        opened = opener(settings.db_path, settings=settings)
+        conn = opened.conn if hasattr(opened, "conn") else opened
+
+        stored = _single_value(
+            conn,
+            "SELECT value FROM embedding_meta WHERE key = 'cohort_key'",
+        )
+        vectors = int(_single_value(conn, "SELECT COUNT(*) FROM vec_chunks") or 0)
+        provider = (provider_factory or _default_provider_factory)(settings)
+        current = provider.cohort_key()
+
+        result["stored_cohort"] = stored
+        result["current_cohort"] = current
+        result["vector_count"] = vectors
+        result["reindex_needed"] = bool(stored and stored != current and vectors > 0)
+    except Exception:
+        pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return result
+
+
+def _single_value(conn: sqlite3.Connection, sql: str) -> Any:
+    """Return the first column of the first row, or None when absent/unavailable."""
+    try:
+        row = conn.execute(sql).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:
+        return None
+    return row[0]
 
 
 def check_completion(
@@ -795,6 +856,13 @@ def run_preflight(
     embedding = check_embedding(
         probe_settings, provider_factory=provider_factory, probe=probe_embedding
     )
+    embedding.update(
+        check_embedding_cohort(
+            probe_settings,
+            provider_factory=provider_factory,
+            db_opener=db_opener,
+        )
+    )
     # Probe the chat model under the SAME flag so a remote chat endpoint is
     # validated (an embedding probe does not exercise the completion endpoint).
     completion = check_completion(
@@ -965,6 +1033,7 @@ __all__ = [
     "run_preflight",
     "check_ollama",
     "check_embedding",
+    "check_embedding_cohort",
     "check_completion",
     "check_sqlite_vec",
     "check_encryption",

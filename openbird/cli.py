@@ -42,6 +42,7 @@ from rich.table import Table
 
 from openbird.capture.cli import register_capture_command
 from openbird.config import get_settings
+from openbird.exit_codes import EXIT_REINDEX_REQUIRED
 
 app = typer.Typer(
     name="openbird",
@@ -371,9 +372,8 @@ def _store(*, provider=None, settings=None, reraise_cohort_mismatch=False):
     capture daemon CLI — routes through, so the recovery path is uniform.
 
     ``reraise_cohort_mismatch``: the long-running ``capture --loop`` daemon needs
-    to translate the mismatch into its OWN distinct exit code (so the mac app can
-    tell "needs reindex" apart from a generic crash), so it passes True to get the
-    typed exception back instead of the generic ``typer.Exit(code=1)``.
+    to perform daemon-specific cleanup before exiting with the shared reindex
+    code, so it passes True to get the typed exception back.
     """
     from openbird.memory.store import EmbeddingCohortMismatch, MemoryStore
 
@@ -387,7 +387,7 @@ def _store(*, provider=None, settings=None, reraise_cohort_mismatch=False):
         if reraise_cohort_mismatch:
             raise
         _print_cohort_mismatch_hint(exc)
-        raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=EXIT_REINDEX_REQUIRED) from exc
 
 
 class _MaintenanceProvider:

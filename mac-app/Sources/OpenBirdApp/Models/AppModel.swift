@@ -319,6 +319,7 @@ final class AppModel: ObservableObject {
 
     var localModelStatusState: StepState {
         if report.error != nil { return .attention }
+        if report.embeddingReindexNeeded { return .attention }
         if report.cloudBlocked { return .attention }
         if hasRemoteModelRoute { return report.runtimeOK ? .ok : .attention }
         if !hasDecodedModelRoute { return .unknown }
@@ -339,6 +340,9 @@ final class AppModel: ObservableObject {
         }
         if let error = report.error {
             return "Preflight could not read model route: \(error)"
+        }
+        if report.embeddingReindexNeeded {
+            return OpenBirdService.reindexRecoveryMessage
         }
         if report.cloudBlocked {
             return "Remote model blocked: \(remoteModelRouteSummary). Use local Ollama or opt in."

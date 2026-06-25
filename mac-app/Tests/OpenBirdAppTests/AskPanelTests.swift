@@ -311,3 +311,40 @@ final class OpenBirdServiceAskChatTimeoutTests: XCTestCase {
         kill(pid, SIGKILL)
     }
 }
+
+final class OpenBirdServiceChatFailureTests: XCTestCase {
+    func testChatFailureSummaryUsesReindexExitCodeWithoutStderrParsing() {
+        XCTAssertEqual(
+            OpenBirdService.chatFailureSummary(
+                exitCode: OpenBirdService.reindexRequiredExitCode,
+                stderr: ""
+            ),
+            OpenBirdService.reindexRecoveryMessage
+        )
+    }
+
+    func testChatFailureSummaryDetectsWrappedReindexHint() {
+        let stderr = """
+        Embedding model changed (ollama:ollama/nomic-embed-text:768:aaaaaaaaaaaaaaaaaaaaaa
+        aaaaaaaaaaaaaaaaaaaaaaaa -> ollama:ollama/embeddinggemma:768:bbbbbbbbbbbbbbbbbbbb
+        bbbbbbbbbbbbbbbbbbbbbb).
+        Run openbird reindex to rebuild the vector index under the new model, then
+        retry.
+        (Or set OPENBIRD_EMBED_MODEL to the previous model to defer.)
+        """
+
+        XCTAssertEqual(
+            OpenBirdService.chatFailureSummary(exitCode: 1, stderr: stderr),
+            OpenBirdService.reindexRecoveryMessage
+        )
+    }
+
+    func testChatFailureSummaryKeepsMissingModelMessageDistinct() {
+        let stderr = "model embeddinggemma not found"
+
+        XCTAssertEqual(
+            OpenBirdService.chatFailureSummary(exitCode: 1, stderr: stderr),
+            "Chat failed because a required local model is missing."
+        )
+    }
+}
