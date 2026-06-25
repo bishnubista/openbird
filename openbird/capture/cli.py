@@ -114,11 +114,48 @@ def capture(
     finally:
         store.close()
 
+    _report_and_finish(stats, once=once)
+
+
+# Exit code reserved for a session that tried to capture but ingested nothing.
+# Codes 3 and 4 are already taken (HelperUnavailableError / CaptureSupervisorError),
+# so a fully-failed capture session uses 5.
+_CAPTURE_NO_PROGRESS_EXIT = 5
+
+
+def _report_and_finish(stats, *, once: bool) -> None:
+    """Print the summary line, then exit nonzero on a clearly-failed session.
+
+    Shared by both the ``--once`` and ``--loop`` paths so they enforce the same
+    policy. The summary line is always printed (it is useful for diagnostics);
+    then we raise a nonzero ``typer.Exit`` when the session tried to do work but
+    produced nothing usable:
+
+        received > 0 and ingested == 0 and errors > 0
+
+    That is the "totally failing" signal — a daemon that saw events but ingested
+    none of them while hitting errors — which previously printed "complete" and
+    exited 0, so a fully broken capture session looked like success to scripts and
+    launchd.
+
+    Deliberately NOT treated as failure (these stay exit 0):
+    - A clean stop that ingested fine, even if a few transient errors occurred —
+      e.g. a long ``--loop`` Ctrl-C'd after ingesting (ingested > 0).
+    - A quiet session that received nothing (received == 0): nothing to do.
+    The signal is specifically "nothing ingested but errors happened", not
+    "any error at all".
+    """
     _console.print(
         f"[green]Capture {'pass' if once else 'session'} complete.[/] "
         f"received={stats.received} ingested={stats.ingested} "
         f"coalesced={stats.coalesced} rejected={stats.rejected} errors={stats.errors}"
     )
+    if stats.received > 0 and stats.ingested == 0 and stats.errors > 0:
+        _err_console.print(
+            "[red]Capture failed:[/] received events but ingested none "
+            f"(errors={stats.errors})."
+        )
+        raise typer.Exit(code=_CAPTURE_NO_PROGRESS_EXIT)
 
 
 def _parse_helper_cmd(helper: Optional[str]) -> Optional[tuple[str, ...]]:
