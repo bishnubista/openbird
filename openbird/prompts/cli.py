@@ -175,6 +175,50 @@ def prompts_reset(
     _console.print(f"Removed {path}; {key!r} now uses the default persona.")
 
 
+@prompts_app.command("test")
+def prompts_test(
+    key: str = typer.Argument(..., help="Prompt key (e.g. 'rag')."),
+    no_llm: bool = typer.Option(
+        False, "--no-llm", help="Deterministic checks only; skip the local-model probe."
+    ),
+) -> None:
+    """Offline injection self-check: prove a prompt still neutralizes a hostile payload.
+
+    Builds the feature's REAL production messages with a canned injection payload as
+    captured data, then asserts the prompt renders and the fence defangs the payload's
+    structural markers. Optionally asks the local model (advisory). Exits 2 if a
+    deterministic check fails; the model result never changes the exit code.
+    """
+    from openbird.config import get_settings
+    from openbird.prompts.harness import run_test
+
+    _spec_or_exit(key)
+    report = run_test(key, settings=get_settings(), use_llm=not no_llm)
+
+    rendered = "[green]✓[/green]" if report.rendered_ok else "[red]✗[/red]"
+    boundary = "[green]✓[/green]" if report.boundary_ok else "[red]✗[/red]"
+    neutralized = "[green]✓[/green]" if report.neutralized_ok else "[red]✗[/red]"
+    _console.print(f"[bold]prompts test: {key}[/bold]")
+    _console.print(f"  {rendered} renders + token-valid")
+    _console.print(f"  {boundary} fence boundary well-formed")
+    _console.print(f"  {neutralized} payload neutralized inside fence — {report.detail}")
+    if report.inert_foreign_tokens:
+        _console.print(
+            f"  [dim]({report.inert_foreign_tokens} foreign-fence token(s) survived as "
+            f"inert text — expected, not a failure)[/dim]"
+        )
+    if report.model_ran:
+        tag = "[green]advisory pass[/green]" if report.model_advisory_pass else "[yellow]advisory FAIL[/yellow]"
+        _console.print(f"  {tag}: {report.model_note}")
+    elif not no_llm:
+        _console.print(f"  [dim]{report.model_note or 'model probe skipped'}[/dim]")
+
+    verdict = "[green]PASS[/green]" if report.deterministic_ok else "[red]FAIL[/red]"
+    _console.print(f"  => deterministic {verdict}")
+    if not report.deterministic_ok:
+        raise typer.Exit(code=2)
+
+
 @prompts_app.command("validate")
 def prompts_validate(
     key: str = typer.Argument(None, help="Validate one key; omit to validate all."),

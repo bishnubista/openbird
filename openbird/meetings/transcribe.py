@@ -588,6 +588,25 @@ def _fence_transcript(transcript: str) -> str:
     return f"{_TRANSCRIPT_OPEN}\n{_FENCE.neutralize(transcript)}\n{_TRANSCRIPT_CLOSE}"
 
 
+def build_meeting_messages(system_prompt: str, transcript: str) -> list[dict]:
+    """Build the meeting-summary messages (pure; system prompt is a parameter).
+
+    The transcript is fenced + neutralized via :func:`_fence_transcript`. Used by
+    both runtime (:func:`summarize_transcript`) and the offline ``prompts test``
+    harness, so the test exercises the exact production fence path.
+    """
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                "Summarize this meeting and extract action items and decisions.\n"
+                f"{_fence_transcript(transcript)}"
+            ),
+        },
+    ]
+
+
 def _normalize_summary(obj: object) -> dict:
     """Coerce a model response into the summary shape (best-effort, total)."""
     if not isinstance(obj, dict):
@@ -642,16 +661,9 @@ def summarize_transcript(
     effective_settings = settings or get_settings()
     provider = provider or create_llm_provider(effective_settings)
     transcript = format_transcript(segments)
-    messages = [
-        {"role": "system", "content": _resolve_system_prompt(effective_settings)},
-        {
-            "role": "user",
-            "content": (
-                "Summarize this meeting and extract action items and decisions.\n"
-                f"{_fence_transcript(transcript)}"
-            ),
-        },
-    ]
+    messages = build_meeting_messages(
+        _resolve_system_prompt(effective_settings), transcript
+    )
     result = provider.complete(messages, json_schema=ACTION_ITEMS_SCHEMA)
     return _normalize_summary(result)
 
