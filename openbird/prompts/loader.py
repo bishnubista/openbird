@@ -53,6 +53,7 @@ class PersonaResolution:
 
 
 def _env_key(key: str) -> str:
+    """Return the inline-override env var name for a prompt key."""
     return f"OPENBIRD_PROMPT_{key.upper()}"
 
 

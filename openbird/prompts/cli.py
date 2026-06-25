@@ -27,12 +27,14 @@ _console = Console()
 
 
 def _prompts_dir() -> Path:
+    """Return the configured persona-override directory."""
     from openbird.config import get_settings
 
     return Path(get_settings().prompts_dir or "")
 
 
 def _spec_or_exit(key: str) -> PromptSpec:
+    """Return the spec for ``key``, or exit 2 if the key is unknown."""
     registry.ensure_loaded()
     try:
         return registry.get(key)
@@ -45,6 +47,7 @@ def _spec_or_exit(key: str) -> PromptSpec:
 
 
 def _status(res: PersonaResolution) -> str:
+    """Render a colored ok/refused status cell for the list table."""
     return "[green]ok[/green]" if res.ok else f"[red]refused: {res.reason}[/red]"
 
 
