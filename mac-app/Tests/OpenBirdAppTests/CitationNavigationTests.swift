@@ -185,6 +185,43 @@ final class CitationNavigationActionTests: XCTestCase {
     }
 }
 
+/// A clicked briefing source reuses the SAME citation navigation as chat sources:
+/// `BriefingSource.asCitation(...)` -> `AppModel.navigateToCitation` switches to
+/// Today and forwards the day offset + observation id. Because a briefing source is
+/// in the currently-shown day, this focuses the observation in that same day.
+@MainActor
+final class BriefingSourceNavigationTests: XCTestCase {
+    func testBriefingSourceClickForwardsToCitationNavigator() {
+        let model = AppModel(service: OpenBirdService(openBirdCLIResolver: { "/tmp/openbird" }))
+        model.selection = .ask   // prove the switch to Today
+
+        var captured: (dayOffset: Int, observationId: String?)?
+        model.citationNavigator = { day, obs in captured = (day, obs) }
+
+        let source = BriefingSource(
+            observationId: "obs-src", app: "Code", window: "rag.py",
+            ts: Date().timeIntervalSince1970, snippet: "edited rag.py"
+        )
+        // The TodayView source row's action: map to a citation, then navigate.
+        model.navigateToCitation(source.asCitation(index: 1))
+
+        XCTAssertEqual(model.selection, .today)
+        XCTAssertEqual(captured?.dayOffset, 0)        // a "today" source -> today
+        XCTAssertEqual(captured?.observationId, "obs-src")
+    }
+}
+
+/// `TodayModel` publishes the briefing's source trail (text + sources + total) from
+/// a decoded `DayBriefing`, so the view can render and link the trail.
+@MainActor
+final class TodayModelBriefingSourcesTests: XCTestCase {
+    func testNoSourcesByDefault() {
+        let model = TodayModel(service: OpenBirdService(openBirdCLIResolver: { nil }))
+        XCTAssertTrue(model.briefingSources.isEmpty)
+        XCTAssertEqual(model.briefingSourcesTotal, 0)
+    }
+}
+
 /// `TodayModel.focus` records the observation to focus and aligns the day offset, so
 /// a citation click lands the day view on the source's day.
 @MainActor

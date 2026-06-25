@@ -118,6 +118,70 @@ struct ChatResult: Codable, Equatable {
 
 enum ChatError: Error { case cliMissing, failed(String), decode }
 
+/// One source in a briefing's "source trail" — an occurrence the prose was
+/// grounded in (decoded from `openbird briefing --json`'s `sources` array). It
+/// mirrors `ChatCitation`'s navigable fields (`observationId` / `app` / `window`
+/// / `ts` / `snippet`) so a clicked briefing source reuses the SAME citation
+/// navigation chat citations use — focusing that observation in its day. Privacy:
+/// `snippet` is already redaction-handled CLI-side (same helpers as chat
+/// citations); the app never sees a raw blob.
+struct BriefingSource: Codable, Identifiable, Equatable {
+    let observationId: String
+    let app: String?
+    let window: String?
+    let ts: Double
+    let snippet: String
+    var id: String { observationId }
+
+    enum CodingKeys: String, CodingKey {
+        case observationId = "observation_id"
+        case app, window, ts, snippet
+    }
+
+    /// Adapt to a `ChatCitation` so the existing citation navigation/rendering
+    /// (`AppModel.navigateToCitation`, `SourcesRail` styling) applies unchanged.
+    /// `index` is 1-based for display only; there is no chunk id for a briefing
+    /// source (it points at the occurrence, not a retrieved chunk).
+    func asCitation(index: Int) -> ChatCitation {
+        ChatCitation(
+            index: index, observationId: observationId, chunkId: nil,
+            app: app, window: window, ts: ts, snippet: snippet
+        )
+    }
+}
+
+/// A day's prose briefing plus its source trail (decoded from `openbird briefing
+/// --json`). `sourcesTotal` is the full count of grounding groups; when it
+/// exceeds `sources.count` the trail was capped CLI-side and the UI says "N of M"
+/// rather than silently truncating.
+struct DayBriefing: Codable, Equatable {
+    let text: String
+    let sources: [BriefingSource]
+    let sourcesTotal: Int
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case sources
+        case sourcesTotal = "sources_total"
+    }
+
+    /// Decode tolerantly: `sources`/`sources_total` are absent on older CLI
+    /// builds (and the experimental `--signals` path), so default them so a stale
+    /// CLI still yields a text-only briefing instead of failing to decode.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = try c.decode(String.self, forKey: .text)
+        sources = try c.decodeIfPresent([BriefingSource].self, forKey: .sources) ?? []
+        sourcesTotal = try c.decodeIfPresent(Int.self, forKey: .sourcesTotal) ?? sources.count
+    }
+
+    init(text: String, sources: [BriefingSource] = [], sourcesTotal: Int? = nil) {
+        self.text = text
+        self.sources = sources
+        self.sourcesTotal = sourcesTotal ?? sources.count
+    }
+}
+
 /// Local memory DB counters decoded from `openbird data stats`.
 struct MemoryStats: Codable, Equatable {
     let observations: Int
@@ -736,10 +800,11 @@ final class OpenBirdService: @unchecked Sendable {
         return try? JSONDecoder().decode(DayTimeline.self, from: data)
     }
 
-    /// Generate a day's grounded prose briefing (`openbird briefing --json`). This
-    /// makes one local LLM call, so the timeout is generous; an empty day returns a
-    /// deterministic line cheaply. Callers should cache per day.
-    func dailyBriefing(dayOffset: Int, timeout: TimeInterval = 120) async -> String? {
+    /// Generate a day's grounded prose briefing + source trail (`openbird briefing
+    /// --json`). This makes one local LLM call, so the timeout is generous; an empty
+    /// day returns a deterministic line (and no sources) cheaply. Callers cache per
+    /// day.
+    func dailyBriefing(dayOffset: Int, timeout: TimeInterval = 120) async -> DayBriefing? {
         guard let cli = resolveOpenBirdCLI() else { return nil }
         let result = await runAsync(
             cli, arguments: ["briefing", "--day", String(dayOffset), "--json"], timeout: timeout
@@ -748,10 +813,9 @@ final class OpenBirdService: @unchecked Sendable {
         return Self.parseBriefing(result.stdout)
     }
 
-    static func parseBriefing(_ output: String) -> String? {
-        struct Briefing: Decodable { let text: String }
+    static func parseBriefing(_ output: String) -> DayBriefing? {
         guard let data = output.data(using: .utf8) else { return nil }
-        return (try? JSONDecoder().decode(Briefing.self, from: data))?.text
+        return try? JSONDecoder().decode(DayBriefing.self, from: data)
     }
 
     // MARK: - Internals
