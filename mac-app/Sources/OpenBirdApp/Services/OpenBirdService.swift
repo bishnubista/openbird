@@ -616,6 +616,10 @@ final class OpenBirdService: @unchecked Sendable {
             do {
                 try supervisorWrite.write(contentsOf: Data((token + "\n").utf8))
             } catch {
+                // Detach the exit handler before terminating: this launch never
+                // became `captureProcess`, so the UI must not process an onExit
+                // for a daemon it never marked running.
+                process.terminationHandler = nil
                 process.terminate()
                 try? supervisorWrite.close()
                 return false
