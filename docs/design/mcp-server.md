@@ -44,7 +44,7 @@ model and machinery rather than inventing a new one.**
 
 ## 4. Architecture
 
-```
+```text
 MCP client (Claude Code / Desktop / claude.ai)
         │  MCP (stdio | streamable-http)
         ▼
@@ -165,7 +165,7 @@ menu-bar state akin to the capture indicator) reading e.g.
 Per OpenBird's rule (reason codes / metadata / counts — **never** captured text),
 log each tool call content-free:
 
-```
+```text
 mcp_query tool=search_memory results=7 window_days=1 scope_apps=2 status=ok
 ```
 
