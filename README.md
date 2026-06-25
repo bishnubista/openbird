@@ -3,9 +3,11 @@
 **Open-source, local-first personal memory for your Mac.**
 
 OpenBird is an always-on macOS work assistant that reads the **text** of your active window (never
-screenshots), transcribes meetings from system audio, unifies everything into a **searchable personal
-memory that stays on your machine**, lets you chat and draft grounded in that memory (with citations),
-and runs scheduled "Routines." OpenBird is **local-first**: your data never leaves your device by
+screenshots), optionally transcribes meetings from system audio (an opt-in extra — see
+[Meeting transcription backends](#meeting-transcription-backends); not bundled in the notarized
+beta), unifies everything into a **searchable personal memory that stays on your machine**, lets you
+chat and draft grounded in that memory (with citations), and runs scheduled "Routines." OpenBird is
+**local-first**: your data never leaves your device by
 default, the model layer is **BYO-model** (Ollama out of the box, cloud opt-in), and the system is
 fully auditable.
 
@@ -261,8 +263,9 @@ To bound growth:
 
 ## Meeting transcription backends
 
-Meeting speech-to-text runs **on-device** behind an optional extra. OpenBird picks a backend
-automatically (`OPENBIRD_MEETINGS_BACKEND=auto|parakeet|whisper`):
+Meeting speech-to-text runs **on-device** behind an optional extra. It is **not bundled in the
+notarized beta .dmg / Homebrew cask** — install it by building from source with one of the extras
+below. OpenBird picks a backend automatically (`OPENBIRD_MEETINGS_BACKEND=auto|parakeet|whisper`):
 
 - **parakeet-mlx (recommended on Apple Silicon)** — NVIDIA Parakeet (TDT) via the MLX port:
   lower WER, ~10× real-time, <1 GB, robust on long meetings. Apple-Silicon-only.
