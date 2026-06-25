@@ -79,80 +79,86 @@ def capture(
 
     helper_cmd = _parse_helper_cmd(helper)
     settings = get_settings()
-    # Build the cloud-checked provider: capture sends screen text to the
-    # embedding model, so it must go through the same opt-in confirm + CLOUD
-    # ACTIVE banner path as every other store-opening command — never silently.
-    provider = _provider()
-    # `reraise_cohort_mismatch=True`: unlike one-shot commands, the daemon exits
-    # with a DISTINCT code so the mac app can offer a one-click reindex instead of
-    # showing a generic "stopped unexpectedly (exit 1)". Terminal users still get
-    # the readable hint on stderr.
-    try:
-        store = _store(
-            provider=provider, settings=settings, reraise_cohort_mismatch=True
+    # Single-instance guard for the long-lived --loop daemon, acquired BEFORE any
+    # provider/store setup: a second daemon must lose fast and cleanly with the
+    # benign "already running" code — never running the cloud-confirm prompt,
+    # opening the store, or exiting with the reindex code first. --once is
+    # lock-free so bounded diagnostic passes stay concurrent. The flock is
+    # authoritative (kernel releases it on any death); the app's pre-spawn check
+    # is only an advisory optimization.
+    capture_lock = acquire_capture_lock(settings.data_dir) if not once else None
+    if not once and capture_lock is None:
+        _err_console.print(
+            "[yellow]capture: another capture daemon is already running; "
+            "exiting[/]"
         )
-    except EmbeddingCohortMismatch as exc:
-        _print_cohort_mismatch_hint(exc)
-        raise typer.Exit(code=CAPTURE_EXIT_REINDEX_REQUIRED) from exc
-    # Released in the finally below. Only ever held in --loop mode.
-    capture_lock = None
+        raise typer.Exit(code=CAPTURE_EXIT_ALREADY_RUNNING)
     try:
-        daemon = CaptureDaemon(
-            store,
-            settings=settings,
-            helper_cmd=helper_cmd,
-            require_signed_helper=not allow_unsigned,
-        )
+        # Build the cloud-checked provider: capture sends screen text to the
+        # embedding model, so it must go through the same opt-in confirm + CLOUD
+        # ACTIVE banner path as every other store-opening command — never silently.
+        provider = _provider()
+        # `reraise_cohort_mismatch=True`: unlike one-shot commands, the daemon
+        # exits with a DISTINCT code so the mac app can offer a one-click reindex
+        # instead of showing a generic "stopped unexpectedly (exit 1)". Terminal
+        # users still get the readable hint on stderr.
         try:
-            if once:
-                stats = daemon.run(max_events=max_events)
-            else:
-                # Single-instance: refuse to start a 2nd concurrent --loop daemon,
-                # which would double-capture the same events. The flock is
-                # authoritative (kernel releases it on any death); the app's
-                # pre-spawn check is only an advisory optimization. --once is
-                # intentionally lock-free so diagnostics can run concurrently.
-                capture_lock = acquire_capture_lock(settings.data_dir)
-                if capture_lock is None:
-                    _err_console.print(
-                        "[yellow]capture: another capture daemon is already "
-                        "running; exiting[/]"
+            store = _store(
+                provider=provider, settings=settings, reraise_cohort_mismatch=True
+            )
+        except EmbeddingCohortMismatch as exc:
+            _print_cohort_mismatch_hint(exc)
+            raise typer.Exit(code=CAPTURE_EXIT_REINDEX_REQUIRED) from exc
+        try:
+            daemon = CaptureDaemon(
+                store,
+                settings=settings,
+                helper_cmd=helper_cmd,
+                require_signed_helper=not allow_unsigned,
+            )
+            try:
+                if once:
+                    stats = daemon.run(max_events=max_events)
+                else:
+                    # Continuous capture: supervise the one-shot helper,
+                    # re-spawning it on a cadence until SIGINT/SIGTERM requests a
+                    # clean stop. The single-instance lock is already held above.
+                    logging.basicConfig(
+                        level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s",
                     )
-                    raise typer.Exit(code=CAPTURE_EXIT_ALREADY_RUNNING)
-                # Continuous capture: supervise the one-shot helper, re-spawning
-                # it on a cadence until SIGINT/SIGTERM requests a clean stop.
-                logging.basicConfig(
-                    level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-                )
-                stop = threading.Event()
+                    stop = threading.Event()
 
-                def _handle(signum, _frame) -> None:
-                    _err_console.print(
-                        f"[yellow]capture: signal {signum}, shutting down[/]"
+                    def _handle(signum, _frame) -> None:
+                        _err_console.print(
+                            f"[yellow]capture: signal {signum}, shutting down[/]"
+                        )
+                        stop.set()
+
+                    signal.signal(signal.SIGINT, _handle)
+                    signal.signal(signal.SIGTERM, _handle)
+                    _console.print(
+                        "[green]capture daemon started[/] (Ctrl-C to stop)"
                     )
-                    stop.set()
-
-                signal.signal(signal.SIGINT, _handle)
-                signal.signal(signal.SIGTERM, _handle)
-                _console.print("[green]capture daemon started[/] (Ctrl-C to stop)")
-                stats = daemon.run_forever(
-                    poll_interval=poll_interval, stop_event=stop
-                )
-        except HelperUnavailableError as exc:
-            _err_console.print(f"[red]Capture helper unavailable:[/] {exc}")
-            raise typer.Exit(code=3) from None
-        except CaptureSupervisorError as exc:
-            # Sustained helper failure tripped the circuit breaker — exit nonzero
-            # so this is not mistaken for a clean session.
-            _err_console.print(f"[red]Capture supervisor aborted:[/] {exc}")
-            raise typer.Exit(code=4) from None
+                    stats = daemon.run_forever(
+                        poll_interval=poll_interval, stop_event=stop
+                    )
+            except HelperUnavailableError as exc:
+                _err_console.print(f"[red]Capture helper unavailable:[/] {exc}")
+                raise typer.Exit(code=3) from None
+            except CaptureSupervisorError as exc:
+                # Sustained helper failure tripped the circuit breaker — exit
+                # nonzero so this is not mistaken for a clean session.
+                _err_console.print(f"[red]Capture supervisor aborted:[/] {exc}")
+                raise typer.Exit(code=4) from None
+        finally:
+            store.close()
     finally:
-        # Release before closing the store; releasing only closes the fd (the
-        # sentinel file is never unlinked — see capture/lock.py).
+        # Release last — after the store is closed — so a waiting daemon cannot
+        # grab the lock while our store is still open. Releasing only closes the
+        # fd; the sentinel file is never unlinked (see capture/lock.py).
         if capture_lock is not None:
             capture_lock.release()
-        store.close()
 
     _report_and_finish(stats, once=once)
 

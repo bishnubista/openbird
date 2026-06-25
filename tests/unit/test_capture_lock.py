@@ -15,9 +15,11 @@ import os
 import stat
 
 import pytest
+import typer
 
+import openbird.cli as cli_mod
 from openbird.capture import lock as lockmod
-from openbird.capture.cli import CAPTURE_EXIT_ALREADY_RUNNING
+from openbird.capture.cli import CAPTURE_EXIT_ALREADY_RUNNING, capture
 from openbird.capture.lock import LOCK_FILENAME, acquire_capture_lock
 
 
@@ -107,3 +109,64 @@ def test_non_eagain_oserror_fails_loud(tmp_path, monkeypatch):
 def test_eagain_maps_to_already_running_exit_code():
     # The benign "already running" path uses a dedicated, app-recognisable code.
     assert CAPTURE_EXIT_ALREADY_RUNNING == 7
+
+
+def test_loop_acquires_lock_before_provider_and_store(tmp_path, monkeypatch):
+    # Contract: a second `--loop` daemon must lose the lock and exit code 7
+    # BEFORE building the provider (cloud-confirm prompt) or opening the store
+    # (which could otherwise exit with the reindex code). So with the lock already
+    # held, neither `_provider` nor `_store` may be called.
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+
+    def _provider_must_not_run(*_a, **_k):
+        raise AssertionError("provider must not be built while the lock is held")
+
+    def _store_must_not_run(*_a, **_k):
+        raise AssertionError("store must not be opened while the lock is held")
+
+    monkeypatch.setattr(cli_mod, "_provider", _provider_must_not_run)
+    monkeypatch.setattr(cli_mod, "_store", _store_must_not_run)
+
+    held = acquire_capture_lock(tmp_path)
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            capture(
+                once=False,
+                max_events=50,
+                poll_interval=2.0,
+                helper=None,
+                allow_unsigned=False,
+            )
+        assert exc.value.exit_code == CAPTURE_EXIT_ALREADY_RUNNING
+    finally:
+        held.release()
+
+
+def test_once_pass_is_lock_free(tmp_path, monkeypatch):
+    # A bounded --once pass must NOT take the lock (diagnostics run concurrently
+    # with the daemon). Hold the lock, then assert --once still proceeds to build
+    # the provider rather than exiting 7. We stop it right after that proof.
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+
+    class _Reached(Exception):
+        pass
+
+    def _provider_reached(*_a, **_k):
+        raise _Reached()
+
+    monkeypatch.setattr(cli_mod, "_provider", _provider_reached)
+
+    held = acquire_capture_lock(tmp_path)
+    try:
+        # --once ignores the held lock and proceeds far enough to build the
+        # provider (our sentinel), proving it never consulted the lock.
+        with pytest.raises(_Reached):
+            capture(
+                once=True,
+                max_events=1,
+                poll_interval=2.0,
+                helper=None,
+                allow_unsigned=False,
+            )
+    finally:
+        held.release()
