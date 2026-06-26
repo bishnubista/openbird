@@ -507,3 +507,21 @@ def test_pointed_temporal_phrasing_matching_synthesis_re_uses_synthesis():
 
     assert completer.last_messages is not None
     assert completer.last_messages[0]["content"] == chatter._synthesis_system_prompt
+
+
+def test_content_query_with_do_prefix_word_stays_semantic():
+    """A content query whose word merely STARTS with a synthesis verb — "what did
+    I document/download about X" (the 'do' in 'document') — must NOT route to the
+    synthesis scan. Codex round-2 finding: _SYNTHESIS_RE needs a word boundary
+    after the verb so the bare verb can't swallow a longer word."""
+    from openbird.chat.rag import _SYNTHESIS_RE
+
+    for content in (
+        "what did I document about security",
+        "what did I download the report",
+        "what have I workshopped this week",
+    ):
+        assert _SYNTHESIS_RE.search(content) is None, content
+    # ...the genuine synthesis phrasings still match.
+    for synth in ("what did I do", "what did I do at 3pm", "what did I work on"):
+        assert _SYNTHESIS_RE.search(synth) is not None, synth

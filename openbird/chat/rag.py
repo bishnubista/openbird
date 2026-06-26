@@ -73,6 +73,11 @@ _SYNTHESIS_RE = re.compile(
     # '-') and a genuine content query mis-routes to the chronological scan.
     r"|\bmy\s+(day|week)s?\b(?![\w-])"
     r"|what\s+(did|have|was|am)\s+i\s+(been\s+)?(do|doing|done|work|working|up\s+to)"
+    # `(?![\w-])` so the bare verb does NOT match a longer word: without it
+    # "do" matches "what did I document/download about X" and a content query
+    # mis-routes to the synthesis scan + persona (Codex). "what did I do" and
+    # "...do at 3pm" still match (verb followed by space/end).
+    r"(?![\w-])"
     r"|what\s+i(?:'ve|\s+have)?\s+(did|done|worked\s+on|been\s+working\s+on|been\s+doing)"
     # "what's been happening" but NOT "...happening with the deploy" (a topic).
     r"|what'?s\s+been\s+(happening|going\s+on)(?!\s+(?:with|to|on|for|about|in|around)\b)"
