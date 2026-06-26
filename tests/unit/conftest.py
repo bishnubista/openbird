@@ -10,6 +10,19 @@ import pytest
 from openbird.config import Settings
 
 
+@pytest.fixture(autouse=True)
+def _no_gui_allowlist(monkeypatch):
+    """Neutralize the macOS GUI-allowlist bridge for ALL unit tests.
+
+    ``_settings_from_env`` reads the real ``ai.openbird.OpenBird`` defaults domain
+    when ``OPENBIRD_ALLOWLIST`` is unset. On a developer Mac that runs the app,
+    that domain is populated, so any ``get_settings()`` test would silently pick up
+    the real allowlist. Default it to "unreadable" everywhere; bridge tests opt
+    back in by re-patching ``_read_gui_allowlist``.
+    """
+    monkeypatch.setattr("openbird.config._read_gui_allowlist", lambda: None)
+
+
 class FakeProvider:
     """A deterministic stand-in for :class:`LLMProvider`.
 

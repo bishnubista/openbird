@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import math
 import os
+import plistlib
 import subprocess
+import sys
 from dataclasses import dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 import platformdirs
 
@@ -38,6 +41,16 @@ _DEFAULT_BLOCKLIST: list[str] = [
     "com.agilebits.onepassword7",
     "com.apple.keychainaccess",
 ]
+
+# The macOS menu-bar app persists the user's capture allowlist in its
+# ``UserDefaults.standard`` domain (its bundle id). The CLI is a SEPARATE process
+# with no shared defaults, so absent an ``OPENBIRD_ALLOWLIST`` override it reads
+# this domain directly to stay in lockstep with what the app captures — otherwise
+# ``openbird doctor`` reports EMPTY and a hand-started ``openbird capture --loop``
+# records nothing even though the app is configured. Keep these in sync with
+# mac-app/Sources/OpenBirdApp/Services/OpenBirdService.swift (allowlistKey).
+_GUI_PREFS_DOMAIN = "ai.openbird.OpenBird"
+_GUI_ALLOWLIST_KEY = "openbird.captureAllowlist"
 
 
 def _default_data_dir() -> Path:
@@ -393,8 +406,61 @@ def is_loopback_host(host_url: str) -> bool:
     return hostname.lower() in _LOOPBACK_HOSTS
 
 
+def _read_gui_allowlist() -> list[str] | None:
+    """Read the menu-bar app's saved capture allowlist from macOS user defaults.
+
+    Returns the normalized list, or ``None`` when it cannot be read (non-macOS,
+    domain/key absent, malformed, or ``defaults`` unavailable/slow) so the caller
+    falls back to the empty default. Read via ``defaults export`` (cfprefsd-backed,
+    so it reflects the app's latest value even when the on-disk plist lags) rather
+    than parsing the plist file directly. Best-effort and never raises: a failure
+    here must degrade to "no allowlist", never crash the CLI.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        # Absolute path (never a PATH-shadowed binary); capture_output keeps a
+        # "domain does not exist" message off the CLI's own stderr; bounded so a
+        # wedged cfprefsd cannot hang settings resolution.
+        proc = subprocess.run(
+            ["/usr/bin/defaults", "export", _GUI_PREFS_DOMAIN, "-"],
+            capture_output=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    try:
+        data = plistlib.loads(proc.stdout)
+    except (plistlib.InvalidFileException, ValueError, ExpatError):
+        return None
+    raw = data.get(_GUI_ALLOWLIST_KEY) if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return None
+    # Normalize identically to the OPENBIRD_ALLOWLIST env path: str-only, trimmed,
+    # de-duped, order-preserving. Return None (not []) when nothing usable remains
+    # so an explicitly-empty saved list and "unreadable" both fall back to default.
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        bundle_id = item.strip()
+        if bundle_id and bundle_id not in seen:
+            seen.add(bundle_id)
+            cleaned.append(bundle_id)
+    return cleaned or None
+
+
 def _settings_from_env() -> Settings:
-    """Build a :class:`Settings` instance applying ``OPENBIRD_*`` overrides."""
+    """Build a :class:`Settings` instance applying ``OPENBIRD_*`` overrides.
+
+    Allowlist precedence (highest first): explicit ``Settings(allowlist=...)`` arg,
+    ``OPENBIRD_ALLOWLIST`` (incl. ``""`` → explicit empty), the menu-bar app's
+    saved macOS prefs (:func:`_read_gui_allowlist`), then the empty default.
+    """
     overrides: dict[str, object] = {}
 
     for f in fields(Settings):
@@ -416,6 +482,15 @@ def _settings_from_env() -> Settings:
         # a full Settings (which would touch the filesystem).
         default_val = _COERCE_DEFAULTS.get(f.name, "")
         overrides[f.name] = _coerce(f.name, raw, default_val)
+
+    # Bridge the menu-bar app's saved allowlist into the CLI when the env var is
+    # absent ("allowlist" in overrides iff OPENBIRD_ALLOWLIST was set above, incl.
+    # the explicit-empty case). The app injects OPENBIRD_ALLOWLIST into the daemon
+    # it spawns, so this only affects CLI invocations the app did not launch.
+    if "allowlist" not in overrides:
+        gui_allowlist = _read_gui_allowlist()
+        if gui_allowlist is not None:
+            overrides["allowlist"] = gui_allowlist
 
     return Settings(**overrides)  # type: ignore[arg-type]
 
