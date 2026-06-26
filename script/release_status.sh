@@ -100,6 +100,7 @@ fi
 
 drift=0
 pending=0
+unverified=0
 
 # classify <file_version> <published:yes|no|unknown> -> echoes status string.
 # A status line is informational only; the drift/pending vars are set in-line
@@ -123,6 +124,8 @@ set_flags() {
   case "$published" in
     yes) drift=1 ;;
     no)  pending=1 ;;
+    *)   unverified=1 ;;  # gh unavailable AND this file differs from pyproject:
+                          # cannot confirm whether a published release was left behind.
   esac
 }
 
@@ -162,6 +165,12 @@ fi
 if [ "$pending" -eq 1 ]; then
   echo "=> in progress: pyproject is ahead, but the lagging artifact is not published yet."
   echo "   This is the expected mid-release state; no drift."
+  exit 0
+fi
+if [ "$unverified" -eq 1 ]; then
+  echo "=> unverified: a packaging file differs from pyproject, but gh is unavailable so"
+  echo "   whether the $pyproject_v release was published (drift) or not (pending) is unknown."
+  echo "   Re-run with an authenticated gh to resolve. NOT asserting aligned."
   exit 0
 fi
 echo "=> aligned: every channel is on $pyproject_v."
