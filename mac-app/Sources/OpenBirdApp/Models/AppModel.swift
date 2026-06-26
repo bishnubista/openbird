@@ -767,6 +767,28 @@ final class AppModel: ObservableObject {
         return service.runningAppBundleIDs().filter { !current.contains($0) }
     }
 
+    var promptDirectoryPath: String { service.promptDirectoryPath }
+
+    func openPromptsFolder() {
+        service.openPromptsFolder()
+        lastActionMessage = "Opened prompt customization folder."
+    }
+
+    func editPromptPersona(_ key: PromptPersonaKey) {
+        lastActionMessage = "Opening \(key.label) prompt editor..."
+        Task {
+            let outcome = await service.editPromptPersona(key)
+            switch outcome {
+            case .launched:
+                lastActionMessage = "Opened \(key.label) prompt editor."
+            case .cliMissing:
+                lastActionMessage = "Could not find the openbird CLI. Run `openbird prompts edit \(key.rawValue)` from Terminal."
+            case .failed(let code):
+                lastActionMessage = "Prompt editor exited with status \(code). Run `openbird prompts edit \(key.rawValue)` from Terminal."
+            }
+        }
+    }
+
     func openDataFolder() { service.openDataFolder() }
     func openBundleFolder() { service.openBundleFolder() }
 
