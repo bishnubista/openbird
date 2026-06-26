@@ -365,3 +365,163 @@ def test_temporal_path_all_self_capture_returns_no_activity():
     assert not result.grounded
     assert "any recorded activity" in result.answer.lower()
     assert completer.calls == 0  # all rows filtered → model never called
+
+
+# -- synthesis answering persona (PR1: fixes the whole-day-summary refusal) -----
+
+
+def test_synthesis_and_strict_personas_differ():
+    """The synthesis variant drops the strict single-source abstention clause but
+    keeps the identical security scaffold."""
+    from openbird.chat.rag import _SYNTHESIS_SYSTEM_PROMPT, _SYSTEM_PROMPT
+
+    assert _SYSTEM_PROMPT != _SYNTHESIS_SYSTEM_PROMPT
+    # The strict QA persona tells the model to abstain when a source doesn't
+    # literally contain the answer — exactly what made it refuse a day summary.
+    assert "say you don't have that in memory" in _SYSTEM_PROMPT
+    assert "say you don't have that in memory" not in _SYNTHESIS_SYSTEM_PROMPT
+    # The synthesis persona reframes the context as the user's own activity.
+    assert "Synthesize" in _SYNTHESIS_SYSTEM_PROMPT
+    # Both retain the framework security scaffold (fence tokens survive render).
+    for prompt in (_SYSTEM_PROMPT, _SYNTHESIS_SYSTEM_PROMPT):
+        assert "OPENBIRD_UNTRUSTED_CONTEXT" in prompt
+        # Grounding contract (cite only listed sources) is preserved in both.
+        assert "cite" in prompt.lower()
+
+
+def test_synthesis_intent_sends_synthesis_persona_to_model():
+    """A whole-day summary routes through the time-range scan with the synthesis
+    system prompt — not the strict QA persona that triggers refusal."""
+    rows = [
+        _row("a", ts=NOW - 3600, window="github PR #1 title here", text="pr body"),
+        _row("b", ts=NOW - 60, window="feat: implement the thing", text="commit"),
+    ]
+    completer = CiteAllCompleter()
+    chatter = RAG(FakeTemporalStore(rows), completer)
+    chatter._now = lambda: NOW
+
+    chatter.answer("Summarize my day")
+
+    assert completer.last_messages is not None
+    assert completer.last_messages[0]["content"] == chatter._synthesis_system_prompt
+    assert "Synthesize" in completer.last_messages[0]["content"]
+
+
+def test_scoped_day_pointed_qa_keeps_strict_persona():
+    """An explicit --day question that is NOT a summary keeps the strict QA
+    persona (hard-scoped pointed lookups answer, not summarize) — Codex finding #1."""
+    rows = [
+        _row("a", ts=NOW - 3600, window="Rocket design doc", text="the rocket uses X"),
+    ]
+    completer = CiteAllCompleter()
+    chatter = RAG(FakeTemporalStore(rows), completer)
+    chatter._now = lambda: NOW
+
+    # window=... mirrors `openbird chat "..." --day 0` (explicit hard scope).
+    chatter.answer("what about the rocket?", window=(NOW - _DAY, NOW))
+
+    assert completer.last_messages is not None
+    assert completer.last_messages[0]["content"] == chatter._system_prompt
+    assert completer.last_messages[0]["content"] != chatter._synthesis_system_prompt
+
+
+def test_scoped_day_summary_uses_synthesis_persona():
+    """An explicit --day summary DOES synthesize — intent gating is on the query."""
+    rows = [_row("a", ts=NOW - 3600, window="github PR #1", text="pr body")]
+    completer = CiteAllCompleter()
+    chatter = RAG(FakeTemporalStore(rows), completer)
+    chatter._now = lambda: NOW
+
+    chatter.answer("summarize my day", window=(NOW - _DAY, NOW))
+
+    assert completer.last_messages is not None
+    assert completer.last_messages[0]["content"] == chatter._synthesis_system_prompt
+
+
+def test_synthesis_persona_honors_user_override(monkeypatch):
+    """A user OPENBIRD_PROMPT_RAG_SYNTHESIS override reaches temporal answers —
+    Codex finding #2 (override semantics preserved for the new prompt). The env
+    var carries inline persona text (never a path)."""
+    from openbird.config import reset_settings_cache
+
+    monkeypatch.setenv("OPENBIRD_PROMPT_RAG_SYNTHESIS", "CUSTOM SYNTHESIS PERSONA LINE.")
+    reset_settings_cache()
+    try:
+        rows = [_row("a", ts=NOW - 60, window="github PR #1", text="pr body")]
+        completer = CiteAllCompleter()
+        chatter = RAG(FakeTemporalStore(rows), completer)
+        chatter._now = lambda: NOW
+
+        chatter.answer("Summarize my day")
+
+        sys_prompt = completer.last_messages[0]["content"]
+        assert "CUSTOM SYNTHESIS PERSONA LINE." in sys_prompt
+        # Security scaffold survives the override.
+        assert "OPENBIRD_UNTRUSTED_CONTEXT" in sys_prompt
+    finally:
+        reset_settings_cache()
+
+
+def test_semantic_path_keeps_strict_persona():
+    """Content lookups (non-synthesis) still use the strict single-source persona."""
+    from openbird.types import SearchHit
+
+    class _SearchStore:
+        def time_range_text(self, start, end, *, max_chars=2000):
+            return []
+
+        def search(self, query, k=10, *, semantic=True):
+            obs = _obs("d1", ts=NOW - 10, window="Auth design doc", app="Notes")
+            return [SearchHit(
+                chunk_id="c1", content_hash=obs.content_hash, text="auth uses JWT",
+                score=1.0, observation=obs,
+            )]
+
+    completer = CiteAllCompleter()
+    chatter = RAG(_SearchStore(), completer)
+    chatter._now = lambda: NOW
+
+    chatter.answer("what does the auth doc say")
+
+    assert completer.last_messages is not None
+    assert completer.last_messages[0]["content"] == chatter._system_prompt
+
+
+def test_pointed_temporal_phrasing_matching_synthesis_re_uses_synthesis():
+    """A pointed temporal query that MATCHES _SYNTHESIS_RE ("what did I do at 3pm")
+    intent-routes through the time-range scan and uses the synthesis persona BY
+    DESIGN — it already gets the broad activity sample, so synthesizing it beats
+    abstaining. Pins the decision behind Codex's routing-vs-persona finding so the
+    comment and behavior cannot silently drift apart again."""
+    from openbird.chat.rag import _SYNTHESIS_RE
+
+    query = "what did I do at 3pm"
+    assert _SYNTHESIS_RE.search(query) is not None  # the regex match Codex flagged
+
+    rows = [_row("a", ts=NOW - 3600, window="github PR #1 title", text="pr body")]
+    completer = CiteAllCompleter()
+    chatter = RAG(FakeTemporalStore(rows), completer)
+    chatter._now = lambda: NOW
+
+    chatter.answer(query)  # no explicit window → intent-routed, not hard-scoped
+
+    assert completer.last_messages is not None
+    assert completer.last_messages[0]["content"] == chatter._synthesis_system_prompt
+
+
+def test_content_query_with_do_prefix_word_stays_semantic():
+    """A content query whose word merely STARTS with a synthesis verb — "what did
+    I document/download about X" (the 'do' in 'document') — must NOT route to the
+    synthesis scan. Codex round-2 finding: _SYNTHESIS_RE needs a word boundary
+    after the verb so the bare verb can't swallow a longer word."""
+    from openbird.chat.rag import _SYNTHESIS_RE
+
+    for content in (
+        "what did I document about security",
+        "what did I download the report",
+        "what have I workshopped this week",
+    ):
+        assert _SYNTHESIS_RE.search(content) is None, content
+    # ...the genuine synthesis phrasings still match.
+    for synth in ("what did I do", "what did I do at 3pm", "what did I work on"):
+        assert _SYNTHESIS_RE.search(synth) is not None, synth

@@ -66,7 +66,9 @@ class HarnessReport:
 # Each feature builds [system, user]; the fenced payload lives in the user message.
 def _build_probe(key: str, system_prompt: str, payload: str) -> list[dict]:
     """Build production messages for ``key`` with ``payload`` as captured data."""
-    if key == "rag":
+    if key in ("rag", "rag_synthesis"):
+        # The synthesis persona builds the SAME fenced RAG messages (only the
+        # system persona differs), so it exercises the identical probe path.
         from openbird.chat.rag import _ContextItem, build_rag_messages
         from openbird.types import Observation, SearchHit
 
@@ -247,7 +249,10 @@ def run_test(
             f" ({survived} literal)"
         )
         # RAG fence contract: the payload's source-header attempt must not survive.
-        if key == "rag":
+        # Both RAG personas build via the same message builder (line 69), so the
+        # synthesis variant must clear the same source-header check — otherwise it
+        # could false-pass the harness if _SOURCE_HEADER neutralization regresses.
+        if key in ("rag", "rag_synthesis"):
             from openbird.chat.rag import _SOURCE_HEADER
 
             if _SOURCE_HEADER in body:
