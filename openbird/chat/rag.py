@@ -627,13 +627,19 @@ class RAG:
             )
             context.append(_ContextItem(source_id=f"S{len(context) + 1}", hit=hit))
 
-        # Use the synthesis persona ONLY for synthesis-intent phrasing ("summarize
-        # my day", "what did I work on"). Scoped/pointed QA that happens to route
-        # through the time-range scan — an explicit ``--day`` question like "what
-        # about the rocket?" or a temporal lookup like "what did I do at 3pm" —
-        # keeps the strict QA persona (and its user override), matching the
-        # documented hard-scoped-answer behavior. Gating on the query (not the
-        # call site) covers all three callers with one predicate.
+        # Persona selection. Synthesis-intent phrasing matched by _SYNTHESIS_RE
+        # ("summarize my day", "what did I work on", "what did I do…") gets the
+        # synthesis persona: the time-range scan hands the model a broad,
+        # signal-ranked SAMPLE of the window's activity (not a targeted retrieval),
+        # which the strict single-source QA persona refuses to synthesize and so
+        # blanks the answer. A pointed question that does NOT match _SYNTHESIS_RE —
+        # e.g. an explicit ``--day`` lookup like "what about the rocket?" — keeps
+        # the strict persona (and its user override), preserving honest abstention
+        # when the asked-about thing isn't in the day's sample. NOTE: a pointed
+        # temporal phrasing that DOES match the regex ("what did I do at 3pm") is
+        # treated as synthesis BY DESIGN — it already routes through the same
+        # activity sample, so synthesizing it beats abstaining. Gating on the query
+        # (not the call site) covers all three callers with one predicate.
         synthesis = _SYNTHESIS_RE.search(query) is not None
         system_prompt = (
             self._synthesis_system_prompt if synthesis else self._system_prompt

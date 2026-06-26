@@ -485,3 +485,25 @@ def test_semantic_path_keeps_strict_persona():
 
     assert completer.last_messages is not None
     assert completer.last_messages[0]["content"] == chatter._system_prompt
+
+
+def test_pointed_temporal_phrasing_matching_synthesis_re_uses_synthesis():
+    """A pointed temporal query that MATCHES _SYNTHESIS_RE ("what did I do at 3pm")
+    intent-routes through the time-range scan and uses the synthesis persona BY
+    DESIGN — it already gets the broad activity sample, so synthesizing it beats
+    abstaining. Pins the decision behind Codex's routing-vs-persona finding so the
+    comment and behavior cannot silently drift apart again."""
+    from openbird.chat.rag import _SYNTHESIS_RE
+
+    query = "what did I do at 3pm"
+    assert _SYNTHESIS_RE.search(query) is not None  # the regex match Codex flagged
+
+    rows = [_row("a", ts=NOW - 3600, window="github PR #1 title", text="pr body")]
+    completer = CiteAllCompleter()
+    chatter = RAG(FakeTemporalStore(rows), completer)
+    chatter._now = lambda: NOW
+
+    chatter.answer(query)  # no explicit window → intent-routed, not hard-scoped
+
+    assert completer.last_messages is not None
+    assert completer.last_messages[0]["content"] == chatter._synthesis_system_prompt
