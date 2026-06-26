@@ -141,4 +141,23 @@ final class CaptureAutoResumeTests: XCTestCase {
             XCTAssertEqual(count, 0)
         }
     }
+
+    /// A call that fails the readiness gate must NOT consume the one-shot flag, so a
+    /// later call (once state is ready) still starts. Drives the live onboarding
+    /// read from not-done → done within a single model.
+    func testRetriesUntilReadyThenStartsOnce() {
+        withConfiguredModel(onboarding: false) { model in
+            var count = 0
+            // Gate fails (onboarding incomplete): no attempt, flag not consumed.
+            XCTAssertFalse(model.autoResumeCaptureIfNeeded(start: { count += 1 }))
+            XCTAssertEqual(count, 0)
+            // User finishes onboarding; the next launch-task invocation now starts.
+            UserDefaults.standard.set(true, forKey: onboardingKey)
+            XCTAssertTrue(model.autoResumeCaptureIfNeeded(start: { count += 1 }))
+            XCTAssertEqual(count, 1)
+            // ...and only once thereafter.
+            XCTAssertFalse(model.autoResumeCaptureIfNeeded(start: { count += 1 }))
+            XCTAssertEqual(count, 1)
+        }
+    }
 }

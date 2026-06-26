@@ -456,18 +456,24 @@ final class AppModel: ObservableObject {
 
     private var didAttemptAutoResume = false
 
-    /// Resume capture once per launch if the user is already configured and hasn't
-    /// paused. The app kills its daemon on quit (see `willTerminateNotification`
-    /// above) and otherwise never restarts capture without a UI action, so without
-    /// this a quit→relaunch leaves capture silently off. Idempotent: only the first
-    /// call per process can attempt a start, so SwiftUI re-invoking the launch
-    /// `.task` cannot spawn repeatedly. The `start` seam keeps this testable without
-    /// launching real service/process work. Returns whether it attempted a start.
+    /// Resume capture if the user is already configured and hasn't paused. The app
+    /// kills its daemon on quit (see `willTerminateNotification` above) and
+    /// otherwise never restarts capture without a UI action, so without this a
+    /// quit→relaunch leaves capture silently off.
+    ///
+    /// Retry-until-ready, then once: the one-shot flag is consumed ONLY after a
+    /// successful start, so a launch where state isn't ready yet (e.g. Accessibility
+    /// granted a moment later, or a re-invoked `.task`) can still start later. After
+    /// the first successful start the flag — and `canStartCaptureNow`'s
+    /// `!captureRunning` term — both prevent a second spawn (closing the race before
+    /// the async `startCapture()` flips `captureRunning`); the daemon `flock` is the
+    /// final backstop. The `start` seam keeps this testable without launching real
+    /// service/process work. Returns whether it attempted a start.
     @discardableResult
     func autoResumeCaptureIfNeeded(start: () -> Void) -> Bool {
         guard !didAttemptAutoResume else { return false }
-        didAttemptAutoResume = true
         guard shouldAutoResumeCapture else { return false }
+        didAttemptAutoResume = true
         start()
         return true
     }
