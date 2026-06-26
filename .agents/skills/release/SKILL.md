@@ -79,12 +79,17 @@ PR**. Watch the run (`gh run watch`), then drive that PR to merge like any other
 
 ### 5. Verify the release is complete
 ```bash
+script/release_status.sh       # alignment report across all four artifacts; exits 1 on drift
 gh release list --limit 5      # beta-dmg-<x.y.z> == Latest; v<x.y.z> present, NOT latest
-grep -E '^\s*version' Casks/openbird.rb
-grep -E '^\s*url' Formula/openbird.rb           # both pin <x.y.z>
 ```
-Confirm `pyproject.toml`, `uv.lock`, the cask, and the formula URL all read `<x.y.z>`, and
-that `beta-dmg-<x.y.z>` is Latest.
+`script/release_status.sh` reads `pyproject.toml` (source of truth), `uv.lock`, the cask,
+and the formula, and cross-checks them against the published `beta-dmg-<x.y.z>` / `v<x.y.z>`
+releases. It is **drift-aware**: a packaging file that lags is reported as `pending` (and
+exits 0) while its artifact is unbuilt — the expected mid-release state — but as `DRIFT`
+(exit 1) once that artifact is published. A clean run prints `=> aligned: every channel is
+on <x.y.z>`. Run it after step 4's formula PR merges; a non-zero exit means a channel was
+left behind — finish the lagging step before declaring the release done. (You can run it at
+any point mid-release to see which steps remain.)
 
 ## Notes for tester-facing release notes
 The dmg release notes are written by the `release-dmg` skill. For a richer changelog on
