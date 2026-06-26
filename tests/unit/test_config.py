@@ -38,6 +38,18 @@ def test_allow_cloud_coerced_from_env(monkeypatch):
     assert get_settings().allow_cloud is False
 
 
+def test_capture_urls_coerced_to_bool_from_env(monkeypatch):
+    # Default off (opt-in); truthy/falsey strings coerce to a real bool, never a
+    # string (a stray "0" must not read as truthy).
+    assert get_settings().capture_urls is False
+    reset_settings_cache()
+    monkeypatch.setenv("OPENBIRD_CAPTURE_URLS", "1")
+    assert get_settings().capture_urls is True
+    reset_settings_cache()
+    monkeypatch.setenv("OPENBIRD_CAPTURE_URLS", "0")
+    assert get_settings().capture_urls is False
+
+
 def test_timeouts_coerced_to_float(monkeypatch):
     monkeypatch.setenv("OPENBIRD_LLM_TIMEOUT", "45.5")
     monkeypatch.setenv("OPENBIRD_EMBED_TIMEOUT", "10")

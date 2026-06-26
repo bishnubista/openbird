@@ -630,6 +630,23 @@ def test_daemon_passes_pause_file_to_helper_boundary(allow_settings):
         str(allow_settings.data_dir / "capture.paused"),
     ]
     assert "--allow" in argv
+    # URL capture is OFF by default — the helper never scripts a browser (and
+    # never triggers an Automation prompt) unless the user opts in.
+    assert "--capture-urls" not in argv
+
+
+def test_policy_args_include_capture_urls_when_opted_in(allow_settings):
+    import dataclasses
+
+    opted_in = dataclasses.replace(allow_settings, capture_urls=True)
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=opted_in,
+        helper_cmd=("capture-helper",),
+        require_signed_helper=False,
+    )
+    argv = daemon._with_policy_args(["capture-helper"])
+    assert "--capture-urls" in argv
 
 
 @pytest.mark.skipif(
