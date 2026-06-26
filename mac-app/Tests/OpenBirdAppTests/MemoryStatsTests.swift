@@ -30,6 +30,18 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(env["OPENBIRD_REQUIRE_ENCRYPTION"], "1")
     }
 
+    func testChildEnvironmentRespectsExplicitKeyringOptOutForDevSelfTest() {
+        // A developer (e.g. the headless self-test) who EXPLICITLY exported
+        // OPENBIRD_DISABLE_KEYRING=1 has opted into a plaintext dev DB — the forced
+        // OPENBIRD_REQUIRE_ENCRYPTION guard must NOT override that, or the chat
+        // subprocess refuses to open the plaintext DB. The strict default still
+        // applies when the operator did NOT set the flag (asserted above).
+        let env = OpenBirdService.childEnvironment(base: ["OPENBIRD_DISABLE_KEYRING": "1"])
+
+        XCTAssertEqual(env["OPENBIRD_DISABLE_KEYRING"], "1")
+        XCTAssertNil(env["OPENBIRD_REQUIRE_ENCRYPTION"])
+    }
+
     func testParseMemoryStatsDecodesCliJson() {
         let stats = OpenBirdService.parseMemoryStats("""
         {

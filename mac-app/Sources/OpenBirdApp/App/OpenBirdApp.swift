@@ -1,8 +1,29 @@
 import AppKit
+import os
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let log = Logger(subsystem: "ai.openbird.OpenBird", category: "selftest")
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // DEVELOP/SELF-TEST MODE: when OPENBIRD_SELFTEST_ASK=<query> is set, run that
+        // ask headlessly through the SAME OpenBirdService.askChat seam the Ask panel
+        // uses, emit a deterministic outcome (stdout + os_log, counts/booleans only —
+        // never the query/answer/citation text), and exit. No window, no global
+        // hotkey, no keystroke automation — so an automated verifier can validate the
+        // real app's ask pipeline with NO Accessibility/Automation permission prompt
+        // (the human bottleneck for self-testing). Pair with OPENBIRD_DISABLE_KEYRING=1
+        // for a Keychain-prompt-free run against an unencrypted dev DB.
+        if let query = ProcessInfo.processInfo.environment["OPENBIRD_SELFTEST_ASK"],
+           !query.isEmpty {
+            // Stay fully headless: no dock icon / window, so the SwiftUI scene's
+            // live work (refresh, auto-resume capture) never runs. The window's
+            // `.task` ALSO guards on this env var as belt-and-suspenders, since the
+            // ask runs off-thread and the scene could otherwise mount before exit.
+            NSApp.setActivationPolicy(.prohibited)
+            Self.runSelfTestAndExit(query: query)
+            return  // runSelfTestAndExit exits the process when the ask completes
+        }
         // Resolve the app-owned DB key and export OPENBIRD_DB_KEY before any CLI
         // child is spawned (the first spawn is the main Window's refresh .task,
         // which runs after launch). This makes the Keychain prompt read "OpenBird"
@@ -10,6 +31,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         OpenBirdService.bootstrapDBKey()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Run one ask through the real service off the main thread, print a parseable
+    /// outcome line to stdout, and exit (0=grounded, 1=ungrounded, 2=error). Stays
+    /// headless: never resolves the Keychain DB key or activates a window, so it
+    /// cannot raise a permission/password prompt.
+    private static func runSelfTestAndExit(query: String) {
+        let service = OpenBirdService()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let line: String
+            let code: Int32
+            do {
+                let r = try service.askChat(query, dayOffset: nil)
+                let grounded = r.grounded && !r.citations.isEmpty
+                line = "SELFTEST ask.outcome grounded=\(r.grounded ? 1 : 0) citations=\(r.citations.count)"
+                code = grounded ? 0 : 1
+                log.info("\(line, privacy: .public)")
+            } catch {
+                line = "SELFTEST ask.outcome error=1"
+                code = 2
+                log.error("\(line, privacy: .public)")
+            }
+            FileHandle.standardOutput.write(Data((line + "\n").utf8))
+            exit(code)
+        }
     }
 }
 
@@ -86,6 +132,11 @@ private struct MainWindowRoot: View {
             onAskExpanded: { askPanel.expand() }
         )
         .task {
+            // Self-test mode runs the ask headlessly and exits; never start the
+            // live UI work here (capture auto-resume / hotkey / refresh), which
+            // could spawn capture or raise a permission prompt before exit.
+            guard ProcessInfo.processInfo.environment["OPENBIRD_SELFTEST_ASK"] == nil
+            else { return }
             askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
             askPanel.openMainWindow = { openWindow(id: "main") }
             await model.refresh()

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Owns the Spotlight Ask panel's conversation, independently of the window
 /// `ChatView`. It calls `OpenBirdService.askChat` directly (sharing only the
@@ -23,6 +24,14 @@ final class AskPanelModel: ObservableObject {
 
     @Published private(set) var thread: [Turn] = []
     @Published private(set) var busy = false
+
+    /// Privacy-safe outcome signpost. Emits ONLY booleans/counts/reason codes —
+    /// never the question, answer, or any captured text/window title — so an ask's
+    /// grounding can be asserted from `log show`/`log stream` (subsystem
+    /// "ai.openbird.OpenBird", category "ask") by an automated app verifier with no
+    /// human reading the screen. Mirrors the privacy rule the CLI `rag_debug` meta
+    /// tier already follows.
+    private static let log = Logger(subsystem: "ai.openbird.OpenBird", category: "ask")
 
     /// Optional day scope (0=today, 1=yesterday, ...) applied to subsequent asks in
     /// this thread. Set by the Today view's "Ask about this day" so answers are
@@ -112,8 +121,14 @@ final class AskPanelModel: ObservableObject {
         switch outcome {
         case .success(let result):
             update(turn.id) { $0.result = result }
+            // Counts/booleans only — never the question/answer/citation text.
+            Self.log.info(
+                "ask.outcome grounded=\(result.grounded ? 1 : 0, privacy: .public) citations=\(result.citations.count, privacy: .public) scoped=\(scope != nil ? 1 : 0, privacy: .public)"
+            )
         case .failure(let error):
             update(turn.id) { $0.error = ChatErrorPresenter.describe(error) }
+            // Boolean only — the error message can carry captured CLI stderr.
+            Self.log.error("ask.outcome error=1")
         }
         busy = false
         activeTurnID = nil
