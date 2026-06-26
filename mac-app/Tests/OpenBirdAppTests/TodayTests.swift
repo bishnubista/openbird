@@ -150,6 +150,15 @@ final class BriefingProseTests: XCTestCase {
         )
     }
 
+    func testStripsBlockquoteMarkers() {
+        // `> quoted` must not render a literal blockquote marker (contract: no raw
+        // Markdown symbols). Nested `>>` collapses too.
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: "> Today was focused on **rag.py**.\n>> nested"),
+            ["Today was focused on **rag.py**.", "nested"]
+        )
+    }
+
     func testMarkerOnlyLinesProduceNoEmptyParagraphs() {
         // `####`, `### `, and a bare `- ` strip to "" and must be dropped, never
         // appended as blank paragraphs (which would render stray gaps).

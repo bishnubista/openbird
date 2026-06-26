@@ -61,6 +61,9 @@ enum BriefingProse {
             } else if let item = strippedListItem(line) {
                 flush()
                 if !item.isEmpty { paragraphs.append(item) }
+            } else if let quote = strippedBlockQuote(line) {
+                flush()
+                if !quote.isEmpty { paragraphs.append(quote) }
             } else {
                 // Plain prose lines reflow together into one paragraph.
                 current.append(line)
@@ -103,6 +106,14 @@ enum BriefingProse {
             }
         }
         return nil
+    }
+
+    /// Strip a leading blockquote marker (`> text`, including nested `>>`). Returns
+    /// nil when the line is not a blockquote.
+    private static func strippedBlockQuote(_ line: String) -> String? {
+        guard line.first == ">" else { return nil }
+        let body = line.drop(while: { $0 == ">" || $0 == " " })
+        return body.trimmingCharacters(in: .whitespaces)
     }
 
     /// Parse one paragraph's inline Markdown (`**bold**`, `*italic*`, `` `code` ``).
