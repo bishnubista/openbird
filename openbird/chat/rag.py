@@ -99,6 +99,69 @@ _MULTIDAY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Stop words for the day-scoped specific-question selector. This is deliberately
+# small and conservative: it strips question glue while preserving names,
+# project ids, PR numbers, and domain nouns that make a scoped row reachable.
+_QUERY_STOPWORDS = frozenset(
+    {
+        "a",
+        "about",
+        "after",
+        "all",
+        "am",
+        "an",
+        "and",
+        "any",
+        "are",
+        "around",
+        "as",
+        "at",
+        "be",
+        "been",
+        "before",
+        "did",
+        "do",
+        "does",
+        "doing",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "i",
+        "in",
+        "is",
+        "it",
+        "me",
+        "my",
+        "of",
+        "on",
+        "or",
+        "our",
+        "should",
+        "that",
+        "the",
+        "this",
+        "to",
+        "up",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "with",
+        "work",
+        "worked",
+        "working",
+    }
+)
+_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_'-]*")
+
 # Generic window titles that carry almost no activity signal on their own (a
 # bare app name, a transient sheet). Used to down-rank low-signal observations
 # when selecting what to ground a synthesis answer on — derived from the real
@@ -439,7 +502,11 @@ class RAG:
                 raise TypeError(
                     "explicit day scope requires a store exposing time_range_text()"
                 )
-            return self._answer_temporal(query, window, route="explicit_window")
+            if self._is_synthesis_query(query):
+                return self._answer_temporal(query, window, route="explicit_window")
+            return self._answer_scoped_specific(
+                query, window, route="explicit_window_specific"
+            )
 
         # Temporal/activity AND synthesis/meta intent ("what did I do
         # yesterday?", "Summarize my day", "what should I follow up on?") must use
@@ -459,7 +526,9 @@ class RAG:
                     if self._temporal_window(query) is not None
                     else "intent_synthesis"
                 )
-            return self._answer_temporal(query, intent_window, route)
+            if self._is_synthesis_query(query):
+                return self._answer_temporal(query, intent_window, route)
+            return self._answer_scoped_specific(query, intent_window, route)
 
         hits = self.store.search(query, k=k, semantic=semantic)
         context = self._assemble_context(hits)
@@ -560,12 +629,23 @@ class RAG:
         )
         return today.timestamp(), now
 
+    @staticmethod
+    def _is_synthesis_query(query: str) -> bool:
+        """Return True for broad activity/meta questions.
+
+        Temporal words alone ("today", "yesterday") do not imply broad synthesis:
+        "what did I ask Alice today?" should still retrieve Alice-specific rows
+        inside today's window. The narrow synthesis regex captures the broad
+        forms ("what did I do", "summarize my day", "what should I follow up on")
+        that are better answered by chronological day synthesis.
+        """
+        return _SYNTHESIS_RE.search(query) is not None
+
     def _answer_temporal(
         self, query: str, window: tuple[float, float], route: str = "temporal"
     ) -> AnswerResult:
         """Answer a temporal question from a time-range scan of observations."""
-        start, end = window
-        rows = self.store.time_range_text(start, end)  # type: ignore[attr-defined]
+        rows, deduped, dropped_self = self._prepared_window_rows(window)
         if not rows:
             emit_retrieval_empty(
                 route=route, reason="no_rows", retrieval={"rows": 0}
@@ -574,29 +654,6 @@ class RAG:
                 answer="I don't have any recorded activity in that time window.",
                 citations=[], used_hits=[], grounded=False,
             )
-        # Build context from occurrences, collapsing repeats of the same content
-        # WITHIN a session. Keying on (session_id, content_hash) — mirroring
-        # _assemble_context — means identical text revisited in a DIFFERENT session
-        # inside the window survives as a distinct episode (so populated session_ids
-        # make temporal recall coherent); a null session_id groups as (None, hash),
-        # preserving the prior content-hash-only collapse for legacy rows.
-        from openbird.capture.redact import _is_self_capture
-
-        deduped: list[tuple[Any, str]] = []
-        seen: set[tuple[str | None, str]] = set()
-        dropped_self = 0
-        for obs, text in rows:
-            # OpenBird's own UI never grounds an answer (parity with the briefing
-            # path): skip self-capture before dedupe/scoring so a legacy pre-gate
-            # self row can't be sent to the model or cited.
-            if obs is None or _is_self_capture(obs.app):
-                dropped_self += 1
-                continue
-            key = (obs.session_id, obs.content_hash)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append((obs, text))
 
         if not deduped:
             emit_retrieval_empty(
@@ -617,39 +674,16 @@ class RAG:
         # by signal (informative window titles + substantial text), keep the
         # richest candidates, THEN spread those evenly across time so the summary
         # is both high-signal and covers morning→evening. Fully deterministic.
-        scored = sorted(
-            deduped, key=lambda p: self._signal_score(p[0], p[1]), reverse=True
-        )
-        candidates = scored[: self.max_context * 2]
-        candidates.sort(key=lambda p: p[0].ts)
-        chosen = self._sample_even(candidates, self.max_context)
+        chosen = self._select_temporal_rows(deduped)
+        context = self._rows_to_context(chosen)
 
-        context: list[_ContextItem] = []
-        for obs, text in chosen:
-            hit = SearchHit(
-                chunk_id=f"obs:{obs.id}", content_hash=obs.content_hash,
-                text=text, score=0.0, observation=obs,
-            )
-            context.append(_ContextItem(source_id=f"S{len(context) + 1}", hit=hit))
-
-        # Persona selection. Synthesis-intent phrasing matched by _SYNTHESIS_RE
-        # ("summarize my day", "what did I work on", "what did I do…") gets the
-        # synthesis persona: the time-range scan hands the model a broad,
-        # signal-ranked SAMPLE of the window's activity (not a targeted retrieval),
-        # which the strict single-source QA persona refuses to synthesize and so
-        # blanks the answer. A pointed question that does NOT match _SYNTHESIS_RE —
-        # e.g. an explicit ``--day`` lookup like "what about the rocket?" — keeps
-        # the strict persona (and its user override), preserving honest abstention
-        # when the asked-about thing isn't in the day's sample. NOTE: a pointed
-        # temporal phrasing that DOES match the regex ("what did I do at 3pm") is
-        # treated as synthesis BY DESIGN — it already routes through the same
-        # activity sample, so synthesizing it beats abstaining. Gating on the query
-        # (not the call site) covers all three callers with one predicate.
-        synthesis = _SYNTHESIS_RE.search(query) is not None
-        system_prompt = (
-            self._synthesis_system_prompt if synthesis else self._system_prompt
+        # Broad activity questions get the synthesis persona: the time-range scan
+        # hands the model a signal-ranked sample of the window's activity, not a
+        # targeted retrieval result. Specific temporal/day-scoped questions route
+        # through _answer_scoped_specific instead and keep the strict QA persona.
+        messages = self._build_messages(
+            query, context, system_prompt=self._synthesis_system_prompt
         )
-        messages = self._build_messages(query, context, system_prompt=system_prompt)
         t0 = time.perf_counter()
         raw = self.provider.complete(messages, json_schema=_RESPONSE_SCHEMA)
         latency_s = time.perf_counter() - t0
@@ -679,6 +713,172 @@ class RAG:
             answer=answer_text, citations=citations,
             used_hits=[i.hit for i in context], grounded=grounded,
         )
+
+    def _answer_scoped_specific(
+        self, query: str, window: tuple[float, float], route: str
+    ) -> AnswerResult:
+        """Answer a specific question from rows hard-scoped to a time window."""
+        rows, deduped, dropped_self = self._prepared_window_rows(window)
+        if not rows:
+            emit_retrieval_empty(
+                route=route, reason="no_rows", retrieval={"rows": 0}
+            )
+            return AnswerResult(
+                answer="I don't have any recorded activity in that time window.",
+                citations=[], used_hits=[], grounded=False,
+            )
+        if not deduped:
+            emit_retrieval_empty(
+                route=route, reason="all_self_or_dupe",
+                retrieval={"rows": len(rows), "dropped_self": dropped_self},
+            )
+            return AnswerResult(
+                answer="I don't have any recorded activity in that time window.",
+                citations=[], used_hits=[], grounded=False,
+            )
+
+        chosen = self._select_specific_rows(query, deduped)
+        context = self._rows_to_context(chosen)
+        if not context:
+            return AnswerResult(
+                answer="I don't have anything in memory about that.",
+                citations=[],
+                used_hits=[],
+                grounded=False,
+            )
+
+        messages = self._build_messages(query, context)
+        t0 = time.perf_counter()
+        raw = self.provider.complete(messages, json_schema=_RESPONSE_SCHEMA)
+        latency_s = time.perf_counter() - t0
+        answer_text, claimed_ids = self._parse_response(raw)
+        citations = self._validate_citations(claimed_ids, context)
+        grounded = len(citations) > 0
+        if debug_level() is not None:
+            emit_grounding_trace(
+                route=route, raw=raw, answer_text=answer_text,
+                claimed_ids=claimed_ids, citations=citations, context=context,
+                retrieval={
+                    "rows": len(rows), "deduped": len(deduped),
+                    "dropped_self": dropped_self,
+                    "signal_scores": [
+                        self._signal_score(o, t) for o, t in chosen
+                    ],
+                    "query_terms": len(self._query_terms(query)),
+                },
+                latency_s=latency_s,
+                model=getattr(self.provider, "llm_model", None),
+            )
+        if not grounded:
+            answer_text = _UNGROUNDED_MESSAGE
+        return AnswerResult(
+            answer=answer_text, citations=citations,
+            used_hits=[i.hit for i in context], grounded=grounded,
+        )
+
+    def _prepared_window_rows(
+        self, window: tuple[float, float]
+    ) -> tuple[list[tuple[Any, str]], list[tuple[Any, str]], int]:
+        """Fetch, self-filter, and dedupe time-window rows.
+
+        Dedupe collapses repeats of the same content WITHIN a session. Identical
+        content revisited in a different session survives as a distinct episode;
+        legacy NULL sessions continue to collapse by content hash.
+        """
+        start, end = window
+        rows = self.store.time_range_text(start, end)  # type: ignore[attr-defined]
+        from openbird.capture.redact import _is_self_capture
+
+        deduped: list[tuple[Any, str]] = []
+        seen: set[tuple[str | None, str]] = set()
+        dropped_self = 0
+        for obs, text in rows:
+            if obs is None or _is_self_capture(obs.app):
+                dropped_self += 1
+                continue
+            key = (obs.session_id, obs.content_hash)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((obs, text))
+        return rows, deduped, dropped_self
+
+    def _select_temporal_rows(self, rows: list[tuple[Any, str]]) -> list[tuple[Any, str]]:
+        """Pick high-signal rows spread across the window for broad summaries."""
+        scored = sorted(
+            rows, key=lambda p: self._signal_score(p[0], p[1]), reverse=True
+        )
+        positive = [p for p in scored if self._signal_score(p[0], p[1]) > 0]
+        if len(positive) >= self.max_context:
+            candidates = positive[: self.max_context * 2]
+        else:
+            candidates = scored[: self.max_context * 2]
+        candidates.sort(key=lambda p: p[0].ts)
+        return self._sample_even(candidates, self.max_context)
+
+    def _select_specific_rows(
+        self, query: str, rows: list[tuple[Any, str]]
+    ) -> list[tuple[Any, str]]:
+        """Pick rows for a specific day-scoped question using lexical relevance."""
+        terms = self._query_terms(query)
+        ranked = sorted(
+            rows,
+            key=lambda p: (
+                self._query_overlap_score(terms, p[0], p[1]),
+                self._signal_score(p[0], p[1]),
+                p[0].ts,
+            ),
+            reverse=True,
+        )
+        matched = [
+            p for p in ranked
+            if self._query_overlap_score(terms, p[0], p[1]) > 0
+        ]
+        if not matched:
+            return []
+        return matched[: self.max_context]
+
+    @staticmethod
+    def _rows_to_context(rows: list[tuple[Any, str]]) -> list[_ContextItem]:
+        context: list[_ContextItem] = []
+        for obs, text in rows:
+            hit = SearchHit(
+                chunk_id=f"obs:{obs.id}", content_hash=obs.content_hash,
+                text=text, score=0.0, observation=obs,
+            )
+            context.append(_ContextItem(source_id=f"S{len(context) + 1}", hit=hit))
+        return context
+
+    @staticmethod
+    def _query_terms(query: str) -> list[str]:
+        """Return deduped lexical terms for specific day-scoped retrieval."""
+        terms: list[str] = []
+        seen: set[str] = set()
+        for raw in _QUERY_TOKEN_RE.findall(query):
+            token = raw.strip("'_-").casefold()
+            if token in _QUERY_STOPWORDS or token in seen:
+                continue
+            if len(token) <= 2 and not token.isdigit():
+                continue
+            seen.add(token)
+            terms.append(token)
+        return terms
+
+    @staticmethod
+    def _query_overlap_score(terms: list[str], obs: Any, text: str) -> int:
+        """Count query terms present in one row's text, window, or app."""
+        if not terms:
+            return 0
+        haystack = " ".join(
+            p
+            for p in (
+                text or "",
+                getattr(obs, "window", "") or "",
+                getattr(obs, "app", "") or "",
+            )
+            if p
+        ).casefold()
+        return sum(1 for term in terms if term in haystack)
 
     @staticmethod
     def _sample_even(items: list[Any], n: int) -> list[Any]:

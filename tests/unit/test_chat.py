@@ -421,8 +421,8 @@ def test_explicit_window_hard_scopes_to_that_day(mem_settings, fake_provider):
     """`answer(window=...)` confines retrieval+citations to the window, isolating days.
 
     Seed TWO calendar days. A NON-temporal question (no "today"/"yesterday" phrase)
-    that is semantically closer to the OTHER day's text must still only ever ground
-    in the scoped day — proving the scope is a hard filter, not a ranking hint.
+    that matches only the OTHER day's text must not leak that other day, and must
+    abstain instead of citing unrelated rows from the scoped day.
     """
     import datetime as dt
 
@@ -448,12 +448,10 @@ def test_explicit_window_hard_scopes_to_that_day(mem_settings, fake_provider):
             "what about the rocket?", window=(day0_start, day0_end)
         )
 
-        # Only the 13th's observation is in the window; the matching 12th is excluded.
-        assert result.grounded
-        assert len(result.used_hits) == 1
-        assert result.citations[0].ts == d13
-        for c in result.citations:
-            assert day0_start <= c.ts <= day0_end  # every citation within the day
+        assert not result.grounded
+        assert result.used_hits == []
+        assert result.citations == []
+        assert "memory" in result.answer.lower()
     finally:
         store.close()
 
