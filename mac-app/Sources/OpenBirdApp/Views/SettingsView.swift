@@ -473,6 +473,20 @@ struct SettingsView: View {
             }
             .padding(.horizontal, 16).padding(.vertical, 11)
             hairline
+            HStack(spacing: 13) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Launch at login")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(OB.textPrimary(scheme))
+                    Text("Start OpenBird at login so memory keeps building after a restart")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(OB.textSecondary(scheme))
+                }
+                Spacer()
+                PauseToggle(isOn: model.launchAtLogin) { model.setLaunchAtLogin(!model.launchAtLogin) }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 11)
+            hairline
             HStack(spacing: 10) {
                 trustButton("Stop helpers", system: "stop.fill") { model.stopHelpers() }
                 trustButton("App bundle", system: "app") { model.openBundleFolder() }

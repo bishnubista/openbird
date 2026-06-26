@@ -53,6 +53,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var report = PreflightReport()
     @Published private(set) var capturePaused = false
     @Published private(set) var captureRunning = false
+    /// True iff this app is registered AND eligible to launch at login. Mirrors the
+    /// live `SMAppService` status (never stored locally) so System-Settings changes
+    /// are reflected; see `refreshLaunchAtLoginState()`.
+    @Published private(set) var launchAtLogin = false
     /// True when capture last died because the on-disk index needs rebuilding under
     /// the current embedding model (capture daemon exit code `captureReindexExitCode`).
     /// Drives the one-click "Reindex" affordance instead of a dead-end error.
@@ -108,6 +112,7 @@ final class AppModel: ObservableObject {
         self.accessibilityGranted = service.accessibilityGranted()
         self.screenRecordingGranted = service.screenRecordingGranted()
         self.microphoneGranted = service.microphoneGranted()
+        self.launchAtLogin = service.launchAtLoginState() == .enabled
 
         // Safety net: if the app is quit by any path (Cmd-Q, menu, dock), stop the
         // capture daemon WE launched so it is never orphaned past app lifetime.
@@ -483,6 +488,51 @@ final class AppModel: ObservableObject {
         autoResumeCaptureIfNeeded(start: { self.startCapture() })
     }
 
+    /// Re-read the live "launch at login" status into `launchAtLogin`. Cheap; call
+    /// it wherever the user might have changed it out-of-band (launch, refresh, after
+    /// a toggle, and on app re-activation) so the UI never shows a stale value.
+    func refreshLaunchAtLoginState() {
+        launchAtLogin = service.launchAtLoginState() == .enabled
+    }
+
+    /// Toggle whether OpenBird launches at login. Together with auto-resume this lets
+    /// capture survive a reboot/logout. Never flips `launchAtLogin` optimistically —
+    /// it always resyncs from the real `SMAppService` status and maps that status to
+    /// an honest user message (success only on `.enabled`; `.requiresApproval` opens
+    /// System Settings; anything else is reported as a failure).
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try service.setLaunchAtLogin(enabled)
+        } catch {
+            refreshLaunchAtLoginState()
+            lastActionMessage = "Could not update Launch at Login: \(error.localizedDescription)"
+            return
+        }
+        // Read the resulting status ONCE and derive both the published flag and the
+        // message from it, so they can never disagree (a second read could observe a
+        // different status and e.g. show "enabled" while the toggle reads off).
+        let state = service.launchAtLoginState()
+        launchAtLogin = state == .enabled
+        if enabled {
+            switch state {
+            case .enabled:
+                lastActionMessage = "OpenBird will launch at login."
+            case .requiresApproval:
+                lastActionMessage = "Approve OpenBird in System Settings › General › Login Items."
+                service.openLoginItemsSettings()
+            case .disabled, .unavailable:
+                lastActionMessage = "Could not enable Launch at Login. Open System Settings › General › Login Items."
+            }
+        } else {
+            switch state {
+            case .disabled:
+                lastActionMessage = "OpenBird will not launch at login."
+            case .enabled, .requiresApproval, .unavailable:
+                lastActionMessage = "Could not disable Launch at Login. Check System Settings › General › Login Items."
+            }
+        }
+    }
+
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off
     /// the main actor and publishes the answer + citations (or a friendly error).
     func ask(_ question: String) {
@@ -562,6 +612,7 @@ final class AppModel: ObservableObject {
         captureRunning = service.isCaptureRunning()
         helpers = service.helperStatuses()
         allowlist = service.allowlist()
+        refreshLaunchAtLoginState()
         refreshPermissionStates()
         report = await service.preflightReport()
         await refreshMemoryStats()
