@@ -516,17 +516,22 @@ class RAG:
         # the model honestly cites nothing and the grounding gate blanks it.
         intent_window = self._intent_window(query)
         if intent_window is not None and hasattr(self.store, "time_range_text"):
+            is_synthesis = self._is_synthesis_query(query)
             route = "intent_window"
             if debug_level() is not None:
-                # Only split temporal-word vs synthesis routing under debug, so
-                # the trace shows which intent classifier fired without paying an
-                # extra regex on the normal path.
-                route = (
-                    "intent_temporal"
-                    if self._temporal_window(query) is not None
-                    else "intent_synthesis"
-                )
-            if self._is_synthesis_query(query):
+                # Label the actual ANSWER PATH (not just the intent classifier) so
+                # the trace separates broad day synthesis (_answer_temporal) from a
+                # targeted day-scoped lookup (_answer_scoped_specific). Both share a
+                # day window and otherwise read identically, so without this a
+                # specific query mislabels as intent_temporal. Mirrors the
+                # explicit_window vs explicit_window_specific split on the --day path.
+                if not is_synthesis:
+                    route = "intent_specific"
+                elif self._temporal_window(query) is not None:
+                    route = "intent_temporal"
+                else:
+                    route = "intent_synthesis"
+            if is_synthesis:
                 return self._answer_temporal(query, intent_window, route)
             return self._answer_scoped_specific(query, intent_window, route)
 
