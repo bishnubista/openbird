@@ -163,6 +163,25 @@ def _raise_partial_shape(mismatch: str) -> None:
     )
 
 
+def _guard_existing_shape(conn: sqlite3.Connection) -> None:
+    """Raise the partial-shape error if existing tables miss any required column.
+
+    The version-1 required columns are a permanent FLOOR: the forward-only ladder
+    only ever ADDS tables/columns and never drops a released one, so this check is
+    valid for a DB stamped at ANY version (>= 1) — the floor must always hold. It is
+    run both when adopting a legacy unstamped DB AND when re-opening an
+    already-stamped DB, so a wrong-shaped-but-stamped DB fails with the clear,
+    actionable migration error instead of a cryptic ``OperationalError`` at first
+    query/write (which the capture daemon swallows, making capture silently store
+    nothing). A DB with no core tables yet (fresh) is a no-op.
+    """
+    if not _db_has_existing_tables(conn):
+        return
+    mismatch = _v1_shape_mismatch(conn)
+    if mismatch is not None:
+        _raise_partial_shape(mismatch)
+
+
 def preflight_legacy_shape_guard(conn: sqlite3.Connection) -> None:
     """Reject a partial/foreign legacy DB BEFORE the baseline schema is applied.
 
@@ -219,6 +238,23 @@ def ensure_schema_version(conn: sqlite3.Connection) -> int:
             f"version {current}."
         )
 
+    # Floor-shape guard for ANY already-stamped DB (current >= 1), evaluated BEFORE
+    # the version branches below so it covers every stamped path — a DB at the
+    # current version (trusted as-is) AND a stamped-but-older DB about to run the
+    # migration ladder. A DB can carry a stamp yet miss a required column:
+    # schema.sql's ``CREATE TABLE IF NOT EXISTS`` silently keeps an already-present,
+    # wrong-shaped table, and the ladder has no step to rebuild it. Without this a
+    # stranded DB is either trusted (``current == SCHEMA_VERSION``) or re-stamped by
+    # the ladder while still wrong-shaped (``0 < current < SCHEMA_VERSION``); both
+    # then fail with a cryptic ``OperationalError`` at first query/write, which the
+    # capture daemon swallows (capture silently stores nothing). The version-1
+    # required columns are a permanent floor — the forward-only ladder only adds,
+    # never drops, a released column — so the check is valid at any stamped version.
+    # (``current == 0`` is handled in its own branch below: it is not yet stamped and
+    # may be a partial/foreign DB that must be refused before adoption.)
+    if current > 0:
+        _guard_existing_shape(conn)
+
     if current == SCHEMA_VERSION:
         return current
 
@@ -235,16 +271,11 @@ def ensure_schema_version(conn: sqlite3.Connection) -> int:
         #     at query time (e.g. ``no such column: ts``). Refuse loudly and
         #     early instead — consistent with the newer-than-supported guard
         #     above — rather than corrupting the version contract.
-        if _db_has_existing_tables(conn):
-            mismatch = _v1_shape_mismatch(conn)
-            if mismatch is not None:
-                # Defense in depth: normally preflight_legacy_shape_guard already
-                # caught this before schema.sql ran, but ensure_schema_version is
-                # also called directly (e.g. in tests) so it must stay self-safe.
-                _raise_partial_shape(mismatch)
-            baseline = 1
-        else:
-            baseline = SCHEMA_VERSION
+        # Defense in depth: normally preflight_legacy_shape_guard already caught a
+        # wrong-shaped DB before schema.sql ran, but ensure_schema_version is also
+        # called directly (e.g. in tests) so it must stay self-safe.
+        _guard_existing_shape(conn)
+        baseline = 1 if _db_has_existing_tables(conn) else SCHEMA_VERSION
         _stamp_in_txn(conn, baseline)
         current = baseline
         if current == SCHEMA_VERSION:

@@ -283,6 +283,98 @@ def test_v0_db_with_partial_shape_raises_instead_of_failing_later(tmp_path):
         conn.close()
 
 
+def _break_chunks_to_pre_redesign_shape(conn: sqlite3.Connection) -> None:
+    """Replace `chunks` with its pre-chunk-dedup shape (keyed by content_hash, NO
+    `chunk_hash`) — the exact stranded shape behind issue #143. foreign_keys is OFF
+    on these bare test connections, so the dependent blob_chunks FK does not block
+    the swap; the resulting schema is deliberately inconsistent."""
+    conn.execute("DROP TABLE chunks")
+    conn.execute(
+        "CREATE TABLE chunks ("
+        "id TEXT PRIMARY KEY, content_hash TEXT NOT NULL, "
+        "span_start INTEGER, span_end INTEGER, text TEXT NOT NULL, "
+        "rowid_int INTEGER UNIQUE)"  # note: no chunk_hash
+    )
+
+
+def test_stamped_current_db_with_wrong_chunks_shape_raises(tmp_path):
+    """A DB stamped at SCHEMA_VERSION but missing `chunks.chunk_hash` must RAISE.
+
+    Regression for issue #143. The stamp used to be trusted blindly (the shape
+    guard only inspected user_version=0 DBs), so a `chunks` table created before an
+    in-place change to the v1 shape — silently kept by schema.sql's CREATE TABLE IF
+    NOT EXISTS — sailed through and then threw a raw `OperationalError: no such
+    column: chunk_hash` at the first add_observation (which the capture daemon
+    swallows). The floor-shape check now revalidates an already-stamped DB.
+    """
+    conn = _make_v1_shaped_db(tmp_path / "stamped_wrong.db")
+    try:
+        _break_chunks_to_pre_redesign_shape(conn)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
+
+        with pytest.raises(RuntimeError) as exc:
+            ensure_schema_version(conn)
+        msg = str(exc.value)
+        assert "does not match" in msg
+        assert "chunk_hash" in msg  # names the concrete missing column
+    finally:
+        conn.close()
+
+
+def test_store_open_on_stamped_wrong_shape_db_raises_not_silent(tmp_path):
+    """End-to-end (issue #143): opening MemoryStore on a DB stamped at the current
+    version but missing `chunks.chunk_hash` raises the CLEAR migration error — NOT a
+    silent open that then throws a raw OperationalError on first write (which the
+    capture daemon swallows, so capture stores nothing while looking healthy)."""
+    db = str(tmp_path / "stamped_wrong_store.db")
+    seed = _make_v1_shaped_db(db)
+    _break_chunks_to_pre_redesign_shape(seed)
+    seed.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    seed.commit()
+    seed.close()
+
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    with pytest.raises(RuntimeError) as exc:
+        MemoryStore(db_path=db, settings=settings, provider=FakeProvider(embed_dim=64))
+    msg = str(exc.value)
+    assert "does not match" in msg
+    assert "chunk_hash" in msg
+    assert not isinstance(exc.value, sqlite3.OperationalError)
+
+
+def test_stamped_old_db_with_wrong_shape_blocks_migration_ladder(tmp_path, monkeypatch):
+    """A stamped-but-OLDER wrong-shaped DB must RAISE before the ladder runs.
+
+    Forward-looking guard (issue #143): with a synthetic SCHEMA_VERSION=2, a
+    user_version=1 DB whose `chunks` lacks `chunk_hash` must NOT be quietly migrated
+    and re-stamped to 2 while still wrong-shaped (it would then fail at first write,
+    swallowed by the capture daemon). The floor guard runs for any stamped DB
+    BEFORE the migration ladder, so it fails loudly and stays unmigrated.
+    """
+    monkeypatch.setattr(migrations, "SCHEMA_VERSION", 2)
+    monkeypatch.setattr(
+        migrations,
+        "MIGRATIONS",
+        [Migration(version=2, description="noop", apply=lambda conn: None)],
+    )
+    conn = _make_v1_shaped_db(tmp_path / "stamped_old_wrong.db")
+    try:
+        _break_chunks_to_pre_redesign_shape(conn)
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+
+        with pytest.raises(RuntimeError) as exc:
+            ensure_schema_version(conn)
+        msg = str(exc.value)
+        assert "does not match" in msg
+        assert "chunk_hash" in msg
+        # NOT migrated or re-stamped: the bad DB stays at version 1.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
 def test_v0_db_missing_a_required_table_raises(tmp_path):
     """A v0 DB with `observations` present but other required tables missing RAISES."""
     conn = sqlite3.connect(tmp_path / "missing_table.db")
@@ -380,8 +472,10 @@ def test_migration_ladder_upgrades_old_db(tmp_path, monkeypatch):
         [Migration(version=2, description="add note", apply=_v2)],
     )
 
-    conn = sqlite3.connect(tmp_path / "upgrade.db")
-    conn.execute("CREATE TABLE observations (id TEXT PRIMARY KEY)")
+    # A realistic stamped-v1 DB: the floor guard now runs for any stamped DB
+    # before the ladder, so a stamped DB must carry the real v1 shape (not a bare
+    # `observations(id)` stub, which would now — correctly — be refused).
+    conn = _make_v1_shaped_db(tmp_path / "upgrade.db")
     conn.execute("PRAGMA user_version = 1")
     conn.commit()
 
@@ -415,8 +509,8 @@ def test_migration_rolls_back_on_failure(tmp_path, monkeypatch):
         "MIGRATIONS",
         [Migration(version=2, description="bad", apply=_bad)],
     )
-    conn = sqlite3.connect(tmp_path / "rollback.db")
-    conn.execute("CREATE TABLE observations (id TEXT PRIMARY KEY)")
+    # Realistic stamped-v1 DB (the floor guard runs before the ladder now).
+    conn = _make_v1_shaped_db(tmp_path / "rollback.db")
     conn.execute("PRAGMA user_version = 1")
     conn.commit()
     with pytest.raises(RuntimeError, match="boom"):
