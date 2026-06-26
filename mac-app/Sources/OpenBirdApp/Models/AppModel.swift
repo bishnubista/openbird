@@ -438,6 +438,51 @@ final class AppModel: ObservableObject {
             && !captureRunning
     }
 
+    /// UserDefaults key for the first-run flag, owned by `AppShellView`'s
+    /// `@AppStorage` (which defaults to `UserDefaults.standard`). Centralized here
+    /// so the auto-resume gate reads the exact same key.
+    static let onboardingCompletedKey = "openbird.onboarding.completed"
+
+    /// Whether capture should be (re)started automatically at launch. Builds on
+    /// `canStartCaptureNow` (Accessibility granted, non-empty allowlist, CLI
+    /// available, not already running) and additionally requires that the user has
+    /// finished onboarding and has NOT explicitly paused capture. Screen Recording
+    /// is intentionally NOT required: text capture is Accessibility-based.
+    var shouldAutoResumeCapture: Bool {
+        canStartCaptureNow
+            && !capturePaused
+            && UserDefaults.standard.bool(forKey: Self.onboardingCompletedKey)
+    }
+
+    private var didAttemptAutoResume = false
+
+    /// Resume capture if the user is already configured and hasn't paused. The app
+    /// kills its daemon on quit (see `willTerminateNotification` above) and
+    /// otherwise never restarts capture without a UI action, so without this a
+    /// quit→relaunch leaves capture silently off.
+    ///
+    /// Retry-until-ready, then once: the one-shot flag is consumed ONLY after a
+    /// successful start, so a launch where state isn't ready yet (e.g. Accessibility
+    /// granted a moment later, or a re-invoked `.task`) can still start later. After
+    /// the first successful start the flag — and `canStartCaptureNow`'s
+    /// `!captureRunning` term — both prevent a second spawn (closing the race before
+    /// the async `startCapture()` flips `captureRunning`); the daemon `flock` is the
+    /// final backstop. The `start` seam keeps this testable without launching real
+    /// service/process work. Returns whether it attempted a start.
+    @discardableResult
+    func autoResumeCaptureIfNeeded(start: () -> Void) -> Bool {
+        guard !didAttemptAutoResume else { return false }
+        guard shouldAutoResumeCapture else { return false }
+        didAttemptAutoResume = true
+        start()
+        return true
+    }
+
+    @discardableResult
+    func autoResumeCaptureIfNeeded() -> Bool {
+        autoResumeCaptureIfNeeded(start: { self.startCapture() })
+    }
+
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off
     /// the main actor and publishes the answer + citations (or a friendly error).
     func ask(_ question: String) {
