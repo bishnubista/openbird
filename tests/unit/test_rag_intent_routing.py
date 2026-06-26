@@ -180,6 +180,19 @@ def test_content_lookup_summarize_named_doc_stays_semantic():
     assert _rag()._intent_window("summarize the auth design doc") is None
 
 
+def test_tightened_triggers_do_not_capture_content_lookups():
+    # "recap"/"follow up on"/"what's been happening" must require first-person /
+    # avoid a topic object, so content lookups stay on semantic search.
+    r = _rag()
+    assert r._intent_window("recap the design doc") is None
+    assert r._intent_window("follow up on the Stripe ticket") is None
+    assert r._intent_window("what's been happening with the deploy") is None
+    # The intended first-person forms still route.
+    assert r._intent_window("recap my day") is not None
+    assert r._intent_window("What should I follow up on?") is not None
+    assert r._intent_window("what's been happening") is not None
+
+
 def test_hyphenated_my_day_to_day_stays_semantic():
     # Regression: "my day-to-day workflow" must NOT match the synthesis "my day"
     # alternative — the hyphen is a regex word boundary, so without a `(?![\w-])`

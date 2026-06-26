@@ -69,9 +69,14 @@ _SYNTHESIS_RE = re.compile(
     r"|\bmy\s+(day|week)s?\b(?![\w-])"
     r"|what\s+(did|have|was|am)\s+i\s+(been\s+)?(do|doing|done|work|working|up\s+to)"
     r"|what\s+i(?:'ve|\s+have)?\s+(did|done|worked\s+on|been\s+working\s+on|been\s+doing)"
-    r"|what'?s\s+been\s+(happening|going\s+on)"
-    r"|\b(catch\s+me\s+up|recap)\b"
-    r"|follow[\s-]?up\s+on|what\s+should\s+i\s+follow"
+    # "what's been happening" but NOT "...happening with the deploy" (a topic).
+    r"|what'?s\s+been\s+(happening|going\s+on)(?!\s+(?:with|to|on|for|about|in|around)\b)"
+    # "catch me up" is first-person; "recap" requires a possessive so "recap the
+    # design doc" (content) stays on semantic search.
+    r"|catch\s+me\s+up|recap\s+my\b"
+    # Only the first-person "what should I follow up on" — drop bare "follow up
+    # on X" which is a content/topic lookup.
+    r"|what\s+should\s+i\s+follow"
     r"|what\s+should\s+i\s+(work\s+on|focus\s+on|do\s+next|prioriti[sz]e)",
     re.IGNORECASE,
 )
@@ -536,8 +541,12 @@ class RAG:
             return []
         if len(items) <= n:
             return items
-        step = len(items) / n
-        return [items[min(len(items) - 1, int(i * step))] for i in range(n)]
+        if n == 1:
+            return [items[0]]
+        # Map i in [0, n-1] onto [0, len-1] so BOTH endpoints are always picked —
+        # the tail (most-recent occurrence) must be represented, not just the head.
+        last = len(items) - 1
+        return [items[round(i * last / (n - 1))] for i in range(n)]
 
     @staticmethod
     def _signal_score(obs: Any, text: str) -> int:
