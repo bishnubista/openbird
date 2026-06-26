@@ -15,6 +15,9 @@ Gates (a surface passes when a MAJORITY of its runs pass):
     flaky grounding gate (e.g. "Summarize my day" grounded only 2/5 on a small
     model before the synthesis-persona fix), so the floor fails grounding flakiness
     before it degrades into silent answer-blanking.
+  * Day-scoped Ask: the same gate over the explicit ``--day`` path used by the
+    Today view's "Ask about this day" button. This catches regressions where the
+    generic intent path grounds but the app/CLI hard-scope path blanks.
   * Briefing (--day 0 and --day 1): the prose has zero ungrounded ``#N`` refs
     (numbers it invented that are absent from the grounding context), and no
     grounding source is self-capture. Briefing runs do not report a grounded flag,
@@ -38,6 +41,14 @@ ASK_QUERIES: tuple[str, ...] = (
     "Summarize my day",
     "What did I work on yesterday?",
     "What should I follow up on?",
+)
+DAY_SCOPED_ASK_QUERIES: tuple[tuple[int, str], ...] = (
+    (0, "Summarize my day"),
+    (0, "What did I work on?"),
+    (0, "What should I follow up on?"),
+    # Non-synthesis by design: drives the explicit-window specific-question
+    # branch instead of the broad temporal summary selector.
+    (0, "What about OpenBird?"),
 )
 BRIEFING_DAYS: tuple[int, ...] = (0, 1)
 
@@ -94,10 +105,17 @@ class QualityReport:
         return bool(self.checks) and all(c.passed for c in self.checks)
 
 
-def _eval_ask(rag: RAG, query: str, runs: int) -> CheckResult:
-    res = CheckResult(label=f"ask:{query}")
+def _eval_ask(
+    rag: RAG,
+    query: str,
+    runs: int,
+    *,
+    window: tuple[float, float] | None = None,
+    label: str | None = None,
+) -> CheckResult:
+    res = CheckResult(label=label or f"ask:{query}")
     for _ in range(runs):
-        ans = rag.answer(query)
+        ans = rag.answer(query, window=window)
         self_cap = any(_is_self_capture(c.app) for c in ans.citations)
         ok = ans.grounded and len(ans.citations) >= 1 and not self_cap
         # Metadata/counts ONLY — never the answer text or citation snippets: this
@@ -149,6 +167,16 @@ def run_quality_eval(store: Any, provider: Any, *, day_window, runs: int = 3) ->
     rag = RAG(store, provider)
     for q in ASK_QUERIES:
         report.checks.append(_eval_ask(rag, q, runs))
+    for day, q in DAY_SCOPED_ASK_QUERIES:
+        report.checks.append(
+            _eval_ask(
+                rag,
+                q,
+                runs,
+                window=day_window(day),
+                label=f"ask:day{day}:{q}",
+            )
+        )
     for day in BRIEFING_DAYS:
         report.checks.append(_eval_briefing(store, provider, day_window, day, runs))
     return report

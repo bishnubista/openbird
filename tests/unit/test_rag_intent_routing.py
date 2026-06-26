@@ -204,6 +204,13 @@ def test_hyphenated_my_day_to_day_stays_semantic():
     assert _rag()._intent_window("my week") is not None
 
 
+def test_eval_specific_day_query_stays_out_of_synthesis_router():
+    # Mirrors quality_eval.DAY_SCOPED_ASK_QUERIES' specific-path guard. If this
+    # starts matching synthesis, eval quality no longer exercises
+    # explicit_window_specific with a real model.
+    assert RAG._is_synthesis_query("What about OpenBird?") is False
+
+
 # -- _sample_even -------------------------------------------------------------
 
 
@@ -298,6 +305,122 @@ def test_temporal_selection_includes_rich_late_row_not_only_earliest():
     # Routing proven: synthesis used the time-range scan, never semantic search.
     assert store.search_calls == 0
     assert store.range_calls >= 1
+
+
+def test_explicit_window_specific_question_uses_query_relevance():
+    """A day-scoped specific question must not use summary-only selection.
+
+    Regression for the real "Ask about this day" failure: a low-signal Mail row
+    containing the asked-about name was present in the selected day, but the
+    broad summary selector filled all six source slots with richer engineering
+    rows and the model had no way to answer.
+    """
+    rich_rows = [
+        _row(
+            f"rich{i}",
+            ts=float(i * 1000),
+            window=f"Land release pipeline improvement #{100 + i}",
+            text=(
+                "Detailed engineering work on notarization, packaging, tests, "
+                "release notes, and CI cleanup. "
+            ) * 3,
+        )
+        for i in range(24)
+    ]
+    alice = _row(
+        "alice",
+        ts=12_345.0,
+        window="Mail",
+        text="Asked Alice to confirm the renewal deadline and invoice owner.",
+    )
+    store = FakeTemporalStore(rich_rows + [alice])
+    chatter = RAG(store, CiteAllCompleter())
+
+    result = chatter.answer("what did I ask Alice about?", window=(0.0, 99_999.0))
+
+    assert result.grounded
+    assert any(c.observation_id == "alice" for c in result.citations)
+    assert store.search_calls == 0  # hard-scoped range scan, not global search
+    assert store.range_calls == 1
+
+
+def test_explicit_window_specific_question_abstains_on_zero_overlap():
+    rows = [
+        _row(
+            "deploy",
+            ts=100.0,
+            window="Deploy checklist",
+            text="Reviewed release packaging and notarization steps.",
+        )
+    ]
+    completer = CiteAllCompleter()
+    chatter = RAG(FakeTemporalStore(rows), completer)
+
+    result = chatter.answer("what about Alice?", window=(0.0, 999.0))
+
+    assert not result.grounded
+    assert result.citations == []
+    assert result.used_hits == []
+    assert "memory" in result.answer.lower()
+    assert completer.calls == 0
+
+
+def test_explicit_window_specific_question_keeps_short_numeric_ids():
+    rows = [
+        _row(
+            "issue42",
+            ts=100.0,
+            window="Fix capture race #42",
+            text="Regression notes for issue #42 and its verification steps.",
+        ),
+        _row(
+            "other",
+            ts=200.0,
+            window="Release notes",
+            text="General packaging cleanup with no issue reference.",
+        ),
+    ]
+    chatter = RAG(FakeTemporalStore(rows), CiteAllCompleter())
+
+    result = chatter.answer("what about #42?", window=(0.0, 999.0))
+
+    assert result.grounded
+    assert {c.observation_id for c in result.citations} == {"issue42"}
+
+
+def test_temporal_selection_drops_low_signal_rows_when_enough_signal_exists():
+    """Noisy days should not spend source slots on low-signal rows."""
+    noise = [
+        _row(
+            f"noise{i}",
+            ts=float(i * 100),
+            window="Codex" if i % 2 else "New Tab",
+            text="_id=abc&uaid=xyz transient browser tracking fragment",
+        )
+        for i in range(60)
+    ]
+    rich = [
+        _row(
+            f"event{i}",
+            ts=float(ts),
+            window=f"Land user-visible OpenBird feature slice #{200 + i}",
+            text=(
+                f"Important milestone {i}: completed focused work with tests, "
+                "review, and handoff notes. "
+            ) * 3,
+        )
+        for i, ts in enumerate([500, 8500, 17000, 26000, 35000, 47000, 59000, 71000])
+    ]
+    store = FakeTemporalStore(sorted(noise + rich, key=lambda p: p[0].ts))
+    chatter = RAG(store, CiteAllCompleter())
+
+    result = chatter.answer("Summarize my day")
+
+    assert result.grounded
+    assert len(result.used_hits) == 6
+    cited_ids = {c.observation_id for c in result.citations}
+    assert all(cid.startswith("event") for cid in cited_ids)
+    assert not any(cid.startswith("noise") for cid in cited_ids)
 
 
 # -- grounding gate intact + routing proven -----------------------------------
