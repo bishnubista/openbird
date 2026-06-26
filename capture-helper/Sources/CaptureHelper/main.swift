@@ -372,8 +372,65 @@ private func contentAllowed(bundleId: String?, allow: Set<String>, block: Set<St
     return anyMatch(id, allow)
 }
 
+// MARK: - Browser URL via Apple Events (opt-in)
+
+/// Map a browser bundle id to its AppleScript application name, for the
+/// Chromium family ONLY. Chromium exposes a per-window `mode` property, which is
+/// what lets us reliably skip private windows (see :func:`activeTabURL`). Safari
+/// is deliberately excluded for now: it has NO scriptable private-browsing flag,
+/// so we cannot prove a window is non-private and must not risk capturing a
+/// private URL. (Safari support is a follow-up that needs the Window-menu check.)
+private func browserScriptTarget(_ bundleId: String?) -> String? {
+    switch bundleId {
+    case "com.google.Chrome", "com.google.Chrome.canary": return "Google Chrome"
+    case "com.microsoft.edgemac": return "Microsoft Edge"
+    case "com.brave.Browser": return "Brave Browser"
+    case "company.thebrowser.Browser": return "Arc"
+    case "com.vivaldi.Vivaldi": return "Vivaldi"
+    default: return nil
+    }
+}
+
+/// The active tab's committed URL via Apple Events, or nil.
+///
+/// FAIL-CLOSED on privacy: the script returns a URL ONLY when the window's `mode`
+/// is definitively `"normal"`. A private/incognito window (`mode == "incognito"`)
+/// OR a browser where `mode` can't be read (unsupported / older Arc) both yield
+/// the empty string → no URL. Also nil for: no front window, a non-Chromium app,
+/// or absent Automation consent (AppleScript error -1743). The URL is untrusted:
+/// the Python side runs `redact.scrub_url` (drops query/fragment + tokens) before
+/// storage, and the helper never logs the URL itself — only a presence bit.
+private func activeTabURL(bundleId: String?) -> String? {
+    guard let appName = browserScriptTarget(bundleId) else { return nil }
+    let source = """
+    tell application "\(appName)"
+        if (count of windows) is 0 then return ""
+        set theWindow to front window
+        set windowMode to ""
+        try
+            set windowMode to (mode of theWindow) as text
+        end try
+        if windowMode is not "normal" then return ""
+        return URL of active tab of theWindow
+    end tell
+    """
+    var errorInfo: NSDictionary?
+    guard let script = NSAppleScript(source: source) else { return nil }
+    let result = script.executeAndReturnError(&errorInfo)
+    if errorInfo != nil {
+        // Denied automation (-1743), app not scriptable, or no window: skip the
+        // URL silently. Reason code only — never the URL or the error detail.
+        diag("capture: url_unavailable")
+        return nil
+    }
+    guard let s = result.stringValue, !s.isEmpty else { return nil }
+    return s
+}
+
 /// Capture the frontmost app's active-window text once and emit it.
-private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile: String?) {
+private func captureFrontmost(
+    allow: Set<String>, block: Set<String>, pauseFile: String?, captureUrls: Bool
+) {
     if skipIfPaused(pauseFile) { return }
 
     guard let frontApp = NSWorkspace.shared.frontmostApplication else {
@@ -458,14 +515,22 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile:
         text = String(decoding: Array(prefix), as: UTF8.self)
     }
 
+    // Active-tab URL via Apple Events, only when opted in (--capture-urls). Skips
+    // incognito/private and denied-automation; nil for non-browsers. Python scrubs
+    // it; the diag carries a presence bit (0/1), never the URL string.
+    var url: String? = nil
+    if captureUrls, !skipIfPaused(pauseFile) {
+        url = activeTabURL(bundleId: bundleId)
+    }
+
     // Emit only NON-content metadata to stderr (node/byte counts + redactions).
     diag("capture: ok nodes=\(budget.nodesVisited) bytes=\(text.utf8.count) "
-        + "secure_skipped=\(budget.sensitiveSkipped)")
+        + "secure_skipped=\(budget.sensitiveSkipped) url=\(url != nil ? 1 : 0)")
 
     let event = CaptureEvent(
         app: bundleId,
         window: windowTitle,
-        url: nil, // URL extraction is per-app (Safari/Chrome AX) and not in the MVP helper.
+        url: url,
         text: text,
         ts: Date().timeIntervalSince1970,
         incognito: false
@@ -528,6 +593,9 @@ private func run() {
     let allow = listArg(args, "--allow")
     let block = listArg(args, "--block")
     let pauseFile = valueArg(args, "--pause-file")
+    // Opt-in: capture the active browser tab's URL via Apple Events (off unless the
+    // daemon passes --capture-urls, which it does only when the user enables it).
+    let captureUrls = args.contains("--capture-urls")
 
     if skipIfPaused(pauseFile) { return }
 
@@ -547,7 +615,7 @@ private func run() {
         exit(2)
     }
 
-    captureFrontmost(allow: allow, block: block, pauseFile: pauseFile)
+    captureFrontmost(allow: allow, block: block, pauseFile: pauseFile, captureUrls: captureUrls)
 }
 
 run()
