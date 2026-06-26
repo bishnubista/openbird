@@ -1273,6 +1273,123 @@ def eval_signals(
         raise typer.Exit(code=1)
 
 
+def _eval_provider(model: str | None):
+    """Build an LLM provider for an eval, overriding the model when given.
+
+    Unlike the signal eval, chat/briefing evals require a live model. Provider
+    construction failures (Ollama down, cloud opt-in) are surfaced as a clean
+    exit-2 with a hint rather than a traceback.
+    """
+    import dataclasses
+
+    from openbird.config import get_settings
+    from openbird.llm.provider import CloudOptInRequired, create_llm_provider
+
+    # Override ONLY the model, preserving the user's env/config (allow_cloud,
+    # timeouts, retries, backend, ollama_host, data/prompts dirs). Constructing a
+    # bare Settings(llm_model=...) would silently discard all of those.
+    base = get_settings()
+    settings = dataclasses.replace(base, llm_model=model) if model else base
+    try:
+        return create_llm_provider(settings), settings.llm_model
+    except CloudOptInRequired as exc:
+        _err_console.print(f"[red]Cloud opt-in required:[/] {exc}")
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:  # Ollama unreachable, etc.
+        _err_console.print(
+            f"[red]Could not start model provider[/] ({type(exc).__name__}). "
+            "Is Ollama running and the model pulled?"
+        )
+        raise typer.Exit(code=2) from exc
+
+
+@eval_app.command("chat")
+def eval_chat(
+    fixture: Path = typer.Argument(..., help="Chat answer-quality eval JSONL fixture."),
+    model: str = typer.Option(None, "--model", help="Override model (e.g. ollama/qwen3:8b)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Run the RAG answer-quality eval (needs a live local model)."""
+    from openbird.chat.eval import (
+        chat_eval_report_payload,
+        load_chat_eval_jsonl,
+        run_chat_eval,
+    )
+
+    try:
+        cases = load_chat_eval_jsonl(fixture)
+    except (OSError, ValueError) as exc:
+        _err_console.print(f"[red]Invalid chat eval fixture:[/] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    provider, resolved = _eval_provider(model)
+    report = run_chat_eval(cases, provider=provider, model=resolved)
+    payload = chat_eval_report_payload(report)
+    if as_json:
+        _console.print_json(data=payload)
+    else:
+        table = Table(title=f"Chat eval — {resolved}", show_header=True, header_style="bold")
+        table.add_column("Metric")
+        table.add_column("Value", justify="right")
+        for key in (
+            "passed", "total_cases", "pass_rate", "json_valid_rate", "facts_ok_rate",
+            "citations_complete_rate", "forbidden_clean_rate", "refusal_ok_rate",
+            "window_ok_rate",
+        ):
+            table.add_row(key, str(payload[key]))
+        _console.print(table)
+    if not report.passed:
+        raise typer.Exit(code=1)
+
+
+@eval_app.command("briefing")
+def eval_briefing(
+    fixture: Path = typer.Argument(..., help="Briefing prose eval JSONL fixture."),
+    model: str = typer.Option(None, "--model", help="Override model (e.g. ollama/qwen3:8b)."),
+    variant: str = typer.Option("current", "--variant", help="current | candidate"),
+    repeats: int = typer.Option(5, "--repeats", help="Repeats per case (stochastic)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Run the briefing prose-adherence eval (needs a live local model)."""
+    from openbird.routines.eval import (
+        VALID_VARIANTS,
+        briefing_eval_report_payload,
+        load_briefing_eval_jsonl,
+        run_briefing_eval,
+    )
+
+    if variant not in VALID_VARIANTS:
+        _err_console.print(f"[red]--variant must be one of[/] {sorted(VALID_VARIANTS)}")
+        raise typer.Exit(code=2)
+    if repeats < 1:
+        _err_console.print("[red]--repeats must be >= 1[/]")
+        raise typer.Exit(code=2)
+    try:
+        cases = load_briefing_eval_jsonl(fixture)
+    except (OSError, ValueError) as exc:
+        _err_console.print(f"[red]Invalid briefing eval fixture:[/] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    provider, resolved = _eval_provider(model)
+    report = run_briefing_eval(
+        cases, provider=provider, model=resolved, variant=variant, repeats=repeats
+    )
+    payload = briefing_eval_report_payload(report)
+    if as_json:
+        _console.print_json(data=payload)
+    else:
+        table = Table(
+            title=f"Briefing eval — {resolved} [{variant}]", show_header=True, header_style="bold"
+        )
+        table.add_column("Metric")
+        table.add_column("Value", justify="right")
+        for key in ("pass_rate", "prose_clean_rate", "grounded_rate", "mean_md_symbols"):
+            table.add_row(key, str(payload[key]))
+        _console.print(table)
+    if not report.passed:
+        raise typer.Exit(code=1)
+
+
 # --------------------------------------------------------------------------- #
 # data                                                                        #
 # --------------------------------------------------------------------------- #
