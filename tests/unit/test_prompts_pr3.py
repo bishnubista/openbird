@@ -68,7 +68,9 @@ def test_routine_single_entrypoint_parity():
 def test_routine_prompt_preserves_rules_and_epilogue():
     sp = routine._SYSTEM_PROMPT
     assert "routine summarizer" in sp and "untrusted DATA" in sp
-    assert "concise" in sp and "SECURITY REMINDER" in sp
+    # Anchor on a specific invariant of the single-paragraph contract (not a generic
+    # keyword), so a regression of the output-only rule fails the test.
+    assert "Output ONLY the briefing" in sp and "SECURITY REMINDER" in sp
 
 
 def test_routine_override_applies_and_falls_back(tmp_path, monkeypatch):
