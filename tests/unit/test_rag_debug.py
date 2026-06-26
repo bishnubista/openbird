@@ -296,3 +296,43 @@ def test_answer_temporal_emits_trace_under_flag(monkeypatch, caplog):
     assert "route=intent_synthesis" in msg
     assert "rows=2" in msg
     assert "grounded=1" in msg
+
+
+def test_intent_specific_query_emits_distinct_route(monkeypatch, caplog):
+    """A day-windowed SPECIFIC question (not synthesis phrasing) routes through
+    _answer_scoped_specific and must be labelled ``route=intent_specific`` — distinct
+    from the broad-synthesis ``intent_temporal``/``intent_synthesis`` labels — so the
+    trace maps to the actual answer path. Regression: PR #157 added the
+    scoped-specific path but it inherited the ``intent_temporal`` label, making the
+    two day-window paths indistinguishable in diagnostics."""
+    monkeypatch.setenv("OPENBIRD_DEBUG_RAG", "meta")
+    rows = [
+        (Observation(id="a", content_hash="ha", ts=1000.0, app="Mail",
+                     window="Mail — renewal", url=None, session_id="s",
+                     source="capture"),
+         "Asked Alice to confirm the renewal deadline and invoice owner."),
+    ]
+    rag = RAG(_Store(rows), _Completer())
+    rag._now = lambda: 1e9
+    # "today" yields a window; "what did I ask Alice" is NOT synthesis phrasing.
+    rag.answer("what did I ask Alice today?")
+    grounding = [r for r in caplog.records if r.getMessage().startswith("rag.grounding ")]
+    assert grounding, "expected a rag.grounding trace line"
+    assert "route=intent_specific" in grounding[-1].getMessage()
+
+
+def test_synthesis_query_keeps_intent_temporal_route(monkeypatch, caplog):
+    """A broad synthesis query with a temporal word stays ``route=intent_temporal``
+    (the _answer_temporal path) — the new specific-path label must not capture it."""
+    monkeypatch.setenv("OPENBIRD_DEBUG_RAG", "meta")
+    rows = [
+        (Observation(id="a", content_hash="ha", ts=1000.0, app="Chrome",
+                     window="github PR #1 title here", url=None, session_id="s",
+                     source="capture"), "pr body one"),
+    ]
+    rag = RAG(_Store(rows), _Completer())
+    rag._now = lambda: 1e9
+    rag.answer("what did I work on yesterday?")
+    grounding = [r for r in caplog.records if r.getMessage().startswith("rag.grounding ")]
+    assert grounding
+    assert "route=intent_temporal" in grounding[-1].getMessage()
