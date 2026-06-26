@@ -7,6 +7,6 @@
   <key>CFBundleName</key>
   <string>OpenBird Capture Helper</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>OpenBird reads the active browser tab's URL to record what you were viewing. URLs are scrubbed of query strings and tokens before storage.</string>
+  <string>When you enable URL capture (off by default), OpenBird reads the active browser tab's URL to record what you were viewing. URLs are scrubbed of query strings and tokens before storage.</string>
 </dict>
 </plist>

@@ -13,15 +13,5 @@
        future bundled dylib does not trip hardened-runtime validation. -->
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
-  <!--
-    The capture-helper reads the active browser tab's URL via Apple Events
-    (opt-in, --capture-urls). Under the hardened runtime a Developer ID binary
-    sending Apple Events is BLOCKED even after the user grants Automation consent
-    unless it carries this entitlement; the NSAppleEventsUsageDescription string
-    is embedded in the helper's Info.plist. (audio-helper does not script apps,
-    but the two share this single Helper.entitlements file — harmless for it.)
-  -->
-  <key>com.apple.security.automation.apple-events</key>
-  <true/>
 </dict>
 </plist>
