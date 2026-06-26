@@ -52,13 +52,18 @@ cd "$repo_root"
 # pyproject.toml: first `version = "..."` line is the [project] version.
 pyproject_v="$(awk -F'"' '/^version = / {print $2; exit}' pyproject.toml)"
 # uv.lock: the project's own editable entry pins its version a line below its name.
+# The trailing `|| true` matters: under `set -euo pipefail` a no-match `grep` exits
+# non-zero, which would kill the script on the assignment BEFORE the empty-check
+# below can report a clean "could not read version" / exit 2. `|| true` lets the
+# substitution yield empty so the handler downstream owns the error path. (The
+# awk-only extractions below exit 0 even on no match, so they need no guard.)
 lock_v="$(grep -A1 '^name = "openbird"$' uv.lock \
-  | awk -F'"' '/^version = / {print $2; exit}')"
+  | awk -F'"' '/^version = / {print $2; exit}' || true)"
 # Casks/openbird.rb: `version "<x.y.z>"`.
 cask_v="$(awk -F'"' '/version "/ {print $2; exit}' Casks/openbird.rb)"
 # Formula/openbird.rb: version lives in the source-tarball URL, .../download/v<x.y.z>/...
 formula_v="$(grep -Eo 'releases/download/v[0-9]+\.[0-9]+\.[0-9]+/' Formula/openbird.rb \
-  | head -n1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
+  | head -n1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' || true)"
 
 for pair in "pyproject:$pyproject_v" "uv.lock:$lock_v" "cask:$cask_v" "formula:$formula_v"; do
   if [ -z "${pair#*:}" ]; then
