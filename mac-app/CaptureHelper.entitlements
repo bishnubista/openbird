@@ -8,8 +8,9 @@
   <true/>
   <!--
     The capture-helper reads the active browser tab's URL via Apple Events
-    (opt-in, --capture-urls). Under the hardened runtime a Developer ID binary
-    sending Apple Events is BLOCKED even after the user grants Automation consent
+    (opt-in, gated by OPENBIRD_CAPTURE_URLS). Under the hardened runtime a
+    Developer ID binary sending Apple Events is BLOCKED even after the user
+    grants Automation consent
     unless it carries this entitlement; the NSAppleEventsUsageDescription string
     is embedded in the helper's Info.plist. Kept in a capture-helper-specific
     profile (NOT the shared Helper.entitlements) so audio-helper — which never
