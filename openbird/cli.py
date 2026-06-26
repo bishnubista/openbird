@@ -1273,6 +1273,44 @@ def eval_signals(
         raise typer.Exit(code=1)
 
 
+@eval_app.command("quality")
+def eval_quality(
+    runs: int = typer.Option(3, "--runs", help="LLM runs per surface (majority must pass)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Quality gate for briefing + ask over the real store with the local model.
+
+    Makes live LLM calls (slow, non-deterministic) — a manual pre-PR gate, not a
+    CI test. Checks each surface N times: ask answers must be grounded + cited with
+    no self-capture; briefings must have zero ungrounded ``#N`` refs and no
+    self-capture source. Exits non-zero if any surface fails its majority gate.
+    """
+    from openbird.routines.quality_eval import quality_eval_payload, run_quality_eval
+
+    provider = _provider()
+    store = _store(provider=provider)
+    try:
+        report = run_quality_eval(store, provider, day_window=_day_window, runs=runs)
+    finally:
+        store.close()
+
+    payload = quality_eval_payload(report)
+    if as_json:
+        _console.print_json(data=payload)
+    else:
+        table = Table(title="Quality eval", show_header=True, header_style="bold")
+        table.add_column("Surface")
+        table.add_column("Pass", justify="center")
+        table.add_column("Runs (ok)")
+        for c in report.checks:
+            ok = sum(1 for r in c.runs if r.get("ok"))
+            table.add_row(c.label, "✓" if c.passed else "✗", f"{ok}/{len(c.runs)}")
+        _console.print(table)
+
+    if not report.passed:
+        raise typer.Exit(code=1)
+
+
 # --------------------------------------------------------------------------- #
 # data                                                                        #
 # --------------------------------------------------------------------------- #
