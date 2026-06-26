@@ -19,6 +19,9 @@ fully auditable.
 
 - **Private by default:** memory lives in on-device SQLite, with encryption gated by preflight.
 - **Text-first capture:** active-window text and UI metadata are stored, not screenshots or video.
+- **Opt-in browser URLs:** set `OPENBIRD_CAPTURE_URLS=1` to also record the active tab's URL for
+  Chromium browsers (Chrome/Edge/Brave/Arc/Vivaldi) via Apple Events — off by default, skips private
+  windows, scrubs query strings/tokens, and triggers a one-time macOS Automation prompt per browser.
 - **Model choice:** Ollama is the default, and cloud models are explicit opt-in through LiteLLM.
 - **Auditable behavior:** capture allowlists, redaction policy, source metadata, and deletion commands
   are part of the product surface.

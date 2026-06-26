@@ -38,6 +38,9 @@ DMG_PATH="$ROOT_DIR/dist/$APP_NAME.dmg"
 
 ENT_APP="$ROOT_DIR/mac-app/OpenBird.entitlements"
 ENT_HELPER="$ROOT_DIR/mac-app/Helper.entitlements"
+# capture-helper needs Apple Events (browser URL scripting); audio-helper does
+# NOT, so they sign with separate profiles (least privilege).
+ENT_CAPTURE_HELPER="$ROOT_DIR/mac-app/CaptureHelper.entitlements"
 ENT_PYTHON="$ROOT_DIR/mac-app/Python.entitlements"
 
 log() { echo "package_dmg: $*" >&2; }
@@ -291,7 +294,7 @@ while IFS= read -r -d '' f; do
   fi
 done < <(find "$RES/python/bin" -maxdepth 1 -type f -name 'python*' -print0)
 # 7c. Helpers, launcher shim, then the app LAST (seals everything)
-sign_one "$MACOS/capture-helper" "$ENT_HELPER"
+sign_one "$MACOS/capture-helper" "$ENT_CAPTURE_HELPER"
 sign_one "$MACOS/audio-helper"   "$ENT_HELPER"
 codesign --force --timestamp --sign "$DEVID" "$MACOS/openbird-cli"
 sign_one "$APP" "$ENT_APP"

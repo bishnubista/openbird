@@ -615,6 +615,11 @@ class CaptureDaemon:
             extra += ["--allow", ",".join(allow)]
         if block:
             extra += ["--block", ",".join(block)]
+        # Opt-in browser URL capture (Apple Events): only pass the flag when the
+        # user enabled it, so the helper never scripts a browser — and never
+        # triggers an Automation prompt — by default.
+        if getattr(self.settings, "capture_urls", False):
+            extra += ["--capture-urls"]
         return argv + extra
 
     def _spawn(self) -> subprocess.Popen[str]:

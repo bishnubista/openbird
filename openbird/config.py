@@ -181,6 +181,11 @@ class Settings:
     blocklist: list[str] = field(default_factory=lambda: list(_DEFAULT_BLOCKLIST))
 
     ocr_enabled: bool = False
+    # Opt-in: capture the active browser tab's URL via Apple Events. OFF by
+    # default — enabling it makes the helper script browsers (Chrome/Safari/…),
+    # which triggers a one-time macOS Automation consent prompt per browser. URLs
+    # are scrubbed (query/fragment + tokens) before storage. OPENBIRD_CAPTURE_URLS=1.
+    capture_urls: bool = False
     # Set by storage.crypto.open_encrypted_db depending on whether an encrypted
     # backend (SQLCipher) is actually available. Default False = "local-only,
     # not yet app-encrypted".
@@ -258,6 +263,7 @@ def _coerce(name: str, raw: str, default: object) -> object:
         "encryption_enabled",
         "allow_cloud",
         "require_encryption",
+        "capture_urls",
     ):
         return raw.strip().lower() in ("1", "true", "yes", "on")
     if isinstance(default, float) or name in ("llm_timeout", "embed_timeout"):
@@ -274,6 +280,7 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "encryption_enabled": False,
     "allow_cloud": False,
     "require_encryption": False,
+    "capture_urls": False,
     "retention_days": 0,
     "session_gap_seconds": 300.0,
     "embed_dim": 768,

@@ -372,8 +372,83 @@ private func contentAllowed(bundleId: String?, allow: Set<String>, block: Set<St
     return anyMatch(id, allow)
 }
 
+// MARK: - Browser URL via Apple Events (opt-in)
+
+/// Map a browser bundle id to its AppleScript application name, for the
+/// Chromium family ONLY. Chromium exposes a per-window `mode` property, which is
+/// what lets us reliably skip private windows (see :func:`activeTabURL`). Safari
+/// is deliberately excluded for now: it has NO scriptable private-browsing flag,
+/// so we cannot prove a window is non-private and must not risk capturing a
+/// private URL. (Safari support is a follow-up that needs the Window-menu check.)
+private func browserScriptTarget(_ bundleId: String?) -> String? {
+    switch bundleId {
+    case "com.google.Chrome", "com.google.Chrome.canary": return "Google Chrome"
+    case "com.microsoft.edgemac": return "Microsoft Edge"
+    case "com.brave.Browser": return "Brave Browser"
+    case "company.thebrowser.Browser": return "Arc"
+    case "com.vivaldi.Vivaldi": return "Vivaldi"
+    default: return nil
+    }
+}
+
+/// The active tab's privacy mode + committed URL, read together in one Apple
+/// Event so the SAME reliable `mode` signal can gate both URL and text capture.
+private struct BrowserTab {
+    /// True ONLY when the window's `mode` is definitively `"incognito"`. A browser
+    /// whose `mode` can't be read (older Arc) is NOT marked private here — so text
+    /// capture is never wrongly suppressed; the URL is still withheld (see `url`).
+    let confirmedPrivate: Bool
+    /// The committed URL, present ONLY when `mode == "normal"` (fail-closed).
+    let url: String?
+}
+
+/// Probe a Chromium browser's front window for its privacy mode and active-tab
+/// URL via Apple Events.
+///
+/// The script returns a sentinel: `"PRIVATE"` (incognito), `"URL:<url>"` (a
+/// confirmed-normal window), or `""` (mode unreadable / no window / denied). This
+/// lets the caller (a) SKIP TEXT for a confirmed-private window — closing the gap
+/// where a private Chromium window whose title lacks an "incognito" marker would
+/// otherwise leak its text — and (b) capture the URL only when normal. Never logs
+/// the URL; the Python side scrubs it before storage.
+private func browserTabInfo(appName: String) -> BrowserTab {
+    let source = """
+    tell application "\(appName)"
+        if (count of windows) is 0 then return ""
+        set theWindow to front window
+        set windowMode to ""
+        try
+            set windowMode to (mode of theWindow) as text
+        end try
+        if windowMode is "incognito" then return "PRIVATE"
+        if windowMode is not "normal" then return ""
+        return "URL:" & (URL of active tab of theWindow)
+    end tell
+    """
+    var errorInfo: NSDictionary?
+    guard let script = NSAppleScript(source: source) else {
+        return BrowserTab(confirmedPrivate: false, url: nil)
+    }
+    let result = script.executeAndReturnError(&errorInfo)
+    if errorInfo != nil {
+        // Denied automation (-1743), not scriptable, or no window: no URL, and we
+        // do NOT claim privacy (don't suppress text on a transient script error).
+        diag("capture: url_unavailable")
+        return BrowserTab(confirmedPrivate: false, url: nil)
+    }
+    let s = result.stringValue ?? ""
+    if s == "PRIVATE" { return BrowserTab(confirmedPrivate: true, url: nil) }
+    if s.hasPrefix("URL:") {
+        let u = String(s.dropFirst(4))
+        return BrowserTab(confirmedPrivate: false, url: u.isEmpty ? nil : u)
+    }
+    return BrowserTab(confirmedPrivate: false, url: nil)
+}
+
 /// Capture the frontmost app's active-window text once and emit it.
-private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile: String?) {
+private func captureFrontmost(
+    allow: Set<String>, block: Set<String>, pauseFile: String?, captureUrls: Bool
+) {
     if skipIfPaused(pauseFile) { return }
 
     guard let frontApp = NSWorkspace.shared.frontmostApplication else {
@@ -446,6 +521,25 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile:
         return
     }
 
+    // Browser URL probe runs BEFORE text traversal (opt-in only). The Apple Events
+    // `mode` is a far more reliable private-window signal than the title heuristic
+    // above, so a window it confirms private skips TEXT too — closing the leak
+    // where a private Chromium window whose title lacks an "incognito" marker would
+    // otherwise have its text captured. A non-private window yields the URL to emit.
+    var capturedURL: String? = nil
+    if captureUrls, let appName = browserScriptTarget(bundleId) {
+        if skipIfPaused(pauseFile) { return }
+        let tab = browserTabInfo(appName: appName)
+        if tab.confirmedPrivate {
+            diag("capture: skipped_incognito_mode")
+            if skipIfPaused(pauseFile) { return }
+            emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
+                              ts: Date().timeIntervalSince1970, incognito: true))
+            return
+        }
+        capturedURL = tab.url
+    }
+
     let budget = TraversalBudget(deadlineSeconds: Limits.deadlineSeconds)
     var parts: [String] = []
     if skipIfPaused(pauseFile) { return }
@@ -458,14 +552,15 @@ private func captureFrontmost(allow: Set<String>, block: Set<String>, pauseFile:
         text = String(decoding: Array(prefix), as: UTF8.self)
     }
 
-    // Emit only NON-content metadata to stderr (node/byte counts + redactions).
+    // Emit only NON-content metadata to stderr. `capturedURL` was probed above
+    // (opt-in only); the diag carries a presence bit (0/1), never the URL string.
     diag("capture: ok nodes=\(budget.nodesVisited) bytes=\(text.utf8.count) "
-        + "secure_skipped=\(budget.sensitiveSkipped)")
+        + "secure_skipped=\(budget.sensitiveSkipped) url=\(capturedURL != nil ? 1 : 0)")
 
     let event = CaptureEvent(
         app: bundleId,
         window: windowTitle,
-        url: nil, // URL extraction is per-app (Safari/Chrome AX) and not in the MVP helper.
+        url: capturedURL,
         text: text,
         ts: Date().timeIntervalSince1970,
         incognito: false
@@ -528,6 +623,9 @@ private func run() {
     let allow = listArg(args, "--allow")
     let block = listArg(args, "--block")
     let pauseFile = valueArg(args, "--pause-file")
+    // Opt-in: capture the active browser tab's URL via Apple Events (off unless the
+    // daemon passes --capture-urls, which it does only when the user enables it).
+    let captureUrls = args.contains("--capture-urls")
 
     if skipIfPaused(pauseFile) { return }
 
@@ -547,7 +645,7 @@ private func run() {
         exit(2)
     }
 
-    captureFrontmost(allow: allow, block: block, pauseFile: pauseFile)
+    captureFrontmost(allow: allow, block: block, pauseFile: pauseFile, captureUrls: captureUrls)
 }
 
 run()

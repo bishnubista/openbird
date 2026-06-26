@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- capture-helper links only system frameworks, but keep parity with the app
+       so a future bundled dylib does not trip hardened-runtime validation. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!--
+    The capture-helper reads the active browser tab's URL via Apple Events
+    (opt-in, --capture-urls). Under the hardened runtime a Developer ID binary
+    sending Apple Events is BLOCKED even after the user grants Automation consent
+    unless it carries this entitlement; the NSAppleEventsUsageDescription string
+    is embedded in the helper's Info.plist. Kept in a capture-helper-specific
+    profile (NOT the shared Helper.entitlements) so audio-helper — which never
+    scripts another app — is not granted Automation access (least privilege).
+  -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>
