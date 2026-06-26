@@ -249,7 +249,10 @@ def run_test(
             f" ({survived} literal)"
         )
         # RAG fence contract: the payload's source-header attempt must not survive.
-        if key == "rag":
+        # Both RAG personas build via the same message builder (line 69), so the
+        # synthesis variant must clear the same source-header check — otherwise it
+        # could false-pass the harness if _SOURCE_HEADER neutralization regresses.
+        if key in ("rag", "rag_synthesis"):
             from openbird.chat.rag import _SOURCE_HEADER
 
             if _SOURCE_HEADER in body:
