@@ -492,7 +492,20 @@ final class OpenBirdService: @unchecked Sendable {
             // macOS prompt for "python3.13" instead of "OpenBird". Strict mode
             // also keeps this from silently degrading to plaintext.
             env["OPENBIRD_DISABLE_KEYRING"] = "1"
-            env["OPENBIRD_REQUIRE_ENCRYPTION"] = "1"
+            // Refuse silent plaintext by default — BUT respect an explicit operator
+            // opt-in. A normal launch never sets OPENBIRD_DISABLE_KEYRING in its own
+            // environment, so this guard still fires for a real user whose Keychain
+            // failed. A developer running against a plaintext dev DB (e.g. the
+            // headless self-test, which launches with OPENBIRD_DISABLE_KEYRING=1)
+            // has consciously opted into plaintext, so don't override that choice.
+            // Recognize the SAME truthy set the Python keyring parser uses
+            // (storage/crypto.py: {1,true,yes,on}), so `=true` works too — not just `=1`.
+            let disableRaw = base["OPENBIRD_DISABLE_KEYRING"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let keyringExplicitlyDisabled = ["1", "true", "yes", "on"].contains(disableRaw)
+            if !keyringExplicitlyDisabled {
+                env["OPENBIRD_REQUIRE_ENCRYPTION"] = "1"
+            }
         }
         return env
     }
