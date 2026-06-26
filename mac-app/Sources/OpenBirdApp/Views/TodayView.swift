@@ -183,12 +183,9 @@ struct TodayView: View {
                     .foregroundStyle(OB.textSecondary(scheme))
             }
         } else if let briefing = model.briefing, !briefing.isEmpty {
-            Text(briefing)
-                .font(.system(size: 14))
-                .lineSpacing(4)
+            BriefingText(briefing: briefing)
                 .foregroundStyle(OB.textPrimary(scheme))
                 .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
         } else {
             Text("No briefing available for this day.")
                 .font(.callout)

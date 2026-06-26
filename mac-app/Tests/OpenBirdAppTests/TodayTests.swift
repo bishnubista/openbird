@@ -111,6 +111,92 @@ final class AppDisplayTests: XCTestCase {
     }
 }
 
+final class BriefingProseTests: XCTestCase {
+    func testTightProseIsSingleParagraph() {
+        let raw = "A development-focused day across **GitHub** and the browser."
+        XCTAssertEqual(BriefingProse.paragraphs(from: raw), [raw])
+    }
+
+    func testStripsHeadingMarkersAndKeepsText() {
+        // The verbose CoT dump (### Summary of Observations / ### Final Answer) must
+        // never render its `#` markers literally.
+        let raw = "### Summary of Observations:\nThe user worked on openbird."
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: raw),
+            ["Summary of Observations:", "The user worked on openbird."]
+        )
+    }
+
+    func testStripsHorizontalRulesAndListMarkers() {
+        let raw = """
+        Overview line.
+
+        ---
+
+        - first item
+        1. second item
+        """
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: raw),
+            ["Overview line.", "first item", "second item"]
+        )
+    }
+
+    func testReflowsWrappedProseLinesIntoOneParagraph() {
+        let raw = "A heads-down day\non the citation pipeline."
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: raw),
+            ["A heads-down day on the citation pipeline."]
+        )
+    }
+
+    func testMarkerOnlyLinesProduceNoEmptyParagraphs() {
+        // `####`, `### `, and a bare `- ` strip to "" and must be dropped, never
+        // appended as blank paragraphs (which would render stray gaps).
+        XCTAssertEqual(BriefingProse.paragraphs(from: "####\n### \n- "), [])
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: "#### \nReal sentence."),
+            ["Real sentence."]
+        )
+    }
+
+    func testFencedCodeOpenersAreDropped() {
+        // ```swift / ~~~json openers must not render literal backticks; fenced content
+        // survives as plain prose.
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: "```swift\nlet x = 1\n```"),
+            ["let x = 1"]
+        )
+    }
+
+    func testCRLFLineEndingsAreNormalised() {
+        // A CRLF tail must not leave `\r` attached and defeat the symbol/heading checks.
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: "####\r\nReal sentence.\r\n"),
+            ["Real sentence."]
+        )
+    }
+
+    func testAllSymbolInputStripsToEmpty() {
+        // Pure noise normalises to no paragraphs; the BriefingText fallback (not this
+        // pure parser) is what keeps the card non-blank.
+        XCTAssertEqual(BriefingProse.paragraphs(from: "---\n***\n___"), [])
+    }
+
+    func testHashtagIsNotTreatedAsHeading() {
+        let raw = "Tagged the note #urgent for review."
+        XCTAssertEqual(BriefingProse.paragraphs(from: raw), [raw])
+    }
+
+    func testInlineBoldSurvivesAsAttributedRun() {
+        // `**rag.py**` parses to a strongly-emphasised run (no literal asterisks).
+        let attr = BriefingProse.inlineAttributed("Worked on **rag.py** today.")
+        XCTAssertFalse(String(attr.characters).contains("*"))
+        let bolded = attr.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }
+        XCTAssertTrue(bolded)
+    }
+}
+
 final class TodayFormattingTests: XCTestCase {
     func testDurationLabel() {
         XCTAssertEqual(TodayView.durationLabel(30), "30s")
