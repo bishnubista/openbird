@@ -74,6 +74,10 @@ done
 
 # --- probe the published GitHub releases (best-effort) -----------------------
 
+# Releases live on the canonical repo (the cask URL is pinned to it too). Query it
+# explicitly with --repo: an inferred repo would, on a fork, report an
+# already-published upstream release as missing and mislabel real drift as pending.
+canonical_repo="bishnubista/openbird"
 dmg_tag="beta-dmg-$pyproject_v"
 src_tag="v$pyproject_v"
 gh_ok=0
@@ -82,8 +86,8 @@ src_published="unknown"
 
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   gh_ok=1
-  if gh release view "$dmg_tag" >/dev/null 2>&1; then dmg_published="yes"; else dmg_published="no"; fi
-  if gh release view "$src_tag" >/dev/null 2>&1; then src_published="yes"; else src_published="no"; fi
+  if gh release view "$dmg_tag" --repo "$canonical_repo" >/dev/null 2>&1; then dmg_published="yes"; else dmg_published="no"; fi
+  if gh release view "$src_tag" --repo "$canonical_repo" >/dev/null 2>&1; then src_published="yes"; else src_published="no"; fi
 fi
 
 # --- evaluate each row -------------------------------------------------------
