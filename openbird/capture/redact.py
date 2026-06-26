@@ -274,6 +274,28 @@ def _is_dangerous(app: str | None) -> bool:
     return _substring_any(app, _DANGEROUS_BUNDLE_SUBSTRINGS)
 
 
+# OpenBird's own bundle id (app + bundled helpers). Capturing OpenBird's own UI
+# would poison its memory with phantom "Ask about your work…" rows and create a
+# retrieval feedback loop. Unlike the dangerous backstop, this match is EXACT /
+# dotted-prefix, NEVER substring: on the real DB the literal "openbird" appears in
+# ~1,459 legitimate Chrome rows (github.com/bishnubista/openbird) and ~1,290
+# Ghostty build rows — a substring match would delete that real dev signal.
+_SELF_BUNDLE_ROOT = "ai.openbird.openbird"
+
+
+def _is_self_capture(app: str | None) -> bool:
+    """True iff ``app`` is OpenBird's own process (the app or a bundled helper).
+
+    Matches the exact root bundle id or a dotted child (``…OpenBird.capture-helper``
+    / ``.audio-helper``), case-insensitively. Substring matching is deliberately
+    NOT used — see :data:`_SELF_BUNDLE_ROOT`.
+    """
+    if not app:
+        return False
+    a = app.casefold()
+    return a == _SELF_BUNDLE_ROOT or a.startswith(_SELF_BUNDLE_ROOT + ".")
+
+
 def _is_allowlisted(app: str | None, allowlist) -> bool:
     """True if ``app`` matches an allowlist entry (exact bundle id by default).
 
@@ -302,10 +324,11 @@ def decide(
     the sole enabler):
 
     1. There must be some text to capture.
-    2. The app must be on the allowlist (empty allowlist => capture nothing).
-    3. The app must not be on the user blocklist.
-    4. The app must not be in the hardcoded dangerous-category backstop.
-    5. The context must not be incognito/private (explicit flag or title heuristic).
+    2. The app must not be OpenBird itself (self-capture backstop).
+    3. The app must be on the allowlist (empty allowlist => capture nothing).
+    4. The app must not be on the user blocklist.
+    5. The app must not be in the hardcoded dangerous-category backstop.
+    6. The context must not be incognito/private (explicit flag or title heuristic).
 
     Args:
         app: App bundle id / name reported by the capture helper.
@@ -323,6 +346,12 @@ def decide(
 
     if not text or not text.strip():
         return RedactionDecision(capture=False, reason="no_text")
+
+    # Self-capture backstop runs BEFORE the allowlist so it yields an accurate
+    # reason and holds even if OpenBird were (mis)allowlisted or under broad
+    # capture — OpenBird must never ingest its own UI.
+    if _is_self_capture(app):
+        return RedactionDecision(capture=False, reason="self_capture")
 
     if not _is_allowlisted(app, settings.allowlist):
         return RedactionDecision(capture=False, reason="not_allowlisted")
@@ -631,4 +660,6 @@ __all__ = [
     "scrub_metadata",
     "apply",
     "is_incognito",
+    "_SELF_BUNDLE_ROOT",
+    "_is_self_capture",
 ]

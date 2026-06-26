@@ -42,6 +42,71 @@ _TEMPORAL_RE = re.compile(
     re.IGNORECASE,
 )
 _DAY = 86_400.0
+# Trailing window (days) for a synthesis "follow up on" / "been working on" intent
+# that carries no explicit temporal word. Kept short so the on-device model gets a
+# small, fast context; explicit "this week" still resolves to 7 days upstream.
+_MULTIDAY_WINDOW_DAYS = 3
+
+# Synthesis/meta intent: "summarize my day", "what did I work on", "what should
+# I follow up on". These carry NO explicit temporal word, so they miss
+# `_TEMPORAL_RE` and would fall to semantic search — which embeds the literal
+# phrase and retrieves text *containing* those words (e.g. OpenBird's own UI),
+# never the day's activity. We detect them and route through the same grounded
+# time-range scan as temporal questions.
+#
+# Deliberately NARROW and first-person/possessive anchored so specific content
+# lookups ("summarize the auth design doc", "what did I decide about X", "what
+# bugs were filed recently") do NOT match and stay on semantic citation-QA. The
+# adversarial review flagged bare "recently/lately" as over-capturing genuine
+# content queries, so those are NOT standalone triggers — they only widen the
+# window once a synthesis intent already matched (see `_MULTIDAY_RE`).
+_SYNTHESIS_RE = re.compile(
+    r"summari[sz]e\s+my\s+(day|morning|afternoon|evening|week|work|activity|standup)"
+    r"(?![\w-])"
+    # `(?![\w-])` so a following hyphen does NOT terminate the word: without it
+    # "my day-to-day workflow" matches "my day" (a regex \b sits between 'y' and
+    # '-') and a genuine content query mis-routes to the chronological scan.
+    r"|\bmy\s+(day|week)s?\b(?![\w-])"
+    r"|what\s+(did|have|was|am)\s+i\s+(been\s+)?(do|doing|done|work|working|up\s+to)"
+    r"|what\s+i(?:'ve|\s+have)?\s+(did|done|worked\s+on|been\s+working\s+on|been\s+doing)"
+    # "what's been happening" but NOT "...happening with the deploy" (a topic).
+    r"|what'?s\s+been\s+(happening|going\s+on)(?!\s+(?:with|to|on|for|about|in|around)\b)"
+    # "catch me up" is first-person; "recap" requires a possessive so "recap the
+    # design doc" (content) stays on semantic search.
+    r"|catch\s+me\s+up|recap\s+my\b"
+    # Only the first-person "what should I follow up on" — drop bare "follow up
+    # on X" which is a content/topic lookup.
+    r"|what\s+should\s+i\s+follow"
+    r"|what\s+should\s+i\s+(work\s+on|focus\s+on|do\s+next|prioriti[sz]e)",
+    re.IGNORECASE,
+)
+# Once a synthesis intent matches, these widen the default window from "today" to
+# a trailing few days (_MULTIDAY_WINDOW_DAYS). Follow-ups inherently span prior
+# days (open loops you have NOT gotten back to today), so "follow up" is a
+# multi-day default — the review flagged today-only as wrong-default for that chip.
+_MULTIDAY_RE = re.compile(
+    r"\b(week|recently|lately|follow[\s-]?up|been\s+working\s+on|been\s+doing)\b",
+    re.IGNORECASE,
+)
+
+# Generic window titles that carry almost no activity signal on their own (a
+# bare app name, a transient sheet). Used to down-rank low-signal observations
+# when selecting what to ground a synthesis answer on — derived from the real
+# captured DB, where these dominate the noise that makes the model refuse to
+# cite. Lowercased for case-insensitive comparison.
+_GENERIC_WINDOWS = frozenset(
+    {
+        "",
+        "codex",
+        "claude",
+        "print",
+        "design",
+        "quick look",
+        "finder",
+        "new tab",
+        "untitled",
+    }
+)
 
 # Hard cap on how many retrieved chunks we feed into the prompt context. Keeps
 # the prompt bounded for small local models.
@@ -293,12 +358,15 @@ class RAG:
                 )
             return self._answer_temporal(query, window)
 
-        # Temporal/activity intent ("what did I do yesterday?") must use the
-        # observation time-range scan, not semantic chunk similarity — otherwise
-        # chronology is missed and ranking keys on irrelevant similarity.
-        phrase_window = self._temporal_window(query)
-        if phrase_window is not None and hasattr(self.store, "time_range_text"):
-            return self._answer_temporal(query, phrase_window)
+        # Temporal/activity AND synthesis/meta intent ("what did I do
+        # yesterday?", "Summarize my day", "what should I follow up on?") must use
+        # the observation time-range scan, not semantic chunk similarity. Semantic
+        # search on a synthesis phrase embeds the literal words and retrieves text
+        # *containing* them (e.g. captured UI) rather than the day's activity, so
+        # the model honestly cites nothing and the grounding gate blanks it.
+        intent_window = self._intent_window(query)
+        if intent_window is not None and hasattr(self.store, "time_range_text"):
+            return self._answer_temporal(query, intent_window)
 
         hits = self.store.search(query, k=k, semantic=semantic)
         context = self._assemble_context(hits)
@@ -356,6 +424,38 @@ class RAG:
         # weekly variants
         return now - 7 * _DAY, now
 
+    def _intent_window(self, query: str) -> tuple[float, float] | None:
+        """Return a time window for a temporal OR synthesis/meta query, else None.
+
+        Precedence: an explicit temporal word ("yesterday"/"this week") wins via
+        :meth:`_temporal_window`. Otherwise a narrow synthesis intent ("Summarize
+        my day", "what did I work on", "what should I follow up on?") gets a
+        default window so it routes through the grounded time-range scan instead
+        of semantic search. The window defaults to local-today; a week/follow-up
+        intent widens it to a trailing few days (``_MULTIDAY_WINDOW_DAYS``;
+        follow-ups span prior days). Explicit "this week" still resolves to 7 days
+        via :meth:`_temporal_window`, which takes precedence. Uses
+        the injectable clock so it is deterministic in tests. Non-synthesis,
+        content-bearing queries return ``None`` and stay on semantic citation-QA.
+        """
+        explicit = self._temporal_window(query)
+        if explicit is not None:
+            return explicit
+        if not _SYNTHESIS_RE.search(query):
+            return None
+        now = self._now()
+        if _MULTIDAY_RE.search(query):
+            # Multi-day synthesis ("follow up on", "been working on") spans prior
+            # days but stays SHORT: a trailing few days keeps the on-device model's
+            # context small enough to answer in one pass (a 7-day window timed out
+            # qwen3:8b on a cold load). Explicit "this week" still gets 7 days via
+            # _temporal_window, which takes precedence above.
+            return now - _MULTIDAY_WINDOW_DAYS * _DAY, now
+        today = _dt.datetime.fromtimestamp(now).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        return today.timestamp(), now
+
     def _answer_temporal(self, query: str, window: tuple[float, float]) -> AnswerResult:
         """Answer a temporal question from a time-range scan of observations."""
         start, end = window
@@ -371,22 +471,51 @@ class RAG:
         # inside the window survives as a distinct episode (so populated session_ids
         # make temporal recall coherent); a null session_id groups as (None, hash),
         # preserving the prior content-hash-only collapse for legacy rows.
-        context: list[_ContextItem] = []
+        from openbird.capture.redact import _is_self_capture
+
+        deduped: list[tuple[Any, str]] = []
         seen: set[tuple[str | None, str]] = set()
         for obs, text in rows:
-            if obs is None:
+            # OpenBird's own UI never grounds an answer (parity with the briefing
+            # path): skip self-capture before dedupe/scoring so a legacy pre-gate
+            # self row can't be sent to the model or cited.
+            if obs is None or _is_self_capture(obs.app):
                 continue
             key = (obs.session_id, obs.content_hash)
             if key in seen:
                 continue
             seen.add(key)
+            deduped.append((obs, text))
+
+        if not deduped:
+            return AnswerResult(
+                answer="I don't have any recorded activity in that time window.",
+                citations=[], used_hits=[], grounded=False,
+            )
+
+        # Selection: `rows` is ORDER BY ts ASC, so taking the first ``max_context``
+        # would ground ONLY on the earliest occurrences (verified on the real DB:
+        # the 6 earliest of a 696-observation day were all 00:12 tracking-URL
+        # noise). But evenly sampling RAW rows is also unreliable — it pulls in the
+        # day's low-signal junk (generic one-word windows, tracking URLs) and the
+        # model honestly refuses to cite it, blanking the answer. So we first rank
+        # by signal (informative window titles + substantial text), keep the
+        # richest candidates, THEN spread those evenly across time so the summary
+        # is both high-signal and covers morning→evening. Fully deterministic.
+        scored = sorted(
+            deduped, key=lambda p: self._signal_score(p[0], p[1]), reverse=True
+        )
+        candidates = scored[: self.max_context * 2]
+        candidates.sort(key=lambda p: p[0].ts)
+        chosen = self._sample_even(candidates, self.max_context)
+
+        context: list[_ContextItem] = []
+        for obs, text in chosen:
             hit = SearchHit(
                 chunk_id=f"obs:{obs.id}", content_hash=obs.content_hash,
                 text=text, score=0.0, observation=obs,
             )
             context.append(_ContextItem(source_id=f"S{len(context) + 1}", hit=hit))
-            if len(context) >= self.max_context:
-                break
 
         messages = self._build_messages(query, context)
         raw = self.provider.complete(messages, json_schema=_RESPONSE_SCHEMA)
@@ -399,6 +528,49 @@ class RAG:
             answer=answer_text, citations=citations,
             used_hits=[i.hit for i in context], grounded=grounded,
         )
+
+    @staticmethod
+    def _sample_even(items: list[Any], n: int) -> list[Any]:
+        """Pick at most ``n`` items spread evenly across ``items`` (order kept).
+
+        Returns ``items`` unchanged when it already fits. Otherwise selects ``n``
+        evenly-spaced indices so a long, time-ordered list is represented across
+        its whole span rather than only its head. Deterministic (no sampling RNG).
+        """
+        if n <= 0:
+            return []
+        if len(items) <= n:
+            return items
+        if n == 1:
+            return [items[0]]
+        # Map i in [0, n-1] onto [0, len-1] so BOTH endpoints are always picked —
+        # the tail (most-recent occurrence) must be represented, not just the head.
+        last = len(items) - 1
+        return [items[round(i * last / (n - 1))] for i in range(n)]
+
+    @staticmethod
+    def _signal_score(obs: Any, text: str) -> int:
+        """Heuristic "is this observation worth grounding on?" score.
+
+        Higher = richer activity signal. Informative window titles (PR / commit /
+        email subjects) and substantial body text score high; bare app-name
+        windows and tracking-URL fragments score low. Tuned against the real
+        captured DB, where low-signal rows (generic windows, ``_id=…&uaid=…``
+        URLs) are what made the model refuse to cite a whole-day summary. Pure
+        function of one row, so selection stays deterministic and testable.
+        """
+        window = (obs.window or "").strip() if obs is not None else ""
+        body = (text or "").strip()
+        # Substantial body text helps, capped so one giant AX dump can't dominate.
+        score = min(len(body), 400)
+        if len(window) >= 15:  # PR titles, commit messages, email subjects
+            score += 250
+        if window.casefold() in _GENERIC_WINDOWS:
+            score -= 300
+        head = body[:80]
+        if head.startswith("_id=") or "uaid=" in head:  # tracking-URL noise
+            score -= 300
+        return score
 
     # -- retrieval / dedup ----------------------------------------------------
 
