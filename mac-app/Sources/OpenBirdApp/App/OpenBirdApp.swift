@@ -89,6 +89,10 @@ private struct MainWindowRoot: View {
             askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
             askPanel.openMainWindow = { openWindow(id: "main") }
             await model.refresh()
+            // Resume capture if the user is already configured and didn't pause it.
+            // After refresh() so allowlist / pause / running state is current.
+            // Idempotent, so re-running this .task cannot double-spawn.
+            model.autoResumeCaptureIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshPermissionStates()

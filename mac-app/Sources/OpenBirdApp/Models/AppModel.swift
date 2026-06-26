@@ -438,6 +438,45 @@ final class AppModel: ObservableObject {
             && !captureRunning
     }
 
+    /// UserDefaults key for the first-run flag, owned by `AppShellView`'s
+    /// `@AppStorage` (which defaults to `UserDefaults.standard`). Centralized here
+    /// so the auto-resume gate reads the exact same key.
+    static let onboardingCompletedKey = "openbird.onboarding.completed"
+
+    /// Whether capture should be (re)started automatically at launch. Builds on
+    /// `canStartCaptureNow` (Accessibility granted, non-empty allowlist, CLI
+    /// available, not already running) and additionally requires that the user has
+    /// finished onboarding and has NOT explicitly paused capture. Screen Recording
+    /// is intentionally NOT required: text capture is Accessibility-based.
+    var shouldAutoResumeCapture: Bool {
+        canStartCaptureNow
+            && !capturePaused
+            && UserDefaults.standard.bool(forKey: Self.onboardingCompletedKey)
+    }
+
+    private var didAttemptAutoResume = false
+
+    /// Resume capture once per launch if the user is already configured and hasn't
+    /// paused. The app kills its daemon on quit (see `willTerminateNotification`
+    /// above) and otherwise never restarts capture without a UI action, so without
+    /// this a quit→relaunch leaves capture silently off. Idempotent: only the first
+    /// call per process can attempt a start, so SwiftUI re-invoking the launch
+    /// `.task` cannot spawn repeatedly. The `start` seam keeps this testable without
+    /// launching real service/process work. Returns whether it attempted a start.
+    @discardableResult
+    func autoResumeCaptureIfNeeded(start: () -> Void) -> Bool {
+        guard !didAttemptAutoResume else { return false }
+        didAttemptAutoResume = true
+        guard shouldAutoResumeCapture else { return false }
+        start()
+        return true
+    }
+
+    @discardableResult
+    func autoResumeCaptureIfNeeded() -> Bool {
+        autoResumeCaptureIfNeeded(start: { self.startCapture() })
+    }
+
     /// Ask a grounded question over captured memory. Runs the (blocking) CLI off
     /// the main actor and publishes the answer + citations (or a friendly error).
     func ask(_ question: String) {
