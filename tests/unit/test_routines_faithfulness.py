@@ -191,10 +191,12 @@ def test_run_rows_all_self_capture_returns_no_activity_without_model():
               window="Ask about your work..."), "openbird ui body"),
     ]
     provider = _RecordingProvider()
-    out = get_template("yesterday").run_rows(provider, 0.0, 100.0, rows)
-    # Empty rendered context (all rows filtered) → deterministic no-activity line,
+    template = get_template("yesterday")
+    out = template.run_rows(provider, 0.0, 100.0, rows)
+    # Empty rendered context (all rows filtered) → the EXACT deterministic
+    # no-activity line (pin the full string so prefix/wording drift is caught),
     # never a model call with an empty <observations> block.
-    assert "No activity recorded" in out
+    assert out == f"[{template.name}] No activity recorded in the selected window."
     assert provider.called is False
 
 
