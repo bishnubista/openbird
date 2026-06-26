@@ -96,6 +96,8 @@ private struct MainWindowRoot: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshPermissionStates()
+            // The user may have changed Login Items in System Settings while away.
+            model.refreshLaunchAtLoginState()
             // Refresh the day view on refocus while it's open, so activity captured in the
             // background shows up without manually leaving and returning to the pane.
             if model.selection == .today {

@@ -3,6 +3,30 @@ import ApplicationServices
 import AVFoundation
 import CoreGraphics
 import Foundation
+import ServiceManagement
+
+/// UI-facing state of the "Launch OpenBird at login" setting, decoupled from
+/// `SMAppService.Status` so `AppModel`/tests don't depend on ServiceManagement.
+enum LaunchAtLoginState: Equatable {
+    /// Registered and eligible to launch at login.
+    case enabled
+    /// Registered but the user must approve it in System Settings › Login Items.
+    case requiresApproval
+    /// Not registered (the off state).
+    case disabled
+    /// Cannot be determined / not available (e.g. unsigned dev build, not found).
+    case unavailable
+
+    init(_ status: SMAppService.Status) {
+        switch status {
+        case .enabled: self = .enabled
+        case .requiresApproval: self = .requiresApproval
+        case .notRegistered: self = .disabled
+        case .notFound: self = .unavailable
+        @unknown default: self = .unavailable
+        }
+    }
+}
 
 /// Optional meeting speech-to-text backend readiness decoded from preflight.
 struct MeetingTranscriptionReadiness: Equatable {
@@ -299,6 +323,13 @@ final class OpenBirdService: @unchecked Sendable {
     /// `pgrep -x capture-helper`; injectable so a stray helper on the host cannot flip
     /// `isCaptureRunning()` under test.
     private let captureHelperRunningProbe: @Sendable () -> Bool
+    /// "Launch at login" backend, injectable so the toggle logic is testable without
+    /// touching the real `SMAppService` (which only behaves correctly for a signed,
+    /// installed app). Defaults forward to `SMAppService.mainApp`.
+    private let loginItemStateProbe: @Sendable () -> LaunchAtLoginState
+    private let loginItemRegister: @Sendable () throws -> Void
+    private let loginItemUnregister: @Sendable () throws -> Void
+    private let loginItemsSettingsOpener: @Sendable () -> Void
 
     /// The capture daemon launched by the app (if any), so it can be stopped.
     private var captureProcess: Process?
@@ -332,6 +363,18 @@ final class OpenBirdService: @unchecked Sendable {
         },
         captureHelperRunningProbe: @escaping @Sendable () -> Bool = {
             OpenBirdService.run("/usr/bin/pgrep", arguments: ["-x", "capture-helper"]).exitCode == 0
+        },
+        loginItemStateProbe: @escaping @Sendable () -> LaunchAtLoginState = {
+            LaunchAtLoginState(SMAppService.mainApp.status)
+        },
+        loginItemRegister: @escaping @Sendable () throws -> Void = {
+            try SMAppService.mainApp.register()
+        },
+        loginItemUnregister: @escaping @Sendable () throws -> Void = {
+            try SMAppService.mainApp.unregister()
+        },
+        loginItemsSettingsOpener: @escaping @Sendable () -> Void = {
+            SMAppService.openSystemSettingsLoginItems()
         }
     ) {
         self.accessibilityProbe = accessibilityProbe
@@ -344,6 +387,10 @@ final class OpenBirdService: @unchecked Sendable {
         self.openBirdCLIResolver = openBirdCLIResolver
         self.externalLoopDaemonProbe = externalLoopDaemonProbe
         self.captureHelperRunningProbe = captureHelperRunningProbe
+        self.loginItemStateProbe = loginItemStateProbe
+        self.loginItemRegister = loginItemRegister
+        self.loginItemUnregister = loginItemUnregister
+        self.loginItemsSettingsOpener = loginItemsSettingsOpener
     }
 
     private var dataDirectory: URL {
@@ -778,6 +825,30 @@ final class OpenBirdService: @unchecked Sendable {
 
     func canLaunchOpenBirdCLI() -> Bool {
         resolveOpenBirdCLI() != nil
+    }
+
+    // MARK: - Launch at login (SMAppService)
+
+    /// Current "launch at login" state, read live from the system (never cached) so
+    /// it reflects changes the user makes in System Settings › Login Items.
+    func launchAtLoginState() -> LaunchAtLoginState {
+        loginItemStateProbe()
+    }
+
+    /// Register or unregister this app as a macOS login item. Throws the underlying
+    /// `SMAppService` error so the caller can resync state and surface a message.
+    func setLaunchAtLogin(_ enabled: Bool) throws {
+        if enabled {
+            try loginItemRegister()
+        } else {
+            try loginItemUnregister()
+        }
+    }
+
+    /// Open System Settings › General › Login Items so the user can approve the app
+    /// when registration lands in the `.requiresApproval` state.
+    func openLoginItemsSettings() {
+        loginItemsSettingsOpener()
     }
 
     // MARK: - Folders & panes
