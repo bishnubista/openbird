@@ -70,6 +70,13 @@ if [ -z "$OUTCOME" ]; then
 fi
 
 log "signal: $OUTCOME"
+# An engine/CLI error (the ask threw) is NOT a grounding verdict — the app emits
+# `error=1` and exits 2. Map it to BLOCKED, not FAIL (which is reserved for a real
+# ungrounded answer), matching this script's documented exit contract.
+if printf '%s' "$OUTCOME" | grep -q 'error=1'; then
+  log "BLOCKED: self-test ask errored (engine/CLI problem, exit $RC) — not a fix verdict"
+  echo "VERDICT: BLOCKED"; exit 2
+fi
 GROUNDED="$(printf '%s' "$OUTCOME" | grep -oE 'grounded=[0-9]+' | cut -d= -f2)"
 CITES="$(printf '%s' "$OUTCOME" | grep -oE 'citations=[0-9]+' | cut -d= -f2)"
 

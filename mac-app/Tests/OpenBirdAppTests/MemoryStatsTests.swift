@@ -42,6 +42,20 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertNil(env["OPENBIRD_REQUIRE_ENCRYPTION"])
     }
 
+    func testChildEnvironmentKeyringOptOutMatchesPythonTruthyValues() {
+        // The opt-out must recognize the SAME truthy set the Python keyring parser
+        // uses (storage/crypto.py: 1/true/yes/on, case-insensitive, trimmed) — not
+        // just "1" — or e.g. `=true` silently forces encryption and breaks the
+        // plaintext dev path.
+        for raw in ["true", "YES", " On ", "1"] {
+            let env = OpenBirdService.childEnvironment(base: ["OPENBIRD_DISABLE_KEYRING": raw])
+            XCTAssertNil(env["OPENBIRD_REQUIRE_ENCRYPTION"], "expected opt-out for \(raw)")
+        }
+        // A non-truthy value is NOT an opt-out: the strict default still applies.
+        let strict = OpenBirdService.childEnvironment(base: ["OPENBIRD_DISABLE_KEYRING": "0"])
+        XCTAssertEqual(strict["OPENBIRD_REQUIRE_ENCRYPTION"], "1")
+    }
+
     func testParseMemoryStatsDecodesCliJson() {
         let stats = OpenBirdService.parseMemoryStats("""
         {

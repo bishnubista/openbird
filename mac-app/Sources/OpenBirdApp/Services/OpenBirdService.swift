@@ -498,7 +498,12 @@ final class OpenBirdService: @unchecked Sendable {
             // failed. A developer running against a plaintext dev DB (e.g. the
             // headless self-test, which launches with OPENBIRD_DISABLE_KEYRING=1)
             // has consciously opted into plaintext, so don't override that choice.
-            if base["OPENBIRD_DISABLE_KEYRING"] != "1" {
+            // Recognize the SAME truthy set the Python keyring parser uses
+            // (storage/crypto.py: {1,true,yes,on}), so `=true` works too — not just `=1`.
+            let disableRaw = base["OPENBIRD_DISABLE_KEYRING"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let keyringExplicitlyDisabled = ["1", "true", "yes", "on"].contains(disableRaw)
+            if !keyringExplicitlyDisabled {
                 env["OPENBIRD_REQUIRE_ENCRYPTION"] = "1"
             }
         }
