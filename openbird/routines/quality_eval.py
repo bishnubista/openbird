@@ -10,10 +10,15 @@ grounded answers, no self-capture leakage) — exercising the SAME code paths as
 Gates (a surface passes when a MAJORITY of its runs pass):
   * Ask ("Summarize my day", "What should I follow up on?", "What did I work on
     yesterday?"): the answer is grounded with >=1 citation, and no citation points
-    at OpenBird's own UI (self-capture).
+    at OpenBird's own UI (self-capture). Additionally, the per-query grounded rate
+    must clear :data:`GROUNDED_RATE_FLOOR` — a strict majority alone can hide a
+    flaky grounding gate (e.g. "Summarize my day" grounded only 2/5 on a small
+    model before the synthesis-persona fix), so the floor fails grounding flakiness
+    before it degrades into silent answer-blanking.
   * Briefing (--day 0 and --day 1): the prose has zero ungrounded ``#N`` refs
     (numbers it invented that are absent from the grounding context), and no
-    grounding source is self-capture.
+    grounding source is self-capture. Briefing runs do not report a grounded flag,
+    so the grounded-rate floor is vacuous for them.
 """
 from __future__ import annotations
 
@@ -36,6 +41,12 @@ ASK_QUERIES: tuple[str, ...] = (
 )
 BRIEFING_DAYS: tuple[int, ...] = (0, 1)
 
+# Minimum fraction of grounding-reporting runs that must be grounded for an ask
+# surface to pass. Set above the bare majority (0.5) so a query that grounds only
+# ~half the time — flaky on a small local model — fails the gate instead of
+# sneaking through on a coin flip. Tunable; 0.8 = at most one slip in five runs.
+GROUNDED_RATE_FLOOR: float = 0.8
+
 
 @dataclass
 class CheckResult:
@@ -45,13 +56,33 @@ class CheckResult:
     runs: list[dict] = field(default_factory=list)
 
     @property
+    def grounded_rate(self) -> float | None:
+        """Fraction of grounding-reporting runs that grounded, or ``None``.
+
+        Only ask runs carry a ``grounded`` flag; briefing runs omit it, so this is
+        ``None`` for a briefing check (and the floor in :meth:`passed` is skipped).
+        """
+        grounded_runs = [r for r in self.runs if "grounded" in r]
+        if not grounded_runs:
+            return None
+        return sum(1 for r in grounded_runs if r.get("grounded")) / len(grounded_runs)
+
+    @property
     def passed(self) -> bool:
         if not self.runs:
             return False
         ok = sum(1 for r in self.runs if r.get("ok"))
         # Strict majority: a tie (e.g. 1/2) is NOT a pass — a quality gate should
         # not green on a coin flip.
-        return ok * 2 > len(self.runs)
+        if ok * 2 <= len(self.runs):
+            return False
+        # Grounded-rate floor (ask surfaces only): the majority check above can
+        # still green on a query that grounds just over half the time, which is the
+        # exact flakiness the synthesis-persona fix targets. Runs that report a
+        # ``grounded`` flag must additionally clear GROUNDED_RATE_FLOOR. Briefing
+        # runs omit the flag, so ``grounded_rate`` is None and the floor is vacuous.
+        rate = self.grounded_rate
+        return rate is None or rate >= GROUNDED_RATE_FLOOR
 
 
 @dataclass
@@ -128,7 +159,12 @@ def quality_eval_payload(report: QualityReport) -> dict:
     return {
         "passed": report.passed,
         "checks": [
-            {"label": c.label, "passed": c.passed, "runs": c.runs}
+            {
+                "label": c.label,
+                "passed": c.passed,
+                "grounded_rate": c.grounded_rate,
+                "runs": c.runs,
+            }
             for c in report.checks
         ],
     }
