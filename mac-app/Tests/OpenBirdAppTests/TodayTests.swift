@@ -188,6 +188,37 @@ final class BriefingProseTests: XCTestCase {
         XCTAssertEqual(BriefingProse.paragraphs(from: raw), [raw])
     }
 
+    func testNoBlockMarkersLeakOnRealisticVerboseBriefing() {
+        // End-to-end-ish: a realistic multi-section qwen3 dump must reduce to clean
+        // paragraphs with NO leaked block markers (the exact failure the bare
+        // `Text(briefing)` produced). Inline `**bold**` is preserved for the renderer.
+        let raw = """
+        The observations reflect activity around the **openbird** repo.
+
+        ### **1. Key Projects and Repositories**
+        - **openbird**: A local-first AI memory system. Recent activity includes:
+          - **#128**: Added a **Liquid Glass Settings tab**.
+          1. Improved the **daily briefing** rendering.
+
+        ---
+
+        ### **2. Notable Features**
+        ```swift
+        let x = 1
+        ```
+        """
+        let paras = BriefingProse.paragraphs(from: raw)
+        XCTAssertFalse(paras.isEmpty)
+        for p in paras {
+            XCTAssertFalse(p.hasPrefix("#"), "heading marker leaked: \(p)")
+            XCTAssertFalse(p.hasPrefix("- "), "list marker leaked: \(p)")
+            XCTAssertNotEqual(p, "---")
+            XCTAssertFalse(p.hasPrefix("```"), "fence leaked: \(p)")
+        }
+        // The grounding entities survive as inline-bold-bearing text.
+        XCTAssertTrue(paras.contains { $0.contains("**openbird**") })
+    }
+
     func testInlineBoldSurvivesAsAttributedRun() {
         // `**rag.py**` parses to a strongly-emphasised run (no literal asterisks).
         let attr = BriefingProse.inlineAttributed("Worked on **rag.py** today.")
