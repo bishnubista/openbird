@@ -28,6 +28,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from openbird.chat.rag_debug import (
+    debug_level,
+    emit_grounding_trace,
+    emit_retrieval_empty,
+)
 from openbird.prompts import FenceSpec, PromptSpec, render
 from openbird.prompts import registry as _prompt_registry
 from openbird.types import Citation, SearchHit
@@ -356,7 +361,7 @@ class RAG:
                 raise TypeError(
                     "explicit day scope requires a store exposing time_range_text()"
                 )
-            return self._answer_temporal(query, window)
+            return self._answer_temporal(query, window, route="explicit_window")
 
         # Temporal/activity AND synthesis/meta intent ("what did I do
         # yesterday?", "Summarize my day", "what should I follow up on?") must use
@@ -366,7 +371,17 @@ class RAG:
         # the model honestly cites nothing and the grounding gate blanks it.
         intent_window = self._intent_window(query)
         if intent_window is not None and hasattr(self.store, "time_range_text"):
-            return self._answer_temporal(query, intent_window)
+            route = "intent_window"
+            if debug_level() is not None:
+                # Only split temporal-word vs synthesis routing under debug, so
+                # the trace shows which intent classifier fired without paying an
+                # extra regex on the normal path.
+                route = (
+                    "intent_temporal"
+                    if self._temporal_window(query) is not None
+                    else "intent_synthesis"
+                )
+            return self._answer_temporal(query, intent_window, route)
 
         hits = self.store.search(query, k=k, semantic=semantic)
         context = self._assemble_context(hits)
@@ -379,7 +394,9 @@ class RAG:
             )
 
         messages = self._build_messages(query, context)
+        t0 = time.perf_counter()
         raw = self.provider.complete(messages, json_schema=_RESPONSE_SCHEMA)
+        latency_s = time.perf_counter() - t0
         answer_text, claimed_ids = self._parse_response(raw)
 
         citations = self._validate_citations(claimed_ids, context)
@@ -389,6 +406,15 @@ class RAG:
         # with an explicit ungrounded message — never surface uncited factual
         # claims as a normal answer.
         grounded = len(citations) > 0
+        if debug_level() is not None:
+            # Trace the ORIGINAL model output (pre-replacement) so the diagnostics
+            # describe what the model actually produced, not the gate's stand-in.
+            emit_grounding_trace(
+                route="semantic", raw=raw, answer_text=answer_text,
+                claimed_ids=claimed_ids, citations=citations, context=context,
+                retrieval={"hits": len(hits)}, latency_s=latency_s,
+                model=getattr(self.provider, "llm_model", None),
+            )
         if not grounded:
             answer_text = _UNGROUNDED_MESSAGE
         return AnswerResult(
@@ -456,11 +482,16 @@ class RAG:
         )
         return today.timestamp(), now
 
-    def _answer_temporal(self, query: str, window: tuple[float, float]) -> AnswerResult:
+    def _answer_temporal(
+        self, query: str, window: tuple[float, float], route: str = "temporal"
+    ) -> AnswerResult:
         """Answer a temporal question from a time-range scan of observations."""
         start, end = window
         rows = self.store.time_range_text(start, end)  # type: ignore[attr-defined]
         if not rows:
+            emit_retrieval_empty(
+                route=route, reason="no_rows", retrieval={"rows": 0}
+            )
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
                 citations=[], used_hits=[], grounded=False,
@@ -475,11 +506,13 @@ class RAG:
 
         deduped: list[tuple[Any, str]] = []
         seen: set[tuple[str | None, str]] = set()
+        dropped_self = 0
         for obs, text in rows:
             # OpenBird's own UI never grounds an answer (parity with the briefing
             # path): skip self-capture before dedupe/scoring so a legacy pre-gate
             # self row can't be sent to the model or cited.
             if obs is None or _is_self_capture(obs.app):
+                dropped_self += 1
                 continue
             key = (obs.session_id, obs.content_hash)
             if key in seen:
@@ -488,6 +521,10 @@ class RAG:
             deduped.append((obs, text))
 
         if not deduped:
+            emit_retrieval_empty(
+                route=route, reason="all_self_or_dupe",
+                retrieval={"rows": len(rows), "dropped_self": dropped_self},
+            )
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
                 citations=[], used_hits=[], grounded=False,
@@ -518,10 +555,29 @@ class RAG:
             context.append(_ContextItem(source_id=f"S{len(context) + 1}", hit=hit))
 
         messages = self._build_messages(query, context)
+        t0 = time.perf_counter()
         raw = self.provider.complete(messages, json_schema=_RESPONSE_SCHEMA)
+        latency_s = time.perf_counter() - t0
         answer_text, claimed_ids = self._parse_response(raw)
         citations = self._validate_citations(claimed_ids, context)
         grounded = len(citations) > 0
+        if debug_level() is not None:
+            # Trace the ORIGINAL model output (pre-replacement). The chosen rows'
+            # signal scores expose a thin/low-signal day (H3) vs a model that got
+            # rich sources but cited nothing (H1) or malformed ids (H4).
+            emit_grounding_trace(
+                route=route, raw=raw, answer_text=answer_text,
+                claimed_ids=claimed_ids, citations=citations, context=context,
+                retrieval={
+                    "rows": len(rows), "deduped": len(deduped),
+                    "dropped_self": dropped_self,
+                    "signal_scores": [
+                        self._signal_score(o, t) for o, t in chosen
+                    ],
+                },
+                latency_s=latency_s,
+                model=getattr(self.provider, "llm_model", None),
+            )
         if not grounded:
             answer_text = _UNGROUNDED_MESSAGE
         return AnswerResult(
