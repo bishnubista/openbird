@@ -226,6 +226,76 @@ def _resolve_system_prompt() -> str:
         logger.warning("rag persona resolution failed; using default prompt")
         return _SYSTEM_PROMPT
 
+
+# Synthesis answering persona. The default ``_RAG_PROMPT`` persona is a strict
+# single-source QA rule ("if the context does not contain the answer, say you
+# don't have it") — correct for "what does the auth doc say?", but it makes the
+# model REFUSE a whole-day summary: handed rich work artifacts (PRs, commits,
+# terminals), it looks for a source that literally *contains* a day-summary,
+# finds none, and abstains (observed live: qwen3:8b returned "I don't have
+# information about your day in the provided context." over 6 sources scoring
+# 450-650; the refusal is flaky ~40% — it sits on the answer/abstain boundary).
+# This variant reframes the same fenced context as the user's OWN activity to
+# synthesize ACROSS. It is a SEPARATE registered prompt (key ``rag_synthesis``)
+# so it (a) keeps the identical security scaffold — ``render`` validates the
+# preamble/epilogue, not the persona — and (b) is independently overridable via
+# ``OPENBIRD_PROMPT_RAG_SYNTHESIS`` / ``rag_synthesis.txt``, the same way the QA
+# persona is. Used only for synthesis-INTENT queries on the time-range scan
+# (:meth:`RAG._answer_temporal`); scoped/temporal QA and the semantic path keep
+# the strict persona.
+_SYNTHESIS_PERSONA = (
+    "ANSWERING RULES:\n"
+    "- The context below is the user's OWN captured activity for the requested "
+    "period (apps, documents, web pages, terminals). Treat it as the raw "
+    "material of their day to summarize, NOT as a question to look up.\n"
+    "- Synthesize what the user was working on ACROSS the sources: group related "
+    "activity and name the concrete things that appear (projects, PRs, "
+    "documents, topics). Be concise.\n"
+    "- Ground every statement in the context and cite the source_id values you "
+    "used. Never invent activity that is not present in the context.\n"
+    "- Only say you have nothing to report if the context is genuinely empty."
+)
+# Reuse the QA prompt's framework-owned security scaffold verbatim so the two
+# personas can never drift in their injection defense — only the answering rules
+# differ.
+_RAG_SYNTHESIS_PROMPT = PromptSpec(
+    key="rag_synthesis",
+    fence=_FENCE,
+    security_preamble=_RAG_PROMPT.security_preamble,
+    default_persona=_SYNTHESIS_PERSONA,
+    security_epilogue=_RAG_PROMPT.security_epilogue,
+)
+_SYNTHESIS_SYSTEM_PROMPT = render(_RAG_SYNTHESIS_PROMPT)
+_prompt_registry.register(_RAG_SYNTHESIS_PROMPT)
+
+
+def _resolve_synthesis_prompt() -> str:
+    """Render the synthesis prompt, applying a user override if present.
+
+    Mirrors :func:`_resolve_system_prompt` for the ``rag_synthesis`` key
+    (``<prompts_dir>/rag_synthesis.txt`` or ``OPENBIRD_PROMPT_RAG_SYNTHESIS``), so
+    temporal/synthesis answers honor a user persona override just like QA answers
+    did before this path existed. Degrades to the bundled default on any error.
+    """
+    try:
+        from openbird.config import get_settings
+        from openbird.prompts.loader import resolve_persona
+
+        resolution = resolve_persona(
+            "rag_synthesis", prompts_dir=Path(get_settings().prompts_dir or "")
+        )
+        if resolution.persona is None and not resolution.ok:
+            logger.warning(
+                "rag_synthesis persona override refused (source=%s reason=%s); "
+                "using default",
+                resolution.source,
+                resolution.reason,
+            )
+        return render(_RAG_SYNTHESIS_PROMPT, resolution.persona)
+    except Exception:  # pragma: no cover - defensive; never break chat on config
+        logger.warning("rag_synthesis persona resolution failed; using default")
+        return _SYNTHESIS_SYSTEM_PROMPT
+
 _RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -320,10 +390,13 @@ class RAG:
         self.provider = provider
         self.max_context = max(1, max_context)
         self._now: Callable[[], float] = time.time  # injectable clock for tests
-        # Resolve the (optionally overridden) system prompt once at construction,
+        # Resolve the (optionally overridden) system prompts once at construction,
         # mirroring get_settings()'s process-wide caching: a long-running process
-        # uses the override that existed at startup.
+        # uses the override that existed at startup. The synthesis prompt is a
+        # distinct, separately-overridable persona used only for synthesis-intent
+        # temporal answers (see _answer_temporal).
         self._system_prompt = _resolve_system_prompt()
+        self._synthesis_system_prompt = _resolve_synthesis_prompt()
 
     # -- public API -----------------------------------------------------------
 
@@ -554,7 +627,18 @@ class RAG:
             )
             context.append(_ContextItem(source_id=f"S{len(context) + 1}", hit=hit))
 
-        messages = self._build_messages(query, context)
+        # Use the synthesis persona ONLY for synthesis-intent phrasing ("summarize
+        # my day", "what did I work on"). Scoped/pointed QA that happens to route
+        # through the time-range scan — an explicit ``--day`` question like "what
+        # about the rocket?" or a temporal lookup like "what did I do at 3pm" —
+        # keeps the strict QA persona (and its user override), matching the
+        # documented hard-scoped-answer behavior. Gating on the query (not the
+        # call site) covers all three callers with one predicate.
+        synthesis = _SYNTHESIS_RE.search(query) is not None
+        system_prompt = (
+            self._synthesis_system_prompt if synthesis else self._system_prompt
+        )
+        messages = self._build_messages(query, context, system_prompt=system_prompt)
         t0 = time.perf_counter()
         raw = self.provider.complete(messages, json_schema=_RESPONSE_SCHEMA)
         latency_s = time.perf_counter() - t0
@@ -691,14 +775,23 @@ class RAG:
 
     # -- prompt construction --------------------------------------------------
 
-    def _build_messages(self, query: str, context: list[_ContextItem]) -> list[dict]:
+    def _build_messages(
+        self,
+        query: str,
+        context: list[_ContextItem],
+        *,
+        system_prompt: str | None = None,
+    ) -> list[dict]:
         """Build the grounded chat messages with fenced UNTRUSTED context.
 
-        Delegates to the pure :func:`build_rag_messages` with the instance's
-        resolved system prompt, so the offline ``prompts test`` harness can build
-        the SAME messages with its own rendered prompt.
+        Delegates to the pure :func:`build_rag_messages`. ``system_prompt``
+        defaults to the instance's resolved (optionally user-overridden) prompt;
+        the time-range scan passes the synthesis variant so a whole-day summary
+        is licensed to synthesize across sources instead of abstaining.
         """
-        return build_rag_messages(self._system_prompt, query, context)
+        return build_rag_messages(
+            system_prompt or self._system_prompt, query, context
+        )
 
     @staticmethod
     def _meta_label(app: str | None, window: str | None) -> str:

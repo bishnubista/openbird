@@ -188,6 +188,10 @@ def test_signal_prompt_preserves_rules_and_epilogue():
 # -- registry completeness ----------------------------------------------------
 
 
-def test_all_four_prompts_registered():
+def test_all_prompts_registered():
     registry.ensure_loaded()
-    assert set(registry.keys()) == {"rag", "routine", "meeting", "signal"}
+    # ``rag_synthesis`` is the synthesis-intent answering persona (separate,
+    # independently-overridable prompt) used by the time-range scan.
+    assert set(registry.keys()) == {
+        "rag", "rag_synthesis", "routine", "meeting", "signal"
+    }

@@ -66,7 +66,9 @@ class HarnessReport:
 # Each feature builds [system, user]; the fenced payload lives in the user message.
 def _build_probe(key: str, system_prompt: str, payload: str) -> list[dict]:
     """Build production messages for ``key`` with ``payload`` as captured data."""
-    if key == "rag":
+    if key in ("rag", "rag_synthesis"):
+        # The synthesis persona builds the SAME fenced RAG messages (only the
+        # system persona differs), so it exercises the identical probe path.
         from openbird.chat.rag import _ContextItem, build_rag_messages
         from openbird.types import Observation, SearchHit
 

@@ -31,7 +31,7 @@ def _isolate():
     reset_settings_cache()
 
 
-KEYS = ["rag", "routine", "meeting", "signal"]
+KEYS = ["rag", "rag_synthesis", "routine", "meeting", "signal"]
 
 
 # -- the real production path defangs the active fence -------------------------
