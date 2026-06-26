@@ -175,6 +175,42 @@ def test_render_context_text_excludes_self_capture_dotted_helper():
     assert "helper body" not in out
 
 
+def test_run_rows_all_self_capture_returns_no_activity_without_model():
+    from openbird.routines.templates import get_template
+
+    class _RecordingProvider:
+        def __init__(self):
+            self.called = False
+
+        def complete(self, *a, **k):
+            self.called = True
+            return "should not be called"
+
+    rows = [
+        (_obs("o1", h="h1", ts=10.0, app="ai.openbird.OpenBird",
+              window="Ask about your work..."), "openbird ui body"),
+    ]
+    provider = _RecordingProvider()
+    out = get_template("yesterday").run_rows(provider, 0.0, 100.0, rows)
+    # Empty rendered context (all rows filtered) → deterministic no-activity line,
+    # never a model call with an empty <observations> block.
+    assert "No activity recorded" in out
+    assert provider.called is False
+
+
+def test_check_result_passed_is_strict_majority():
+    from openbird.routines.quality_eval import CheckResult
+
+    def _runs(oks):
+        return CheckResult(label="x", runs=[{"ok": o} for o in oks])
+
+    assert _runs([True, True, False]).passed is True   # 2/3
+    assert _runs([True, False, False]).passed is False  # 1/3
+    assert _runs([True, False]).passed is False         # 1/2 tie is NOT a pass
+    assert _runs([True, True]).passed is True            # 2/2
+    assert _runs([]).passed is False                     # empty guard
+
+
 def test_select_briefing_sources_excludes_self_capture():
     from openbird.routines.templates import select_briefing_sources
 

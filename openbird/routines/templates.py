@@ -248,7 +248,13 @@ class RoutineTemplate:
         """
         if not rows:
             return f"[{self.name}] No activity recorded in the selected window."
-        return self._summarize(provider, start, end, render_context_text(rows))
+        context = render_context_text(rows)
+        if not context.strip():
+            # Every row was filtered (e.g. all self-capture) — treat as no
+            # activity rather than prompting the model with an empty
+            # <observations> block (which invites a hallucinated summary).
+            return f"[{self.name}] No activity recorded in the selected window."
+        return self._summarize(provider, start, end, context)
 
     def _summarize(self, provider: object, start: float, end: float, context: str) -> str:
         """Build the fenced prompt from rendered ``context`` and call the provider."""
@@ -345,7 +351,7 @@ def render_context(observations: list[Observation]) -> str:
 # naturally few, but this guards against a pathological day pushing the (already
 # large) prompt toward truncation.
 _MAX_CONTEXT_TITLES = 24
-# Leading TUI animation glyphs (braille spinner U+2800–U+28FF, ✳/✶ stars, bullet
+# Leading TUI animation glyphs (braille spinner U+2800-U+28FF, stars, bullet
 # frames) that fork one window title into many near-duplicates as a spinner ticks.
 _SPINNER_PREFIX_RE = re.compile(r"^[⠀-⣿✀-➿•·*\s]+")
 

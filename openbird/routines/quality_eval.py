@@ -17,7 +17,6 @@ Gates (a surface passes when a MAJORITY of its runs pass):
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -50,7 +49,9 @@ class CheckResult:
         if not self.runs:
             return False
         ok = sum(1 for r in self.runs if r.get("ok"))
-        return ok >= math.ceil(len(self.runs) / 2)
+        # Strict majority: a tie (e.g. 1/2) is NOT a pass — a quality gate should
+        # not green on a coin flip.
+        return ok * 2 > len(self.runs)
 
 
 @dataclass

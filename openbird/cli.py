@@ -1278,12 +1278,15 @@ def eval_quality(
     runs: int = typer.Option(3, "--runs", help="LLM runs per surface (majority must pass)."),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
-    """Quality gate for briefing + ask over the real store with the local model.
+    """Quality gate for briefing + ask over the real store with the configured model.
 
     Makes live LLM calls (slow, non-deterministic) — a manual pre-PR gate, not a
-    CI test. Checks each surface N times: ask answers must be grounded + cited with
-    no self-capture; briefings must have zero ungrounded ``#N`` refs and no
-    self-capture source. Exits non-zero if any surface fails its majority gate.
+    CI test. Uses the same provider as ``chat``/``briefing`` (local by default; a
+    remote model still requires the ``OPENBIRD_ALLOW_CLOUD`` opt-in via
+    ``_provider()``, so it can never reach cloud silently). Checks each surface N
+    times: ask answers must be grounded + cited with no self-capture; briefings
+    must have zero ungrounded ``#N`` refs and no self-capture source. Exits
+    non-zero if any surface fails its strict-majority gate.
     """
     from openbird.routines.quality_eval import quality_eval_payload, run_quality_eval
 
