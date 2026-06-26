@@ -184,7 +184,20 @@ log "[5/8] Rewrite launcher shim to the embedded interpreter (no uv, no repo)"
 cat >"$MACOS/openbird-cli" <<'WRAPPER'
 #!/bin/sh
 set -eu
-DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve $0 through any symlink chain so the wrapper locates its own bundle even
+# when invoked via a symlink outside the bundle — e.g. a Homebrew cask `binary`
+# symlink in /opt/homebrew/bin. Without this, $0 is the symlink's path and PY
+# resolves next to the symlink (wrong dir, missing interpreter, and a hijack
+# shape). BSD/macOS readlink has no -f, so follow the chain by hand.
+SELF="$0"
+while [ -h "$SELF" ]; do
+  target="$(readlink "$SELF")"
+  case "$target" in
+    /*) SELF="$target" ;;
+    *)  SELF="$(dirname "$SELF")/$target" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$SELF")" && pwd)"
 PY="$DIR/../Resources/python/bin/python3"
 # Sanitize inherited env so the bundled interpreter can't be hijacked to load a
 # foreign stdlib/extension or inject a dylib (we ship a self-contained runtime).
@@ -260,6 +273,18 @@ if "$RELOC_APP/Contents/MacOS/openbird-cli" --help >/dev/null 2>"$RELOC_TMP/err"
 else
   log "  CLI failed from moved copy:"; cat "$RELOC_TMP/err" >&2
   rm -rf "$RELOC_TMP"; die "embedded interpreter is NOT relocatable"
+fi
+# Prove the wrapper is symlink-robust: a future Homebrew cask `binary` stanza will
+# expose openbird-cli as a symlink in /opt/homebrew/bin, so $0 becomes the symlink
+# (its dirname is NOT the bundle). Invoke through a symlink OUTSIDE the bundle and
+# assert it still resolves the bundled interpreter and runs.
+RELOC_LINK="$RELOC_TMP/openbird-symlinked"
+ln -s "$RELOC_APP/Contents/MacOS/openbird-cli" "$RELOC_LINK"
+if "$RELOC_LINK" --help >/dev/null 2>"$RELOC_TMP/symlink_err"; then
+  log "  symlink-invocation OK (wrapper resolves bundle via symlink)"
+else
+  log "  CLI failed when invoked via symlink:"; cat "$RELOC_TMP/symlink_err" >&2
+  rm -rf "$RELOC_TMP"; die "openbird-cli wrapper is NOT symlink-robust"
 fi
 assert_python_bytecode_unchanged "$RELOC_APP" "$RELOC_BYTECODE_MANIFEST" "relocated CLI smoke test" \
   || { rm -rf "$RELOC_TMP"; die "relocated CLI mutated Python bytecode inside the app bundle"; }
