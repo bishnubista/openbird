@@ -238,16 +238,24 @@ def ensure_schema_version(conn: sqlite3.Connection) -> int:
             f"version {current}."
         )
 
-    if current == SCHEMA_VERSION:
-        # Defense in depth for an ALREADY-stamped DB. A table created before an
-        # in-place change to this version's shape can carry the current stamp yet
-        # miss a required column: schema.sql's ``CREATE TABLE IF NOT EXISTS``
-        # silently skips an already-present, wrong-shaped table, and the ladder has
-        # no step to rebuild it. Without this check the stamp is trusted and the
-        # first query/write fails with a cryptic ``OperationalError`` that the
-        # capture daemon swallows (capture then silently stores nothing). Validate
-        # the floor shape so it raises the actionable migration error instead.
+    # Floor-shape guard for ANY already-stamped DB (current >= 1), evaluated BEFORE
+    # the version branches below so it covers every stamped path — a DB at the
+    # current version (trusted as-is) AND a stamped-but-older DB about to run the
+    # migration ladder. A DB can carry a stamp yet miss a required column:
+    # schema.sql's ``CREATE TABLE IF NOT EXISTS`` silently keeps an already-present,
+    # wrong-shaped table, and the ladder has no step to rebuild it. Without this a
+    # stranded DB is either trusted (``current == SCHEMA_VERSION``) or re-stamped by
+    # the ladder while still wrong-shaped (``0 < current < SCHEMA_VERSION``); both
+    # then fail with a cryptic ``OperationalError`` at first query/write, which the
+    # capture daemon swallows (capture silently stores nothing). The version-1
+    # required columns are a permanent floor — the forward-only ladder only adds,
+    # never drops, a released column — so the check is valid at any stamped version.
+    # (``current == 0`` is handled in its own branch below: it is not yet stamped and
+    # may be a partial/foreign DB that must be refused before adoption.)
+    if current > 0:
         _guard_existing_shape(conn)
+
+    if current == SCHEMA_VERSION:
         return current
 
     if current == 0:
