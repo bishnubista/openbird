@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import plistlib
+import subprocess
+
 import pytest
 
 from openbird.config import (
     DEFAULT_OLLAMA_HOST,
     Settings,
+    _read_gui_allowlist,
     get_settings,
     is_loopback_host,
     is_ollama_model,
@@ -95,6 +99,107 @@ def test_blocklist_defaults_when_env_unset(monkeypatch):
     # With no env var at all, the non-empty default blocklist stands.
     monkeypatch.delenv("OPENBIRD_BLOCKLIST", raising=False)
     assert get_settings().blocklist != []
+
+
+# --------------------------------------------------------------------------- #
+# allowlist: GUI-prefs bridge (precedence)                                    #
+# --------------------------------------------------------------------------- #
+# NOTE: the autouse `_no_gui_allowlist` fixture (conftest) patches
+# `_read_gui_allowlist` -> None for hermeticity; these tests re-patch it.
+
+
+def test_allowlist_from_gui_prefs_when_env_unset(monkeypatch):
+    # No OPENBIRD_ALLOWLIST -> inherit the menu-bar app's saved allowlist.
+    monkeypatch.delenv("OPENBIRD_ALLOWLIST", raising=False)
+    monkeypatch.setattr(
+        "openbird.config._read_gui_allowlist", lambda: ["com.apple.Safari"]
+    )
+    assert get_settings().allowlist == ["com.apple.Safari"]
+
+
+def test_env_allowlist_overrides_gui_prefs(monkeypatch):
+    # An explicit env var wins over the GUI prefs (and the reader isn't consulted).
+    monkeypatch.setenv("OPENBIRD_ALLOWLIST", "com.google.Chrome")
+    monkeypatch.setattr(
+        "openbird.config._read_gui_allowlist", lambda: ["com.apple.Safari"]
+    )
+    assert get_settings().allowlist == ["com.google.Chrome"]
+
+
+def test_empty_env_allowlist_beats_gui_prefs(monkeypatch):
+    # OPENBIRD_ALLOWLIST="" is an explicit clear and must win over GUI prefs.
+    monkeypatch.setenv("OPENBIRD_ALLOWLIST", "")
+    monkeypatch.setattr(
+        "openbird.config._read_gui_allowlist", lambda: ["com.apple.Safari"]
+    )
+    assert get_settings().allowlist == []
+
+
+def test_allowlist_empty_when_no_env_and_no_prefs(monkeypatch):
+    monkeypatch.delenv("OPENBIRD_ALLOWLIST", raising=False)
+    monkeypatch.setattr("openbird.config._read_gui_allowlist", lambda: None)
+    assert get_settings().allowlist == []
+
+
+# --------------------------------------------------------------------------- #
+# _read_gui_allowlist: parsing & failure modes                                #
+# --------------------------------------------------------------------------- #
+
+
+def _fake_defaults(monkeypatch, *, returncode=0, stdout=b"", raises=None):
+    """Stub macOS so `_read_gui_allowlist` exercises its parse path on any host."""
+    monkeypatch.setattr("openbird.config.sys.platform", "darwin")
+
+    def fake_run(*_args, **_kwargs):
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(_args, returncode, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr("openbird.config.subprocess.run", fake_run)
+
+
+def test_read_gui_allowlist_parses_normalizes_and_dedupes(monkeypatch):
+    payload = plistlib.dumps(
+        {"openbird.captureAllowlist": [" com.a ", "com.a", "com.b", "", 5]}
+    )
+    _fake_defaults(monkeypatch, stdout=payload)
+    # trimmed, de-duped, order-preserved, non-strings dropped.
+    assert _read_gui_allowlist() == ["com.a", "com.b"]
+
+
+def test_read_gui_allowlist_none_on_non_darwin(monkeypatch):
+    monkeypatch.setattr("openbird.config.sys.platform", "linux")
+    # subprocess must not even be consulted off-macOS.
+    monkeypatch.setattr(
+        "openbird.config.subprocess.run",
+        lambda *a, **k: pytest.fail("defaults must not run off-macOS"),
+    )
+    assert _read_gui_allowlist() is None
+
+
+def test_read_gui_allowlist_none_on_nonzero_returncode(monkeypatch):
+    _fake_defaults(monkeypatch, returncode=1, stdout=b"")
+    assert _read_gui_allowlist() is None
+
+
+def test_read_gui_allowlist_none_on_malformed_xml(monkeypatch):
+    _fake_defaults(monkeypatch, stdout=b"<not a plist>")
+    assert _read_gui_allowlist() is None
+
+
+def test_read_gui_allowlist_none_when_key_absent(monkeypatch):
+    _fake_defaults(monkeypatch, stdout=plistlib.dumps({"some.other.key": ["x"]}))
+    assert _read_gui_allowlist() is None
+
+
+def test_read_gui_allowlist_none_when_defaults_missing(monkeypatch):
+    _fake_defaults(monkeypatch, raises=FileNotFoundError("no defaults"))
+    assert _read_gui_allowlist() is None
+
+
+def test_read_gui_allowlist_none_when_only_invalid_entries(monkeypatch):
+    _fake_defaults(monkeypatch, stdout=plistlib.dumps({"openbird.captureAllowlist": ["", 7]}))
+    assert _read_gui_allowlist() is None
 
 
 def test_session_gap_seconds_default_and_valid(tmp_path):
