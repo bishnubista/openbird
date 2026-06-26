@@ -111,6 +111,132 @@ final class AppDisplayTests: XCTestCase {
     }
 }
 
+final class BriefingProseTests: XCTestCase {
+    func testTightProseIsSingleParagraph() {
+        let raw = "A development-focused day across **GitHub** and the browser."
+        XCTAssertEqual(BriefingProse.paragraphs(from: raw), [raw])
+    }
+
+    func testStripsHeadingMarkersAndKeepsText() {
+        // The verbose CoT dump (### Summary of Observations / ### Final Answer) must
+        // never render its `#` markers literally.
+        let raw = "### Summary of Observations:\nThe user worked on openbird."
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: raw),
+            ["Summary of Observations:", "The user worked on openbird."]
+        )
+    }
+
+    func testStripsHorizontalRulesAndListMarkers() {
+        let raw = """
+        Overview line.
+
+        ---
+
+        - first item
+        1. second item
+        """
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: raw),
+            ["Overview line.", "first item", "second item"]
+        )
+    }
+
+    func testReflowsWrappedProseLinesIntoOneParagraph() {
+        let raw = "A heads-down day\non the citation pipeline."
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: raw),
+            ["A heads-down day on the citation pipeline."]
+        )
+    }
+
+    func testStripsBlockquoteMarkers() {
+        // `> quoted` must not render a literal blockquote marker (contract: no raw
+        // Markdown symbols). Nested `>>` collapses too.
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: "> Today was focused on **rag.py**.\n>> nested"),
+            ["Today was focused on **rag.py**.", "nested"]
+        )
+    }
+
+    func testMarkerOnlyLinesProduceNoEmptyParagraphs() {
+        // `####`, `### `, and a bare `- ` strip to "" and must be dropped, never
+        // appended as blank paragraphs (which would render stray gaps).
+        XCTAssertEqual(BriefingProse.paragraphs(from: "####\n### \n- "), [])
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: "#### \nReal sentence."),
+            ["Real sentence."]
+        )
+    }
+
+    func testFencedCodeOpenersAreDropped() {
+        // ```swift / ~~~json openers must not render literal backticks; fenced content
+        // survives as plain prose.
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: "```swift\nlet x = 1\n```"),
+            ["let x = 1"]
+        )
+    }
+
+    func testCRLFLineEndingsAreNormalised() {
+        // A CRLF tail must not leave `\r` attached and defeat the symbol/heading checks.
+        XCTAssertEqual(
+            BriefingProse.paragraphs(from: "####\r\nReal sentence.\r\n"),
+            ["Real sentence."]
+        )
+    }
+
+    func testAllSymbolInputStripsToEmpty() {
+        // Pure noise normalises to no paragraphs; the BriefingText fallback (not this
+        // pure parser) is what keeps the card non-blank.
+        XCTAssertEqual(BriefingProse.paragraphs(from: "---\n***\n___"), [])
+    }
+
+    func testHashtagIsNotTreatedAsHeading() {
+        let raw = "Tagged the note #urgent for review."
+        XCTAssertEqual(BriefingProse.paragraphs(from: raw), [raw])
+    }
+
+    func testNoBlockMarkersLeakOnRealisticVerboseBriefing() {
+        // End-to-end-ish: a realistic multi-section qwen3 dump must reduce to clean
+        // paragraphs with NO leaked block markers (the exact failure the bare
+        // `Text(briefing)` produced). Inline `**bold**` is preserved for the renderer.
+        let raw = """
+        The observations reflect activity around the **openbird** repo.
+
+        ### **1. Key Projects and Repositories**
+        - **openbird**: A local-first AI memory system. Recent activity includes:
+          - **#128**: Added a **Liquid Glass Settings tab**.
+          1. Improved the **daily briefing** rendering.
+
+        ---
+
+        ### **2. Notable Features**
+        ```swift
+        let x = 1
+        ```
+        """
+        let paras = BriefingProse.paragraphs(from: raw)
+        XCTAssertFalse(paras.isEmpty)
+        for p in paras {
+            XCTAssertFalse(p.hasPrefix("#"), "heading marker leaked: \(p)")
+            XCTAssertFalse(p.hasPrefix("- "), "list marker leaked: \(p)")
+            XCTAssertNotEqual(p, "---")
+            XCTAssertFalse(p.hasPrefix("```"), "fence leaked: \(p)")
+        }
+        // The grounding entities survive as inline-bold-bearing text.
+        XCTAssertTrue(paras.contains { $0.contains("**openbird**") })
+    }
+
+    func testInlineBoldSurvivesAsAttributedRun() {
+        // `**rag.py**` parses to a strongly-emphasised run (no literal asterisks).
+        let attr = BriefingProse.inlineAttributed("Worked on **rag.py** today.")
+        XCTAssertFalse(String(attr.characters).contains("*"))
+        let bolded = attr.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }
+        XCTAssertTrue(bolded)
+    }
+}
+
 final class TodayFormattingTests: XCTestCase {
     func testDurationLabel() {
         XCTAssertEqual(TodayView.durationLabel(30), "30s")
