@@ -265,6 +265,108 @@ def test_day_memory_deleted_by_full_wipe(store):
     assert store.conn.execute("SELECT COUNT(*) c FROM day_memory_sources").fetchone()["c"] == 0
 
 
+def test_ensure_day_memory_rebuilds_after_closed_day_backfill(store):
+    start, end = 100.0, 199.0
+    first = store.add_observation("first work", source="capture", ts=150.0)
+    saved1 = store.ensure_day_memory(
+        local_date="1970-01-01",
+        start_ts=start,
+        end_ts=end,
+        day_offset=0,
+    )
+    assert saved1["source_ids"] == [first.id]
+
+    second = store.add_observation("backfilled issue follow up", source="capture", ts=125.0)
+    saved2 = store.ensure_day_memory(
+        local_date="1970-01-01",
+        start_ts=start,
+        end_ts=end,
+        day_offset=0,
+    )
+
+    assert saved2["id"] != saved1["id"]
+    assert saved2["payload"]["source_fingerprint"] != saved1["payload"]["source_fingerprint"]
+    assert sorted(saved2["source_ids"]) == sorted([first.id, second.id])
+
+
+def test_ensure_day_memory_reuses_unchanged_timestamp_ties(store):
+    start, end = 100.0, 199.0
+    store.add_observation("alpha", source="capture", ts=150.0)
+    store.add_observation("beta", source="capture", ts=150.0)
+    saved1 = store.ensure_day_memory(
+        local_date="1970-01-01", start_ts=start, end_ts=end, day_offset=0
+    )
+    saved2 = store.ensure_day_memory(
+        local_date="1970-01-01", start_ts=start, end_ts=end, day_offset=0
+    )
+
+    assert saved2["id"] == saved1["id"]
+    assert saved2["payload"]["source_fingerprint"] == saved1["payload"]["source_fingerprint"]
+
+
+def test_ensure_day_memory_rebuilds_old_extractor_payload(store):
+    start, end = 100.0, 199.0
+    obs = store.add_observation("old extractor work", source="capture", ts=150.0)
+    rows = store.time_range_text(start, end, source="capture")
+    old = store.save_day_memory(
+        local_date="1970-01-01",
+        source_scope="capture",
+        extractor_version="day-memory-v0",
+        payload={
+            "schema": 1,
+            "extractor_version": "day-memory-v0",
+            "narrative_status": "not_persisted",
+            "source_fingerprint": store.day_memory_source_fingerprint_from_rows(rows),
+            "coverage": {"source_ids": [obs.id]},
+        },
+        source_ids=[obs.id],
+    )
+
+    saved = store.ensure_day_memory(
+        local_date="1970-01-01", start_ts=start, end_ts=end, day_offset=0
+    )
+
+    assert saved["id"] != old["id"]
+    assert saved["extractor_version"] != "day-memory-v0"
+    assert "workstreams" in saved["payload"]
+
+
+def test_concurrent_ensure_day_memory_converges_to_one_row(tmp_path, fake_provider):
+    from concurrent.futures import ThreadPoolExecutor
+
+    db = str(tmp_path / "daymem-concurrent.db")
+    settings = Settings(data_dir=tmp_path, embed_dim=fake_provider.embed_dim)
+    seed = MemoryStore(db_path=db, settings=settings, provider=fake_provider)
+    try:
+        seed.add_observation("concurrent day memory", source="capture", ts=150.0)
+    finally:
+        seed.close()
+
+    def run_once():
+        s = MemoryStore(db_path=db, settings=settings, provider=fake_provider)
+        try:
+            return s.ensure_day_memory(
+                local_date="1970-01-01",
+                start_ts=100.0,
+                end_ts=199.0,
+                day_offset=0,
+            )["id"]
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids = list(pool.map(lambda _i: run_once(), range(2)))
+
+    check = MemoryStore(db_path=db, settings=settings, provider=fake_provider)
+    try:
+        count = check.conn.execute("SELECT COUNT(*) c FROM day_memories").fetchone()["c"]
+    finally:
+        check.close()
+
+    assert count == 1
+    assert len(set(ids)) == 1
+
+
 def test_time_range_correctness(store):
     store.add_observation("a", source="capture", ts=10.0)
     store.add_observation("b", source="capture", ts=20.0)

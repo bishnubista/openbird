@@ -111,6 +111,9 @@ def test_build_day_memory_payload_has_metrics_sources_and_no_narrative_text():
     assert payload["metrics"]["time_by_category"]["browser_research"] == 300
     assert any(d["value"] == "github.com" for d in payload["entities"]["domains"])
     assert any(d["value"] == "youtube.com" for d in payload["entities"]["domains"])
+    assert payload["workstreams"]
+    assert payload["workstreams"][0]["source_ids"]
+    assert payload["source_fingerprint"]["count"] == 3
 
 
 def test_build_day_memory_times_terminal_observation_against_window_end():
@@ -185,6 +188,64 @@ def test_build_day_memory_uses_stable_tie_breakers():
     ]
 
 
+def test_build_day_memory_extracts_open_loop_cues_without_narrative():
+    start = _ts(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "issue",
+                ts=start,
+                app="com.google.Chrome",
+                window="Fix capture race · Issue #42 · bishnubista/openbird",
+                url="https://github.com/bishnubista/openbird/issues/42",
+            ),
+            "TODO follow up on regression test",
+        )
+    ]
+
+    built = build_day_memory(
+        rows,
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+    )
+
+    payload = built.payload
+    assert "narrative" not in payload
+    assert payload["open_loops"][0]["kind"] == "github_issue"
+    assert payload["open_loops"][0]["source_ids"] == ["issue"]
+
+
+def test_build_day_memory_dedupes_github_open_loop_by_canonical_cue():
+    start = _ts(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "a",
+                ts=start,
+                window="Old title · Issue #42",
+                url="https://github.com/bishnubista/openbird/issues/42",
+            ),
+            "review",
+        ),
+        (
+            _obs(
+                "b",
+                ts=start + 10,
+                window="New title · Issue #42",
+                url="https://github.com/bishnubista/openbird/issues/42",
+            ),
+            "fix",
+        ),
+    ]
+
+    built = build_day_memory(rows, start_ts=start, end_ts=start + 60, day_offset=0)
+
+    assert len(built.payload["open_loops"]) == 1
+    assert built.payload["open_loops"][0]["source_count"] == 2
+    assert built.payload["open_loops"][0]["source_ids"] == ["a", "b"]
+
+
 class _DayMemoryStoreStub:
     def __init__(self, rows):
         self.rows = rows
@@ -210,6 +271,27 @@ class _DayMemoryStoreStub:
         if self.saved is None:
             return None
         return self.save_day_memory(**self.saved)
+
+    def ensure_day_memory(self, **kwargs):
+        from openbird.day_memory import EXTRACTOR_VERSION, build_day_memory
+
+        rows = self.time_range_text(
+            kwargs["start_ts"], kwargs["end_ts"], source=kwargs.get("source_scope")
+        )
+        built = build_day_memory(
+            rows,
+            start_ts=kwargs["start_ts"],
+            end_ts=kwargs["end_ts"],
+            day_offset=kwargs["day_offset"],
+            source_scope=kwargs.get("source_scope", "capture"),
+        )
+        return self.save_day_memory(
+            local_date=kwargs["local_date"],
+            source_scope=kwargs.get("source_scope", "capture"),
+            extractor_version=EXTRACTOR_VERSION,
+            payload=built.payload,
+            source_ids=built.source_ids,
+        )
 
     def close(self):
         pass
@@ -238,15 +320,18 @@ def test_day_memory_build_cli_is_no_model_and_json(monkeypatch, tmp_path):
     assert payload["day_memory"]["payload"]["narrative_status"] == "not_persisted"
 
 
-def test_day_memory_show_json_miss_exits_nonzero(monkeypatch, tmp_path):
+def test_day_memory_show_json_ensures_empty_day(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
     stub = _DayMemoryStoreStub([])
     monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
 
-    res = CliRunner().invoke(cli.app, ["day-memory", "show", "--day", "0", "--json"])
+    try:
+        res = CliRunner().invoke(cli.app, ["day-memory", "show", "--day", "0", "--json"])
+    finally:
+        reset_settings_cache()
 
-    assert res.exit_code == 1, res.output
+    assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
-    assert payload["built"] is False
-    assert payload["message"] == "day memory has not been built"
+    assert payload["built"] is True
+    assert payload["day_memory"]["payload"]["coverage"]["observations"] == 0

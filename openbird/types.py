@@ -75,6 +75,23 @@ class Citation(BaseModel):
     snippet: str
 
 
+class DerivedCitation(BaseModel):
+    """A citation for a deterministic derived fact backed by observations.
+
+    This is intentionally separate from :class:`Citation`: aggregate facts such
+    as "42 minutes coding" do not live inside one occurrence, so they must carry
+    an explicit source set instead of pretending to be an occurrence excerpt.
+    """
+
+    index: int
+    source_id: str
+    type: str = "day_memory"
+    label: str
+    snippet: str
+    derived_from: list[str]
+    derived_from_total: int
+
+
 class RoutineRun(BaseModel):
     """A durable record of a single scheduled-routine execution."""
 
@@ -94,6 +111,7 @@ __all__ = [
     "Chunk",
     "SearchHit",
     "Citation",
+    "DerivedCitation",
     "RoutineRun",
     "Field",
 ]

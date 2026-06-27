@@ -10,6 +10,8 @@ read-time inferences for later features, not durable facts.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -17,7 +19,7 @@ from urllib.parse import urlparse
 
 from openbird.types import Observation
 
-EXTRACTOR_VERSION = "day-memory-v1"
+EXTRACTOR_VERSION = "day-memory-v2"
 
 _BROWSER_APPS = {
     "com.google.chrome",
@@ -43,7 +45,14 @@ _SYSTEM_HINTS = ("systempreferences", "settings", "keychain", "activitymonitor")
 _FILE_HINTS = ("finder",)
 _MEDIA_DOMAINS = ("youtube.com", "youtu.be", "netflix.com", "spotify.com")
 _REPO_RE = re.compile(r"\bgithub\.com/([^/\s]+)/([^/\s?#]+)", re.IGNORECASE)
+_GITHUB_ITEM_RE = re.compile(
+    r"github\.com/([^/\s]+)/([^/\s?#]+)/(issues|pull)/(\d+)", re.IGNORECASE
+)
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{2,}")
+_OPEN_LOOP_RE = re.compile(
+    r"\b(todo|follow(?:ing)? up|follow-up|blocked|blocker|review|fix|bug|issue|pr|pull request)\b",
+    re.IGNORECASE,
+)
 _STOP_TOKENS = {
     "google", "chrome", "safari", "github", "pull", "request", "requests",
     "openbird", "codex", "page", "copy", "login", "sign", "into", "with",
@@ -72,12 +81,18 @@ def build_day_memory(
     day_offset: int,
     source_scope: str = "capture",
     gap_seconds: float = 300.0,
+    source_fingerprint: dict | None = None,
+    as_of: float | None = None,
 ) -> DayMemoryBuild:
     """Build a deterministic, no-model day-memory payload."""
     ordered = sorted(rows, key=lambda item: _observation_sort_key(item[0]))
     source_ids = [obs.id for obs, _ in ordered]
     sessions = _build_sessions(ordered)
     timed = _timed_observations(ordered, gap_seconds=gap_seconds, end_ts=end_ts)
+    active_by_source = _active_seconds_by_source(timed)
+    entities = _entities(ordered)
+    workstreams = _workstreams(sessions, entities, active_by_source)
+    open_loops = _open_loops(ordered)
 
     time_by_hour: Counter[str] = Counter()
     time_by_app: Counter[str] = Counter()
@@ -96,6 +111,7 @@ def build_day_memory(
         "narrative_status": "not_persisted",
         "local_date": local_date_for_window(start_ts),
         "source_scope": source_scope,
+        "as_of": end_ts if as_of is None else as_of,
         "day_offset": day_offset,
         "window": {"start": start_ts, "end": end_ts},
         "coverage": {
@@ -104,7 +120,10 @@ def build_day_memory(
             "apps": len({obs.app for obs, _ in ordered if obs.app}),
             "source_ids": source_ids,
         },
+        "source_fingerprint": source_fingerprint or source_fingerprint_for_rows(ordered),
         "sessions": sessions,
+        "workstreams": workstreams,
+        "open_loops": open_loops,
         "metrics": {
             "active_seconds": round(sum(time_by_category.values()), 3),
             "time_by_hour": _round_counter(time_by_hour),
@@ -118,9 +137,23 @@ def build_day_memory(
                 1 for obs, text in ordered if classify_observation(obs, text)[0] == "unknown"
             ),
         },
-        "entities": _entities(ordered),
+        "entities": entities,
     }
     return DayMemoryBuild(payload=payload, source_ids=source_ids)
+
+
+def source_fingerprint_for_rows(rows: list[tuple[Observation, str]]) -> dict:
+    """Return a stable fingerprint for the exact observation membership."""
+    ordered = sorted(rows, key=lambda item: item[0].id)
+    pairs = [(obs.id, obs.content_hash) for obs, _text in ordered]
+    payload = json.dumps(pairs, ensure_ascii=False, separators=(",", ":"))
+    timestamps = [obs.ts for obs, _text in ordered]
+    return {
+        "count": len(ordered),
+        "min_ts": min(timestamps) if timestamps else None,
+        "max_ts": max(timestamps) if timestamps else None,
+        "ids_hash": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+    }
 
 
 def classify_observation(obs: Observation, text: str = "") -> tuple[str, float]:
@@ -225,6 +258,16 @@ def _timed_observations(
     return out
 
 
+def _active_seconds_by_source(
+    timed: list[tuple[Observation, str, str, float]]
+) -> dict[str, float]:
+    seconds: Counter[str] = Counter()
+    for obs, _text, _category, duration in timed:
+        if duration > 0:
+            seconds[obs.id] += duration
+    return {source_id: round(value, 3) for source_id, value in sorted(seconds.items())}
+
+
 def _context_switch_count(rows: list[tuple[Observation, str]]) -> int:
     if not rows:
         return 0
@@ -290,6 +333,123 @@ def _entities(rows: list[tuple[Observation, str]]) -> dict:
             ]
         ],
     }
+
+
+def _workstreams(
+    sessions: list[dict], entities: dict, active_by_source: dict[str, float]
+) -> list[dict]:
+    session_by_source: dict[str, dict] = {}
+    category_by_source: dict[str, str] = {}
+    for session in sessions:
+        for source_id in session.get("source_ids", []):
+            session_by_source[source_id] = session
+            category_by_source[source_id] = session.get("category", "unknown")
+
+    candidates: list[dict] = []
+    for kind in ("repo", "domain"):
+        entity_key = "repos" if kind == "repo" else "domains"
+        for item in entities.get(entity_key, []):
+            source_ids = list(item.get("source_ids", []))
+            if not source_ids:
+                continue
+            categories = Counter(category_by_source.get(sid, "unknown") for sid in source_ids)
+            category = sorted(categories.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            sessions_seen = {
+                tuple(session_by_source[sid].get("source_ids", []))
+                for sid in source_ids
+                if sid in session_by_source
+            }
+            candidates.append(
+                {
+                    "kind": kind,
+                    "label": item["value"],
+                    "category": category,
+                    "session_count": len(sessions_seen),
+                    "active_seconds": round(sum(active_by_source.get(sid, 0.0) for sid in source_ids), 3),
+                    "source_ids": sorted(source_ids),
+                    "source_count": item.get("count", len(source_ids)),
+                }
+            )
+
+    by_category: dict[str, set[str]] = defaultdict(set)
+    for session in sessions:
+        by_category[session.get("category", "unknown")].update(session.get("source_ids", []))
+    for category, ids in sorted(by_category.items()):
+        source_ids = sorted(ids)
+        candidates.append(
+            {
+                "kind": "category",
+                "label": category,
+                "category": category,
+                "session_count": sum(
+                    1 for session in sessions if session.get("category") == category
+                ),
+                "active_seconds": round(sum(active_by_source.get(sid, 0.0) for sid in source_ids), 3),
+                "source_ids": source_ids[:12],
+                "source_count": len(source_ids),
+            }
+        )
+
+    return sorted(
+        candidates,
+        key=lambda item: (
+            -float(item.get("active_seconds", 0.0)),
+            -int(item.get("source_count", 0)),
+            item.get("kind", ""),
+            item.get("label", ""),
+        ),
+    )[:12]
+
+
+def _open_loops(rows: list[tuple[Observation, str]]) -> list[dict]:
+    loops: dict[tuple[str, str], dict] = {}
+    for obs, text in rows:
+        blob = " ".join(part for part in (obs.window or "", obs.url or "", text[:500]) if part)
+        if not blob:
+            continue
+        github = _GITHUB_ITEM_RE.search(blob)
+        cue_match = _OPEN_LOOP_RE.search(blob)
+        if not github and not cue_match:
+            continue
+        if github:
+            owner, repo, item_kind, number = github.groups()
+            kind = "github_pr" if item_kind == "pull" else "github_issue"
+            cue = f"{owner}/{repo} {item_kind} #{number}"
+            key_value = cue.casefold()
+        else:
+            kind = "cue"
+            cue = cue_match.group(0).lower() if cue_match else "cue"
+            key_value = None
+        title = _clean_title(obs.window or text or obs.url or cue)
+        key = (kind, key_value or title.casefold())
+        current = loops.setdefault(
+            key,
+            {
+                "kind": kind,
+                "title": title,
+                "cue": cue,
+                "source_ids": [],
+                "source_count": 0,
+            },
+        )
+        current["source_count"] += 1
+        current["source_ids"].append(obs.id)
+
+    out: list[dict] = []
+    for item in loops.values():
+        item["source_ids"] = sorted(set(item["source_ids"]))[:12]
+        out.append(item)
+    return sorted(
+        out,
+        key=lambda item: (-int(item["source_count"]), item["kind"], item["title"]),
+    )[:12]
+
+
+def _clean_title(value: str, *, limit: int = 140) -> str:
+    title = " ".join(value.split())
+    if len(title) > limit:
+        title = title[: limit - 1].rstrip() + "…"
+    return title
 
 
 def _domain(value: str) -> str | None:
