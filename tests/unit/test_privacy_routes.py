@@ -154,6 +154,8 @@ def test_deep_brain_ask_inherits_active_model_route() -> None:
         "packet_build_route",
         "generated_answer",
         "validated_citations",
+        "exclusion_counts",
+        "exclusion_metadata",
     }.issubset(set(route["captured_fields"]))
 
 
@@ -168,6 +170,7 @@ def test_deep_brain_preview_declares_day_or_week_packet_metadata() -> None:
         "selected_citation_snippets",
         "packet_build_route",
         "exclusion_counts",
+        "exclusion_metadata",
     }.issubset(set(route["captured_fields"]))
 
 
@@ -191,6 +194,7 @@ def test_briefing_model_uses_distilled_packet_and_cloud_opt_in_only() -> None:
         "generated_briefing",
         "validated_citations",
         "exclusion_counts",
+        "exclusion_metadata",
     }.issubset(set(route["captured_fields"]))
 
 

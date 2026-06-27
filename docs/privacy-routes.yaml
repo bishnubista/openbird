@@ -118,6 +118,7 @@ routes:
       - selected_source_timestamp
       - packet_build_route
       - exclusion_counts
+      - exclusion_metadata
       - opt_in_gate_status
     storage: []
     egress:
@@ -143,6 +144,7 @@ routes:
       - generated_answer
       - validated_citations
       - exclusion_counts
+      - exclusion_metadata
     storage: []
     egress:
       default: inherits_active_model_route
@@ -178,6 +180,7 @@ routes:
       - generated_briefing
       - validated_citations
       - exclusion_counts
+      - exclusion_metadata
     storage: []
     egress:
       default: inherits_active_model_route

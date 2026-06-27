@@ -29,6 +29,7 @@ import datetime as _dt
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -304,6 +305,54 @@ def _validate_deep_brain_days(days: int) -> None:
         raise typer.Exit(code=2)
 
 
+def _merge_cli_exclusions(configured: list[str], cli_values: list[str] | None) -> list[str]:
+    """Append CLI exclusion values without mutating cached settings."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in [*configured, *(cli_values or [])]:
+        item = str(value).strip()
+        if not item:
+            continue
+        key = item.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
+def _settings_with_cli_cloud_exclusions(
+    settings,
+    *,
+    exclude_app: list[str] | None = None,
+    exclude_source: list[str] | None = None,
+    exclude_observation_id: list[str] | None = None,
+):
+    """Return a settings copy with one-off cloud packet exclusions applied."""
+    if not (exclude_app or exclude_source or exclude_observation_id):
+        return settings
+    return replace(
+        settings,
+        deep_brain_excluded_apps=_merge_cli_exclusions(
+            settings.deep_brain_excluded_apps, exclude_app
+        ),
+        deep_brain_excluded_sources=_merge_cli_exclusions(
+            settings.deep_brain_excluded_sources, exclude_source
+        ),
+        deep_brain_excluded_observation_ids=_merge_cli_exclusions(
+            settings.deep_brain_excluded_observation_ids, exclude_observation_id
+        ),
+    )
+
+
+def _has_cli_cloud_exclusions(
+    exclude_app: list[str] | None,
+    exclude_source: list[str] | None,
+    exclude_observation_id: list[str] | None,
+) -> bool:
+    return bool(exclude_app or exclude_source or exclude_observation_id)
+
+
 def _deep_brain_day_windows(day: int, days: int) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
     for offset in range(day + days - 1, day - 1, -1):
@@ -423,6 +472,21 @@ def briefing(
         help="Opt in to model-written prose (configured provider) instead of the "
         "default local deterministic day-memory summary.",
     ),
+    exclude_app: list[str] = typer.Option(
+        [],
+        "--exclude-app",
+        help="Only with --model: exclude an app/bundle id from the model packet.",
+    ),
+    exclude_source: list[str] = typer.Option(
+        [],
+        "--exclude-source",
+        help="Only with --model: exclude an observation source from the model packet.",
+    ),
+    exclude_observation_id: list[str] = typer.Option(
+        [],
+        "--exclude-observation-id",
+        help="Only with --model: exclude one observation id from the model packet.",
+    ),
     signals: bool = typer.Option(
         False,
         "--signals",
@@ -436,16 +500,24 @@ def briefing(
     trail. No completion provider is constructed and no model is called.
 
     ``--model`` is the explicit opt-in escape hatch for model-written prose via the
-    configured provider (the ``yesterday`` routine template over the SAME bounds as
-    ``timeline --day N``); a remote model still requires the cloud opt-in enforced
-    at provider construction. ``--signals`` is the separate experimental local
-    classifier path. ``--model`` and ``--signals`` are mutually exclusive.
+    configured provider over an exclusion-filtered distilled day packet; a remote
+    model still requires the cloud opt-in enforced at provider construction.
+    ``--signals`` is the separate experimental local classifier path. ``--model``
+    and ``--signals`` are mutually exclusive.
     """
     if day < 0:
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
     if model and signals:
         _err_console.print("[red]--model and --signals are mutually exclusive.[/]")
+        raise typer.Exit(code=2)
+    if not model and _has_cli_cloud_exclusions(
+        exclude_app, exclude_source, exclude_observation_id
+    ):
+        _err_console.print(
+            "[red]Cloud exclusion flags apply only to model briefings. "
+            "Use --model, or omit the exclusion flags for the local briefing.[/]"
+        )
         raise typer.Exit(code=2)
 
     start, end = _day_window(day)
@@ -454,7 +526,15 @@ def briefing(
         return
 
     if model:
-        _briefing_model(day, start, end, as_json=as_json)
+        _briefing_model(
+            day,
+            start,
+            end,
+            as_json=as_json,
+            exclude_app=exclude_app,
+            exclude_source=exclude_source,
+            exclude_observation_id=exclude_observation_id,
+        )
         return
 
     _briefing_local(day, start, end, as_json=as_json)
@@ -511,14 +591,28 @@ def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> Non
     _console.print(text)
 
 
-def _briefing_model(day: int, start: float, end: float, *, as_json: bool) -> None:
+def _briefing_model(
+    day: int,
+    start: float,
+    end: float,
+    *,
+    as_json: bool,
+    exclude_app: list[str] | None = None,
+    exclude_source: list[str] | None = None,
+    exclude_observation_id: list[str] | None = None,
+) -> None:
     """Opt-in briefing: model-written prose over a distilled day packet."""
     from openbird.deep_brain import (
         build_deep_brain_preview,
         complete_from_deep_brain_packet,
     )
 
-    settings = get_settings()
+    settings = _settings_with_cli_cloud_exclusions(
+        get_settings(),
+        exclude_app=exclude_app,
+        exclude_source=exclude_source,
+        exclude_observation_id=exclude_observation_id,
+    )
     store = _store_maintenance()
     try:
         rows = store.time_range_text(start, end, source="capture")
@@ -692,6 +786,21 @@ def deep_brain_preview(
     source_scope: str = typer.Option(
         "capture", "--source-scope", help="Observation source to preview."
     ),
+    exclude_app: list[str] = typer.Option(
+        [],
+        "--exclude-app",
+        help="Exclude an app/bundle id from the preview packet.",
+    ),
+    exclude_source: list[str] = typer.Option(
+        [],
+        "--exclude-source",
+        help="Exclude an observation source from the preview packet.",
+    ),
+    exclude_observation_id: list[str] = typer.Option(
+        [],
+        "--exclude-observation-id",
+        help="Exclude one observation id from the preview packet.",
+    ),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
     """Build a local-only Deep Brain packet preview.
@@ -706,7 +815,12 @@ def deep_brain_preview(
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
     _validate_deep_brain_days(days)
-    settings = get_settings()
+    settings = _settings_with_cli_cloud_exclusions(
+        get_settings(),
+        exclude_app=exclude_app,
+        exclude_source=exclude_source,
+        exclude_observation_id=exclude_observation_id,
+    )
     packet = _build_deep_brain_period_packet(day, days, source_scope, settings)
     if as_json:
         _console.print_json(json.dumps(packet))
@@ -732,6 +846,21 @@ def deep_brain_ask(
     source_scope: str = typer.Option(
         "capture", "--source-scope", help="Observation source to distill."
     ),
+    exclude_app: list[str] = typer.Option(
+        [],
+        "--exclude-app",
+        help="Exclude an app/bundle id from the Deep Brain packet.",
+    ),
+    exclude_source: list[str] = typer.Option(
+        [],
+        "--exclude-source",
+        help="Exclude an observation source from the Deep Brain packet.",
+    ),
+    exclude_observation_id: list[str] = typer.Option(
+        [],
+        "--exclude-observation-id",
+        help="Exclude one observation id from the Deep Brain packet.",
+    ),
     stdin: bool = typer.Option(False, "--stdin", help="Read the question from stdin."),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
@@ -751,7 +880,12 @@ def deep_brain_ask(
         deep_brain_ask_blocked_reasons,
     )
 
-    settings = get_settings()
+    settings = _settings_with_cli_cloud_exclusions(
+        get_settings(),
+        exclude_app=exclude_app,
+        exclude_source=exclude_source,
+        exclude_observation_id=exclude_observation_id,
+    )
     packet = _build_deep_brain_period_packet(day, days, source_scope, settings)
     blocked = deep_brain_ask_blocked_reasons(settings)
     if blocked:
@@ -972,6 +1106,21 @@ def productivity_coach(
     source_scope: str = typer.Option(
         "capture", "--source-scope", help="Observation source to analyze."
     ),
+    exclude_app: list[str] = typer.Option(
+        [],
+        "--exclude-app",
+        help="Exclude an app/bundle id from the coaching packet.",
+    ),
+    exclude_source: list[str] = typer.Option(
+        [],
+        "--exclude-source",
+        help="Exclude an observation source from the coaching packet.",
+    ),
+    exclude_observation_id: list[str] = typer.Option(
+        [],
+        "--exclude-observation-id",
+        help="Exclude one observation id from the coaching packet.",
+    ),
     stdin: bool = typer.Option(False, "--stdin", help="Read the question from stdin."),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
@@ -993,7 +1142,12 @@ def productivity_coach(
     )
 
     start, end = _day_window(day)
-    settings = get_settings()
+    settings = _settings_with_cli_cloud_exclusions(
+        get_settings(),
+        exclude_app=exclude_app,
+        exclude_source=exclude_source,
+        exclude_observation_id=exclude_observation_id,
+    )
     store = _store_maintenance()
     try:
         rows = store.time_range_text(start, end, source=source_scope)
