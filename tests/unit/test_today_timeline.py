@@ -311,6 +311,7 @@ class _Completion:
 
     def __init__(self, rows):
         self._rows = rows
+        self.messages = []
 
     # Store seam used by the briefing command.
     def day_sessions(self, start, end):
@@ -347,8 +348,14 @@ class _Completion:
         pass
 
     # Provider seam.
-    def complete(self, messages):
-        return "SUMMARY"
+    def complete(self, messages, *, json_schema=None):
+        self.messages.append(messages)
+        citation_ids = [self._rows[0][0].id] if self._rows else []
+        return {
+            "answer": "SUMMARY",
+            "citation_ids": citation_ids,
+            "confidence": "high",
+        }
 
 
 class _EmptyDayMemory(_Completion):
@@ -360,6 +367,7 @@ def _patch_briefing_store(monkeypatch, stub):
     monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
     monkeypatch.setattr(cli, "_store", lambda *a, **k: stub)
     monkeypatch.setattr(cli, "_provider", lambda: stub)
+    monkeypatch.setattr(cli, "_completion_provider", lambda **_: stub)
 
 
 def test_briefing_cli_json_defaults_to_local_day_memory(monkeypatch, tmp_path):
@@ -411,15 +419,83 @@ def test_briefing_cli_model_flag_uses_configured_provider(monkeypatch, tmp_path)
     rows = [
         (_obs("o1", h="h1", ts=today, window="rag.py"), "edited rag.py"),
     ]
-    _patch_briefing_store(monkeypatch, _Completion(rows))
+    stub = _Completion(rows)
+    _patch_briefing_store(monkeypatch, stub)
 
     res = CliRunner().invoke(cli.app, ["briefing", "--model", "--json", "--day", "0"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
     assert payload["text"] == "SUMMARY"
     assert payload["reasoning_route"] == "local_model"
+    assert payload["egress"] == "none"
+    assert payload["packet_route"] == "deep_brain.preview"
+    assert payload["packet_build_route"] == "deterministic_distillation"
+    assert payload["confidence"] == "high"
+    assert payload["grounded"] is True
     assert "memory_context" not in payload
     assert payload["sources_total"] == 1
+    assert [source["observation_id"] for source in payload["sources"]] == ["o1"]
+    assert payload["sources"][0]["window"] == "rag.py"
+
+    prompt = "\n\n".join(message["content"] for message in stub.messages[0])
+    assert '"packet_build_route":"deterministic_distillation"' in prompt
+    assert '"memory_summary"' in prompt
+    assert "<observations" not in prompt
+    assert "Output ONLY the briefing" not in prompt
+
+
+def test_briefing_cli_model_empty_packet_skips_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    _patch_briefing_store(monkeypatch, _Completion([]))
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda **_: (_ for _ in ()).throw(
+            AssertionError("empty model briefing must not construct provider")
+        ),
+    )
+
+    res = CliRunner().invoke(cli.app, ["briefing", "--model", "--json", "--day", "0"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert payload["egress"] == "none"
+    assert payload["grounded"] is False
+    assert payload["sources"] == []
+    assert payload["sources_total"] == 0
+    assert "enough cited briefing evidence" in payload["text"].lower()
+
+
+def test_briefing_cli_model_fully_excluded_packet_skips_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_APPS", "com.mitchellh.ghostty")
+    reset_settings_cache()
+    today = _day(*dt.datetime.now().timetuple()[:3], 9)
+    rows = [
+        (
+            _obs("o1", h="h1", ts=today, app="com.mitchellh.ghostty", window="secret"),
+            "private terminal work",
+        ),
+    ]
+    _patch_briefing_store(monkeypatch, _Completion(rows))
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda **_: (_ for _ in ()).throw(
+            AssertionError("excluded model briefing must not construct provider")
+        ),
+    )
+
+    res = CliRunner().invoke(cli.app, ["briefing", "--model", "--json", "--day", "0"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert payload["egress"] == "none"
+    assert payload["sources"] == []
+    assert payload["sources_total"] == 0
+    assert payload["exclusions"]["excluded_observations"] == 1
+    assert payload["exclusions"]["excluded_by"] == {"app": 1}
 
 
 def test_briefing_cli_json_empty_day_has_no_sources(monkeypatch, tmp_path):

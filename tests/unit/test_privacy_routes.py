@@ -50,6 +50,7 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
     assert {
         "capture.active_window",
         "capture.pause",
+        "briefing.model",
         "chat.local",
         "chat.remote",
         "data.export",
@@ -166,6 +167,29 @@ def test_deep_brain_preview_declares_day_or_week_packet_metadata() -> None:
         "period_metadata",
         "selected_citation_snippets",
         "packet_build_route",
+        "exclusion_counts",
+    }.issubset(set(route["captured_fields"]))
+
+
+def test_briefing_model_uses_distilled_packet_and_cloud_opt_in_only() -> None:
+    route = _routes()["briefing.model"]
+
+    assert route["class"] == "unknown"
+    assert route["egress"]["default"] == "inherits_active_model_route"
+    assert route["egress"]["inherited_from"] == ["chat.local", "chat.remote"]
+    assert route["enforcement"]["requires"] == "OPENBIRD_ALLOW_CLOUD"
+    assert "feature_requires" not in route["enforcement"]
+    assert "cli.briefing_model" in route["truth_surface"]
+    assert "cli.CLOUD_ACTIVE" in route["truth_surface"]
+    assert {
+        "model_briefing_prompt",
+        "distilled_day_memory_content",
+        "selected_citation_snippets",
+        "packet_build_route",
+        "packet_preview_egress_label",
+        "opt_in_gate_status",
+        "generated_briefing",
+        "validated_citations",
         "exclusion_counts",
     }.issubset(set(route["captured_fields"]))
 
@@ -378,7 +402,12 @@ def test_egress_manifest_declares_no_undeclared_optin_call_site_route() -> None:
         for rid, r in routes.items()
         if r.get("enforcement", {}).get("requires") == "OPENBIRD_ALLOW_CLOUD"
     }
-    call_site_routes = optin_routes - resolver_ids
+    inherited_model_routes = {
+        rid
+        for rid, r in routes.items()
+        if r.get("egress", {}).get("default") == "inherits_active_model_route"
+    }
+    call_site_routes = optin_routes - resolver_ids - inherited_model_routes
     assert call_site_routes == set(CLOUD_EGRESS_ROUTES.values()), (
         "per-call-site cloud-egress routes in the manifest must match the code's "
         f"CLOUD_EGRESS_ROUTES registry. manifest={sorted(call_site_routes)} "
