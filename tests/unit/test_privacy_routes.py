@@ -146,10 +146,25 @@ def test_deep_brain_ask_inherits_active_model_route() -> None:
     assert route["enforcement"]["feature_requires"] == "OPENBIRD_DEEP_BRAIN_ENABLED"
     assert {
         "distilled_day_memory_content",
+        "distilled_day_or_week_memory_content",
+        "period_metadata",
         "selected_citation_snippets",
         "selected_source_window_or_url",
         "generated_answer",
         "validated_citations",
+    }.issubset(set(route["captured_fields"]))
+
+
+def test_deep_brain_preview_declares_day_or_week_packet_metadata() -> None:
+    route = _routes()["deep_brain.preview"]
+
+    assert route["class"] == "local"
+    assert route["egress"]["default"] == "none"
+    assert {
+        "distilled_day_or_week_memory_content",
+        "period_metadata",
+        "selected_citation_snippets",
+        "exclusion_counts",
     }.issubset(set(route["captured_fields"]))
 
 

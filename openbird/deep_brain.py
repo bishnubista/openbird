@@ -24,6 +24,8 @@ from openbird.types import Observation
 
 Rows = Sequence[tuple[Observation, str]]
 _SOURCE_META_LEN = 160
+MAX_DEEP_BRAIN_DAYS = 7
+PRIOR_DAY_SOURCES = 3
 _UNGROUNDED_DEEP_BRAIN_ANSWER = (
     "I could not ground that answer in the Deep Brain packet."
 )
@@ -79,6 +81,100 @@ def build_deep_brain_preview(
         "selected_sources": _safe_selected_sources(raw_sources),
         "sources_total": total_sources,
         "exclusions": exclusion_meta,
+    }
+
+
+def build_deep_brain_period_preview(
+    day_rows: Sequence[Rows],
+    *,
+    day_windows: Sequence[dict[str, Any]],
+    day_offset: int,
+    days: int,
+    source_scope: str,
+    settings: Settings,
+    newest_sources_limit: int = DEFAULT_BRIEFING_SOURCES,
+    prior_sources_per_day: int = PRIOR_DAY_SOURCES,
+) -> dict[str, Any]:
+    """Build a local-only Deep Brain packet for a trailing day/week period.
+
+    Multi-day packets are computed per local day before aggregation. That keeps
+    the daily distiller inside its intended grain and guarantees every included
+    day gets its own exclusion pass, summary, and citable source anchors.
+    """
+    if days != len(day_windows) or days != len(day_rows):
+        raise ValueError("days must match day_windows and day_rows")
+    if days < 1 or days > MAX_DEEP_BRAIN_DAYS:
+        raise ValueError(f"days must be between 1 and {MAX_DEEP_BRAIN_DAYS}")
+    if days == 1:
+        window = day_windows[0]
+        return build_deep_brain_preview(
+            day_rows[0],
+            start_ts=float(window["start"]),
+            end_ts=float(window["end"]),
+            day_offset=int(window["day_offset"]),
+            source_scope=source_scope,
+            settings=settings,
+            sources_limit=newest_sources_limit,
+        )
+
+    summaries: list[dict[str, Any]] = []
+    selected_sources: list[dict[str, Any]] = []
+    seen_source_ids: set[str] = set()
+    source_group_total = 0
+    exclusion_metas: list[dict[str, Any]] = []
+
+    for idx, (rows, window) in enumerate(zip(day_rows, day_windows, strict=True)):
+        filtered_rows, exclusion_meta = filter_rows_for_deep_brain(
+            rows, settings=settings
+        )
+        exclusion_metas.append(exclusion_meta)
+        built = build_day_memory(
+            list(filtered_rows),
+            start_ts=float(window["start"]),
+            end_ts=float(window["end"]),
+            day_offset=int(window["day_offset"]),
+            source_scope=source_scope,
+            gap_seconds=settings.session_gap_seconds,
+        )
+        summaries.append(_compact_period_day_summary(_memory_summary(built.payload)))
+
+        limit = newest_sources_limit if idx == len(day_rows) - 1 else prior_sources_per_day
+        raw_sources, total = select_briefing_sources(list(filtered_rows), limit=limit)
+        source_group_total += total
+        for source in _safe_selected_sources(raw_sources):
+            obs_id = source.get("observation_id")
+            if not obs_id or str(obs_id) in seen_source_ids:
+                continue
+            seen_source_ids.add(str(obs_id))
+            source["local_date"] = window["local_date"]
+            selected_sources.append(source)
+
+    start_window = day_windows[0]
+    end_window = day_windows[-1]
+    period = {
+        "kind": "multi_day",
+        "days": days,
+        "start_local_date": start_window["local_date"],
+        "end_local_date": end_window["local_date"],
+        "start_day_offset": start_window["day_offset"],
+        "end_day_offset": end_window["day_offset"],
+        "window": {"start": start_window["start"], "end": end_window["end"]},
+    }
+    blocked_reasons = deep_brain_blocked_reasons(settings)
+    return {
+        "route": "deep_brain.preview",
+        "egress": "none_preview",
+        "cloud_ready": not blocked_reasons,
+        "blocked_reasons": blocked_reasons,
+        "local_date": end_window["local_date"],
+        "day_offset": day_offset,
+        "source_scope": source_scope,
+        "period": period,
+        "memory_summary": _aggregate_period_memory_summary(summaries, period),
+        "memory_summaries": summaries,
+        "selected_sources": selected_sources,
+        "sources_total": source_group_total,
+        "exclusions": _aggregate_period_exclusions(exclusion_metas, settings=settings),
     }
 
 
@@ -385,6 +481,134 @@ def _memory_summary(payload: dict[str, Any]) -> dict[str, Any]:
             ),
         ),
         "entities": _entities_summary(payload.get("entities") or {}),
+    }
+
+
+def _compact_period_day_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Bound one daily summary for inclusion in a multi-day model packet."""
+    coverage = summary.get("coverage") or {}
+    metrics = summary.get("metrics") or {}
+    entities = summary.get("entities") or {}
+    return {
+        "schema": summary.get("schema"),
+        "extractor_version": summary.get("extractor_version"),
+        "narrative_status": summary.get("narrative_status"),
+        "local_date": summary.get("local_date"),
+        "source_scope": summary.get("source_scope"),
+        "as_of": summary.get("as_of"),
+        "day_offset": summary.get("day_offset"),
+        "window": _copy_mapping(summary.get("window"), ("start", "end")),
+        "coverage": {
+            "observations": int(coverage.get("observations") or 0),
+            "sessions": int(coverage.get("sessions") or 0),
+            "apps": int(coverage.get("apps") or 0),
+        },
+        "workstreams": list(summary.get("workstreams") or [])[:5],
+        "open_loops": list(summary.get("open_loops") or [])[:5],
+        "metrics": {
+            "active_seconds": float(metrics.get("active_seconds") or 0.0),
+            "time_by_app": dict(metrics.get("time_by_app") or {}),
+            "time_by_category": dict(metrics.get("time_by_category") or {}),
+            "context_switch_count": int(metrics.get("context_switch_count") or 0),
+            "first_seen": metrics.get("first_seen"),
+            "last_seen": metrics.get("last_seen"),
+            "unknown_category_count": int(metrics.get("unknown_category_count") or 0),
+            "longest_same_category_streak": metrics.get("longest_same_category_streak"),
+        },
+        "entities": {
+            "domains": list(entities.get("domains") or [])[:5],
+            "repos": list(entities.get("repos") or [])[:5],
+            "title_tokens": list(entities.get("title_tokens") or [])[:5],
+        },
+    }
+
+
+def _aggregate_period_memory_summary(
+    summaries: list[dict[str, Any]], period: dict[str, Any]
+) -> dict[str, Any]:
+    """Fold compact per-day summaries into a small period rollup."""
+    first_seen_values: list[float] = []
+    last_seen_values: list[float] = []
+    time_by_app: Counter[str] = Counter()
+    time_by_category: Counter[str] = Counter()
+    observations = sessions = apps_active_day_sum = active_day_count = 0
+    active_seconds = 0.0
+    context_switch_count = unknown_category_count = 0
+
+    for summary in summaries:
+        coverage = summary.get("coverage") or {}
+        metrics = summary.get("metrics") or {}
+        day_observations = int(coverage.get("observations") or 0)
+        observations += day_observations
+        sessions += int(coverage.get("sessions") or 0)
+        apps_active_day_sum += int(coverage.get("apps") or 0)
+        if day_observations > 0:
+            active_day_count += 1
+        active_seconds += float(metrics.get("active_seconds") or 0.0)
+        context_switch_count += int(metrics.get("context_switch_count") or 0)
+        unknown_category_count += int(metrics.get("unknown_category_count") or 0)
+        time_by_app.update(_numeric_mapping(metrics.get("time_by_app") or {}))
+        time_by_category.update(_numeric_mapping(metrics.get("time_by_category") or {}))
+        first_seen = metrics.get("first_seen")
+        if first_seen is not None:
+            first_seen_values.append(float(first_seen))
+        last_seen = metrics.get("last_seen")
+        if last_seen is not None:
+            last_seen_values.append(float(last_seen))
+
+    return {
+        "period": dict(period),
+        "coverage": {
+            "observations": observations,
+            "sessions": sessions,
+            "active_day_count": active_day_count,
+            "apps_active_day_sum": apps_active_day_sum,
+        },
+        "metrics": {
+            "active_seconds": round(active_seconds, 3),
+            "time_by_app": _round_numeric_counter(time_by_app),
+            "time_by_category": _round_numeric_counter(time_by_category),
+            "context_switch_count": context_switch_count,
+            "first_seen": min(first_seen_values) if first_seen_values else None,
+            "last_seen": max(last_seen_values) if last_seen_values else None,
+            "unknown_category_count": unknown_category_count,
+        },
+    }
+
+
+def _aggregate_period_exclusions(
+    metas: list[dict[str, Any]], *, settings: Settings
+) -> dict[str, Any]:
+    excluded_by: Counter[str] = Counter()
+    out = {
+        "input_observations": 0,
+        "kept_observations": 0,
+        "excluded_observations": 0,
+        "unknown_app_kept": 0,
+    }
+    for meta in metas:
+        for key in out:
+            out[key] += int(meta.get(key) or 0)
+        excluded_by.update(meta.get("excluded_by") or {})
+    return {
+        **out,
+        "excluded_by": dict(sorted(excluded_by.items())),
+        "excluded_apps_configured": list(settings.deep_brain_excluded_apps),
+        "excluded_sources_configured": list(settings.deep_brain_excluded_sources),
+        "excluded_observation_ids_configured": len(
+            settings.deep_brain_excluded_observation_ids
+        ),
+    }
+
+
+def _numeric_mapping(value: dict[str, Any]) -> dict[str, float]:
+    return {str(key): float(amount or 0.0) for key, amount in value.items()}
+
+
+def _round_numeric_counter(counter: Counter[str]) -> dict[str, float]:
+    return {
+        key: round(float(value), 3)
+        for key, value in sorted(counter.items(), key=lambda item: item[0])
     }
 
 
