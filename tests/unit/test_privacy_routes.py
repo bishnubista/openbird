@@ -232,7 +232,7 @@ def test_chat_day_facts_route_is_local_branch_over_day_memory() -> None:
     assert "inherited_from" not in route["egress"]
     assert "inherited_by" not in route["egress"]
     assert "resolved_by" not in route["egress"]
-    assert {
+    assert set(route["captured_fields"]) == {
         "user_question_for_classification_only",
         "active_seconds",
         "active_minutes",
@@ -242,18 +242,18 @@ def test_chat_day_facts_route_is_local_branch_over_day_memory() -> None:
         "longest_focus_block",
         "derived_citation_source_ids",
         "memory_context_counts",
-    }.issubset(set(route["captured_fields"]))
-    assert {
+    }
+    assert set(route["forbidden_fields"]) == {
         "captured_text",
         "raw_window_title",
         "raw_url",
         "raw_title",
         "source_ids_in_memory_context",
-    }.issubset(set(route["forbidden_fields"]))
-    assert {
+    }
+    assert set(route["truth_surface"]) == {
         "cli.chat_json.reasoning_route",
         "app.ChatResult.routeLabel",
-    }.issubset(set(route["truth_surface"]))
+    }
 
 
 def test_chat_day_facts_is_not_modeled_as_egress_inheritance() -> None:
