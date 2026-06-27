@@ -16,8 +16,10 @@ from openbird.deep_brain import (
     build_deep_brain_preview,
     packet_json_for_model,
 )
+from openbird.memory.store import MemoryStore
 from openbird.prompts import registry as _prompt_registry
 from openbird.types import Observation
+from tests.unit.conftest import FakeProvider
 
 
 def _day(y: int, mo: int, d: int, h: int = 0, mi: int = 0) -> float:
@@ -436,6 +438,33 @@ class _Provider:
         return self.response
 
 
+class _RaisingProvider(_Provider):
+    def complete(self, messages, *, json_schema=None):
+        self.messages = messages
+        self.schema = json_schema
+        raise RuntimeError("simulated provider failure with sensitive packet")
+
+
+def _seed_cli_memory(tmp_path, rows: list[tuple[str, dict]]) -> list[Observation]:
+    settings = Settings(data_dir=tmp_path)
+    store = MemoryStore(settings=settings, provider=FakeProvider())
+    try:
+        observations = []
+        for text, kwargs in rows:
+            observations.append(store.add_observation(text, **kwargs))
+        return observations
+    finally:
+        store.close()
+
+
+def _ledger_rows(tmp_path) -> list[dict]:
+    store = MemoryStore(settings=Settings(data_dir=tmp_path), provider=FakeProvider())
+    try:
+        return store.list_reasoning_send_ledger()
+    finally:
+        store.close()
+
+
 def test_deep_brain_ask_local_model_needs_feature_gate_only(tmp_path):
     start = _day(2026, 6, 12, 9)
     rows = [(_obs("o1", h="h1", ts=start, window="notes"), "useful notes")]
@@ -822,6 +851,177 @@ def test_deep_brain_ask_cli_uses_provider_when_enabled(monkeypatch, tmp_path):
     assert payload["packet_route"] == "deep_brain.preview"
     assert payload["reasoning_route"] == "local_model"
     assert payload["citations"][0]["observation_id"] == "o1"
+
+
+def test_deep_brain_ask_cli_remote_success_writes_redacted_ledger(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    monkeypatch.setenv("OPENBIRD_ALLOW_CLOUD", "1")
+    monkeypatch.setenv("OPENBIRD_LLM_MODEL", "gpt-4o-mini")
+    reset_settings_cache()
+    today = dt.datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    kept, excluded = _seed_cli_memory(
+        tmp_path,
+        [
+            (
+                "public notes for the packet",
+                {
+                    "source": "capture",
+                    "ts": today.timestamp(),
+                    "app": "Code",
+                    "window": "public notes",
+                },
+            ),
+            (
+                "meeting notes that must be excluded",
+                {
+                    "source": "capture",
+                    "ts": today.timestamp() + 60,
+                    "app": "MeetingApp",
+                    "window": "private meeting",
+                },
+            ),
+        ],
+    )
+    provider = _Provider(
+        {
+            "answer": "You worked in notes.",
+            "citation_ids": [kept.id],
+            "confidence": "high",
+        }
+    )
+    provider.llm_model = "gpt-4o-mini"
+    monkeypatch.setattr(cli, "_completion_provider", lambda: provider)
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            [
+                "deep-brain",
+                "ask",
+                "--day",
+                "0",
+                "--json",
+                "--stdin",
+                "--exclude-app",
+                "MeetingApp",
+            ],
+            input="what did I do?",
+        )
+        rows = _ledger_rows(tmp_path)
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "cloud_reasoning_active"
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["feature"] == "deep_brain.ask"
+    assert row["outcome"] == "success"
+    assert row["egress"] == "active_model_route"
+    assert row["route_class"] == "third-party-cloud"
+    assert row["provider_family"] == "openai"
+    assert row["packet_hash"]
+    assert row["packet_bytes"] > 0
+    assert row["selected_source_count"] == 1
+    assert row["citation_count"] == 1
+    assert row["excluded_observations"] == 1
+    assert row["excluded_by"] == {"app": 1}
+    assert set(row["excluded_by"]) <= {"app", "source", "observation_id"}
+    assert all(isinstance(value, int) for value in row["excluded_by"].values())
+    serialized = json.dumps(row, sort_keys=True)
+    assert "what did I do" not in serialized
+    assert "You worked in notes" not in serialized
+    assert "public notes for the packet" not in serialized
+    assert "public notes" not in serialized
+    assert kept.id not in serialized
+    assert excluded.id not in serialized
+    assert "MeetingApp" not in serialized
+    assert "private meeting" not in serialized
+
+
+def test_deep_brain_ask_cli_blocked_remote_does_not_write_ledger(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    monkeypatch.setenv("OPENBIRD_LLM_MODEL", "gpt-4o-mini")
+    reset_settings_cache()
+    today = dt.datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    _seed_cli_memory(
+        tmp_path,
+        [
+            (
+                "public notes for the packet",
+                {"source": "capture", "ts": today.timestamp(), "app": "Code"},
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("provider must not be built")),
+    )
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "ask", "what happened?", "--day", "0", "--json"],
+        )
+        rows = _ledger_rows(tmp_path)
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 2
+    assert rows == []
+
+
+def test_deep_brain_ask_cli_remote_provider_error_writes_redacted_ledger(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    monkeypatch.setenv("OPENBIRD_ALLOW_CLOUD", "1")
+    monkeypatch.setenv("OPENBIRD_LLM_MODEL", "gpt-4o-mini")
+    reset_settings_cache()
+    today = dt.datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    kept = _seed_cli_memory(
+        tmp_path,
+        [
+            (
+                "public notes for the packet",
+                {"source": "capture", "ts": today.timestamp(), "app": "Code"},
+            )
+        ],
+    )[0]
+    provider = _RaisingProvider({})
+    provider.llm_model = "gpt-4o-mini"
+    monkeypatch.setattr(cli, "_completion_provider", lambda: provider)
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "ask", "what happened?", "--day", "0", "--json"],
+        )
+        rows = _ledger_rows(tmp_path)
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code != 0
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == "error"
+    assert row["error_kind"] == "RuntimeError"
+    assert row["citation_count"] == 0
+    assert row["selected_source_count"] == 1
+    assert row["packet_hash"]
+    serialized = json.dumps(row, sort_keys=True)
+    assert "simulated provider failure" not in serialized
+    assert "public notes for the packet" not in serialized
+    assert kept.id not in serialized
 
 
 def test_deep_brain_cli_rejects_out_of_range_days(monkeypatch, tmp_path):

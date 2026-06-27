@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import sqlite3
 import struct
 import time
@@ -959,6 +960,132 @@ class MemoryStore:
             "payload": json.loads(row["payload_json"]),
         }
 
+    # -- reasoning send ledger ------------------------------------------------
+
+    def record_reasoning_send(
+        self,
+        *,
+        feature: str,
+        packet_route: str | None,
+        reasoning_route: str | None,
+        egress: str,
+        route_class: str,
+        provider_family: str,
+        model: str | None,
+        packet_hash: str | None,
+        packet_bytes: int | None,
+        selected_source_count: int,
+        citation_count: int,
+        excluded_observations: int,
+        excluded_by: dict[str, int],
+        outcome: str,
+        error_kind: str | None = None,
+        deletion_caveat: str = (
+            "This redacted local audit row may outlive selective source deletion; "
+            "full purge removes it."
+        ),
+    ) -> dict:
+        """Persist redacted metadata for a remote reasoning packet send attempt.
+
+        The ledger intentionally stores only counts, route metadata, and a
+        packet-content hash. It must never receive raw packet JSON, question text,
+        answer text, snippets, source IDs, citation IDs, titles, URLs, or
+        configured exclusion names.
+        """
+        row_id = uuid.uuid4().hex
+        created_at = time.time()
+        safe_excluded_by: dict[str, int] = {}
+        for key, value in sorted((excluded_by or {}).items()):
+            reason = str(key)
+            if reason not in {"app", "source", "observation_id"}:
+                continue
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                continue
+            if count < 0:
+                continue
+            safe_excluded_by[reason] = count
+        safe_excluded_observations = max(0, int(excluded_observations))
+        safe_error_kind: str | None = None
+        if error_kind is not None:
+            candidate = str(error_kind).strip()
+            safe_error_kind = (
+                candidate
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", candidate)
+                else "error"
+            )
+        try:
+            self._begin()
+            self.conn.execute(
+                """
+                INSERT INTO reasoning_send_ledger(
+                    id, created_at, feature, packet_route, reasoning_route, egress,
+                    route_class, provider_family, model, packet_hash, packet_bytes,
+                    selected_source_count, citation_count, excluded_observations,
+                    excluded_by_json, outcome, error_kind, deletion_caveat
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row_id,
+                    created_at,
+                    feature,
+                    packet_route,
+                    reasoning_route,
+                    egress,
+                    route_class,
+                    provider_family,
+                    model,
+                    packet_hash,
+                    packet_bytes,
+                    int(selected_source_count),
+                    int(citation_count),
+                    safe_excluded_observations,
+                    json.dumps(safe_excluded_by, sort_keys=True, separators=(",", ":")),
+                    outcome,
+                    safe_error_kind,
+                    deletion_caveat,
+                ),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return self._reasoning_send_ledger_row(row_id)
+
+    def list_reasoning_send_ledger(self, *, limit: int = 50) -> list[dict]:
+        """Return newest redacted reasoning-send ledger rows."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM reasoning_send_ledger
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (max(0, int(limit)),),
+        ).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["excluded_by"] = json.loads(item.pop("excluded_by_json") or "{}")
+            except json.JSONDecodeError:
+                item["excluded_by"] = {}
+            out.append(item)
+        return out
+
+    def _reasoning_send_ledger_row(self, row_id: str) -> dict:
+        row = self.conn.execute(
+            "SELECT * FROM reasoning_send_ledger WHERE id = ?", (row_id,)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("reasoning send ledger row was not inserted")
+        item = dict(row)
+        try:
+            item["excluded_by"] = json.loads(item.pop("excluded_by_json") or "{}")
+        except json.JSONDecodeError:
+            item["excluded_by"] = {}
+        return item
+
     # -- delete ---------------------------------------------------------------
 
     def delete(
@@ -1002,6 +1129,7 @@ class MemoryStore:
                 # daily artifact survives a full purge.
                 cur.execute("DELETE FROM day_memories")
                 cur.execute("DELETE FROM day_memory_sources")
+                cur.execute("DELETE FROM reasoning_send_ledger")
                 cur.execute("DELETE FROM observations")
                 cur.execute("DELETE FROM blob_chunks")
                 cur.execute("DELETE FROM chunks")

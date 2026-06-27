@@ -143,6 +143,7 @@ def test_deep_brain_ask_inherits_active_model_route() -> None:
     route = _routes()["deep_brain.ask"]
 
     assert route["class"] == "unknown"
+    assert route["storage"] == ["sqlite.reasoning_send_ledger_metadata"]
     assert route["egress"]["default"] == "inherits_active_model_route"
     assert route["egress"]["inherited_from"] == ["chat.local", "chat.remote"]
     assert "requires" not in route.get("enforcement", {})
@@ -159,12 +160,23 @@ def test_deep_brain_ask_inherits_active_model_route() -> None:
         "exclusion_counts",
         "exclusion_metadata",
     }.issubset(set(route["captured_fields"]))
+    assert {
+        "ledger_raw_question",
+        "ledger_generated_answer",
+        "ledger_packet_json",
+        "ledger_observation_ids",
+        "ledger_citation_ids",
+        "ledger_configured_exclusion_names",
+        "ledger_source_app_names",
+        "ledger_url_or_window_title_metadata",
+    }.issubset(set(route["forbidden_fields"]))
 
 
 def test_deep_brain_preview_declares_day_or_week_packet_metadata() -> None:
     route = _routes()["deep_brain.preview"]
 
     assert route["class"] == "local"
+    assert route["storage"] == []
     assert route["egress"]["default"] == "none"
     assert {
         "distilled_day_or_week_memory_content",
@@ -180,6 +192,7 @@ def test_briefing_model_uses_distilled_packet_and_cloud_opt_in_only() -> None:
     route = _routes()["briefing.model"]
 
     assert route["class"] == "unknown"
+    assert route["storage"] == ["sqlite.reasoning_send_ledger_metadata"]
     assert route["egress"]["default"] == "inherits_active_model_route"
     assert route["egress"]["inherited_from"] == ["chat.local", "chat.remote"]
     assert route["enforcement"]["requires"] == "OPENBIRD_ALLOW_CLOUD"
@@ -198,6 +211,16 @@ def test_briefing_model_uses_distilled_packet_and_cloud_opt_in_only() -> None:
         "exclusion_counts",
         "exclusion_metadata",
     }.issubset(set(route["captured_fields"]))
+    assert {
+        "ledger_raw_question",
+        "ledger_generated_briefing",
+        "ledger_packet_json",
+        "ledger_observation_ids",
+        "ledger_citation_ids",
+        "ledger_configured_exclusion_names",
+        "ledger_source_app_names",
+        "ledger_url_or_window_title_metadata",
+    }.issubset(set(route["forbidden_fields"]))
 
 
 def test_productivity_local_facts_route_is_local_and_content_safe() -> None:
@@ -316,6 +339,7 @@ def test_productivity_coach_inherits_route_and_forbids_prompt_source_ids() -> No
     route = _routes()["productivity.coach"]
 
     assert route["class"] == "unknown"
+    assert route["storage"] == ["sqlite.reasoning_send_ledger_metadata"]
     assert route["egress"]["default"] == "inherits_active_model_route"
     assert route["egress"]["inherited_from"] == ["chat.local", "chat.remote"]
     assert route["enforcement"]["feature_requires"] == "OPENBIRD_DEEP_BRAIN_ENABLED"
@@ -336,6 +360,14 @@ def test_productivity_coach_inherits_route_and_forbids_prompt_source_ids() -> No
         "raw_title",
         "source_ids_in_prompt",
         "observation_ids_in_prompt",
+        "ledger_raw_question",
+        "ledger_generated_coaching",
+        "ledger_packet_json",
+        "ledger_observation_ids",
+        "ledger_citation_ids",
+        "ledger_configured_exclusion_names",
+        "ledger_source_app_names",
+        "ledger_url_or_window_title_metadata",
     }.issubset(set(route["forbidden_fields"]))
 
 
