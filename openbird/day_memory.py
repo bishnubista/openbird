@@ -96,6 +96,7 @@ def build_day_memory(
     open_loops = _open_loops(ordered)
 
     time_by_hour: Counter[str] = Counter()
+    time_by_hour_sources: dict[str, set[str]] = defaultdict(set)
     time_by_app: Counter[str] = Counter()
     time_by_category: Counter[str] = Counter()
     for obs, _text, category, seconds in timed:
@@ -103,6 +104,7 @@ def build_day_memory(
             continue
         hour = dt.datetime.fromtimestamp(obs.ts).strftime("%H:00")
         time_by_hour[hour] += seconds
+        time_by_hour_sources[hour].add(obs.id)
         time_by_app[obs.app or "unknown"] += seconds
         time_by_category[category] += seconds
 
@@ -124,6 +126,7 @@ def build_day_memory(
         "source_fingerprint": source_fingerprint or source_fingerprint_for_rows(ordered),
         "sessions": sessions,
         "focus_blocks": focus_blocks,
+        "hour_sources": _hour_sources(time_by_hour_sources),
         "workstreams": workstreams,
         "open_loops": open_loops,
         "metrics": {
@@ -163,7 +166,7 @@ def build_productivity_report(saved: dict) -> dict:
             else 0.0
         ),
         "top_category": _top_category_fact(metrics, category_sources),
-        "top_hour": _top_hour_fact(metrics, focus_blocks),
+        "top_hour": _top_hour_fact(metrics, payload.get("hour_sources") or []),
         "longest_focus_block": _longest_focus_block(focus_blocks),
     }
     coach_ready_packet = {
@@ -536,18 +539,19 @@ def _top_category_fact(metrics: dict, category_sources: list[dict]) -> dict | No
     }
 
 
-def _top_hour_fact(metrics: dict, focus_blocks: list[dict]) -> dict | None:
+def _top_hour_fact(metrics: dict, hour_sources: list[dict]) -> dict | None:
     hours = metrics.get("time_by_hour") or {}
     if not hours:
         return None
     hour, seconds = sorted(hours.items(), key=lambda kv: (-float(kv[1]), str(kv[0])))[0]
-    source_ids: set[str] = set()
-    for block in focus_blocks:
-        start_hour = dt.datetime.fromtimestamp(
-            float(block.get("start") or 0.0)
-        ).strftime("%H:00")
-        if start_hour == hour:
-            source_ids.update(block.get("source_ids") or [])
+    source_ids = next(
+        (
+            list(item.get("source_ids") or [])
+            for item in hour_sources
+            if item.get("hour") == hour
+        ),
+        [],
+    )
     return {
         "hour": hour,
         "seconds": round(float(seconds), 3),
@@ -745,6 +749,17 @@ def _rank_entity_map(items: dict[str, set[str]]) -> list[dict]:
 
 def _round_counter(counter: Counter[str]) -> dict[str, float]:
     return {key: round(value, 3) for key, value in sorted(counter.items())}
+
+
+def _hour_sources(items: dict[str, set[str]]) -> list[dict]:
+    return [
+        {
+            "hour": hour,
+            "source_ids": sorted(source_ids),
+            "source_count": len(source_ids),
+        }
+        for hour, source_ids in sorted(items.items())
+    ]
 
 
 def _observation_sort_key(obs: Observation) -> tuple[float, str, str, str, str]:

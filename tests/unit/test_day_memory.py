@@ -292,6 +292,68 @@ def test_productivity_report_keeps_raw_text_out_of_output():
     assert report["memory_context"]["coverage"]["observations"] == 1
 
 
+def test_productivity_top_hour_sources_use_observation_hour_bucket():
+    start = _ts(2026, 6, 12, 9, 59)
+    rows = [
+        (
+            _obs(
+                "o9",
+                ts=start,
+                app="com.mitchellh.ghostty",
+                session_id="s1",
+            ),
+            "coding",
+        ),
+        (
+            _obs(
+                "o10a",
+                ts=start + 60,
+                app="com.mitchellh.ghostty",
+                session_id="s1",
+            ),
+            "coding",
+        ),
+        (
+            _obs(
+                "o10b",
+                ts=start + 360,
+                app="com.mitchellh.ghostty",
+                session_id="s1",
+            ),
+            "coding",
+        ),
+    ]
+    built = build_day_memory(
+        rows,
+        start_ts=_ts(2026, 6, 12, 0),
+        end_ts=start + 660,
+        day_offset=0,
+        gap_seconds=300,
+    )
+    saved = {
+        "payload": built.payload,
+        "local_date": built.payload["local_date"],
+        "source_scope": "capture",
+        "source_count": len(built.source_ids),
+        "generated_at": start + 660,
+        "extractor_version": EXTRACTOR_VERSION,
+    }
+
+    top_hour = build_productivity_report(saved)["productivity"]["facts"]["top_hour"]
+
+    assert built.payload["metrics"]["time_by_hour"] == {
+        "09:00": 60,
+        "10:00": 600,
+    }
+    assert top_hour == {
+        "hour": "10:00",
+        "seconds": 600,
+        "minutes": 10.0,
+        "source_ids": ["o10a", "o10b"],
+        "source_count": 2,
+    }
+
+
 def test_productivity_empty_day_is_zero_safe():
     built = build_day_memory(
         [],
