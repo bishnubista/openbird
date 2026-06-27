@@ -1,6 +1,6 @@
 cask "openbird" do
-  version "0.6.0"
-  sha256 "9aa25f96371c1eafea38bdbcd9a0ef18d928269e34cd597e124a63f575dd06b4"
+  version "0.6.1"
+  sha256 "9710f034d9f581ff6e7ef4641f0362372610942ca436cbf4cf03814a61eb8d1e"
 
   url "https://github.com/bishnubista/openbird/releases/download/beta-dmg-#{version}/OpenBird.dmg"
   name "OpenBird"
@@ -14,6 +14,14 @@ cask "openbird" do
   depends_on macos: :ventura # minimum macOS 13 (app deployment target)
 
   app "OpenBird.app"
+  # Symlink the app's bundled CLI onto PATH. `openbird` ships as BOTH this cask and a
+  # same-token formula; Homebrew intentionally skips auto-linking the formula's
+  # bin/openbird while the cask is installed ("cask is installed, skipping link"),
+  # silently leaving `openbird` off PATH until a manual `brew link`. This stanza makes
+  # the cask itself own the PATH entry. Safe only because the bundled openbird-cli
+  # wrapper resolves $0 through its symlink chain (PR #161, first shipped in the
+  # 0.6.1 dmg) — earlier dmgs would resolve the interpreter next to the symlink and break.
+  binary "#{appdir}/OpenBird.app/Contents/MacOS/openbird-cli", target: "openbird"
 
   uninstall quit: "ai.openbird.OpenBird"
 
