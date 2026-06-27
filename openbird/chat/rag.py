@@ -969,11 +969,15 @@ class RAG:
         if not llm_model:
             return None
         try:
-            from openbird.config import resolved_ollama_host
+            from openbird.config import is_ollama_model, resolved_ollama_host
             from openbird.llm.provider import is_local_model
 
             settings = getattr(self.provider, "settings", None)
-            host = resolved_ollama_host(settings) if settings is not None else None
+            host = None
+            if is_ollama_model(llm_model):
+                if settings is None:
+                    return None
+                host = resolved_ollama_host(settings)
             local = is_local_model(llm_model, ollama_host=host)
         except Exception:  # pragma: no cover - defensive; absence means no label
             return None

@@ -274,6 +274,22 @@ def test_attrless_provider_omits_reasoning_route():
     assert "reasoning_route" not in result.to_public_dict()
 
 
+def test_ollama_provider_without_settings_omits_reasoning_route(monkeypatch):
+    obs = _obs("obs-1", app="Code")
+    store = StubStore([_hit(obs, "SQLite migration notes.")])
+    provider = RoutedLLM(
+        {"answer": "SQLite.", "citations": ["S1"]},
+        llm_model="ollama/qwen3:4b",
+        settings=None,
+    )
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+    result = answer("what database?", store=store, provider=provider)
+
+    assert result.reasoning_route is None
+    assert "reasoning_route" not in result.to_public_dict()
+
+
 def test_ungrounded_completion_keeps_provider_reasoning_route():
     from openbird.config import Settings
 
