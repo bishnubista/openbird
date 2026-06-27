@@ -629,7 +629,7 @@ def classify_observation(obs: Observation, text: str = "") -> tuple[str, float]:
 def _build_sessions(rows: list[tuple[Observation, str]]) -> list[dict]:
     grouped: dict[tuple[str, str], list[tuple[Observation, str]]] = defaultdict(list)
     for obs, text in rows:
-        key = (obs.session_id or obs.id, obs.app or "unknown")
+        key = (_session_bucket(obs), obs.app or "unknown")
         grouped[key].append((obs, text))
 
     sessions: list[dict] = []
@@ -663,6 +663,12 @@ def _build_sessions(rows: list[tuple[Observation, str]]) -> list[dict]:
         )
     )
     return sessions
+
+
+def _session_bucket(obs: Observation) -> str:
+    if obs.session_id:
+        return f"session:{obs.session_id}"
+    return f"observation:{obs.id}"
 
 
 def _real_session_id(items: list[tuple[Observation, str]]) -> str | None:

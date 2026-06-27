@@ -960,6 +960,47 @@ def test_build_day_memory_legacy_null_session_id_stays_none():
     assert built.payload["sessions"][0]["source_ids"] == ["legacy"]
 
 
+def test_build_day_memory_namespaces_legacy_bucket_from_real_session_id():
+    start = _ts(2026, 6, 12, 9)
+    built = build_day_memory(
+        [
+            (
+                _obs(
+                    "shared-id",
+                    ts=start,
+                    app="com.google.Chrome",
+                    session_id=None,
+                ),
+                "legacy observation",
+            ),
+            (
+                _obs(
+                    "real-source",
+                    ts=start + 1,
+                    app="com.google.Chrome",
+                    session_id="shared-id",
+                ),
+                "real session observation",
+            ),
+        ],
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+        gap_seconds=300,
+    )
+
+    sessions = sorted(
+        built.payload["sessions"], key=lambda item: item["source_ids"][0]
+    )
+    assert [
+        (session["session_id"], session["source_ids"])
+        for session in sessions
+    ] == [
+        ("shared-id", ["real-source"]),
+        (None, ["shared-id"]),
+    ]
+
+
 def test_build_day_memory_extracts_open_loop_cues_without_narrative():
     start = _ts(2026, 6, 12, 9)
     rows = [
