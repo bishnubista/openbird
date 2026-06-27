@@ -280,6 +280,42 @@ def _store_maintenance():
     return MemoryStore(settings=settings, provider=provider)
 
 
+def _render_chat_result(result, *, json_out: bool) -> None:
+    """Render a chat result through the CLI's existing JSON/human contract."""
+    if json_out:
+        _console.print_json(json.dumps(result.to_public_dict()))
+        raise typer.Exit(code=0)
+
+    if result.grounding == "ungrounded" and result.answer:
+        # Surface the grounding gate up front so an ungrounded answer is never
+        # mistaken for verified memory.
+        _console.print("[yellow]⚠ ungrounded — no verified source for this answer[/]")
+    if result.answer:
+        _console.print(escape(result.answer))
+    else:
+        _console.print("[dim](no answer)[/]")
+    if result.citations:
+        _console.print("\n[bold]Sources[/]")
+        for i, c in enumerate(result.citations, start=1):
+            when = _fmt_ts(c.ts)
+            where = " / ".join(p for p in (c.app, c.window) if p) or "unknown"
+            _console.print(f"  [cyan][{i}][/] {escape(where)} · {when}")
+            _console.print(f"      [dim]{escape(c.snippet)}[/]")
+    if result.derived_citations:
+        _console.print("\n[bold]Derived sources[/]")
+        for c in result.derived_citations:
+            _console.print(
+                f"  [cyan][{c.index}][/] {escape(c.label)} · "
+                f"{c.derived_from_total} source observation(s)"
+            )
+            _console.print(f"      [dim]{escape(c.snippet)}[/]")
+    else:
+        if not result.citations:
+            _console.print(
+                "\n[dim]No citations (answer not grounded in a stored occurrence).[/]"
+            )
+
+
 # --------------------------------------------------------------------------- #
 # Today / day view (timeline + briefing)                                      #
 # --------------------------------------------------------------------------- #
@@ -1665,6 +1701,17 @@ def chat(
     # every citation are confined to that day. Omitted -> unscoped.
     window = _day_window(day) if day is not None else None
 
+    if window is not None:
+        local_store = _store_maintenance()
+        try:
+            local_rag = RAG(local_store, local_store.provider)
+            local_result = local_rag.answer_deterministic_day_memory(question, window)
+        finally:
+            local_store.close()
+        if local_result is not None:
+            _render_chat_result(local_result, json_out=json_out)
+            return
+
     provider = _provider()
     store = _store(provider=provider)
     try:
@@ -1673,38 +1720,7 @@ def chat(
     finally:
         store.close()
 
-    if json_out:
-        _console.print_json(json.dumps(result.to_public_dict()))
-        raise typer.Exit(code=0)
-
-    if result.grounding == "ungrounded" and result.answer:
-        # Surface the grounding gate up front so an ungrounded answer is never
-        # mistaken for verified memory.
-        _console.print("[yellow]⚠ ungrounded — no verified source for this answer[/]")
-    if result.answer:
-        _console.print(escape(result.answer))
-    else:
-        _console.print("[dim](no answer)[/]")
-    if result.citations:
-        _console.print("\n[bold]Sources[/]")
-        for i, c in enumerate(result.citations, start=1):
-            when = _fmt_ts(c.ts)
-            where = " / ".join(p for p in (c.app, c.window) if p) or "unknown"
-            _console.print(f"  [cyan][{i}][/] {escape(where)} · {when}")
-            _console.print(f"      [dim]{escape(c.snippet)}[/]")
-    if result.derived_citations:
-        _console.print("\n[bold]Derived sources[/]")
-        for c in result.derived_citations:
-            _console.print(
-                f"  [cyan][{c.index}][/] {escape(c.label)} · "
-                f"{c.derived_from_total} source observation(s)"
-            )
-            _console.print(f"      [dim]{escape(c.snippet)}[/]")
-    else:
-        if not result.citations:
-            _console.print(
-                "\n[dim]No citations (answer not grounded in a stored occurrence).[/]"
-            )
+    _render_chat_result(result, json_out=json_out)
 
 
 # --------------------------------------------------------------------------- #

@@ -52,6 +52,7 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "capture.pause",
         "briefing.model",
         "chat.day_facts",
+        "chat.day_memory",
         "chat.local",
         "chat.remote",
         "data.export",
@@ -227,7 +228,12 @@ def test_chat_day_facts_route_is_local_branch_over_day_memory() -> None:
     assert route["derives_from"] == ["productivity.local_facts"]
     assert route["storage"] == ["sqlite.day_memories"]
     assert route["egress"]["default"] == "none"
+    assert "_provider" in route["egress"]["note"]
+    assert "_MaintenanceProvider" in route["egress"]["note"]
     assert "provider.complete" in route["egress"]["note"]
+    assert "No completion or embedding request" in route["egress"]["note"]
+    # The explicit --day branch instantiates a non-egress maintenance stub; the
+    # route must not collapse that into a false generic provider claim.
     assert "provider is constructed" not in route["egress"]["note"]
     assert "inherited_from" not in route["egress"]
     assert "inherited_by" not in route["egress"]
@@ -256,6 +262,45 @@ def test_chat_day_facts_route_is_local_branch_over_day_memory() -> None:
     }
 
 
+def test_chat_day_memory_route_is_local_synthesis_over_day_distillation() -> None:
+    route = _routes()["chat.day_memory"]
+
+    assert route["class"] == "local"
+    assert route["derives_from"] == ["capture.active_window"]
+    assert route["storage"] == ["sqlite.day_memories"]
+    assert route["egress"]["default"] == "none"
+    assert "_provider" in route["egress"]["note"]
+    assert "_MaintenanceProvider" in route["egress"]["note"]
+    assert "provider.complete" in route["egress"]["note"]
+    assert "No completion or embedding request" in route["egress"]["note"]
+    assert "provider is constructed" not in route["egress"]["note"]
+    assert "inherited_from" not in route["egress"]
+    assert "inherited_by" not in route["egress"]
+    assert "resolved_by" not in route["egress"]
+    assert set(route["captured_fields"]) == {
+        "user_question_for_classification_only",
+        "distilled_day_memory_metrics",
+        "workstreams",
+        "sessions",
+        "open_loops",
+        "domains",
+        "repos",
+        "derived_citation_source_ids",
+        "memory_context_counts",
+    }
+    assert set(route["forbidden_fields"]) == {
+        "captured_text",
+        "raw_window_title",
+        "raw_url",
+        "raw_title",
+        "source_ids_in_memory_context",
+    }
+    assert set(route["truth_surface"]) == {
+        "cli.chat_json.reasoning_route",
+        "app.ChatResult.routeLabel",
+    }
+
+
 def test_chat_day_facts_is_not_modeled_as_egress_inheritance() -> None:
     routes = _routes()
     for route in routes.values():
@@ -264,6 +309,7 @@ def test_chat_day_facts_is_not_modeled_as_egress_inheritance() -> None:
         inherited.update(egress.get("inherited_from", []))
         inherited.update(egress.get("resolved_by", []))
         assert "chat.day_facts" not in inherited
+        assert "chat.day_memory" not in inherited
 
 
 def test_productivity_coach_inherits_route_and_forbids_prompt_source_ids() -> None:
