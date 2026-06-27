@@ -611,6 +611,82 @@ def deep_brain_preview(
     )
 
 
+@deep_brain_app.command("ask")
+def deep_brain_ask(
+    question: Optional[str] = typer.Argument(None, help="Question to answer from the day packet."),
+    day: int = typer.Option(0, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    source_scope: str = typer.Option(
+        "capture", "--source-scope", help="Observation source to distill."
+    ),
+    stdin: bool = typer.Option(False, "--stdin", help="Read the question from stdin."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Ask the configured model over the exact Deep Brain preview packet."""
+    if day < 0:
+        _err_console.print("[red]--day must be >= 0.[/]")
+        raise typer.Exit(code=2)
+    if stdin:
+        question = sys.stdin.read().strip()
+    if not question:
+        _err_console.print("[red]Provide a question or pass --stdin.[/]")
+        raise typer.Exit(code=2)
+
+    from openbird.deep_brain import (
+        answer_deep_brain,
+        build_deep_brain_preview,
+        deep_brain_ask_blocked_reasons,
+    )
+
+    start, end = _day_window(day)
+    settings = get_settings()
+    store = _store_maintenance()
+    try:
+        rows = store.time_range_text(start, end, source=source_scope)
+    finally:
+        store.close()
+
+    packet = build_deep_brain_preview(
+        rows,
+        start_ts=start,
+        end_ts=end,
+        day_offset=day,
+        source_scope=source_scope,
+        settings=settings,
+    )
+    blocked = deep_brain_ask_blocked_reasons(settings)
+    if blocked:
+        payload = {
+            "ok": False,
+            "answer": "Deep Brain ask is not enabled.",
+            "blocked_reasons": blocked,
+            "reasoning_route": "blocked",
+            "egress": "none",
+            "packet_route": packet.get("route"),
+            "packet": {
+                "local_date": packet.get("local_date"),
+                "day_offset": packet.get("day_offset"),
+                "source_scope": packet.get("source_scope"),
+                "coverage": packet.get("memory_summary", {}).get("coverage", {}),
+                "sources_total": packet.get("sources_total", 0),
+                "exclusions": packet.get("exclusions", {}),
+            },
+        }
+        if as_json:
+            _console.print_json(json.dumps(payload))
+        else:
+            _err_console.print("[red]Deep Brain ask refused:[/]")
+            for reason in blocked:
+                _err_console.print(f"- {reason}")
+        raise typer.Exit(code=2)
+
+    provider = _provider()
+    result = answer_deep_brain(question, packet, provider, settings=settings)
+    if as_json:
+        _console.print_json(json.dumps(result))
+        return
+    _console.print(result["answer"])
+
+
 # --------------------------------------------------------------------------- #
 # deterministic day memory                                                    #
 # --------------------------------------------------------------------------- #

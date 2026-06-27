@@ -123,6 +123,33 @@ routes:
     truth_surface:
       - cli.deep_brain_preview
 
+  - id: deep_brain.ask
+    class: unknown
+    source: user question plus exclusion-filtered daily memory packet
+    captured_fields:
+      - user_question
+      - distilled_day_memory_content
+      - selected_citation_snippets
+      - selected_source_observation_id
+      - selected_source_app
+      - selected_source_window_or_url
+      - selected_source_timestamp
+      - generated_answer
+      - validated_citations
+      - exclusion_counts
+    storage: []
+    egress:
+      default: inherits_active_model_route
+      inherited_from:
+        - chat.local
+        - chat.remote
+      warning: packet content leaves this machine when the active model route is remote
+    enforcement:
+      feature_requires: OPENBIRD_DEEP_BRAIN_ENABLED
+    truth_surface:
+      - cli.deep_brain_ask
+      - cli.CLOUD_ACTIVE
+
   - id: chat.remote
     class: unknown
     source: user prompt plus retrieved local memory
