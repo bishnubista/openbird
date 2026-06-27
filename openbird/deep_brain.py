@@ -123,7 +123,7 @@ def build_deep_brain_period_preview(
     source_group_total = 0
     exclusion_metas: list[dict[str, Any]] = []
 
-    for idx, (rows, window) in enumerate(zip(day_rows, day_windows)):
+    for idx, (rows, window) in enumerate(zip(day_rows, day_windows, strict=True)):
         filtered_rows, exclusion_meta = filter_rows_for_deep_brain(
             rows, settings=settings
         )
