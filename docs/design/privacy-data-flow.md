@@ -56,6 +56,10 @@ path as any other off-device model route.
 - GUI cloud opt-in source of truth: until a durable UI setting is implemented,
   cloud opt-in is per-process/environment only. Any future persistent setting
   must be surfaced as privacy state and tested against the actual subprocess env.
+- Deep Brain model strategy: see `docs/design/deep-brain-model-strategy.md`.
+  Local deterministic memory remains the privacy boundary and source of truth;
+  cloud-capable reasoning triggers must resolve their route from the actual model
+  destination, send only exclusion-filtered packets, and disclose the route.
 - Connector/agent permissions: SurfSense-style ask/allow/deny rules are deferred
   until OpenBird adds connector write actions or agent tools. Adding the rules
   without the scope would expand architecture without improving current privacy.
