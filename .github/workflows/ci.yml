@@ -1,12 +1,13 @@
 name: CI
 
-# Public CI for contributors: validates every PR (and pushes to main) against the
-# same gates the project runs locally — Python tests, ShellCheck, and the Swift
-# helper builds. Runs on macOS because OpenBird is a macOS-only product.
+# Manual-only CI. OpenBird is pre-production and hosted GitHub Actions are
+# currently billing-disabled by choice, so auto-running this on every push/PR
+# only produces runs that fail at job startup and add noise. Until production,
+# the authoritative pre-merge gates are the LOCAL ones (`uv run python -m pytest
+# -q`, ShellCheck, `swift build`) plus the Codex/CodeRabbit reviews. Trigger a
+# hosted run by hand from the Actions tab (or `gh workflow run CI`) when a
+# cross-check on a clean runner is actually wanted.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
