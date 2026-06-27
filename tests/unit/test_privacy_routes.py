@@ -51,6 +51,7 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "capture.active_window",
         "capture.pause",
         "briefing.model",
+        "chat.day_facts",
         "chat.local",
         "chat.remote",
         "data.export",
@@ -217,6 +218,52 @@ def test_productivity_local_facts_route_is_local_and_content_safe() -> None:
         "raw_url",
         "raw_title",
     }.issubset(set(route["forbidden_fields"]))
+
+
+def test_chat_day_facts_route_is_local_branch_over_day_memory() -> None:
+    route = _routes()["chat.day_facts"]
+
+    assert route["class"] == "local"
+    assert route["derives_from"] == ["productivity.local_facts"]
+    assert route["storage"] == ["sqlite.day_memories"]
+    assert route["egress"]["default"] == "none"
+    assert "provider.complete" in route["egress"]["note"]
+    assert "provider is constructed" not in route["egress"]["note"]
+    assert "inherited_from" not in route["egress"]
+    assert "inherited_by" not in route["egress"]
+    assert "resolved_by" not in route["egress"]
+    assert {
+        "user_question_for_classification_only",
+        "active_seconds",
+        "active_minutes",
+        "context_switch_count",
+        "top_category",
+        "top_hour",
+        "longest_focus_block",
+        "derived_citation_source_ids",
+        "memory_context_counts",
+    }.issubset(set(route["captured_fields"]))
+    assert {
+        "captured_text",
+        "raw_window_title",
+        "raw_url",
+        "raw_title",
+        "source_ids_in_memory_context",
+    }.issubset(set(route["forbidden_fields"]))
+    assert {
+        "cli.chat_json.reasoning_route",
+        "app.ChatResult.routeLabel",
+    }.issubset(set(route["truth_surface"]))
+
+
+def test_chat_day_facts_is_not_modeled_as_egress_inheritance() -> None:
+    routes = _routes()
+    for route in routes.values():
+        egress = route.get("egress", {})
+        inherited = set(egress.get("inherited_by", []))
+        inherited.update(egress.get("inherited_from", []))
+        inherited.update(egress.get("resolved_by", []))
+        assert "chat.day_facts" not in inherited
 
 
 def test_productivity_coach_inherits_route_and_forbids_prompt_source_ids() -> None:
