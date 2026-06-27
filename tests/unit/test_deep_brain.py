@@ -678,7 +678,13 @@ def test_deep_brain_preview_cli_applies_one_off_cloud_exclusions(monkeypatch, tm
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_APPS", "ExistingApp")
     reset_settings_cache()
-    start = _day(*dt.datetime.now().timetuple()[:3], 9)
+    day_start = _day(2026, 6, 27)
+    monkeypatch.setattr(
+        cli,
+        "_day_window",
+        lambda _day_offset: (day_start, day_start + 86400 - 0.000001),
+    )
+    start = _day(2026, 6, 27, 9)
     rows = [
         (_obs("app-secret", h="h1", ts=start, app="SecretApp"), "private app"),
         (_obs("id-secret", h="h2", ts=start + 1, app="Code"), "private id"),
@@ -749,7 +755,13 @@ def test_deep_brain_ask_cli_refuses_before_provider_without_feature_gate(monkeyp
 def test_deep_brain_ask_cli_blocked_payload_reflects_one_off_exclusions(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
-    start = _day(*dt.datetime.now().timetuple()[:3], 9)
+    day_start = _day(2026, 6, 27)
+    monkeypatch.setattr(
+        cli,
+        "_day_window",
+        lambda _day_offset: (day_start, day_start + 86400 - 0.000001),
+    )
+    start = _day(2026, 6, 27, 9)
     rows = [(_obs("o1", h="h1", ts=start, source="capture"), "public notes")]
     monkeypatch.setattr(cli, "_store_maintenance", lambda: _PreviewStore(rows))
     monkeypatch.setattr(

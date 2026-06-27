@@ -1327,11 +1327,13 @@ def test_productivity_coach_cli_one_off_exclusion_skips_provider(monkeypatch, tm
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
     reset_settings_cache()
-    today = (
-        dt.datetime.now()
-        .replace(hour=9, minute=0, second=0, microsecond=0)
-        .timestamp()
+    day_start = _ts(2026, 6, 27, 0)
+    monkeypatch.setattr(
+        cli,
+        "_day_window",
+        lambda _day_offset: (day_start, day_start + 86400 - 0.000001),
     )
+    today = _ts(2026, 6, 27, 9)
     rows = [
         (_obs("o1", ts=today, app="com.openai.codex", source="capture"), "coding"),
     ]

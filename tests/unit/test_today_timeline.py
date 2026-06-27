@@ -484,6 +484,13 @@ def test_briefing_cli_rejects_cloud_exclusions_without_model(monkeypatch, tmp_pa
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
     _patch_briefing_store(monkeypatch, _Completion([]))
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda **_: (_ for _ in ()).throw(
+            AssertionError("invalid local briefing options must not build provider")
+        ),
+    )
 
     res = CliRunner().invoke(
         cli.app,
@@ -497,7 +504,13 @@ def test_briefing_cli_rejects_cloud_exclusions_without_model(monkeypatch, tmp_pa
 def test_briefing_cli_model_fully_excluded_packet_skips_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
-    today = _day(*dt.datetime.now().timetuple()[:3], 9)
+    day_start = _day(2026, 6, 27)
+    monkeypatch.setattr(
+        cli,
+        "_day_window",
+        lambda _day_offset: (day_start, day_start + 86400 - 0.000001),
+    )
+    today = _day(2026, 6, 27, 9)
     rows = [
         (
             _obs("o1", h="h1", ts=today, app="com.mitchellh.ghostty", window="secret"),
