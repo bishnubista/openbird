@@ -104,6 +104,36 @@ routes:
       - cli.cloud_banner
       - app.privacyTransmissionSummary
 
+  - id: chat.day_facts
+    class: local
+    source: deterministic RAG day-fact answer branch over persisted day-memory productivity facts; not every metric-looking question
+    derives_from:
+      - productivity.local_facts
+    captured_fields:
+      - user_question_for_classification_only
+      - active_seconds
+      - active_minutes
+      - context_switch_count
+      - top_category
+      - top_hour
+      - longest_focus_block
+      - derived_citation_source_ids
+      - memory_context_counts
+    forbidden_fields:
+      - captured_text
+      - raw_window_title
+      - raw_url
+      - raw_title
+      - source_ids_in_memory_context
+    storage:
+      - sqlite.day_memories
+    egress:
+      default: none
+      note: chat constructs a provider before RAG, but this branch returns before provider.complete; no completion request is issued and no day-fact data egresses
+    truth_surface:
+      - cli.chat_json.reasoning_route
+      - app.ChatResult.routeLabel
+
   - id: deep_brain.preview
     class: local
     source: exclusion-filtered day/week memory plus selected cited snippets
