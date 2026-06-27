@@ -2302,6 +2302,31 @@ data_app = typer.Typer(help="Manage stored data (purge, stats).", no_args_is_hel
 app.add_typer(data_app, name="data")
 
 
+REASONING_LEDGER_FIELDS = (
+    "created_at",
+    "feature",
+    "packet_route",
+    "reasoning_route",
+    "egress",
+    "route_class",
+    "provider_family",
+    "model",
+    "packet_hash",
+    "packet_bytes",
+    "selected_source_count",
+    "citation_count",
+    "excluded_observations",
+    "excluded_by",
+    "outcome",
+    "error_kind",
+    "deletion_caveat",
+)
+
+
+def _redacted_reasoning_ledger_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {field: row.get(field) for field in REASONING_LEDGER_FIELDS}
+
+
 @data_app.command("purge")
 def data_purge(
     since: Optional[str] = typer.Option(
@@ -2412,6 +2437,76 @@ def data_stats() -> None:
     finally:
         store.close()
     _console.print_json(json.dumps(stats))
+
+
+@data_app.command("reasoning-ledger")
+def data_reasoning_ledger(
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        min=1,
+        max=200,
+        help="Number of recent redacted reasoning-send rows to show.",
+    ),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit exact redacted ledger rows as JSON.",
+    ),
+) -> None:
+    """Inspect redacted local metadata for remote reasoning packet sends.
+
+    This is a local maintenance read: it never constructs a model provider,
+    embeds content, or sends captured memory off-device. The ledger stores only
+    route/count/hash metadata; raw prompts, answers, packets, snippets, source
+    IDs, app/source names, URLs, and window titles are intentionally absent.
+    """
+    store = _store_maintenance()
+    try:
+        rows = [
+            _redacted_reasoning_ledger_row(row)
+            for row in store.list_reasoning_send_ledger(limit=limit)
+        ]
+    finally:
+        store.close()
+
+    if json_out:
+        _console.print_json(json.dumps({"rows": rows}))
+        return
+
+    table = Table(title="Reasoning Send Ledger", show_header=True, header_style="bold")
+    table.add_column("Time", no_wrap=True)
+    table.add_column("Feature", no_wrap=True)
+    table.add_column("Route")
+    table.add_column("Provider", no_wrap=True)
+    table.add_column("Outcome", no_wrap=True)
+    table.add_column("Packet", no_wrap=True)
+    table.add_column("Sources", justify="right", no_wrap=True)
+    table.add_column("Exclusions")
+    for row in rows:
+        packet_hash = str(row.get("packet_hash") or "")
+        packet_label = packet_hash[:12] if packet_hash else "-"
+        excluded_by = row.get("excluded_by") or {}
+        if isinstance(excluded_by, dict) and excluded_by:
+            exclusions = ", ".join(
+                f"{escape(str(key))}:{int(value)}"
+                for key, value in sorted(excluded_by.items())
+            )
+        else:
+            exclusions = "-"
+        table.add_row(
+            _fmt_ts(float(row["created_at"])) if row.get("created_at") is not None else "-",
+            escape(str(row.get("feature") or "-")),
+            escape(str(row.get("route_class") or "-")),
+            escape(str(row.get("provider_family") or "-")),
+            escape(str(row.get("outcome") or "-")),
+            packet_label,
+            str(row.get("selected_source_count") or 0),
+            exclusions,
+        )
+    _console.print(table)
+    if not rows:
+        _console.print("No remote reasoning sends recorded.")
 
 
 @data_app.command("export")

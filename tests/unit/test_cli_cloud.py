@@ -2,11 +2,36 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from typer.testing import CliRunner
 
 from openbird import cli
 from openbird.config import Settings, reset_settings_cache
+from openbird.memory.store import MemoryStore
+from tests.unit.conftest import FakeProvider
+
+
+REASONING_LEDGER_FIELDS = {
+    "created_at",
+    "feature",
+    "packet_route",
+    "reasoning_route",
+    "egress",
+    "route_class",
+    "provider_family",
+    "model",
+    "packet_hash",
+    "packet_bytes",
+    "selected_source_count",
+    "citation_count",
+    "excluded_observations",
+    "excluded_by",
+    "outcome",
+    "error_kind",
+    "deletion_caveat",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +111,76 @@ def test_data_stats_not_gated_by_cloud(monkeypatch):
     res = CliRunner().invoke(cli.app, ["data", "stats"])
     assert res.exit_code == 0, res.output
     assert "CLOUD MODEL CONFIGURED" not in res.output
+
+
+def test_data_reasoning_ledger_json_is_redacted_and_not_gated_by_cloud(
+    monkeypatch, tmp_path
+):
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        store.record_reasoning_send(
+            feature="deep_brain.ask",
+            packet_route="deep_brain.preview",
+            reasoning_route="cloud_reasoning_active",
+            egress="active_model_route",
+            route_class="third-party-cloud",
+            provider_family="openai",
+            model="gpt-5.5",
+            packet_hash="a" * 64,
+            packet_bytes=321,
+            selected_source_count=2,
+            citation_count=1,
+            excluded_observations=7,
+            excluded_by={"app": 2, "source": 1, "observation_id": 4, "obs-secret-123": 9},
+            outcome="error",
+            error_kind="RuntimeError: secret provider text",
+        )
+    finally:
+        store.close()
+
+    monkeypatch.setenv("OPENBIRD_EMBED_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("OPENBIRD_EMBED_DIM", "1536")
+    reset_settings_cache()
+
+    try:
+        res = CliRunner().invoke(cli.app, ["data", "reasoning-ledger", "--json"])
+
+        assert res.exit_code == 0, res.output
+        assert "CLOUD MODEL CONFIGURED" not in res.output
+        payload = json.loads(res.stdout)
+        assert set(payload) == {"rows"}
+        assert len(payload["rows"]) == 1
+        row = payload["rows"][0]
+        assert set(row) == REASONING_LEDGER_FIELDS
+        assert row["feature"] == "deep_brain.ask"
+        assert row["packet_hash"] == "a" * 64
+        assert row["error_kind"] == "error"
+        assert row["excluded_observations"] == 7
+        assert row["excluded_by"] == {"app": 2, "observation_id": 4, "source": 1}
+        serialized = json.dumps(payload, sort_keys=True)
+        assert "secret provider text" not in serialized
+        assert "raw question" not in serialized
+        assert "generated answer" not in serialized
+        assert "packet json" not in serialized
+        assert "obs-secret-123" not in serialized
+
+        table = CliRunner().invoke(cli.app, ["data", "reasoning-ledger"])
+        assert table.exit_code == 0, table.output
+        assert "Reasoning Send Ledger" in table.output
+        assert "No remote reasoning sends recorded" not in table.output
+        assert "secret provider text" not in table.output
+    finally:
+        reset_settings_cache()
+
+
+def test_data_reasoning_ledger_text_empty_and_limit_validation():
+    empty = CliRunner().invoke(cli.app, ["data", "reasoning-ledger"])
+    assert empty.exit_code == 0, empty.output
+    assert "No remote reasoning sends recorded" in empty.output
+
+    invalid = CliRunner().invoke(cli.app, ["data", "reasoning-ledger", "--limit", "0"])
+    assert invalid.exit_code != 0
 
 
 def test_data_vacuum_not_gated_by_cloud(monkeypatch):
