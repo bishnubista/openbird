@@ -651,6 +651,75 @@ def test_deep_brain_preview_cli_uses_maintenance_store_not_model_provider(monkey
     assert packet["selected_sources"][0]["observation_id"] == "o1"
 
 
+def test_cli_cloud_exclusion_settings_are_copied_not_mutated(tmp_path):
+    base = Settings(
+        data_dir=tmp_path,
+        deep_brain_excluded_apps=["Code"],
+        deep_brain_excluded_sources=["private"],
+        deep_brain_excluded_observation_ids=["obs-1"],
+    )
+
+    copied = cli._settings_with_cli_cloud_exclusions(
+        base,
+        exclude_app=["code", "Slack"],
+        exclude_source=["Private", "meeting"],
+        exclude_observation_id=["OBS-1", "obs-2"],
+    )
+
+    assert base.deep_brain_excluded_apps == ["Code"]
+    assert base.deep_brain_excluded_sources == ["private"]
+    assert base.deep_brain_excluded_observation_ids == ["obs-1"]
+    assert copied.deep_brain_excluded_apps == ["Code", "Slack"]
+    assert copied.deep_brain_excluded_sources == ["private", "meeting"]
+    assert copied.deep_brain_excluded_observation_ids == ["obs-1", "obs-2"]
+
+
+def test_deep_brain_preview_cli_applies_one_off_cloud_exclusions(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_APPS", "ExistingApp")
+    reset_settings_cache()
+    start = _day(*dt.datetime.now().timetuple()[:3], 9)
+    rows = [
+        (_obs("app-secret", h="h1", ts=start, app="SecretApp"), "private app"),
+        (_obs("id-secret", h="h2", ts=start + 1, app="Code"), "private id"),
+        (_obs("public", h="h3", ts=start + 2, app="Code"), "public notes"),
+    ]
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _PreviewStore(rows))
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            [
+                "deep-brain",
+                "preview",
+                "--day",
+                "0",
+                "--json",
+                "--exclude-app",
+                "SecretApp",
+                "--exclude-source",
+                "archive",
+                "--exclude-observation-id",
+                "id-secret",
+            ],
+        )
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    packet = json.loads(res.stdout)
+    assert [s["observation_id"] for s in packet["selected_sources"]] == ["public"]
+    assert packet["exclusions"]["kept_observations"] == 1
+    assert packet["exclusions"]["excluded_observations"] == 2
+    assert packet["exclusions"]["excluded_by"] == {"app": 1, "observation_id": 1}
+    assert packet["exclusions"]["excluded_apps_configured"] == [
+        "ExistingApp",
+        "SecretApp",
+    ]
+    assert packet["exclusions"]["excluded_sources_configured"] == ["archive"]
+    assert packet["exclusions"]["excluded_observation_ids_configured"] == 1
+
+
 def test_deep_brain_ask_cli_refuses_before_provider_without_feature_gate(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
@@ -675,6 +744,43 @@ def test_deep_brain_ask_cli_refuses_before_provider_without_feature_gate(monkeyp
     payload = json.loads(res.stdout)
     assert payload["ok"] is False
     assert "OPENBIRD_DEEP_BRAIN_ENABLED" in " ".join(payload["blocked_reasons"])
+
+
+def test_deep_brain_ask_cli_blocked_payload_reflects_one_off_exclusions(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    start = _day(*dt.datetime.now().timetuple()[:3], 9)
+    rows = [(_obs("o1", h="h1", ts=start, source="capture"), "public notes")]
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _PreviewStore(rows))
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("refusal must not use provider")),
+    )
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            [
+                "deep-brain",
+                "ask",
+                "what did I do?",
+                "--day",
+                "0",
+                "--json",
+                "--exclude-source",
+                "capture",
+            ],
+        )
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 2
+    payload = json.loads(res.stdout)
+    assert payload["packet"]["sources_total"] == 0
+    assert payload["packet"]["exclusions"]["kept_observations"] == 0
+    assert payload["packet"]["exclusions"]["excluded_by"] == {"source": 1}
+    assert payload["packet"]["exclusions"]["excluded_sources_configured"] == ["capture"]
 
 
 def test_deep_brain_ask_cli_uses_provider_when_enabled(monkeypatch, tmp_path):

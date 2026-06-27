@@ -480,9 +480,22 @@ def test_briefing_cli_model_empty_packet_skips_provider(monkeypatch, tmp_path):
     assert "enough cited briefing evidence" in payload["text"].lower()
 
 
+def test_briefing_cli_rejects_cloud_exclusions_without_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    _patch_briefing_store(monkeypatch, _Completion([]))
+
+    res = CliRunner().invoke(
+        cli.app,
+        ["briefing", "--json", "--day", "0", "--exclude-app", "com.secret.App"],
+    )
+
+    assert res.exit_code == 2
+    assert "only to model briefings" in res.stderr
+
+
 def test_briefing_cli_model_fully_excluded_packet_skips_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_APPS", "com.mitchellh.ghostty")
     reset_settings_cache()
     today = _day(*dt.datetime.now().timetuple()[:3], 9)
     rows = [
@@ -500,7 +513,18 @@ def test_briefing_cli_model_fully_excluded_packet_skips_provider(monkeypatch, tm
         ),
     )
 
-    res = CliRunner().invoke(cli.app, ["briefing", "--model", "--json", "--day", "0"])
+    res = CliRunner().invoke(
+        cli.app,
+        [
+            "briefing",
+            "--model",
+            "--json",
+            "--day",
+            "0",
+            "--exclude-app",
+            "com.mitchellh.ghostty",
+        ],
+    )
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
     assert payload["reasoning_route"] == "local_deterministic"
@@ -509,6 +533,7 @@ def test_briefing_cli_model_fully_excluded_packet_skips_provider(monkeypatch, tm
     assert payload["sources_total"] == 0
     assert payload["exclusions"]["excluded_observations"] == 1
     assert payload["exclusions"]["excluded_by"] == {"app": 1}
+    assert payload["exclusions"]["excluded_apps_configured"] == ["com.mitchellh.ghostty"]
 
 
 def test_briefing_cli_json_empty_day_has_no_sources(monkeypatch, tmp_path):

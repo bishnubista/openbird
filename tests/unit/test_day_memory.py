@@ -1323,6 +1323,54 @@ def test_productivity_coach_cli_uses_packet_label_when_enabled(monkeypatch, tmp_
     assert "source_ids" not in provider.messages[1]["content"]
 
 
+def test_productivity_coach_cli_one_off_exclusion_skips_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    reset_settings_cache()
+    today = (
+        dt.datetime.now()
+        .replace(hour=9, minute=0, second=0, microsecond=0)
+        .timestamp()
+    )
+    rows = [
+        (_obs("o1", ts=today, app="com.openai.codex", source="capture"), "coding"),
+    ]
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _DayMemoryStoreStub(rows))
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("excluded productivity coaching must not build provider")
+        ),
+    )
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            [
+                "productivity-coach",
+                "coach me",
+                "--day",
+                "0",
+                "--json",
+                "--exclude-source",
+                "capture",
+            ],
+        )
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is True
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert payload["egress"] == "none"
+    assert payload["citations"] == []
+    assert payload["exclusions"]["kept_observations"] == 0
+    assert payload["exclusions"]["excluded_by"] == {"source": 1}
+    assert payload["exclusions"]["excluded_sources_configured"] == ["capture"]
+
+
 def test_productivity_cli_rejects_negative_day(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
