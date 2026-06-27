@@ -39,6 +39,13 @@ class FakeLLM:
         return self.response
 
 
+class RoutedLLM(FakeLLM):
+    def __init__(self, response, *, llm_model: str, settings=None):
+        super().__init__(response)
+        self.llm_model = llm_model
+        self.settings = settings
+
+
 class EchoCiteAllLLM:
     """An LLM that cites every source_id it can see in the user prompt.
 
@@ -183,6 +190,7 @@ def test_no_hits_returns_empty_answer_and_skips_llm():
 
     assert result.citations == []
     assert "memory" in result.answer.lower()
+    assert result.reasoning_route == "local_deterministic"
     # LLM must not be consulted when there's no grounding context.
     assert llm.last_messages is None
 
@@ -193,7 +201,94 @@ def test_empty_query_short_circuits():
     result = answer("   ", store=store, provider=llm)
     assert result.answer == ""
     assert result.citations == []
+    assert result.reasoning_route == "local_deterministic"
     assert llm.last_messages is None
+
+
+def test_completion_route_uses_injected_local_provider_settings(monkeypatch):
+    from openbird.config import Settings
+
+    obs = _obs("obs-1", app="Code")
+    store = StubStore([_hit(obs, "SQLite migration notes.")])
+    provider = RoutedLLM(
+        {"answer": "SQLite.", "citations": ["S1"]},
+        llm_model="ollama/qwen3:4b",
+        settings=Settings(embed_dim=768, llm_model="ollama/qwen3:4b"),
+    )
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+    result = answer("what database?", store=store, provider=provider)
+
+    assert result.reasoning_route == "local_model"
+
+
+def test_completion_route_uses_injected_cloud_provider_not_global_settings(monkeypatch):
+    from openbird.config import Settings
+
+    obs = _obs("obs-1", app="Code")
+    store = StubStore([_hit(obs, "SQLite migration notes.")])
+    provider = RoutedLLM(
+        {"answer": "SQLite.", "citations": ["S1"]},
+        llm_model="gpt-4o-mini",
+        settings=Settings(embed_dim=768, llm_model="gpt-4o-mini"),
+    )
+    # Regression guard: global/default settings are local, but the provider that
+    # actually completed is remote and must own the route label.
+    monkeypatch.setenv("OPENBIRD_LLM_MODEL", "ollama/qwen3:4b")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+    result = answer("what database?", store=store, provider=provider)
+
+    assert result.reasoning_route == "cloud_reasoning_active"
+
+
+def test_completion_route_respects_remote_ollama_host_on_provider_settings(monkeypatch):
+    from openbird.config import Settings
+
+    obs = _obs("obs-1", app="Code")
+    store = StubStore([_hit(obs, "SQLite migration notes.")])
+    provider = RoutedLLM(
+        {"answer": "SQLite.", "citations": ["S1"]},
+        llm_model="ollama/qwen3:4b",
+        settings=Settings(
+            embed_dim=768,
+            llm_model="ollama/qwen3:4b",
+            ollama_host="http://10.0.0.5:11434",
+        ),
+    )
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+
+    result = answer("what database?", store=store, provider=provider)
+
+    assert result.reasoning_route == "cloud_reasoning_active"
+
+
+def test_attrless_provider_omits_reasoning_route():
+    obs = _obs("obs-1", app="Code")
+    store = StubStore([_hit(obs, "SQLite migration notes.")])
+    provider = FakeLLM({"answer": "SQLite.", "citations": ["S1"]})
+
+    result = answer("what database?", store=store, provider=provider)
+
+    assert result.reasoning_route is None
+    assert "reasoning_route" not in result.to_public_dict()
+
+
+def test_ungrounded_completion_keeps_provider_reasoning_route():
+    from openbird.config import Settings
+
+    obs = _obs("obs-1", app="Code")
+    store = StubStore([_hit(obs, "SQLite migration notes.")])
+    provider = RoutedLLM(
+        {"answer": "Uncited claim.", "citations": []},
+        llm_model="gpt-4o-mini",
+        settings=Settings(embed_dim=768, llm_model="gpt-4o-mini"),
+    )
+
+    result = answer("what database?", store=store, provider=provider)
+
+    assert result.grounding == "ungrounded"
+    assert result.reasoning_route == "cloud_reasoning_active"
 
 
 # -- dedup by document/session --------------------------------------------------
@@ -367,6 +462,7 @@ def test_temporal_query_routes_to_day_memory(mem_settings, fake_provider):
         result = chatter.answer("what did I do yesterday?")
 
         assert result.grounding == "derived"
+        assert result.reasoning_route == "local_deterministic"
         assert result.citations == []
         assert result.derived_citations
         assert result.memory_context["local_date"] == "2026-06-12"
@@ -486,6 +582,7 @@ def test_broad_single_day_uses_deterministic_day_memory(mem_settings, fake_provi
 
         assert llm.calls == 0
         assert result.grounding == "derived"
+        assert result.reasoning_route == "local_deterministic"
         assert result.grounded is True
         assert result.citations == []
         assert result.derived_citations
@@ -776,11 +873,13 @@ def test_answer_result_to_public_dict_shape():
             )
         ],
         grounded=True,
+        reasoning_route="local_model",
     )
     d = result.to_public_dict()
     assert d["answer"] == "Storage uses SQLite."
     assert d["grounded"] is True
     assert d["grounding"] == "occurrence"
+    assert d["reasoning_route"] == "local_model"
     assert d["citations"] == [
         {
             "index": 1,
@@ -852,6 +951,7 @@ def test_chat_cli_json_output(monkeypatch):
             Citation(observation_id="o1", chunk_id="c1", app="Notes", window="W", ts=1.0, snippet="sqlite")
         ],
         grounded=True,
+        reasoning_route="local_model",
     )
 
     class _FakeRAG:
@@ -874,6 +974,7 @@ def test_chat_cli_json_output(monkeypatch):
     payload = _json.loads(res.output)
     assert payload["answer"] == "Use SQLite."
     assert payload["grounded"] is True
+    assert payload["reasoning_route"] == "local_model"
     assert payload["citations"][0]["app"] == "Notes"
     # human-only rendering must not appear in --json mode
     assert "Sources" not in res.output

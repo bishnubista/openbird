@@ -144,6 +144,11 @@ struct AskPanelView: View {
             Text(groundedLabel(result))
                 .font(.system(size: 11.5))
                 .foregroundStyle(OB.textSecondary(scheme))
+            if let route = result.routeLabel {
+                Text("· \(route)")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(OB.textTertiary(scheme))
+            }
         }
         Text(result.answer.isEmpty ? "(no answer)" : result.answer)
             .font(.system(size: 14))

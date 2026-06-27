@@ -376,6 +376,10 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
     "required": ["answer", "citations"],
 }
 
+_ROUTE_LOCAL_DETERMINISTIC = "local_deterministic"
+_ROUTE_LOCAL_MODEL = "local_model"
+_ROUTE_CLOUD_REASONING = "cloud_reasoning_active"
+
 
 class _Completer(Protocol):
     """Structural type for the slice of LLMProvider that RAG depends on."""
@@ -404,6 +408,7 @@ class AnswerResult:
     grounding: str = "none"
     derived_citations: list[DerivedCitation] = field(default_factory=list)
     memory_context: dict | None = None
+    reasoning_route: str | None = None
 
     def __post_init__(self) -> None:
         if self.grounding == "none":
@@ -454,7 +459,7 @@ class AnswerResult:
                 for c in self.derived_citations
             ],
             "memory_context": self.memory_context,
-        }
+        } | ({"reasoning_route": self.reasoning_route} if self.reasoning_route else {})
 
 
 @dataclass
@@ -522,7 +527,10 @@ class RAG:
         "what did I do yesterday?".
         """
         if not query or not query.strip():
-            return AnswerResult(answer="", citations=[], used_hits=[])
+            return AnswerResult(
+                answer="", citations=[], used_hits=[],
+                reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+            )
 
         # An explicit caller-supplied window hard-scopes retrieval to that span.
         # It can only be honored via the time-range scan, so refuse a store that
@@ -581,6 +589,7 @@ class RAG:
                 answer="I don't have anything in memory about that.",
                 citations=[],
                 used_hits=[],
+                reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
             )
 
         messages = self._build_messages(query, context)
@@ -612,6 +621,7 @@ class RAG:
             citations=citations,
             used_hits=used_hits,
             grounding="occurrence" if grounded else "ungrounded",
+            reasoning_route=self._completion_reasoning_route(),
         )
 
     # -- temporal / activity path ---------------------------------------------
@@ -696,6 +706,7 @@ class RAG:
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
                 citations=[], used_hits=[], grounding="empty",
+                reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
             )
 
         if not deduped:
@@ -706,6 +717,7 @@ class RAG:
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
                 citations=[], used_hits=[], grounding="empty",
+                reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
             )
 
         # Selection: `rows` is ORDER BY ts ASC, so taking the first ``max_context``
@@ -756,6 +768,7 @@ class RAG:
             answer=answer_text, citations=citations,
             used_hits=[i.hit for i in context],
             grounding="occurrence" if grounded else "ungrounded",
+            reasoning_route=self._completion_reasoning_route(),
         )
 
     def _can_answer_from_day_memory(self, window: tuple[float, float]) -> bool:
@@ -798,6 +811,7 @@ class RAG:
                 derived_citations=[],
                 grounding="empty",
                 memory_context=memory_context,
+                reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
             )
 
         derived = self._day_memory_derived_citations(payload)
@@ -809,6 +823,7 @@ class RAG:
             derived_citations=derived,
             grounding="derived",
             memory_context=memory_context,
+            reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
         )
 
     @staticmethod
@@ -889,6 +904,7 @@ class RAG:
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
                 citations=[], used_hits=[], grounding="empty",
+                reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
             )
         if not deduped:
             emit_retrieval_empty(
@@ -898,6 +914,7 @@ class RAG:
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
                 citations=[], used_hits=[], grounding="empty",
+                reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
             )
 
         chosen = self._select_specific_rows(query, deduped)
@@ -908,6 +925,7 @@ class RAG:
                 citations=[],
                 used_hits=[],
                 grounding="empty",
+                reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
             )
 
         messages = self._build_messages(query, context)
@@ -938,7 +956,28 @@ class RAG:
             answer=answer_text, citations=citations,
             used_hits=[i.hit for i in context],
             grounding="occurrence" if grounded else "ungrounded",
+            reasoning_route=self._completion_reasoning_route(),
         )
+
+    def _completion_reasoning_route(self) -> str | None:
+        """Return the answer-generation route for the provider that just completed.
+
+        This is deliberately scoped to the LLM completion role. Embedding and
+        rerank egress are separate privacy routes enforced by provider/preflight.
+        """
+        llm_model = (getattr(self.provider, "llm_model", None) or "").strip()
+        if not llm_model:
+            return None
+        try:
+            from openbird.config import resolved_ollama_host
+            from openbird.llm.provider import is_local_model
+
+            settings = getattr(self.provider, "settings", None)
+            host = resolved_ollama_host(settings) if settings is not None else None
+            local = is_local_model(llm_model, ollama_host=host)
+        except Exception:  # pragma: no cover - defensive; absence means no label
+            return None
+        return _ROUTE_LOCAL_MODEL if local else _ROUTE_CLOUD_REASONING
 
     def _prepared_window_rows(
         self, window: tuple[float, float]
