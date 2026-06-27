@@ -8,7 +8,13 @@ from typer.testing import CliRunner
 
 from openbird import cli
 from openbird.config import reset_settings_cache
-from openbird.day_memory import build_day_memory, classify_observation
+from openbird.day_memory import (
+    EXTRACTOR_VERSION,
+    build_day_memory,
+    build_productivity_report,
+    classify_observation,
+)
+from openbird.memory.store import MemoryStore
 from openbird.types import Observation
 
 
@@ -113,6 +119,7 @@ def test_build_day_memory_payload_has_metrics_sources_and_no_narrative_text():
     assert any(d["value"] == "youtube.com" for d in payload["entities"]["domains"])
     assert payload["workstreams"]
     assert payload["workstreams"][0]["source_ids"]
+    assert payload["focus_blocks"]
     assert payload["source_fingerprint"]["count"] == 3
 
 
@@ -143,6 +150,173 @@ def test_build_day_memory_times_terminal_observation_against_window_end():
     assert metrics["active_seconds"] == 120
     assert metrics["time_by_category"]["coding"] == 120
     assert metrics["longest_same_category_streak"] == {"category": "coding", "seconds": 120}
+
+
+def test_productivity_focus_blocks_share_canonical_category_metrics():
+    start = _ts(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "c1",
+                ts=start,
+                app="com.mitchellh.ghostty",
+                window="SECRET_CODE_WINDOW",
+                session_id="s1",
+            ),
+            "SECRET_CODE_TEXT",
+        ),
+        (
+            _obs(
+                "c2",
+                ts=start + 60,
+                app="com.mitchellh.ghostty",
+                window="more code",
+                session_id="s1",
+            ),
+            "coding",
+        ),
+        (
+            _obs("m1", ts=start + 120, app="Slack", window="SECRET_SLACK", session_id="s2"),
+            "follow up",
+        ),
+        (
+            _obs(
+                "c3",
+                ts=start + 180,
+                app="com.mitchellh.ghostty",
+                window="return code",
+                session_id="s3",
+            ),
+            "coding",
+        ),
+    ]
+
+    built = build_day_memory(
+        rows,
+        start_ts=start,
+        end_ts=start + 240,
+        day_offset=0,
+        gap_seconds=300,
+    )
+    saved = {
+        "payload": built.payload,
+        "local_date": built.payload["local_date"],
+        "source_scope": "capture",
+        "source_count": len(built.source_ids),
+        "generated_at": start + 300,
+        "extractor_version": EXTRACTOR_VERSION,
+    }
+    report = build_productivity_report(saved)
+
+    metrics = built.payload["metrics"]
+    blocks = built.payload["focus_blocks"]
+    assert blocks == [
+        {
+            "category": "coding",
+            "start": start,
+            "end": start + 120,
+            "seconds": 120,
+            "source_ids": ["c1", "c2"],
+            "session_count": 1,
+        },
+        {
+            "category": "communication",
+            "start": start + 120,
+            "end": start + 180,
+            "seconds": 60,
+            "source_ids": ["m1"],
+            "session_count": 1,
+        },
+        {
+            "category": "coding",
+            "start": start + 180,
+            "end": start + 240,
+            "seconds": 60,
+            "source_ids": ["c3"],
+            "session_count": 1,
+        },
+    ]
+    assert metrics["longest_same_category_streak"] == {
+        "category": "coding",
+        "seconds": 120,
+    }
+
+    productivity = report["productivity"]
+    facts = productivity["facts"]
+    assert facts["active_seconds"] == metrics["active_seconds"]
+    assert facts["context_switch_count"] == metrics["context_switch_count"]
+    assert facts["context_switches_per_active_hour"] == 30.0
+    assert facts["top_category"]["category"] == "coding"
+    assert facts["top_category"]["seconds"] == metrics["time_by_category"]["coding"]
+    assert facts["top_category"]["source_ids"] == ["c1", "c2", "c3"]
+
+    by_category = {item["category"]: item for item in productivity["category_sources"]}
+    for category, seconds in metrics["time_by_category"].items():
+        assert by_category[category]["active_seconds"] == seconds
+    assert by_category["coding"]["source_ids"] == ["c1", "c2", "c3"]
+
+
+def test_productivity_report_keeps_raw_text_out_of_output():
+    start = _ts(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "secret",
+                ts=start,
+                app="com.mitchellh.ghostty",
+                window="ULTRA_SECRET_WINDOW",
+                url="https://example.com/ULTRA_SECRET_URL",
+                session_id="s1",
+            ),
+            "ULTRA_SECRET_TEXT",
+        )
+    ]
+    built = build_day_memory(rows, start_ts=start, end_ts=start + 60, day_offset=0)
+    saved = {
+        "payload": built.payload,
+        "local_date": built.payload["local_date"],
+        "source_scope": "capture",
+        "source_count": 1,
+        "generated_at": start + 60,
+        "extractor_version": EXTRACTOR_VERSION,
+    }
+
+    report = build_productivity_report(saved)
+    serialized = json.dumps(report, sort_keys=True)
+
+    assert "ULTRA_SECRET_WINDOW" not in serialized
+    assert "ULTRA_SECRET_URL" not in serialized
+    assert "ULTRA_SECRET_TEXT" not in serialized
+    coach_packet = report["productivity"]["coach_ready_packet"]
+    assert "source_ids" not in json.dumps(coach_packet, sort_keys=True)
+    assert report["memory_context"]["coverage"]["observations"] == 1
+
+
+def test_productivity_empty_day_is_zero_safe():
+    built = build_day_memory(
+        [],
+        start_ts=_ts(2026, 6, 12, 0),
+        end_ts=_ts(2026, 6, 13, 0),
+        day_offset=0,
+    )
+    saved = {
+        "payload": built.payload,
+        "local_date": built.payload["local_date"],
+        "source_scope": "capture",
+        "source_count": 0,
+        "generated_at": _ts(2026, 6, 12, 1),
+        "extractor_version": EXTRACTOR_VERSION,
+    }
+
+    report = build_productivity_report(saved)
+
+    assert report["route"] == "productivity.local_facts"
+    assert report["egress"] == "none"
+    facts = report["productivity"]["facts"]
+    assert facts["active_seconds"] == 0
+    assert facts["context_switches_per_active_hour"] == 0.0
+    assert facts["top_category"] is None
+    assert report["productivity"]["focus_blocks"] == []
 
 
 def test_build_day_memory_uses_stable_tie_breakers():
@@ -246,6 +420,50 @@ def test_build_day_memory_dedupes_github_open_loop_by_canonical_cue():
     assert built.payload["open_loops"][0]["source_ids"] == ["a", "b"]
 
 
+def test_ensure_day_memory_rebuilds_v2_payload_for_productivity(
+    mem_settings, fake_provider
+):
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = _ts(2026, 6, 12, 9)
+        obs = store.add_observation(
+            "coding",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            session_id="s1",
+            ts=start,
+        )
+        rows = store.time_range_text(start, start + 60, source="capture")
+        fingerprint = store.day_memory_source_fingerprint_from_rows(rows)
+        store.save_day_memory(
+            local_date="2026-06-12",
+            source_scope="capture",
+            extractor_version="day-memory-v2",
+            payload={
+                "local_date": "2026-06-12",
+                "source_scope": "capture",
+                "source_fingerprint": fingerprint,
+                "metrics": {},
+            },
+            source_ids=[obs.id],
+            generated_at=start,
+        )
+
+        saved = store.ensure_day_memory(
+            local_date="2026-06-12",
+            start_ts=start,
+            end_ts=start + 60,
+            day_offset=0,
+            source_scope="capture",
+            force=False,
+        )
+
+        assert saved["extractor_version"] == EXTRACTOR_VERSION
+        assert saved["payload"]["focus_blocks"]
+    finally:
+        store.close()
+
+
 class _DayMemoryStoreStub:
     def __init__(self, rows):
         self.rows = rows
@@ -335,3 +553,53 @@ def test_day_memory_show_json_ensures_empty_day(monkeypatch, tmp_path):
     payload = json.loads(res.stdout)
     assert payload["built"] is True
     assert payload["day_memory"]["payload"]["coverage"]["observations"] == 0
+
+
+def test_productivity_cli_json_uses_local_route(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    today = (
+        dt.datetime.now()
+        .replace(hour=9, minute=0, second=0, microsecond=0)
+        .timestamp()
+    )
+    rows = [
+        (_obs("o1", ts=today, app="com.mitchellh.ghostty", window="openbird"), "coding"),
+    ]
+    stub = _DayMemoryStoreStub(rows)
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
+    monkeypatch.setattr(
+        cli,
+        "_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("productivity must not build provider")),
+    )
+
+    try:
+        res = CliRunner().invoke(cli.app, ["productivity", "--day", "0", "--json"])
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["route"] == "productivity.local_facts"
+    assert payload["egress"] == "none"
+    assert payload["productivity_status"] == "local_facts_only"
+    assert payload["memory_context"]["route"] == "local_deterministic"
+    assert "source_ids" not in payload["memory_context"]["coverage"]
+    assert payload["productivity"]["focus_blocks"][0]["source_ids"] == ["o1"]
+    assert "source_ids" not in json.dumps(
+        payload["productivity"]["coach_ready_packet"],
+        sort_keys=True,
+    )
+
+
+def test_productivity_cli_rejects_negative_day(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+
+    try:
+        res = CliRunner().invoke(cli.app, ["productivity", "--day=-1", "--json"])
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 2

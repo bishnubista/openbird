@@ -824,6 +824,73 @@ def day_memory_show(
 
 
 # --------------------------------------------------------------------------- #
+# productivity facts                                                          #
+# --------------------------------------------------------------------------- #
+
+
+@app.command("productivity")
+def productivity(
+    day: int = typer.Option(0, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    source_scope: str = typer.Option(
+        "capture", "--source-scope", help="Observation source to analyze."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show local-only productivity facts for a day.
+
+    This is deterministic and provider-free: it ensures the day-memory artifact,
+    then projects factual metrics and cited source ids from that local payload.
+    """
+    if day < 0:
+        _err_console.print("[red]--day must be >= 0.[/]")
+        raise typer.Exit(code=2)
+
+    from openbird.day_memory import build_productivity_report, local_date_for_window
+
+    start, end = _day_window(day)
+    local_date = local_date_for_window(start)
+    store = _store_maintenance()
+    try:
+        saved = store.ensure_day_memory(
+            local_date=local_date,
+            start_ts=start,
+            end_ts=end,
+            day_offset=day,
+            source_scope=source_scope,
+            force=False,
+        )
+    finally:
+        store.close()
+
+    report = build_productivity_report(saved)
+    if as_json:
+        _console.print_json(data=report)
+        return
+
+    facts = report["productivity"]["facts"]
+    top_category = facts.get("top_category")
+    longest = facts.get("longest_focus_block")
+    _console.print(
+        f"[bold]{report['local_date']}[/] · "
+        f"{facts['active_minutes']} active minute(s), "
+        f"{facts['context_switch_count']} context switch(es), "
+        f"{facts['context_switches_per_active_hour']} switch(es)/active hour."
+    )
+    if top_category:
+        _console.print(
+            "Top category: "
+            f"{top_category['category']} ({top_category['minutes']}m, "
+            f"{top_category['source_count']} source(s))."
+        )
+    if longest:
+        _console.print(
+            "Longest focus block: "
+            f"{longest['category']} ({round(float(longest['seconds']) / 60.0, 1)}m, "
+            f"{longest['session_count']} session(s))."
+        )
+
+
+# --------------------------------------------------------------------------- #
 # preflight                                                                   #
 # --------------------------------------------------------------------------- #
 

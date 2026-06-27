@@ -150,6 +150,33 @@ routes:
       - cli.deep_brain_ask
       - cli.CLOUD_ACTIVE
 
+  - id: productivity.local_facts
+    class: local
+    source: deterministic day-memory metrics and source references
+    captured_fields:
+      - active_seconds
+      - active_minutes
+      - context_switch_count
+      - context_switches_per_active_hour
+      - top_category
+      - top_hour
+      - focus_blocks
+      - category_sources
+      - source_ids
+      - coach_ready_packet_without_source_ids
+    forbidden_fields:
+      - captured_text
+      - raw_window_title
+      - raw_url
+      - raw_title
+    storage:
+      - sqlite.day_memories
+    egress:
+      default: none
+      note: no provider is constructed; coaching packets are local read-time projections
+    truth_surface:
+      - cli.productivity
+
   - id: chat.remote
     class: unknown
     source: user prompt plus retrieved local memory

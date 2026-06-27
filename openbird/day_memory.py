@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 from openbird.types import Observation
 
-EXTRACTOR_VERSION = "day-memory-v2"
+EXTRACTOR_VERSION = "day-memory-v3"
 
 _BROWSER_APPS = {
     "com.google.chrome",
@@ -89,6 +89,7 @@ def build_day_memory(
     source_ids = [obs.id for obs, _ in ordered]
     sessions = _build_sessions(ordered)
     timed = _timed_observations(ordered, gap_seconds=gap_seconds, end_ts=end_ts)
+    focus_blocks = _focus_blocks(timed)
     active_by_source = _active_seconds_by_source(timed)
     entities = _entities(ordered)
     workstreams = _workstreams(sessions, entities, active_by_source)
@@ -122,6 +123,7 @@ def build_day_memory(
         },
         "source_fingerprint": source_fingerprint or source_fingerprint_for_rows(ordered),
         "sessions": sessions,
+        "focus_blocks": focus_blocks,
         "workstreams": workstreams,
         "open_loops": open_loops,
         "metrics": {
@@ -130,7 +132,7 @@ def build_day_memory(
             "time_by_app": _round_counter(time_by_app),
             "time_by_category": _round_counter(time_by_category),
             "context_switch_count": _context_switch_count(ordered),
-            "longest_same_category_streak": _longest_category_streak(timed),
+            "longest_same_category_streak": _longest_focus_block_metric(focus_blocks),
             "first_seen": ordered[0][0].ts if ordered else None,
             "last_seen": ordered[-1][0].ts if ordered else None,
             "unknown_category_count": sum(
@@ -140,6 +142,58 @@ def build_day_memory(
         "entities": entities,
     }
     return DayMemoryBuild(payload=payload, source_ids=source_ids)
+
+
+def build_productivity_report(saved: dict) -> dict:
+    """Build a local-only productivity facts report from a saved day memory."""
+    payload = saved.get("payload", {})
+    metrics = payload.get("metrics", {})
+    focus_blocks = list(payload.get("focus_blocks") or [])
+    category_sources = _category_sources_from_blocks(focus_blocks)
+
+    active_seconds = float(metrics.get("active_seconds") or 0.0)
+    context_switch_count = int(metrics.get("context_switch_count") or 0)
+    facts = {
+        "active_seconds": round(active_seconds, 3),
+        "active_minutes": round(active_seconds / 60.0, 1),
+        "context_switch_count": context_switch_count,
+        "context_switches_per_active_hour": (
+            round(context_switch_count / (active_seconds / 3600.0), 3)
+            if active_seconds > 0
+            else 0.0
+        ),
+        "top_category": _top_category_fact(metrics, category_sources),
+        "top_hour": _top_hour_fact(metrics, focus_blocks),
+        "longest_focus_block": _longest_focus_block(focus_blocks),
+    }
+    coach_ready_packet = {
+        "local_date": payload.get("local_date") or saved.get("local_date"),
+        "source_scope": payload.get("source_scope") or saved.get("source_scope"),
+        "productivity_status": "local_facts_only",
+        "facts": _without_source_ids(facts),
+        "category_sources": [_without_source_ids(item) for item in category_sources],
+        "focus_blocks": [_without_source_ids(item) for item in focus_blocks[:12]],
+        "source_count": (
+            saved.get("source_count")
+            or payload.get("coverage", {}).get("observations", 0)
+        ),
+    }
+    return {
+        "route": "productivity.local_facts",
+        "egress": "none",
+        "productivity_status": "local_facts_only",
+        "local_date": payload.get("local_date") or saved.get("local_date"),
+        "day_offset": payload.get("day_offset"),
+        "source_scope": payload.get("source_scope") or saved.get("source_scope"),
+        "generated_at": saved.get("generated_at"),
+        "memory_context": day_memory_context(saved),
+        "productivity": {
+            "facts": facts,
+            "category_sources": category_sources,
+            "focus_blocks": focus_blocks,
+            "coach_ready_packet": coach_ready_packet,
+        },
+    }
 
 
 def source_fingerprint_for_rows(rows: list[tuple[Observation, str]]) -> dict:
@@ -351,25 +405,168 @@ def _context_switch_count(rows: list[tuple[Observation, str]]) -> int:
     return count
 
 
-def _longest_category_streak(
-    timed: list[tuple[Observation, str, str, float]]
-) -> dict | None:
-    best_category: str | None = None
-    best_seconds = 0.0
-    cur_category: str | None = None
-    cur_seconds = 0.0
-    for _obs, _text, category, seconds in timed:
-        if category != cur_category:
-            if cur_category is not None and cur_seconds > best_seconds:
-                best_category, best_seconds = cur_category, cur_seconds
-            cur_category, cur_seconds = category, seconds
-        else:
-            cur_seconds += seconds
-    if cur_category is not None and cur_seconds > best_seconds:
-        best_category, best_seconds = cur_category, cur_seconds
-    if best_category is None:
+def _focus_blocks(timed: list[tuple[Observation, str, str, float]]) -> list[dict]:
+    """Return contiguous same-category spans with local source references only."""
+    blocks: list[dict] = []
+    current: dict | None = None
+    current_sessions: set[str] = set()
+
+    def flush() -> None:
+        nonlocal current, current_sessions
+        if current is None:
+            return
+        current["session_count"] = len(current_sessions)
+        blocks.append(current)
+        current = None
+        current_sessions = set()
+
+    for obs, _text, category, seconds in timed:
+        if seconds <= 0:
+            continue
+        session_key = obs.session_id or obs.id
+        end = obs.ts + seconds
+        if current is None or current["category"] != category:
+            flush()
+            current = {
+                "category": category,
+                "start": obs.ts,
+                "end": end,
+                "seconds": seconds,
+                "source_ids": [obs.id],
+            }
+            current_sessions = {session_key}
+            continue
+
+        current["end"] = max(float(current["end"]), end)
+        current["seconds"] = float(current["seconds"]) + seconds
+        current["source_ids"].append(obs.id)
+        current_sessions.add(session_key)
+
+    flush()
+    return blocks
+
+
+def _longest_focus_block_metric(focus_blocks: list[dict]) -> dict | None:
+    block = _longest_focus_block(focus_blocks)
+    if block is None:
         return None
-    return {"category": best_category, "seconds": round(best_seconds, 3)}
+    return {"category": block["category"], "seconds": block["seconds"]}
+
+
+def _longest_focus_block(focus_blocks: list[dict]) -> dict | None:
+    if not focus_blocks:
+        return None
+    block = sorted(
+        focus_blocks,
+        key=lambda item: (
+            -float(item.get("seconds") or 0.0),
+            str(item.get("category") or ""),
+            float(item.get("start") or 0.0),
+        ),
+    )[0]
+    return {
+        "category": block.get("category"),
+        "start": block.get("start"),
+        "end": block.get("end"),
+        "seconds": round(float(block.get("seconds") or 0.0), 3),
+        "source_ids": list(block.get("source_ids") or []),
+        "session_count": int(block.get("session_count") or 0),
+    }
+
+
+def _category_sources_from_blocks(focus_blocks: list[dict]) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    for block in focus_blocks:
+        category = str(block.get("category") or "unknown")
+        item = grouped.setdefault(
+            category,
+            {
+                "category": category,
+                "active_seconds": 0.0,
+                "source_ids": set(),
+                "block_count": 0,
+                "session_count": 0,
+            },
+        )
+        item["active_seconds"] += float(block.get("seconds") or 0.0)
+        item["source_ids"].update(block.get("source_ids") or [])
+        item["block_count"] += 1
+        item["session_count"] += int(block.get("session_count") or 0)
+
+    out: list[dict] = []
+    for item in grouped.values():
+        source_ids = sorted(item["source_ids"])
+        out.append(
+            {
+                "category": item["category"],
+                "active_seconds": round(float(item["active_seconds"]), 3),
+                "active_minutes": round(float(item["active_seconds"]) / 60.0, 1),
+                "source_ids": source_ids,
+                "source_count": len(source_ids),
+                "block_count": item["block_count"],
+                "session_count": item["session_count"],
+            }
+        )
+    return sorted(
+        out,
+        key=lambda item: (
+            -float(item.get("active_seconds") or 0.0),
+            str(item.get("category") or ""),
+        ),
+    )
+
+
+def _top_category_fact(metrics: dict, category_sources: list[dict]) -> dict | None:
+    categories = metrics.get("time_by_category") or {}
+    if not categories:
+        return None
+    category, seconds = sorted(
+        categories.items(), key=lambda kv: (-float(kv[1]), str(kv[0]))
+    )[0]
+    sources = next(
+        (item for item in category_sources if item.get("category") == category),
+        {},
+    )
+    return {
+        "category": category,
+        "seconds": round(float(seconds), 3),
+        "minutes": round(float(seconds) / 60.0, 1),
+        "source_ids": list(sources.get("source_ids") or []),
+        "source_count": int(sources.get("source_count") or 0),
+    }
+
+
+def _top_hour_fact(metrics: dict, focus_blocks: list[dict]) -> dict | None:
+    hours = metrics.get("time_by_hour") or {}
+    if not hours:
+        return None
+    hour, seconds = sorted(hours.items(), key=lambda kv: (-float(kv[1]), str(kv[0])))[0]
+    source_ids: set[str] = set()
+    for block in focus_blocks:
+        start_hour = dt.datetime.fromtimestamp(
+            float(block.get("start") or 0.0)
+        ).strftime("%H:00")
+        if start_hour == hour:
+            source_ids.update(block.get("source_ids") or [])
+    return {
+        "hour": hour,
+        "seconds": round(float(seconds), 3),
+        "minutes": round(float(seconds) / 60.0, 1),
+        "source_ids": sorted(source_ids),
+        "source_count": len(source_ids),
+    }
+
+
+def _without_source_ids(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_source_ids(item)
+            for key, item in value.items()
+            if key not in {"source_ids", "observation_id", "observation_ids"}
+        }
+    if isinstance(value, list):
+        return [_without_source_ids(item) for item in value]
+    return value
 
 
 def _entities(rows: list[tuple[Observation, str]]) -> dict:
