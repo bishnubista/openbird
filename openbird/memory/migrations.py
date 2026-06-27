@@ -47,7 +47,7 @@ class Migration:
 
 def _apply_v2_day_memories(conn: sqlite3.Connection) -> None:
     """Add purge-safe deterministic day-memory tables."""
-    conn.executescript(
+    statements = [
         """
         CREATE TABLE IF NOT EXISTS day_memories (
             id                TEXT PRIMARY KEY,
@@ -58,19 +58,24 @@ def _apply_v2_day_memories(conn: sqlite3.Connection) -> None:
             payload_json      TEXT NOT NULL,
             source_count      INTEGER NOT NULL,
             UNIQUE(local_date, source_scope)
-        );
-
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS day_memory_sources (
             day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,
             observation_id TEXT NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
             PRIMARY KEY(day_memory_id, observation_id)
-        );
-
+        )
+        """,
+        """
         CREATE INDEX IF NOT EXISTS idx_day_memories_date_scope
-            ON day_memories(local_date, source_scope);
+            ON day_memories(local_date, source_scope)
+        """,
+        """
         CREATE INDEX IF NOT EXISTS idx_day_memory_sources_observation
-            ON day_memory_sources(observation_id);
-
+            ON day_memory_sources(observation_id)
+        """,
+        """
         CREATE TRIGGER IF NOT EXISTS trg_day_memory_observation_delete
         BEFORE DELETE ON observations
         BEGIN
@@ -80,9 +85,11 @@ def _apply_v2_day_memories(conn: sqlite3.Connection) -> None:
                 FROM day_memory_sources
                 WHERE observation_id = OLD.id
             );
-        END;
-        """
-    )
+        END
+        """,
+    ]
+    for statement in statements:
+        conn.execute(statement)
 
 
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),

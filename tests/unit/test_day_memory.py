@@ -113,6 +113,78 @@ def test_build_day_memory_payload_has_metrics_sources_and_no_narrative_text():
     assert any(d["value"] == "youtube.com" for d in payload["entities"]["domains"])
 
 
+def test_build_day_memory_times_terminal_observation_against_window_end():
+    start = _ts(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "o1",
+                ts=start,
+                app="com.mitchellh.ghostty",
+                window="openbird",
+                session_id="s1",
+            ),
+            "coding",
+        )
+    ]
+
+    built = build_day_memory(
+        rows,
+        start_ts=start,
+        end_ts=start + 120,
+        day_offset=0,
+        gap_seconds=300,
+    )
+
+    metrics = built.payload["metrics"]
+    assert metrics["active_seconds"] == 120
+    assert metrics["time_by_category"]["coding"] == 120
+    assert metrics["longest_same_category_streak"] == {"category": "coding", "seconds": 120}
+
+
+def test_build_day_memory_uses_stable_tie_breakers():
+    start = _ts(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "b",
+                ts=start,
+                app="com.google.Chrome",
+                window="Beta Alpha",
+                url="https://example.org/b",
+                session_id="s",
+            ),
+            "Beta token",
+        ),
+        (
+            _obs(
+                "a",
+                ts=start,
+                app="com.google.Chrome",
+                window="Alpha Beta",
+                url="https://example.org/a",
+                session_id="s",
+            ),
+            "Alpha token",
+        ),
+    ]
+
+    built = build_day_memory(
+        rows,
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+        gap_seconds=300,
+    )
+
+    assert built.source_ids == ["a", "b"]
+    assert built.payload["sessions"][0]["source_ids"] == ["a", "b"]
+    assert [token["token"] for token in built.payload["entities"]["title_tokens"][:2]] == [
+        "alpha",
+        "beta",
+    ]
+
+
 class _DayMemoryStoreStub:
     def __init__(self, rows):
         self.rows = rows
@@ -164,3 +236,17 @@ def test_day_memory_build_cli_is_no_model_and_json(monkeypatch, tmp_path):
     assert payload["built"] is True
     assert payload["day_memory"]["source_ids"] == ["o1"]
     assert payload["day_memory"]["payload"]["narrative_status"] == "not_persisted"
+
+
+def test_day_memory_show_json_miss_exits_nonzero(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    stub = _DayMemoryStoreStub([])
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
+
+    res = CliRunner().invoke(cli.app, ["day-memory", "show", "--day", "0", "--json"])
+
+    assert res.exit_code == 1, res.output
+    payload = json.loads(res.stdout)
+    assert payload["built"] is False
+    assert payload["message"] == "day memory has not been built"

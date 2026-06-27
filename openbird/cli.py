@@ -553,11 +553,11 @@ def day_memory_show(
         }
         if as_json:
             _console.print_json(data=payload)
-            return
-        _console.print(
-            f"[yellow]No day memory built[/] for {local_date} ({source_scope}). "
-            "Run `openbird day-memory build --day N` first."
-        )
+        else:
+            _console.print(
+                f"[yellow]No day memory built[/] for {local_date} ({source_scope}). "
+                "Run `openbird day-memory build --day N` first."
+            )
         raise typer.Exit(code=1)
 
     payload = {"built": True, "day_memory": saved}

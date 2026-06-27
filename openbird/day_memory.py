@@ -74,10 +74,10 @@ def build_day_memory(
     gap_seconds: float = 300.0,
 ) -> DayMemoryBuild:
     """Build a deterministic, no-model day-memory payload."""
-    ordered = sorted(rows, key=lambda item: item[0].ts)
+    ordered = sorted(rows, key=lambda item: _observation_sort_key(item[0]))
     source_ids = [obs.id for obs, _ in ordered]
     sessions = _build_sessions(ordered)
-    timed = _timed_observations(ordered, gap_seconds=gap_seconds)
+    timed = _timed_observations(ordered, gap_seconds=gap_seconds, end_ts=end_ts)
 
     time_by_hour: Counter[str] = Counter()
     time_by_app: Counter[str] = Counter()
@@ -155,8 +155,8 @@ def _build_sessions(rows: list[tuple[Observation, str]]) -> list[dict]:
         grouped[key].append((obs, text))
 
     sessions: list[dict] = []
-    for (_bucket, app), items in grouped.items():
-        items.sort(key=lambda item: item[0].ts)
+    for (_bucket, app), items in sorted(grouped.items(), key=lambda item: item[0]):
+        items.sort(key=lambda item: _observation_sort_key(item[0]))
         category, confidence = _classify_many(items)
         title = _representative_title(items)
         source_ids = [obs.id for obs, _ in items]
@@ -172,7 +172,15 @@ def _build_sessions(rows: list[tuple[Observation, str]]) -> list[dict]:
                 "source_ids": source_ids,
             }
         )
-    sessions.sort(key=lambda s: s["start"])
+    sessions.sort(
+        key=lambda s: (
+            s["start"],
+            s["end"],
+            s["app"],
+            s["category"],
+            tuple(s["source_ids"]),
+        )
+    )
     return sessions
 
 
@@ -183,7 +191,7 @@ def _classify_many(items: list[tuple[Observation, str]]) -> tuple[str, float]:
         category, confidence = classify_observation(obs, text)
         votes[category] += 1
         confidences[category].append(confidence)
-    category, _ = votes.most_common(1)[0]
+    category, _ = sorted(votes.items(), key=lambda item: (-item[1], item[0]))[0]
     values = confidences[category]
     return category, round(sum(values) / len(values), 3)
 
@@ -193,7 +201,10 @@ def _representative_title(items: list[tuple[Observation, str]]) -> str | None:
     if not titles:
         return None
     counts = Counter(titles)
-    return max(titles, key=lambda title: (counts[title], _latest_title_ts(items, title)))
+    return sorted(
+        counts,
+        key=lambda title: (-counts[title], -_latest_title_ts(items, title), title),
+    )[0]
 
 
 def _latest_title_ts(items: list[tuple[Observation, str]], title: str) -> float:
@@ -201,13 +212,13 @@ def _latest_title_ts(items: list[tuple[Observation, str]], title: str) -> float:
 
 
 def _timed_observations(
-    rows: list[tuple[Observation, str]], *, gap_seconds: float
+    rows: list[tuple[Observation, str]], *, gap_seconds: float, end_ts: float
 ) -> list[tuple[Observation, str, str, float]]:
     out: list[tuple[Observation, str, str, float]] = []
     for idx, (obs, text) in enumerate(rows):
         category, _confidence = classify_observation(obs, text)
         if idx + 1 >= len(rows):
-            seconds = 0.0
+            seconds = max(0.0, min(end_ts - obs.ts, gap_seconds))
         else:
             seconds = max(0.0, min(rows[idx + 1][0].ts - obs.ts, gap_seconds))
         out.append((obs, text, category, seconds))
@@ -274,7 +285,9 @@ def _entities(rows: list[tuple[Observation, str]]) -> dict:
         "repos": _rank_entity_map(repos),
         "title_tokens": [
             {"token": token, "count": count, "source_ids": sorted(token_sources[token])[:5]}
-            for token, count in tokens.most_common(12)
+            for token, count in sorted(tokens.items(), key=lambda item: (-item[1], item[0]))[
+                :12
+            ]
         ],
     }
 
@@ -306,3 +319,6 @@ def _rank_entity_map(items: dict[str, set[str]]) -> list[dict]:
 def _round_counter(counter: Counter[str]) -> dict[str, float]:
     return {key: round(value, 3) for key, value in sorted(counter.items())}
 
+
+def _observation_sort_key(obs: Observation) -> tuple[float, str, str, str, str]:
+    return (obs.ts, obs.id, obs.app or "", obs.window or "", obs.url or "")
