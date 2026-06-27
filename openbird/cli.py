@@ -129,7 +129,7 @@ def _provider():
     return provider
 
 
-def _completion_provider():
+def _completion_provider(*, packet_label: str = "Deep Brain packet"):
     """Construct a provider for completion-only routes, gating only the LLM role."""
     from openbird.llm.provider import (
         CloudOptInRequired,
@@ -152,7 +152,7 @@ def _completion_provider():
     if remote.get("llm"):
         _err_console.print(
             "[bold yellow]⚠ CLOUD ACTIVE — remote llm="
-            f"{remote['llm']} (Deep Brain packet leaves this machine)[/]"
+            f"{remote['llm']} ({packet_label} leaves this machine)[/]"
         )
     return provider
 
@@ -888,6 +888,107 @@ def productivity(
             f"{longest['category']} ({round(float(longest['seconds']) / 60.0, 1)}m, "
             f"{longest['session_count']} session(s))."
         )
+
+
+@app.command("productivity-coach")
+def productivity_coach(
+    question: Optional[str] = typer.Argument(
+        None, help="Coaching question to answer from local productivity facts."
+    ),
+    day: int = typer.Option(0, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    source_scope: str = typer.Option(
+        "capture", "--source-scope", help="Observation source to analyze."
+    ),
+    stdin: bool = typer.Option(False, "--stdin", help="Read the question from stdin."),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Ask the configured model for cited coaching over local productivity facts."""
+    if day < 0:
+        _err_console.print("[red]--day must be >= 0.[/]")
+        raise typer.Exit(code=2)
+    if stdin:
+        question = sys.stdin.read().strip()
+    if not question:
+        _err_console.print("[red]Provide a question or pass --stdin.[/]")
+        raise typer.Exit(code=2)
+
+    from openbird.day_memory import (
+        answer_productivity_coach,
+        build_productivity_coach_packet,
+        build_productivity_report,
+        local_date_for_window,
+        productivity_coach_blocked_reasons,
+    )
+
+    start, end = _day_window(day)
+    local_date = local_date_for_window(start)
+    settings = get_settings()
+    store = _store_maintenance()
+    try:
+        saved = store.ensure_day_memory(
+            local_date=local_date,
+            start_ts=start,
+            end_ts=end,
+            day_offset=day,
+            source_scope=source_scope,
+            force=False,
+        )
+    finally:
+        store.close()
+
+    report = build_productivity_report(saved)
+    packet = build_productivity_coach_packet(report)
+    blocked = productivity_coach_blocked_reasons(settings)
+    if blocked:
+        payload = {
+            "ok": False,
+            "answer": "Productivity coaching is not enabled.",
+            "blocked_reasons": blocked,
+            "reasoning_route": "blocked",
+            "egress": "none",
+            "packet_route": packet.get("route"),
+            "packet": {
+                "local_date": packet.get("local_date"),
+                "day_offset": packet.get("day_offset"),
+                "source_scope": packet.get("source_scope"),
+                "citation_count": packet.get("citation_count", 0),
+            },
+        }
+        if as_json:
+            _console.print_json(json.dumps(payload))
+        else:
+            _err_console.print("[red]Productivity coaching refused:[/]")
+            for reason in blocked:
+                _err_console.print(f"- {reason}")
+        raise typer.Exit(code=2)
+
+    if packet["citation_count"] == 0:
+        payload = {
+            "ok": True,
+            "question": question,
+            "answer": "I do not have enough cited productivity evidence to coach on that.",
+            "confidence": "insufficient_evidence",
+            "grounded": False,
+            "reasoning_route": "local_deterministic",
+            "egress": "none",
+            "model": None,
+            "packet_route": packet["route"],
+            "citations": [],
+            "local_date": report.get("local_date"),
+            "source_scope": report.get("source_scope"),
+        }
+        if as_json:
+            _console.print_json(json.dumps(payload))
+            return
+        _console.print(payload["answer"])
+        return
+
+    provider = _completion_provider(packet_label="productivity coaching packet")
+    result = answer_productivity_coach(question, report, provider, settings=settings)
+    if as_json:
+        _console.print_json(json.dumps(result))
+        return
+    _console.print(result["answer"])
 
 
 # --------------------------------------------------------------------------- #

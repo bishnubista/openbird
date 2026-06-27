@@ -62,6 +62,7 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "model.local_ollama",
         "model.remote_ollama",
         "model.third_party_cloud",
+        "productivity.coach",
         "productivity.local_facts",
         "rerank.remote",
         "routines.summary",
@@ -170,6 +171,31 @@ def test_productivity_local_facts_route_is_local_and_content_safe() -> None:
         "raw_window_title",
         "raw_url",
         "raw_title",
+    }.issubset(set(route["forbidden_fields"]))
+
+
+def test_productivity_coach_inherits_route_and_forbids_prompt_source_ids() -> None:
+    route = _routes()["productivity.coach"]
+
+    assert route["class"] == "unknown"
+    assert route["egress"]["default"] == "inherits_active_model_route"
+    assert route["egress"]["inherited_from"] == ["chat.local", "chat.remote"]
+    assert route["enforcement"]["feature_requires"] == "OPENBIRD_DEEP_BRAIN_ENABLED"
+    assert "cli.productivity_coach" in route["truth_surface"]
+    assert {
+        "user_question",
+        "productivity_facts",
+        "synthetic_citation_ids",
+        "generated_coaching",
+        "validated_citations_local_source_ids",
+    }.issubset(set(route["captured_fields"]))
+    assert {
+        "captured_text",
+        "raw_window_title",
+        "raw_url",
+        "raw_title",
+        "source_ids_in_prompt",
+        "observation_ids_in_prompt",
     }.issubset(set(route["forbidden_fields"]))
 
 

@@ -7,12 +7,15 @@ import pytest
 from typer.testing import CliRunner
 
 from openbird import cli
-from openbird.config import reset_settings_cache
+from openbird.config import Settings, reset_settings_cache
 from openbird.day_memory import (
     EXTRACTOR_VERSION,
+    answer_productivity_coach,
     build_day_memory,
+    build_productivity_coach_packet,
     build_productivity_report,
     classify_observation,
+    productivity_coach_packet_json_for_model,
 )
 from openbird.memory.store import MemoryStore
 from openbird.types import Observation
@@ -47,6 +50,38 @@ def _obs(
         session_id=session_id,
         source="capture",
     )
+
+
+class _Provider:
+    llm_model = "stub-model"
+
+    def __init__(self, response):
+        self.response = response
+        self.messages = None
+        self.schema = None
+
+    def complete(self, messages, *, json_schema=None):
+        self.messages = messages
+        self.schema = json_schema
+        return self.response
+
+
+def _saved_day_memory(rows, *, start: float, end: float, day_offset: int = 0):
+    built = build_day_memory(
+        rows,
+        start_ts=start,
+        end_ts=end,
+        day_offset=day_offset,
+        gap_seconds=300,
+    )
+    return {
+        "payload": built.payload,
+        "local_date": built.payload["local_date"],
+        "source_scope": "capture",
+        "source_count": len(built.source_ids),
+        "generated_at": end,
+        "extractor_version": EXTRACTOR_VERSION,
+    }
 
 
 def test_classify_observation_uses_descriptive_categories():
@@ -290,6 +325,220 @@ def test_productivity_report_keeps_raw_text_out_of_output():
     coach_packet = report["productivity"]["coach_ready_packet"]
     assert "source_ids" not in json.dumps(coach_packet, sort_keys=True)
     assert report["memory_context"]["coverage"]["observations"] == 1
+
+
+def test_productivity_coach_packet_uses_synthetic_ids_and_local_citation_map():
+    start = _ts(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "SRC_SECRET",
+                ts=start,
+                app="com.mitchellh.ghostty",
+                window="ULTRA_SECRET_WINDOW",
+                url="https://example.com/ULTRA_SECRET_URL",
+                session_id="s1",
+            ),
+            "ULTRA_SECRET_TEXT",
+        )
+    ]
+    report = build_productivity_report(
+        _saved_day_memory(rows, start=start, end=start + 60)
+    )
+
+    packet = build_productivity_coach_packet(report)
+    serialized = productivity_coach_packet_json_for_model(packet)
+
+    assert packet["citation_count"] > 0
+    assert "category:coding" in packet["citation_map"]
+    assert "block:1" in packet["citation_map"]
+    assert "hour:09:00" in packet["citation_map"]
+    assert packet["citation_map"]["category:coding"]["source_ids"] == ["SRC_SECRET"]
+    assert "source_ids" not in serialized
+    assert "SRC_SECRET" not in serialized
+    assert "ULTRA_SECRET_WINDOW" not in serialized
+    assert "ULTRA_SECRET_URL" not in serialized
+    assert "ULTRA_SECRET_TEXT" not in serialized
+    assert packet["model_packet"]["category_sources"][0]["citation_id"] == "category:coding"
+    assert packet["model_packet"]["focus_blocks"][0]["citation_id"] == "block:1"
+    assert packet["model_packet"]["facts"]["top_hour"]["citation_id"] == "hour:09:00"
+
+
+def test_productivity_coach_local_model_needs_feature_gate_only():
+    start = _ts(2026, 6, 12, 9)
+    report = build_productivity_report(
+        _saved_day_memory(
+            [
+                (
+                    _obs(
+                        "c1",
+                        ts=start,
+                        app="com.mitchellh.ghostty",
+                        session_id="s1",
+                    ),
+                    "coding",
+                )
+            ],
+            start=start,
+            end=start + 60,
+        )
+    )
+    provider = _Provider(
+        {
+            "answer": "You had a focused coding block.",
+            "citation_ids": ["category:coding"],
+            "confidence": "medium",
+        }
+    )
+
+    result = answer_productivity_coach(
+        "how did I do?",
+        report,
+        provider,
+        settings=Settings(deep_brain_enabled=True),
+    )
+
+    assert result["ok"] is True
+    assert result["reasoning_route"] == "local_model"
+    assert result["egress"] == "none"
+    assert result["citations"][0]["citation_id"] == "category:coding"
+    assert result["citations"][0]["source_ids"] == ["c1"]
+    assert "source_ids" not in provider.messages[1]["content"]
+
+
+def test_productivity_coach_refuses_remote_without_cloud_optin():
+    start = _ts(2026, 6, 12, 9)
+    report = build_productivity_report(
+        _saved_day_memory(
+            [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+            start=start,
+            end=start + 60,
+        )
+    )
+    provider = _Provider(
+        {"answer": "should not run", "citation_ids": ["category:coding"], "confidence": "low"}
+    )
+
+    result = answer_productivity_coach(
+        "coach me",
+        report,
+        provider,
+        settings=Settings(deep_brain_enabled=True, llm_model="gpt-4o-mini"),
+    )
+
+    assert result["ok"] is False
+    assert "OPENBIRD_ALLOW_CLOUD" in " ".join(result["blocked_reasons"])
+    assert provider.messages is None
+
+
+def test_productivity_coach_remote_route_truth_with_both_gates():
+    start = _ts(2026, 6, 12, 9)
+    report = build_productivity_report(
+        _saved_day_memory(
+            [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+            start=start,
+            end=start + 60,
+        )
+    )
+    provider = _Provider(
+        {
+            "answer": "Your coding block was a strength.",
+            "citation_ids": ["block:1"],
+            "confidence": "medium",
+        }
+    )
+
+    result = answer_productivity_coach(
+        "coach me",
+        report,
+        provider,
+        settings=Settings(
+            deep_brain_enabled=True,
+            allow_cloud=True,
+            llm_model="gpt-4o-mini",
+        ),
+    )
+
+    assert result["reasoning_route"] == "cloud_reasoning_active"
+    assert result["egress"] == "active_model_route"
+    assert result["model"] == "stub-model"
+    assert result["citations"][0]["citation_id"] == "block:1"
+
+
+def test_productivity_coach_drops_hallucinated_citations():
+    start = _ts(2026, 6, 12, 9)
+    report = build_productivity_report(
+        _saved_day_memory(
+            [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+            start=start,
+            end=start + 60,
+        )
+    )
+    provider = _Provider(
+        {"answer": "Unsupported coaching.", "citation_ids": ["block:99"], "confidence": "high"}
+    )
+
+    result = answer_productivity_coach(
+        "coach me",
+        report,
+        provider,
+        settings=Settings(deep_brain_enabled=True),
+    )
+
+    assert result["answer"] == "I could not ground productivity coaching in the local facts packet."
+    assert result["confidence"] == "insufficient_evidence"
+    assert result["citations"] == []
+
+
+def test_productivity_coach_empty_packet_never_calls_model():
+    start = _ts(2026, 6, 12, 0)
+    report = build_productivity_report(
+        _saved_day_memory([], start=start, end=start + 3600)
+    )
+    provider = _Provider(
+        {"answer": "Unsupported coaching.", "citation_ids": [], "confidence": "high"}
+    )
+
+    result = answer_productivity_coach(
+        "coach me",
+        report,
+        provider,
+        settings=Settings(deep_brain_enabled=True),
+    )
+
+    assert result["answer"] == "I do not have enough cited productivity evidence to coach on that."
+    assert result["confidence"] == "insufficient_evidence"
+    assert result["grounded"] is False
+    assert result["egress"] == "none"
+    assert provider.messages is None
+
+
+def test_productivity_coach_uncitable_facts_never_call_model():
+    start = _ts(2026, 6, 12, 9)
+    report = build_productivity_report(
+        _saved_day_memory(
+            [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+            start=start,
+            end=start + 60,
+        )
+    )
+    report["productivity"]["coach_ready_packet"]["category_sources"] = []
+    report["productivity"]["coach_ready_packet"]["focus_blocks"] = []
+    report["productivity"]["coach_ready_packet"]["facts"]["top_hour"] = None
+    provider = _Provider(
+        {"answer": "Unsupported coaching.", "citation_ids": [], "confidence": "high"}
+    )
+
+    result = answer_productivity_coach(
+        "coach me",
+        report,
+        provider,
+        settings=Settings(deep_brain_enabled=True),
+    )
+
+    assert result["reasoning_route"] == "local_deterministic"
+    assert result["citations"] == []
+    assert provider.messages is None
 
 
 def test_productivity_top_hour_sources_use_observation_hour_bucket():
@@ -653,6 +902,92 @@ def test_productivity_cli_json_uses_local_route(monkeypatch, tmp_path):
         payload["productivity"]["coach_ready_packet"],
         sort_keys=True,
     )
+
+
+def test_productivity_coach_cli_refuses_before_provider_without_feature_gate(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    today = (
+        dt.datetime.now()
+        .replace(hour=9, minute=0, second=0, microsecond=0)
+        .timestamp()
+    )
+    rows = [
+        (_obs("o1", ts=today, app="com.mitchellh.ghostty", window="openbird"), "coding"),
+    ]
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _DayMemoryStoreStub(rows))
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("refusal must not use provider")
+        ),
+    )
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["productivity-coach", "coach me", "--day", "0", "--json"],
+        )
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 2
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is False
+    assert "OPENBIRD_DEEP_BRAIN_ENABLED" in " ".join(payload["blocked_reasons"])
+    assert payload["packet"]["citation_count"] > 0
+
+
+def test_productivity_coach_cli_uses_packet_label_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    reset_settings_cache()
+    today = (
+        dt.datetime.now()
+        .replace(hour=9, minute=0, second=0, microsecond=0)
+        .timestamp()
+    )
+    rows = [
+        (_obs("o1", ts=today, app="com.mitchellh.ghostty", window="openbird"), "coding"),
+    ]
+    provider = _Provider(
+        {
+            "answer": "Your coding block was a useful focus anchor.",
+            "citation_ids": ["category:coding"],
+            "confidence": "medium",
+        }
+    )
+    packet_labels: list[str] = []
+
+    def _fake_completion_provider(*, packet_label: str = "Deep Brain packet"):
+        packet_labels.append(packet_label)
+        return provider
+
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _DayMemoryStoreStub(rows))
+    monkeypatch.setattr(cli, "_completion_provider", _fake_completion_provider)
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["productivity-coach", "--day", "0", "--json", "--stdin"],
+            input="how did I do?",
+        )
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert packet_labels == ["productivity coaching packet"]
+    assert payload["ok"] is True
+    assert payload["packet_route"] == "productivity.coach_packet"
+    assert payload["reasoning_route"] == "local_model"
+    assert payload["egress"] == "none"
+    assert payload["citations"][0]["citation_id"] == "category:coding"
+    assert payload["citations"][0]["source_ids"] == ["o1"]
+    assert "source_ids" not in provider.messages[1]["content"]
 
 
 def test_productivity_cli_rejects_negative_day(monkeypatch, tmp_path):
