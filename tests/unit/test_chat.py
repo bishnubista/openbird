@@ -810,6 +810,32 @@ def test_answer_result_to_public_dict_empty():
     }
 
 
+def test_answer_result_infers_mixed_grounding():
+    from openbird.chat.rag import AnswerResult
+    from openbird.types import Citation, DerivedCitation
+
+    result = AnswerResult(
+        answer="mixed",
+        citations=[
+            Citation(observation_id="o1", chunk_id="c1", app="Notes", ts=1.0, snippet="x")
+        ],
+        derived_citations=[
+            DerivedCitation(
+                index=1,
+                source_id="D1",
+                label="Daily metrics",
+                snippet="1 session",
+                derived_from=["o1"],
+                derived_from_total=1,
+            )
+        ],
+    )
+
+    assert result.grounding == "mixed"
+    assert result.grounded is True
+    assert result.to_public_dict()["grounding"] == "mixed"
+
+
 def test_chat_cli_json_output(monkeypatch):
     """`chat --json` emits only the JSON payload (no human Sources/grounding text)."""
     import json as _json

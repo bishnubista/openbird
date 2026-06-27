@@ -407,7 +407,9 @@ class AnswerResult:
 
     def __post_init__(self) -> None:
         if self.grounding == "none":
-            if self.derived_citations:
+            if self.derived_citations and self.citations:
+                self.grounding = "mixed"
+            elif self.derived_citations:
                 self.grounding = "derived"
             elif self.citations:
                 self.grounding = "occurrence"

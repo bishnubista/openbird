@@ -890,7 +890,7 @@ class MemoryStore:
                 return self._get_day_memory_unchecked(
                     local_date=local_date, source_scope=source_scope
                 ) or {}
-            except (sqlite3.OperationalError, sqlite3.IntegrityError):
+            except self._retryable_db_errors():
                 self.conn.rollback()
                 if attempt + 1 >= attempts:
                     raise
@@ -899,6 +899,25 @@ class MemoryStore:
                 self.conn.rollback()
                 raise
         raise RuntimeError("failed to ensure day memory")
+
+    def _retryable_db_errors(self) -> tuple[type[BaseException], ...]:
+        """Return lock/unique exception classes for the active DB-API backend."""
+        errors: set[type[BaseException]] = {
+            sqlite3.OperationalError,
+            sqlite3.IntegrityError,
+        }
+        try:
+            module = __import__(
+                type(self.conn).__module__,
+                fromlist=["OperationalError", "IntegrityError"],
+            )
+        except Exception:
+            return tuple(errors)
+        for name in ("OperationalError", "IntegrityError"):
+            exc = getattr(module, name, None)
+            if isinstance(exc, type) and issubclass(exc, BaseException):
+                errors.add(exc)
+        return tuple(errors)
 
     @staticmethod
     def day_memory_source_fingerprint_from_rows(

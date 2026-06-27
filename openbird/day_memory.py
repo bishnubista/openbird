@@ -415,11 +415,13 @@ def _open_loops(rows: list[tuple[Observation, str]]) -> list[dict]:
             owner, repo, item_kind, number = github.groups()
             kind = "github_pr" if item_kind == "pull" else "github_issue"
             cue = f"{owner}/{repo} {item_kind} #{number}"
+            key_value = cue.casefold()
         else:
             kind = "cue"
             cue = cue_match.group(0).lower() if cue_match else "cue"
+            key_value = None
         title = _clean_title(obs.window or text or obs.url or cue)
-        key = (kind, title.casefold())
+        key = (kind, key_value or title.casefold())
         current = loops.setdefault(
             key,
             {

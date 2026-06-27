@@ -216,6 +216,36 @@ def test_build_day_memory_extracts_open_loop_cues_without_narrative():
     assert payload["open_loops"][0]["source_ids"] == ["issue"]
 
 
+def test_build_day_memory_dedupes_github_open_loop_by_canonical_cue():
+    start = _ts(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "a",
+                ts=start,
+                window="Old title · Issue #42",
+                url="https://github.com/bishnubista/openbird/issues/42",
+            ),
+            "review",
+        ),
+        (
+            _obs(
+                "b",
+                ts=start + 10,
+                window="New title · Issue #42",
+                url="https://github.com/bishnubista/openbird/issues/42",
+            ),
+            "fix",
+        ),
+    ]
+
+    built = build_day_memory(rows, start_ts=start, end_ts=start + 60, day_offset=0)
+
+    assert len(built.payload["open_loops"]) == 1
+    assert built.payload["open_loops"][0]["source_count"] == 2
+    assert built.payload["open_loops"][0]["source_ids"] == ["a", "b"]
+
+
 class _DayMemoryStoreStub:
     def __init__(self, rows):
         self.rows = rows
@@ -296,7 +326,10 @@ def test_day_memory_show_json_ensures_empty_day(monkeypatch, tmp_path):
     stub = _DayMemoryStoreStub([])
     monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
 
-    res = CliRunner().invoke(cli.app, ["day-memory", "show", "--day", "0", "--json"])
+    try:
+        res = CliRunner().invoke(cli.app, ["day-memory", "show", "--day", "0", "--json"])
+    finally:
+        reset_settings_cache()
 
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
