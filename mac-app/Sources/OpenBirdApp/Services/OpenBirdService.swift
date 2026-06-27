@@ -183,6 +183,37 @@ struct ChatResult: Codable, Equatable {
     let answer: String
     let grounded: Bool
     let citations: [ChatCitation]
+    let reasoningRoute: String?
+
+    enum CodingKeys: String, CodingKey {
+        case answer, grounded, citations
+        case reasoningRoute = "reasoning_route"
+    }
+
+    init(
+        answer: String,
+        grounded: Bool,
+        citations: [ChatCitation],
+        reasoningRoute: String? = nil
+    ) {
+        self.answer = answer
+        self.grounded = grounded
+        self.citations = citations
+        self.reasoningRoute = reasoningRoute
+    }
+
+    var routeLabel: String? {
+        switch reasoningRoute {
+        case "local_deterministic":
+            return "Deterministic answer"
+        case "cloud_reasoning_active":
+            return "Cloud reasoning active"
+        case "local_model":
+            return "Local model"
+        default:
+            return nil
+        }
+    }
 }
 
 enum ChatError: Error { case cliMissing, failed(String), decode }

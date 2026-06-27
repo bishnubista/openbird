@@ -38,6 +38,50 @@ final class CitationFormattingTests: XCTestCase {
     }
 }
 
+final class ChatResultRouteTests: XCTestCase {
+    func testDecodeChatResultKeepsMissingRouteCompatible() throws {
+        let json = """
+        {"answer":"ok","grounded":false,"citations":[]}
+        """
+
+        let result = try JSONDecoder().decode(ChatResult.self, from: Data(json.utf8))
+
+        XCTAssertNil(result.reasoningRoute)
+        XCTAssertNil(result.routeLabel)
+    }
+
+    func testDecodeChatResultMapsKnownReasoningRoutes() throws {
+        let deterministic = try JSONDecoder().decode(
+            ChatResult.self,
+            from: Data(#"{"answer":"ok","grounded":true,"citations":[],"reasoning_route":"local_deterministic"}"#.utf8)
+        )
+        XCTAssertEqual(deterministic.reasoningRoute, "local_deterministic")
+        XCTAssertEqual(deterministic.routeLabel, "Deterministic answer")
+
+        let localModel = try JSONDecoder().decode(
+            ChatResult.self,
+            from: Data(#"{"answer":"ok","grounded":true,"citations":[],"reasoning_route":"local_model"}"#.utf8)
+        )
+        XCTAssertEqual(localModel.routeLabel, "Local model")
+
+        let cloud = try JSONDecoder().decode(
+            ChatResult.self,
+            from: Data(#"{"answer":"ok","grounded":true,"citations":[],"reasoning_route":"cloud_reasoning_active"}"#.utf8)
+        )
+        XCTAssertEqual(cloud.routeLabel, "Cloud reasoning active")
+    }
+
+    func testDecodeChatResultUnknownRouteHasNoLabel() throws {
+        let result = try JSONDecoder().decode(
+            ChatResult.self,
+            from: Data(#"{"answer":"ok","grounded":true,"citations":[],"reasoning_route":"partial_cloud"}"#.utf8)
+        )
+
+        XCTAssertEqual(result.reasoningRoute, "partial_cloud")
+        XCTAssertNil(result.routeLabel)
+    }
+}
+
 @MainActor
 final class AskPanelModelTests: XCTestCase {
     private func makeAppModel() -> AppModel {
