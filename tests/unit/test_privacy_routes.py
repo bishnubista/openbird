@@ -150,6 +150,7 @@ def test_deep_brain_ask_inherits_active_model_route() -> None:
         "period_metadata",
         "selected_citation_snippets",
         "selected_source_window_or_url",
+        "packet_build_route",
         "generated_answer",
         "validated_citations",
     }.issubset(set(route["captured_fields"]))
