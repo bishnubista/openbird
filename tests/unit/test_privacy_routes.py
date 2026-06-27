@@ -164,6 +164,7 @@ def test_deep_brain_preview_declares_day_or_week_packet_metadata() -> None:
         "distilled_day_or_week_memory_content",
         "period_metadata",
         "selected_citation_snippets",
+        "packet_build_route",
         "exclusion_counts",
     }.issubset(set(route["captured_fields"]))
 
