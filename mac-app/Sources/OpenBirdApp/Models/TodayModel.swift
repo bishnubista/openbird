@@ -6,6 +6,7 @@ import Foundation
 final class TodayModel: ObservableObject {
     @Published private(set) var timeline: DayTimeline?
     @Published private(set) var briefing: String?
+    @Published private(set) var productivity: DayProductivity?
     /// The current briefing's source trail (the occurrences the prose was grounded
     /// in) and the full grounding-group count. Empty when there is no briefing or
     /// the day had no activity. `briefingSourcesTotal > briefingSources.count` means
@@ -22,7 +23,9 @@ final class TodayModel: ObservableObject {
     @Published private(set) var briefingRouteLabel: String?
     @Published private(set) var loadingTimeline = false
     @Published private(set) var loadingBriefing = false
+    @Published private(set) var loadingProductivity = false
     @Published private(set) var timelineError: String?
+    @Published private(set) var productivityError: String?
     /// Display names resolved once per distinct app when the timeline loads, so the
     /// view never hits LaunchServices per row (a NULL-session day can have hundreds
     /// of single-observation sessions).
@@ -89,7 +92,9 @@ final class TodayModel: ObservableObject {
         let generation = loadGeneration
         let day = dayOffset
         await loadTimeline(day: day, generation: generation)
-        await loadBriefing(day: day, generation: generation)
+        async let productivityLoad: Void = loadProductivity(day: day, generation: generation)
+        async let briefingLoad: Void = loadBriefing(day: day, generation: generation)
+        _ = await (productivityLoad, briefingLoad)
     }
 
     private func loadTimeline(day: Int, generation: Int) async {
@@ -112,6 +117,18 @@ final class TodayModel: ObservableObject {
     func displayName(_ app: String?) -> String {
         guard let app, !app.isEmpty else { return "Unknown" }
         return appNames[app] ?? AppDisplay.name(app)
+    }
+
+    private func loadProductivity(day: Int, generation: Int) async {
+        guard generation == loadGeneration else { return }
+        loadingProductivity = true
+        productivity = nil
+        productivityError = nil
+        defer { if generation == loadGeneration { loadingProductivity = false } }
+        let result = await service.dailyProductivity(dayOffset: day)
+        guard generation == loadGeneration else { return }
+        productivity = result
+        productivityError = result == nil ? "Could not load productivity facts." : nil
     }
 
     private func loadBriefing(day: Int, generation: Int) async {

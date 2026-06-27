@@ -124,6 +124,90 @@ final class TodayTimelineDecodingTests: XCTestCase {
         XCTAssertEqual(citation.ts, 1_700_000_000.0)
         XCTAssertEqual(citation.snippet, "edited rag.py")
     }
+
+    func testParseProductivityDecodesNestedFactsAndIgnoresSourceIds() {
+        let json = """
+        {
+          "route": "productivity.local_facts",
+          "egress": "none",
+          "local_date": "2026-06-27",
+          "source_scope": "capture",
+          "productivity": {
+            "facts": {
+              "active_minutes": 95.5,
+              "context_switch_count": 12,
+              "context_switches_per_active_hour": 7.5,
+              "top_category": {"category": "coding", "minutes": 70.0, "source_count": 4},
+              "top_hour": {"hour": "09:00", "minutes": 42.0, "source_count": 3},
+              "longest_focus_block": {"category": "coding", "seconds": 2700.0, "session_count": 2}
+            },
+            "category_sources": [
+              {"category": "coding", "source_ids": ["secret-source-id"]}
+            ],
+            "focus_blocks": [
+              {"category": "coding", "source_ids": ["secret-block-id"]}
+            ],
+            "coach_ready_packet": {
+              "facts": {"active_minutes": 95.5},
+              "source_ids": ["must-not-decode"]
+            }
+          }
+        }
+        """
+
+        let report = OpenBirdService.parseProductivity(json)
+
+        XCTAssertEqual(report?.routeLabel, "Local facts")
+        XCTAssertTrue(report?.hasActivityFacts == true)
+        XCTAssertEqual(report?.localDate, "2026-06-27")
+        XCTAssertEqual(report?.sourceScope, "capture")
+        XCTAssertEqual(report?.facts.activeMinutes, 95.5)
+        XCTAssertEqual(report?.facts.contextSwitchCount, 12)
+        XCTAssertEqual(report?.facts.contextSwitchesPerActiveHour, 7.5)
+        XCTAssertEqual(report?.facts.topCategory?.category, "coding")
+        XCTAssertEqual(report?.facts.topCategory?.minutes, 70.0)
+        XCTAssertEqual(report?.facts.topCategory?.sourceCount, 4)
+        XCTAssertEqual(report?.facts.topHour?.hour, "09:00")
+        XCTAssertEqual(report?.facts.topHour?.minutes, 42.0)
+        XCTAssertEqual(report?.facts.longestFocusBlock?.seconds, 2700.0)
+        XCTAssertEqual(report?.facts.longestFocusBlock?.sessionCount, 2)
+    }
+
+    func testParseProductivityDecodesEmptyDayNullFacts() {
+        let json = """
+        {
+          "route": "productivity.local_facts",
+          "egress": "none",
+          "local_date": "2026-06-27",
+          "source_scope": "capture",
+          "productivity": {
+            "facts": {
+              "active_minutes": 0.0,
+              "context_switch_count": 0,
+              "context_switches_per_active_hour": 0.0,
+              "top_category": null,
+              "top_hour": null,
+              "longest_focus_block": null
+            },
+            "coach_ready_packet": {"source_ids": []}
+          }
+        }
+        """
+
+        let report = OpenBirdService.parseProductivity(json)
+
+        XCTAssertNotNil(report)
+        XCTAssertEqual(report?.facts.activeMinutes, 0.0)
+        XCTAssertEqual(report?.facts.contextSwitchCount, 0)
+        XCTAssertNil(report?.facts.topCategory)
+        XCTAssertNil(report?.facts.topHour)
+        XCTAssertNil(report?.facts.longestFocusBlock)
+        XCTAssertFalse(report?.hasActivityFacts ?? true)
+    }
+
+    func testParseProductivityRejectsNonJson() {
+        XCTAssertNil(OpenBirdService.parseProductivity("nope"))
+    }
 }
 
 final class AppDisplayTests: XCTestCase {
@@ -271,6 +355,14 @@ final class TodayFormattingTests: XCTestCase {
         XCTAssertEqual(TodayView.durationLabel(90), "1m")
         XCTAssertEqual(TodayView.durationLabel(3661), "1h 1m")
         XCTAssertEqual(TodayView.durationLabel(0), "0s")
+    }
+
+    func testProductivityFormattingHelpers() {
+        XCTAssertEqual(TodayView.minutesLabel(90.0), "1h 30m")
+        XCTAssertEqual(TodayView.minutesLabel(5.5), "5m")
+        XCTAssertEqual(TodayView.rateLabel(7.0), "7")
+        XCTAssertEqual(TodayView.rateLabel(7.25), "7.2")
+        XCTAssertEqual(TodayView.categoryLabel("browser_research"), "Browser Research")
     }
 }
 
