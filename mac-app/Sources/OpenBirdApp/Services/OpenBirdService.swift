@@ -205,7 +205,7 @@ struct ChatResult: Codable, Equatable {
     var routeLabel: String? {
         switch reasoningRoute {
         case "local_deterministic":
-            return "Deterministic answer"
+            return "Local only"
         case "cloud_reasoning_active":
             return "Cloud reasoning active"
         case "local_model":

@@ -56,7 +56,7 @@ final class ChatResultRouteTests: XCTestCase {
             from: Data(#"{"answer":"ok","grounded":true,"citations":[],"reasoning_route":"local_deterministic"}"#.utf8)
         )
         XCTAssertEqual(deterministic.reasoningRoute, "local_deterministic")
-        XCTAssertEqual(deterministic.routeLabel, "Deterministic answer")
+        XCTAssertEqual(deterministic.routeLabel, "Local only")
 
         let localModel = try JSONDecoder().decode(
             ChatResult.self,
