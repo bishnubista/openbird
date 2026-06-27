@@ -616,15 +616,11 @@ class RAG:
                 raise TypeError(
                     "explicit day scope requires a store exposing time_range_text()"
                 )
+            deterministic = self.answer_deterministic_day_memory(query, window)
+            if deterministic is not None:
+                return deterministic
             if self._is_synthesis_query(query):
-                if self._can_answer_from_day_memory(window):
-                    day_result = self._answer_day_memory(query, window)
-                    if day_result is not None:
-                        return day_result
                 return self._answer_temporal(query, window, route="explicit_window")
-            fact_kind = self._day_fact_kind(query)
-            if fact_kind is not None and self._can_answer_from_day_memory(window):
-                return self._answer_day_memory_fact(query, window, fact_kind)
             return self._answer_scoped_specific(
                 query, window, route="explicit_window_specific"
             )
@@ -652,15 +648,11 @@ class RAG:
                     route = "intent_temporal"
                 else:
                     route = "intent_synthesis"
+            deterministic = self.answer_deterministic_day_memory(query, intent_window)
+            if deterministic is not None:
+                return deterministic
             if is_synthesis:
-                if self._can_answer_from_day_memory(intent_window):
-                    day_result = self._answer_day_memory(query, intent_window)
-                    if day_result is not None:
-                        return day_result
                 return self._answer_temporal(query, intent_window, route)
-            fact_kind = self._day_fact_kind(query)
-            if fact_kind is not None and self._can_answer_from_day_memory(intent_window):
-                return self._answer_day_memory_fact(query, intent_window, fact_kind)
             return self._answer_scoped_specific(query, intent_window, route)
 
         hits = self.store.search(query, k=k, semantic=semantic)
@@ -899,15 +891,54 @@ class RAG:
             force=False,
         )
 
+    def _day_memory_parts(self, window: tuple[float, float]) -> tuple[dict, dict, dict]:
+        saved = self._ensure_day_memory_for_window(window)
+        payload = saved.get("payload", {})
+        memory_context = self._day_memory_context(saved)
+        return saved, payload, memory_context
+
+    def answer_deterministic_day_memory(
+        self, query: str, window: tuple[float, float]
+    ) -> AnswerResult | None:
+        """Return a terminal local day-memory answer when the query is deterministic.
+
+        Specific/content questions deliberately return ``None`` so the normal
+        scoped occurrence-RAG path can retrieve rows and call the configured
+        provider. Broad day synthesis and scalar day facts are answered from the
+        persisted day-memory artifact and never fall through to provider
+        completion once they match this branch.
+        """
+        if not self._can_answer_from_day_memory(window):
+            return None
+
+        if self._is_synthesis_query(query):
+            saved, payload, memory_context = self._day_memory_parts(window)
+            result = self._answer_day_memory_from_parts(saved, payload, memory_context)
+            if result is not None:
+                return result
+            local_date = str(
+                payload.get("local_date") or saved.get("local_date") or "that day"
+            )
+            return self._day_memory_uncitable(local_date, memory_context)
+
+        fact_kind = self._day_fact_kind(query)
+        if fact_kind is not None:
+            return self._answer_day_memory_fact(query, window, fact_kind)
+
+        return None
+
     def _answer_day_memory(
         self, query: str, window: tuple[float, float]
     ) -> AnswerResult | None:
         del query  # deterministic day-memory answers depend only on the day window.
 
-        saved = self._ensure_day_memory_for_window(window)
-        payload = saved.get("payload", {})
+        saved, payload, memory_context = self._day_memory_parts(window)
+        return self._answer_day_memory_from_parts(saved, payload, memory_context)
+
+    def _answer_day_memory_from_parts(
+        self, saved: dict, payload: dict, memory_context: dict
+    ) -> AnswerResult | None:
         local_date = payload.get("local_date") or saved.get("local_date") or "that day"
-        memory_context = self._day_memory_context(saved)
         coverage = payload.get("coverage", {})
         observations = int(coverage.get("observations") or 0)
         if observations <= 0:
@@ -928,6 +959,21 @@ class RAG:
             citations=[],
             derived_citations=derived,
             grounding="derived",
+            memory_context=memory_context,
+            reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+        )
+
+    @staticmethod
+    def _day_memory_uncitable(local_date: str, memory_context: dict) -> AnswerResult:
+        return AnswerResult(
+            answer=(
+                f"I found recorded activity for {local_date}, but could not "
+                "assemble enough structured day-memory sources to summarize it "
+                "locally."
+            ),
+            citations=[],
+            derived_citations=[],
+            grounding="empty",
             memory_context=memory_context,
             reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
         )

@@ -8,6 +8,7 @@ Ollama is unavailable.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import shutil
 
@@ -982,6 +983,50 @@ def test_day_fact_unavailable_is_terminal_local(monkeypatch):
     assert "not have enough local day-memory facts" in result.answer
 
 
+def test_deterministic_day_memory_uncitable_activity_is_terminal_local():
+    start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+    end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+    saved = {
+        "payload": {
+            "local_date": "2026-06-12",
+            "source_scope": "capture",
+            "coverage": {
+                "observations": 1,
+                "sessions": 1,
+                "apps": 1,
+                "source_ids": [],
+            },
+            "metrics": {},
+            "workstreams": [],
+            "open_loops": [],
+            "window": {"start": start, "end": end},
+        },
+        "local_date": "2026-06-12",
+        "source_scope": "capture",
+        "extractor_version": "test",
+    }
+
+    class _UncitableStore:
+        def ensure_day_memory(self, **_kwargs):
+            return saved
+
+    llm = BoomLLM()
+    chatter = RAG(_UncitableStore(), llm)
+    chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+    result = chatter.answer_deterministic_day_memory(
+        "summarize my day", (start, end)
+    )
+
+    assert llm.calls == 0
+    assert result is not None
+    assert result.reasoning_route == "local_deterministic"
+    assert result.grounding == "empty"
+    assert "found recorded activity" in result.answer
+    assert "could not assemble enough structured day-memory sources" in result.answer
+    assert "recorded evidence" not in result.answer
+
+
 def test_empty_single_day_is_empty_not_ungrounded(mem_settings, fake_provider):
     import datetime as dt
 
@@ -1371,6 +1416,65 @@ def test_chat_cli_json_output(monkeypatch):
     assert "ungrounded" not in res.output
 
 
+def _cli_day_memory_saved(
+    *, observations: int = 1, source_ids: list[str] | None = None
+) -> dict:
+    source_ids = ["o1"] if source_ids is None else source_ids
+    start = dt.datetime(2026, 6, 27, 0, 0, 0).timestamp()
+    end = dt.datetime(2026, 6, 27, 23, 59, 59).timestamp()
+    return {
+        "payload": {
+            "local_date": "2026-06-27",
+            "source_scope": "capture",
+            "coverage": {
+                "observations": observations,
+                "sessions": 1 if observations else 0,
+                "apps": 1 if observations else 0,
+                "source_ids": source_ids,
+            },
+            "metrics": {
+                "active_seconds": 120 if observations else 0,
+                "time_by_category": {"coding": 120} if observations else {},
+                "context_switch_count": 0,
+            },
+            "workstreams": [
+                {
+                    "label": "openbird",
+                    "kind": "repo",
+                    "category": "coding",
+                    "session_count": 1,
+                    "source_ids": source_ids,
+                }
+            ]
+            if observations
+            else [],
+            "open_loops": [],
+            "window": {"start": start, "end": end},
+        },
+        "local_date": "2026-06-27",
+        "source_scope": "capture",
+        "source_count": len(source_ids),
+        "source_ids": source_ids,
+        "extractor_version": "test",
+    }
+
+
+class _CliMaintenanceStore:
+    provider = BoomLLM()
+
+    def __init__(self, saved: dict | None = None):
+        self.saved = saved or _cli_day_memory_saved()
+        self.closed = False
+        self.ensure_calls = 0
+
+    def ensure_day_memory(self, **_kwargs):
+        self.ensure_calls += 1
+        return self.saved
+
+    def close(self):
+        self.closed = True
+
+
 def test_chat_cli_reads_question_from_stdin(monkeypatch):
     """`chat --stdin` reads the question from stdin (keeps it out of argv)."""
     from typer.testing import CliRunner
@@ -1411,6 +1515,124 @@ def test_chat_cli_blank_question_exits_2():
     assert res.exit_code == 2
 
 
+def test_chat_cli_explicit_day_broad_synthesis_uses_maintenance_path(monkeypatch):
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    store = _CliMaintenanceStore()
+    start = dt.datetime(2026, 6, 27, 0, 0, 0).timestamp()
+    end = dt.datetime(2026, 6, 27, 23, 59, 59).timestamp()
+
+    monkeypatch.setattr(cli, "_day_window", lambda _day: (start, end))
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: store)
+    monkeypatch.setattr(
+        cli,
+        "_provider",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("deterministic day chat must not build _provider")
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_store",
+        lambda **_k: (_ for _ in ()).throw(
+            AssertionError("deterministic day chat must not open _store")
+        ),
+    )
+
+    res = CliRunner().invoke(
+        cli.app, ["chat", "what did I work on today?", "--day", "0", "--json"]
+    )
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert payload["grounding"] == "derived"
+    assert payload["derived_citations"]
+    assert payload["memory_context"]["route"] == "local_deterministic"
+    assert store.ensure_calls == 1
+    assert store.closed is True
+
+
+def test_chat_cli_explicit_day_metric_fact_uses_maintenance_path(monkeypatch):
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    store = _CliMaintenanceStore()
+    start = dt.datetime(2026, 6, 27, 0, 0, 0).timestamp()
+    end = dt.datetime(2026, 6, 27, 23, 59, 59).timestamp()
+
+    monkeypatch.setattr(cli, "_day_window", lambda _day: (start, end))
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: store)
+    monkeypatch.setattr(
+        cli,
+        "_provider",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("deterministic day fact must not build _provider")
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_store",
+        lambda **_k: (_ for _ in ()).throw(
+            AssertionError("deterministic day fact must not open _store")
+        ),
+    )
+
+    res = CliRunner().invoke(
+        cli.app, ["chat", "how much active time today?", "--day", "0", "--json"]
+    )
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert "active minute" in payload["answer"]
+    assert payload["derived_citations"]
+    assert store.ensure_calls == 1
+    assert store.closed is True
+
+
+def test_chat_cli_explicit_day_empty_memory_uses_maintenance_path(monkeypatch):
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    store = _CliMaintenanceStore(_cli_day_memory_saved(observations=0, source_ids=[]))
+    start = dt.datetime(2026, 6, 27, 0, 0, 0).timestamp()
+    end = dt.datetime(2026, 6, 27, 23, 59, 59).timestamp()
+
+    monkeypatch.setattr(cli, "_day_window", lambda _day: (start, end))
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: store)
+    monkeypatch.setattr(
+        cli,
+        "_provider",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("empty deterministic day chat must not build _provider")
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_store",
+        lambda **_k: (_ for _ in ()).throw(
+            AssertionError("empty deterministic day chat must not open _store")
+        ),
+    )
+
+    res = CliRunner().invoke(
+        cli.app, ["chat", "summarize my day", "--day", "0", "--json"]
+    )
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert payload["grounding"] == "empty"
+    assert "recorded evidence" in payload["answer"]
+    assert store.ensure_calls == 1
+    assert store.closed is True
+
+
 def test_chat_cli_day_passes_window_to_rag(monkeypatch):
     """`chat --day N` forwards that day's inclusive window to RAG.answer()."""
     from typer.testing import CliRunner
@@ -1424,15 +1646,21 @@ def test_chat_cli_day_passes_window_to_rag(monkeypatch):
         def __init__(self, *_a, **_k):
             pass
 
+        def answer_deterministic_day_memory(self, *_a, **_k):
+            return None
+
         def answer(self, q, **kw):
             captured["window"] = kw.get("window")
             return AnswerResult(answer="ok", citations=[], grounded=False)
 
     class _FakeStore:
+        provider = object()
+
         def close(self):
             pass
 
     monkeypatch.setattr(cli, "_provider", lambda: object())
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _FakeStore())
     monkeypatch.setattr(cli, "_store", lambda **_k: _FakeStore())
     monkeypatch.setattr("openbird.chat.rag.RAG", _FakeRAG)
 
@@ -1472,6 +1700,53 @@ def test_chat_cli_without_day_is_unscoped(monkeypatch):
     res = CliRunner().invoke(cli.app, ["chat", "q", "--json"])
     assert res.exit_code == 0
     assert captured["window"] is None
+
+
+def test_chat_cli_without_day_metric_still_enters_provider_path(monkeypatch):
+    """The provider-free fast path is explicit --day only; inferred day stays truthful."""
+    from typer.testing import CliRunner
+
+    from openbird import cli
+    from openbird.chat.rag import AnswerResult
+
+    calls = {"provider": 0, "store": 0}
+
+    class _FakeRAG:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def answer(self, q, **kw):
+            assert q == "how much active time today?"
+            assert kw.get("window") is None
+            return AnswerResult(
+                answer="ok",
+                citations=[],
+                grounded=False,
+                reasoning_route="local_deterministic",
+            )
+
+    class _FakeStore:
+        def close(self):
+            pass
+
+    def fake_provider():
+        calls["provider"] += 1
+        return object()
+
+    def fake_store(**_k):
+        calls["store"] += 1
+        return _FakeStore()
+
+    monkeypatch.setattr(cli, "_provider", fake_provider)
+    monkeypatch.setattr(cli, "_store", fake_store)
+    monkeypatch.setattr("openbird.chat.rag.RAG", _FakeRAG)
+
+    res = CliRunner().invoke(
+        cli.app, ["chat", "how much active time today?", "--json"]
+    )
+
+    assert res.exit_code == 0
+    assert calls == {"provider": 1, "store": 1}
 
 
 def test_chat_cli_negative_day_exits_2():

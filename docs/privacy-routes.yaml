@@ -129,7 +129,37 @@ routes:
       - sqlite.day_memories
     egress:
       default: none
-      note: chat constructs a provider before RAG, but this branch returns before provider.complete; no completion request is issued and no day-fact data egresses
+      note: explicit day-scoped branch returns before the cloud/embedding provider (_provider) is constructed; the only provider object instantiated on this branch is the non-embedding maintenance stub (_MaintenanceProvider), which raises on embed and complete. Query-inferred day branch may construct a provider before RAG, but returns before provider.complete. No completion or embedding request is issued on either branch.
+    truth_surface:
+      - cli.chat_json.reasoning_route
+      - app.ChatResult.routeLabel
+
+  - id: chat.day_memory
+    class: local
+    source: deterministic RAG day-memory synthesis branch over persisted day-memory distillation; not specific/content lookups
+    derives_from:
+      - capture.active_window
+    captured_fields:
+      - user_question_for_classification_only
+      - distilled_day_memory_metrics
+      - workstreams
+      - sessions
+      - open_loops
+      - domains
+      - repos
+      - derived_citation_source_ids
+      - memory_context_counts
+    forbidden_fields:
+      - captured_text
+      - raw_window_title
+      - raw_url
+      - raw_title
+      - source_ids_in_memory_context
+    storage:
+      - sqlite.day_memories
+    egress:
+      default: none
+      note: explicit day-scoped branch returns before the cloud/embedding provider (_provider) is constructed; the only provider object instantiated on this branch is the non-embedding maintenance stub (_MaintenanceProvider), which raises on embed and complete. Query-inferred day branch may construct a provider before RAG, but returns before provider.complete. No completion or embedding request is issued on either branch.
     truth_surface:
       - cli.chat_json.reasoning_route
       - app.ChatResult.routeLabel
