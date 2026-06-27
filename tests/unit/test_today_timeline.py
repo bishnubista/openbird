@@ -319,6 +319,30 @@ class _Completion:
     def time_range_text(self, start, end, *, source=None):
         return [(o, t) for (o, t) in self._rows if start <= o.ts <= end]
 
+    def ensure_day_memory(self, **kwargs):
+        from openbird.day_memory import EXTRACTOR_VERSION, build_day_memory
+
+        rows = self.time_range_text(
+            kwargs["start_ts"], kwargs["end_ts"], source=kwargs.get("source_scope")
+        )
+        built = build_day_memory(
+            rows,
+            start_ts=kwargs["start_ts"],
+            end_ts=kwargs["end_ts"],
+            day_offset=kwargs["day_offset"],
+            source_scope=kwargs.get("source_scope", "capture"),
+        )
+        return {
+            "id": "dm-test",
+            "local_date": built.payload["local_date"],
+            "source_scope": kwargs.get("source_scope", "capture"),
+            "extractor_version": EXTRACTOR_VERSION,
+            "generated_at": 123.0,
+            "source_count": len(built.source_ids),
+            "source_ids": built.source_ids,
+            "payload": built.payload,
+        }
+
     def close(self):
         pass
 
@@ -333,7 +357,7 @@ def _patch_briefing_store(monkeypatch, stub):
     monkeypatch.setattr(cli, "_provider", lambda: stub)
 
 
-def test_briefing_cli_json_includes_sources(monkeypatch, tmp_path):
+def test_briefing_cli_json_defaults_to_local_day_memory(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
     base = _day(2026, 6, 12, 9)
@@ -345,13 +369,25 @@ def test_briefing_cli_json_includes_sources(monkeypatch, tmp_path):
     # Day window is computed from "now"; widen the stub to the requested day by
     # using day 0 and seeding today.
     today = _day(*dt.datetime.now().timetuple()[:3], 9)
-    rows[0] = (_obs("o1", h="h1", ts=today, window="rag.py"), "edited rag.py")
+    rows[0] = (
+        _obs("o1", h="h1", ts=today, app="com.mitchellh.ghostty", window="rag.py"),
+        "edited rag.py",
+    )
     rows[1] = (_obs("o2", h="h2", ts=today + 60, window="notes"), "took notes")
+    monkeypatch.setattr(
+        cli,
+        "_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("default briefing must be no-model")),
+    )
 
     res = CliRunner().invoke(cli.app, ["briefing", "--json", "--day", "0"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
-    assert payload["text"] == "SUMMARY"
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert payload["memory_context"]["route"] == "local_deterministic"
+    assert payload["memory_context"]["coverage"]["observations"] == 2
+    assert "recorded observations" in payload["text"]
+    assert "coding" in payload["text"]
     assert payload["sources_total"] == 2
     ids = {s["observation_id"] for s in payload["sources"]}
     assert ids == {"o1", "o2"}
@@ -363,6 +399,24 @@ def test_briefing_cli_json_includes_sources(monkeypatch, tmp_path):
     assert by_id["o2"]["ts"] == today + 60
 
 
+def test_briefing_cli_model_flag_uses_configured_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    today = _day(*dt.datetime.now().timetuple()[:3], 9)
+    rows = [
+        (_obs("o1", h="h1", ts=today, window="rag.py"), "edited rag.py"),
+    ]
+    _patch_briefing_store(monkeypatch, _Completion(rows))
+
+    res = CliRunner().invoke(cli.app, ["briefing", "--model", "--json", "--day", "0"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["text"] == "SUMMARY"
+    assert payload["reasoning_route"] == "local_model"
+    assert "memory_context" not in payload
+    assert payload["sources_total"] == 1
+
+
 def test_briefing_cli_json_empty_day_has_no_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
@@ -371,6 +425,8 @@ def test_briefing_cli_json_empty_day_has_no_sources(monkeypatch, tmp_path):
     res = CliRunner().invoke(cli.app, ["briefing", "--json", "--day", "0"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert payload["memory_context"]["coverage"]["observations"] == 0
     assert payload["sources"] == []
     assert payload["sources_total"] == 0
-    assert "No activity" in payload["text"]
+    assert "no activity" in payload["text"].lower()

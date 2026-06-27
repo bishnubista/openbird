@@ -1,7 +1,7 @@
 import Foundation
 
-/// Backs the Today/day view: loads the capture timeline (fast SQL) and the prose
-/// briefing (one on-demand LLM call, cached per day so reopening Today is free).
+/// Backs the Today/day view: loads the capture timeline (fast SQL) and the
+/// briefing (local deterministic by default, cached per day so reopening Today is free).
 @MainActor
 final class TodayModel: ObservableObject {
     @Published private(set) var timeline: DayTimeline?
@@ -17,6 +17,9 @@ final class TodayModel: ObservableObject {
     /// day so reopening Today keeps the original time). Drives the "generated H:MM"
     /// label on the briefing card.
     @Published private(set) var briefingGeneratedAt: Date?
+    /// Truthful route label from the CLI's `reasoning_route`. Missing/unknown means
+    /// no label, never a local-only affirmation.
+    @Published private(set) var briefingRouteLabel: String?
     @Published private(set) var loadingTimeline = false
     @Published private(set) var loadingBriefing = false
     @Published private(set) var timelineError: String?
@@ -127,6 +130,7 @@ final class TodayModel: ObservableObject {
         briefingSources = []
         briefingSourcesTotal = 0
         briefingGeneratedAt = nil
+        briefingRouteLabel = nil
         if let result = await service.dailyBriefing(dayOffset: day) {
             // A superseded generation must NOT write the cache. With the reload-on-open and
             // refocus paths, two same-day loads can overlap; if an OLDER load finishes after
@@ -144,6 +148,7 @@ final class TodayModel: ObservableObject {
     /// Publish a fetched/cached briefing into the view-facing fields.
     private func apply(_ briefing: DayBriefing) {
         self.briefing = briefing.text
+        briefingRouteLabel = briefing.routeLabel
         briefingSources = briefing.sources
         briefingSourcesTotal = briefing.sourcesTotal
     }

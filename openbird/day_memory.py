@@ -156,6 +156,76 @@ def source_fingerprint_for_rows(rows: list[tuple[Observation, str]]) -> dict:
     }
 
 
+def render_day_memory_prose(payload: dict) -> str:
+    """Render factual, no-model prose from a built day-memory ``payload``.
+
+    Pure function shared by the chat/Ask route (:meth:`RAG._render_day_memory_answer`)
+    and the CLI ``briefing`` default path, so both surfaces produce the SAME
+    deterministic summary and cannot drift. Reports only descriptive facts already
+    in the payload: coverage, recorded active minutes, top detected workstreams,
+    recorded time-by-category, and open-loop cues — never a model inference.
+    """
+    coverage = payload.get("coverage", {})
+    metrics = payload.get("metrics", {})
+    local_date = payload.get("local_date", "the selected day")
+    observations = int(coverage.get("observations") or 0)
+    if observations <= 0:
+        return f"For {local_date}, no activity was recorded in the selected window."
+    active_minutes = round(float(metrics.get("active_seconds") or 0.0) / 60)
+    pieces = [
+        f"For {local_date}, I found {observations} recorded observations "
+        f"across {coverage.get('sessions', 0)} session(s)"
+    ]
+    if active_minutes:
+        pieces[-1] += f", with about {active_minutes} recorded active minute(s)."
+    else:
+        pieces[-1] += "."
+
+    streams = payload.get("workstreams", [])[:3]
+    if streams:
+        labels = ", ".join(str(s.get("label", "unknown")) for s in streams)
+        pieces.append(f"Main detected workstreams: {labels}.")
+    categories = metrics.get("time_by_category") or {}
+    if categories:
+        top = sorted(categories.items(), key=lambda kv: (-float(kv[1]), kv[0]))[:3]
+        labels = ", ".join(f"{name} ({round(float(seconds) / 60)}m)" for name, seconds in top)
+        pieces.append(f"Recorded time by category: {labels}.")
+    loops = payload.get("open_loops", [])[:3]
+    if loops:
+        labels = ", ".join(str(item.get("title") or item.get("cue")) for item in loops)
+        pieces.append(f"Detected follow-up/open-loop cues: {labels}.")
+    return " ".join(pieces)
+
+
+def day_memory_context(saved: dict) -> dict:
+    """Build the route/provenance ``memory_context`` for a persisted day memory.
+
+    Pure function shared by the chat/Ask route (:meth:`RAG._day_memory_context`)
+    and the CLI ``briefing`` default path so the route contract stays identical
+    across surfaces. Privacy: emits metadata/counts only; ``route`` is fixed
+    ``"local_deterministic"`` (this artifact is built with no model), and coverage
+    is the observation/session/app COUNTS. It deliberately omits ``source_ids`` so
+    no per-occurrence identifiers leak into the route context (the navigable source
+    trail is a separate, redaction-handled contract).
+    """
+    payload = saved.get("payload", {})
+    coverage = payload.get("coverage", {})
+    return {
+        "type": "day_memory",
+        "route": "local_deterministic",
+        "local_date": saved.get("local_date") or payload.get("local_date"),
+        "source_scope": saved.get("source_scope") or payload.get("source_scope"),
+        "as_of": payload.get("as_of"),
+        "source_fingerprint": payload.get("source_fingerprint"),
+        "coverage": {
+            "observations": coverage.get("observations", 0),
+            "sessions": coverage.get("sessions", 0),
+            "apps": coverage.get("apps", 0),
+        },
+        "extractor_version": saved.get("extractor_version") or payload.get("extractor_version"),
+    }
+
+
 def classify_observation(obs: Observation, text: str = "") -> tuple[str, float]:
     """Classify one observation into a descriptive activity category."""
     hay = " ".join(

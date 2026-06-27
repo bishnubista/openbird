@@ -80,6 +80,12 @@ struct TodayView: View {
                     .tracking(0.6)
                     .foregroundStyle(OB.accent)
                 Spacer()
+                if let route = model.briefingRouteLabel {
+                    Text(route)
+                        .font(.system(size: 12))
+                        .foregroundStyle(OB.textTertiary(scheme))
+                        .lineLimit(1)
+                }
                 if let at = model.briefingGeneratedAt {
                     Text("generated \(at.formatted(date: .omitted, time: .shortened))")
                         .font(.system(size: 12))
