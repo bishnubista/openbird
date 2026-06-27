@@ -155,20 +155,32 @@ def answer_deep_brain(
             "exclusions": packet.get("exclusions", {}),
         }
 
+    selected_total = len(packet.get("selected_sources") or [])
+    if selected_total == 0:
+        return {
+            "ok": True,
+            "question": question,
+            "answer": "I do not have enough Deep Brain packet evidence to answer that.",
+            "confidence": "insufficient_evidence",
+            "grounded": False,
+            "reasoning_route": "local_deterministic",
+            "egress": "none",
+            "model": None,
+            "packet_route": packet.get("route"),
+            "citations": [],
+            "sources_total": packet.get("sources_total", 0),
+            "exclusions": packet.get("exclusions", {}),
+        }
+
     messages = build_deep_brain_messages(question, packet)
     raw = provider.complete(messages, json_schema=DEEP_BRAIN_RESPONSE_SCHEMA)
     parsed = raw if isinstance(raw, dict) else {}
     answer = str(parsed.get("answer") or "").strip()
     confidence = str(parsed.get("confidence") or "").strip() or "unknown"
     citations = _valid_citations(packet, parsed.get("citation_ids"))
-    selected_total = len(packet.get("selected_sources") or [])
-    grounded = bool(citations) or selected_total == 0
+    grounded = bool(citations)
     if not answer or not grounded:
-        answer = (
-            _UNGROUNDED_DEEP_BRAIN_ANSWER
-            if selected_total
-            else "I do not have enough Deep Brain packet evidence to answer that."
-        )
+        answer = _UNGROUNDED_DEEP_BRAIN_ANSWER
         confidence = "insufficient_evidence"
         citations = []
 

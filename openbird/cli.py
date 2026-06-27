@@ -129,6 +129,34 @@ def _provider():
     return provider
 
 
+def _completion_provider():
+    """Construct a provider for completion-only routes, gating only the LLM role."""
+    from openbird.llm.provider import (
+        CloudOptInRequired,
+        classify_models,
+        create_llm_provider,
+    )
+
+    settings = get_settings()
+    try:
+        provider = create_llm_provider(settings, cloud_roles=("llm",))
+    except CloudOptInRequired as exc:
+        names = ", ".join(f"{role}={model}" for role, model in exc.remote_models.items())
+        _err_console.print(
+            "[red]Cloud opt-in required[/] for completion model(s): "
+            f"[bold]{names}[/]."
+        )
+        raise typer.Exit(code=2) from exc
+
+    remote = classify_models(settings)
+    if remote.get("llm"):
+        _err_console.print(
+            "[bold yellow]⚠ CLOUD ACTIVE — remote llm="
+            f"{remote['llm']} (Deep Brain packet leaves this machine)[/]"
+        )
+    return provider
+
+
 def _print_cohort_mismatch_hint(exc) -> None:
     """Render a content-free recovery hint for an embedding-cohort mismatch.
 
@@ -679,7 +707,7 @@ def deep_brain_ask(
                 _err_console.print(f"- {reason}")
         raise typer.Exit(code=2)
 
-    provider = _provider()
+    provider = _completion_provider()
     result = answer_deep_brain(question, packet, provider, settings=settings)
     if as_json:
         _console.print_json(json.dumps(result))

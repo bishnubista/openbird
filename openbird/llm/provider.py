@@ -164,6 +164,7 @@ class LiteLLMProvider:
         *,
         normalized: bool = False,
         allow_cloud: bool | None = None,
+        cloud_roles: tuple[str, ...] | None = None,
     ) -> None:
         """Create a provider.
 
@@ -173,6 +174,11 @@ class LiteLLMProvider:
                 Recorded in :meth:`cohort_key` so cohorts stay consistent.
             allow_cloud: Opt-in override. When ``None`` (default), taken from
                 ``settings.allow_cloud`` / ``OPENBIRD_ALLOW_CLOUD``.
+            cloud_roles: Optional subset of model roles this provider will exercise.
+                ``None`` preserves the default fail-closed behavior: every remote
+                configured role is gated. A completion-only path can pass ``("llm",)``
+                so an unused remote embed/rerank configuration does not block a
+                pure completion call.
 
         Raises:
             CloudOptInRequired: if any resolved model is *remote* (a cloud API,
@@ -185,6 +191,12 @@ class LiteLLMProvider:
         cloud_ok = self.settings.allow_cloud if allow_cloud is None else allow_cloud
         if not cloud_ok:
             remote = classify_models(self.settings)
+            if cloud_roles is not None:
+                allowed_roles = set(cloud_roles)
+                remote = {
+                    role: model for role, model in remote.items()
+                    if role in allowed_roles
+                }
             if remote:
                 raise CloudOptInRequired(remote)
         self.embed_model = self.settings.embed_model
@@ -437,6 +449,7 @@ def create_llm_provider(
     backend: str | None = None,
     normalized: bool = False,
     allow_cloud: bool | None = None,
+    cloud_roles: tuple[str, ...] | None = None,
 ) -> LLMProviderProtocol:
     """Build the configured model provider.
 
@@ -457,7 +470,12 @@ def create_llm_provider(
     resolved_settings = settings or get_settings()
     selected = (backend or resolved_settings.llm_backend).strip().lower()
     if selected == "litellm":
-        return LLMProvider(resolved_settings, normalized=normalized, allow_cloud=allow_cloud)
+        return LLMProvider(
+            resolved_settings,
+            normalized=normalized,
+            allow_cloud=allow_cloud,
+            cloud_roles=cloud_roles,
+        )
     if selected == "mlx":
         raise NotImplementedError(
             "The MLX backend is not wired into OpenBird runtime yet. "

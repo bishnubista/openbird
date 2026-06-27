@@ -288,6 +288,31 @@ def test_deep_brain_ask_refuses_remote_without_cloud_optin(tmp_path):
     assert provider.messages is None
 
 
+def test_deep_brain_ask_empty_packet_never_calls_model(tmp_path):
+    settings = Settings(data_dir=tmp_path, deep_brain_enabled=True)
+    packet = build_deep_brain_preview(
+        [],
+        start_ts=_day(2026, 6, 12),
+        end_ts=_day(2026, 6, 12, 1),
+        day_offset=0,
+        source_scope="capture",
+        settings=settings,
+    )
+    provider = _Provider(
+        {"answer": "Unsupported empty-packet claim.", "citation_ids": [], "confidence": "high"}
+    )
+
+    result = answer_deep_brain("q", packet, provider, settings=settings)
+
+    assert result["ok"] is True
+    assert result["answer"] == "I do not have enough Deep Brain packet evidence to answer that."
+    assert result["confidence"] == "insufficient_evidence"
+    assert result["grounded"] is False
+    assert result["egress"] == "none"
+    assert result["citations"] == []
+    assert provider.messages is None
+
+
 def test_deep_brain_ask_remote_route_truth_with_both_gates(tmp_path):
     settings = Settings(
         data_dir=tmp_path,
@@ -428,14 +453,17 @@ def test_deep_brain_ask_cli_refuses_before_provider_without_feature_gate(monkeyp
     monkeypatch.setattr(cli, "_store_maintenance", lambda: _PreviewStore(rows))
     monkeypatch.setattr(
         cli,
-        "_provider",
+        "_completion_provider",
         lambda: (_ for _ in ()).throw(AssertionError("refusal must not use provider")),
     )
 
-    res = CliRunner().invoke(
-        cli.app,
-        ["deep-brain", "ask", "what did I do?", "--day", "0", "--json"],
-    )
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "ask", "what did I do?", "--day", "0", "--json"],
+        )
+    finally:
+        reset_settings_cache()
 
     assert res.exit_code == 2
     payload = json.loads(res.stdout)
@@ -453,13 +481,16 @@ def test_deep_brain_ask_cli_uses_provider_when_enabled(monkeypatch, tmp_path):
     provider = _Provider(
         {"answer": "You worked in notes.", "citation_ids": ["o1"], "confidence": "high"}
     )
-    monkeypatch.setattr(cli, "_provider", lambda: provider)
+    monkeypatch.setattr(cli, "_completion_provider", lambda: provider)
 
-    res = CliRunner().invoke(
-        cli.app,
-        ["deep-brain", "ask", "--day", "0", "--json", "--stdin"],
-        input="what did I do?",
-    )
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "ask", "--day", "0", "--json", "--stdin"],
+            input="what did I do?",
+        )
+    finally:
+        reset_settings_cache()
 
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
