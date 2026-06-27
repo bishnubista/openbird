@@ -48,8 +48,13 @@ app = typer.Typer(
 
 routine_app = typer.Typer(help="Manage and run scheduled routines.", no_args_is_help=True)
 eval_app = typer.Typer(help="Run local eval harnesses.", no_args_is_help=True)
+day_memory_app = typer.Typer(
+    help="Build and inspect deterministic daily memory artifacts.",
+    no_args_is_help=True,
+)
 app.add_typer(routine_app, name="routine")
 app.add_typer(eval_app, name="eval")
+app.add_typer(day_memory_app, name="day-memory")
 register_capture_command(app)
 
 from openbird.prompts.cli import prompts_app  # noqa: E402 - after app is defined
@@ -453,6 +458,115 @@ def _briefing_signals(day: int, start: float, end: float, *, as_json: bool) -> N
         )
         return
     _console.print(text)
+
+
+# --------------------------------------------------------------------------- #
+# deterministic day memory                                                    #
+# --------------------------------------------------------------------------- #
+
+
+@day_memory_app.command("build")
+def day_memory_build(
+    day: int = typer.Option(0, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    source_scope: str = typer.Option(
+        "capture", "--source-scope", help="Observation source to distill."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Build and persist a deterministic daily memory artifact.
+
+    This path is local-only and no-model: it computes descriptive metrics and
+    categories from captured observations, then stores them with source
+    dependencies so purge deletes the derived artifact too. No narrative prose is
+    persisted.
+    """
+    if day < 0:
+        _err_console.print("[red]--day must be >= 0.[/]")
+        raise typer.Exit(code=2)
+
+    from openbird.day_memory import EXTRACTOR_VERSION, build_day_memory, local_date_for_window
+
+    start, end = _day_window(day)
+    local_date = local_date_for_window(start)
+    store = _store_maintenance()
+    try:
+        rows = store.time_range_text(start, end, source=source_scope)
+        built = build_day_memory(
+            rows,
+            start_ts=start,
+            end_ts=end,
+            day_offset=day,
+            source_scope=source_scope,
+            gap_seconds=get_settings().session_gap_seconds,
+        )
+        saved = store.save_day_memory(
+            local_date=local_date,
+            source_scope=source_scope,
+            extractor_version=EXTRACTOR_VERSION,
+            payload=built.payload,
+            source_ids=built.source_ids,
+        )
+    finally:
+        store.close()
+
+    payload = {"built": True, "day_memory": saved}
+    if as_json:
+        _console.print_json(data=payload)
+        return
+    coverage = saved["payload"]["coverage"]
+    _console.print(
+        f"[green]Built[/] day memory for {local_date}: "
+        f"{coverage['observations']} observation(s), "
+        f"{coverage['sessions']} session(s)."
+    )
+
+
+@day_memory_app.command("show")
+def day_memory_show(
+    day: int = typer.Option(0, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    source_scope: str = typer.Option(
+        "capture", "--source-scope", help="Observation source to inspect."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show a previously built deterministic daily memory artifact."""
+    if day < 0:
+        _err_console.print("[red]--day must be >= 0.[/]")
+        raise typer.Exit(code=2)
+
+    from openbird.day_memory import local_date_for_window
+
+    start, _end = _day_window(day)
+    local_date = local_date_for_window(start)
+    store = _store_maintenance()
+    try:
+        saved = store.get_day_memory(local_date=local_date, source_scope=source_scope)
+    finally:
+        store.close()
+
+    if saved is None:
+        payload = {
+            "built": False,
+            "local_date": local_date,
+            "source_scope": source_scope,
+            "message": "day memory has not been built",
+        }
+        if as_json:
+            _console.print_json(data=payload)
+        else:
+            _console.print(
+                f"[yellow]No day memory built[/] for {local_date} ({source_scope}). "
+                "Run `openbird day-memory build --day N` first."
+            )
+        raise typer.Exit(code=1)
+
+    payload = {"built": True, "day_memory": saved}
+    if as_json:
+        _console.print_json(data=payload)
+        return
+    metrics = saved["payload"]["metrics"]
+    _console.print(f"[bold]{local_date}[/] · {saved['source_count']} source(s)")
+    _console.print_json(data=metrics)
 
 
 # --------------------------------------------------------------------------- #

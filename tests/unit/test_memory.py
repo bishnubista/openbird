@@ -201,6 +201,70 @@ def test_cascade_delete_since_orphans_only(store):
     assert remaining[0].ts == 100.0
 
 
+def _save_test_day_memory(store, source_ids):
+    return store.save_day_memory(
+        local_date="2026-06-12",
+        source_scope="capture",
+        extractor_version="test",
+        payload={
+            "schema": 1,
+            "narrative_status": "not_persisted",
+            "coverage": {"source_ids": source_ids},
+        },
+        source_ids=source_ids,
+        generated_at=123.0,
+    )
+
+
+def test_day_memory_deleted_when_source_observation_deleted_since(store):
+    keep = store.add_observation("keep", source="capture", ts=100.0)
+    doomed = store.add_observation("doomed", source="capture", ts=300.0)
+    saved = _save_test_day_memory(store, [keep.id, doomed.id])
+    assert saved["source_count"] == 2
+
+    assert store.delete(since_ts=250.0) == 1
+
+    assert store.get_day_memory(local_date="2026-06-12", source_scope="capture") is None
+    assert store.conn.execute("SELECT COUNT(*) c FROM day_memory_sources").fetchone()["c"] == 0
+
+
+def test_day_memory_deleted_when_source_observation_deleted_before(store):
+    old = store.add_observation("old", source="capture", ts=100.0)
+    new = store.add_observation("new", source="capture", ts=300.0)
+    _save_test_day_memory(store, [old.id, new.id])
+
+    assert store.delete(before_ts=200.0) == 1
+
+    assert store.get_day_memory(local_date="2026-06-12", source_scope="capture") is None
+
+
+def test_day_memory_deleted_by_prune(tmp_path, fake_provider):
+    db = str(tmp_path / "daymem-prune.db")
+    settings = Settings(data_dir=tmp_path, embed_dim=fake_provider.embed_dim)
+    store = MemoryStore(db_path=db, settings=settings, provider=fake_provider)
+    try:
+        old = store.add_observation("old", source="capture", ts=100.0)
+        store.add_observation("new", source="capture", ts=300.0)
+        _save_test_day_memory(store, [old.id])
+
+        assert store.prune(older_than_ts=200.0) == 1
+
+        assert store.get_day_memory(local_date="2026-06-12", source_scope="capture") is None
+    finally:
+        store.close()
+
+
+def test_day_memory_deleted_by_full_wipe(store):
+    obs = store.add_observation("one", source="capture", ts=1.0)
+    _save_test_day_memory(store, [obs.id])
+
+    assert store.delete(all=True) == 1
+
+    assert store.get_day_memory(local_date="2026-06-12", source_scope="capture") is None
+    assert store.conn.execute("SELECT COUNT(*) c FROM day_memories").fetchone()["c"] == 0
+    assert store.conn.execute("SELECT COUNT(*) c FROM day_memory_sources").fetchone()["c"] == 0
+
+
 def test_time_range_correctness(store):
     store.add_observation("a", source="capture", ts=10.0)
     store.add_observation("b", source="capture", ts=20.0)

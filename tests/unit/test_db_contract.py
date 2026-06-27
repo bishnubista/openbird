@@ -223,6 +223,28 @@ def test_fresh_store_ships_session_index(tmp_path):
         s.close()
 
 
+def test_fresh_store_ships_day_memory_tables_and_before_delete_trigger(tmp_path):
+    db = str(tmp_path / "daymem-schema.db")
+    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
+                    provider=FakeProvider(embed_dim=64))
+    try:
+        tables = {
+            r["name"]
+            for r in s.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert {"day_memories", "day_memory_sources"} <= tables
+        trigger = s.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='trg_day_memory_observation_delete'"
+        ).fetchone()
+        assert trigger is not None
+        assert "BEFORE DELETE ON observations" in trigger["sql"]
+    finally:
+        s.close()
+
+
 def test_legacy_unversioned_db_with_real_v1_shape_is_adopted_as_v1(tmp_path):
     """A DB with the REAL v1 shape but user_version=0 is stamped to 1, not migrated.
 
@@ -485,6 +507,34 @@ def test_migration_ladder_upgrades_old_db(tmp_path, monkeypatch):
     cols = [r[1] for r in conn.execute("PRAGMA table_info(observations)").fetchall()]
     assert "note" in cols
     conn.close()
+
+
+def test_real_v1_db_migrates_to_v2_day_memory_shape(tmp_path):
+    """A released v1-stamped DB gets the v2 day-memory tables/triggers."""
+    conn = _make_v1_shaped_db(tmp_path / "real_v1_to_v2.db")
+    try:
+        # _make_v1_shaped_db applies the current idempotent schema.sql. Strip the
+        # additive v2 objects so this models a real DB created by the released v1
+        # build, then stamp it as v1 and run the real ladder.
+        conn.execute("DROP TRIGGER IF EXISTS trg_day_memory_observation_delete")
+        conn.execute("DROP TABLE IF EXISTS day_memory_sources")
+        conn.execute("DROP TABLE IF EXISTS day_memories")
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='day_memories'"
+        ).fetchone()
+        trigger = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='trg_day_memory_observation_delete'"
+        ).fetchone()
+        assert trigger is not None
+        assert "BEFORE DELETE ON observations" in trigger[0]
+    finally:
+        conn.close()
 
 
 def test_newer_than_supported_db_is_refused(tmp_path):
