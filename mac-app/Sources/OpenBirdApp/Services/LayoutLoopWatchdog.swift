@@ -65,6 +65,9 @@ final class LayoutLoopWatchdog: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !started else { return }
         started = true
+        // Clear dedupe state so a prior run's reported stall can't suppress this run's
+        // first real stall. Safe to touch here: the poller isn't running yet (CodeRabbit).
+        reportedStall = false
         // Seed the heartbeat at start so the first poll can't see a stale stamp.
         lastTick.withLock { $0 = ProcessInfo.processInfo.systemUptime }
 

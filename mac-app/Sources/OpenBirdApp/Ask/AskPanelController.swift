@@ -224,9 +224,17 @@ final class AskPanelController: NSObject, ObservableObject {
     /// Applies ONLY to the compact panel; the expanded window sizes itself.
     private func handleCompactSize(_ size: CGSize) {
         guard let panel = compactPanel, panel.isVisible, !isApplyingCompactSize else { return }
-        // Bound the request by what the screen can actually display so the resize loop
-        // always reaches a fixed point (#169).
-        let maxHeight = (panel.screen ?? NSScreen.main)?.visibleFrame.height ?? size.height
+        // Bound the request by the space actually available BELOW the panel's fixed top
+        // anchor (positionCompact pins the top edge at ~80% screen height and grows the
+        // card downward), not the full screen — so the reachable fixed point is a fully
+        // visible panel, not one clipped off the bottom (#169, CodeRabbit).
+        let maxHeight: CGFloat
+        if let visibleFrame = (panel.screen ?? NSScreen.main)?.visibleFrame {
+            let topY = anchorTopY ?? (visibleFrame.minY + visibleFrame.height * 0.80)
+            maxHeight = max(0, topY - visibleFrame.minY)
+        } else {
+            maxHeight = size.height
+        }
         guard let target = Self.compactResizeTarget(
             reportedHeight: size.height,
             currentHeight: panel.frame.height,

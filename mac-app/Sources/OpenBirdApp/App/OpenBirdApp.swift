@@ -48,10 +48,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #else
         let isDebug = false
         #endif
+        let environment = ProcessInfo.processInfo.environment
         guard LayoutLoopWatchdog.isEnabled(
-            environment: ProcessInfo.processInfo.environment, isDebug: isDebug
+            environment: environment, isDebug: isDebug
         ) else { return }
-        let watchdog = LayoutLoopWatchdog()
+        // Build from the same environment so OPENBIRD_LAYOUT_WATCHDOG_SECONDS is honored.
+        let watchdog = LayoutLoopWatchdog(environment: environment)
         layoutWatchdog = watchdog
         watchdog.start()
     }
