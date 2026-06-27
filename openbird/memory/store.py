@@ -911,7 +911,7 @@ class MemoryStore:
                 type(self.conn).__module__,
                 fromlist=["OperationalError", "IntegrityError"],
             )
-        except Exception:
+        except ImportError:
             return tuple(errors)
         for name in ("OperationalError", "IntegrityError"):
             exc = getattr(module, name, None)
