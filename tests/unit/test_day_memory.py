@@ -217,6 +217,7 @@ def test_build_day_memory_sessions_include_grounded_bounded_cues():
     )
 
     cues = built.payload["sessions"][0]["cues"]
+    assert built.payload["sessions"][0]["session_id"] == "s1"
     assert cues == rebuilt.payload["sessions"][0]["cues"]
     assert {
         "value": "github.com",
@@ -364,11 +365,29 @@ def test_productivity_focus_blocks_share_canonical_category_metrics():
     assert facts["top_category"]["category"] == "coding"
     assert facts["top_category"]["seconds"] == metrics["time_by_category"]["coding"]
     assert facts["top_category"]["source_ids"] == ["c1", "c2", "c3"]
+    assert [ref["session_id"] for ref in facts["top_category"]["session_refs"]] == [
+        "s1",
+        "s3",
+    ]
+    assert facts["longest_focus_block"]["session_refs"] == [
+        {
+            "session_id": "s1",
+            "app": "com.mitchellh.ghostty",
+            "category": "coding",
+            "start": start,
+            "end": start + 60,
+            "source_count": 2,
+        }
+    ]
 
     by_category = {item["category"]: item for item in productivity["category_sources"]}
     for category, seconds in metrics["time_by_category"].items():
         assert by_category[category]["active_seconds"] == seconds
     assert by_category["coding"]["source_ids"] == ["c1", "c2", "c3"]
+    assert [ref["session_id"] for ref in by_category["coding"]["session_refs"]] == [
+        "s1",
+        "s3",
+    ]
 
 
 def test_productivity_report_keeps_raw_text_out_of_output():
@@ -434,7 +453,20 @@ def test_productivity_coach_packet_uses_synthetic_ids_and_local_citation_map():
     assert "block:1" in packet["citation_map"]
     assert "hour:09:00" in packet["citation_map"]
     assert packet["citation_map"]["category:coding"]["source_ids"] == ["SRC_SECRET"]
+    assert packet["citation_map"]["category:coding"]["session_refs"] == [
+        {
+            "session_id": "s1",
+            "app": "com.mitchellh.ghostty",
+            "category": "coding",
+            "start": start,
+            "end": start,
+            "source_count": 1,
+        }
+    ]
     assert "source_ids" not in serialized
+    assert "session_refs" not in serialized
+    assert "session_id" not in serialized
+    assert "s1" not in serialized
     assert "SRC_SECRET" not in serialized
     assert "ULTRA_SECRET_WINDOW" not in serialized
     assert "ULTRA_SECRET_URL" not in serialized
@@ -633,7 +665,19 @@ def test_productivity_coach_local_model_needs_feature_gate_only():
     assert result["egress"] == "none"
     assert result["citations"][0]["citation_id"] == "category:coding"
     assert result["citations"][0]["source_ids"] == ["c1"]
+    assert result["citations"][0]["session_refs"] == [
+        {
+            "session_id": "s1",
+            "app": "com.mitchellh.ghostty",
+            "category": "coding",
+            "start": start,
+            "end": start,
+            "source_count": 1,
+        }
+    ]
     assert "source_ids" not in provider.messages[1]["content"]
+    assert "session_refs" not in provider.messages[1]["content"]
+    assert "session_id" not in provider.messages[1]["content"]
 
 
 def test_productivity_coach_refuses_remote_without_cloud_optin():
@@ -814,13 +858,21 @@ def test_productivity_top_hour_sources_use_observation_hour_bucket():
         "09:00": 60,
         "10:00": 600,
     }
-    assert top_hour == {
-        "hour": "10:00",
-        "seconds": 600,
-        "minutes": 10.0,
-        "source_ids": ["o10a", "o10b"],
-        "source_count": 2,
-    }
+    assert top_hour["hour"] == "10:00"
+    assert top_hour["seconds"] == 600
+    assert top_hour["minutes"] == 10.0
+    assert top_hour["source_ids"] == ["o10a", "o10b"]
+    assert top_hour["source_count"] == 2
+    assert top_hour["session_refs"] == [
+        {
+            "session_id": "s1",
+            "app": "com.mitchellh.ghostty",
+            "category": "coding",
+            "start": start,
+            "end": start + 360,
+            "source_count": 3,
+        }
+    ]
 
 
 def test_productivity_empty_day_is_zero_safe():
@@ -886,11 +938,26 @@ def test_build_day_memory_uses_stable_tie_breakers():
     )
 
     assert built.source_ids == ["a", "b"]
+    assert built.payload["sessions"][0]["session_id"] == "s"
     assert built.payload["sessions"][0]["source_ids"] == ["a", "b"]
     assert [token["token"] for token in built.payload["entities"]["title_tokens"][:2]] == [
         "alpha",
         "beta",
     ]
+
+
+def test_build_day_memory_legacy_null_session_id_stays_none():
+    start = _ts(2026, 6, 12, 9)
+    built = build_day_memory(
+        [(_obs("legacy", ts=start, app="com.apple.finder"), "legacy row")],
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+        gap_seconds=300,
+    )
+
+    assert built.payload["sessions"][0]["session_id"] is None
+    assert built.payload["sessions"][0]["source_ids"] == ["legacy"]
 
 
 def test_build_day_memory_extracts_open_loop_cues_without_narrative():
@@ -992,6 +1059,7 @@ def test_ensure_day_memory_rebuilds_v2_payload_for_productivity(
         assert saved["extractor_version"] == EXTRACTOR_VERSION
         assert saved["payload"]["focus_blocks"]
         assert saved["payload"]["sessions"][0]["cues"]
+        assert saved["payload"]["sessions"][0]["session_id"] == "s1"
     finally:
         store.close()
 
