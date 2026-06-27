@@ -274,6 +274,92 @@ struct DayBriefing: Codable, Equatable {
     }
 }
 
+/// Local-only productivity facts decoded from `openbird productivity --json`.
+/// This intentionally models only descriptive facts for the Today surface; the
+/// source-id-bearing citation fields and coach packet are left undecoded.
+struct DayProductivity: Codable, Equatable {
+    let route: String
+    let egress: String
+    let localDate: String
+    let sourceScope: String
+    let productivity: ProductivityBody
+
+    enum CodingKeys: String, CodingKey {
+        case route, egress, productivity
+        case localDate = "local_date"
+        case sourceScope = "source_scope"
+    }
+
+    var facts: ProductivityFacts { productivity.facts }
+
+    var routeLabel: String? {
+        route == "productivity.local_facts" && egress == "none" ? "Local facts" : nil
+    }
+
+    var hasActivityFacts: Bool {
+        facts.activeMinutes > 0
+            || facts.contextSwitchCount > 0
+            || facts.topCategory != nil
+            || facts.topHour != nil
+            || facts.longestFocusBlock != nil
+    }
+}
+
+struct ProductivityBody: Codable, Equatable {
+    let facts: ProductivityFacts
+}
+
+struct ProductivityFacts: Codable, Equatable {
+    let activeMinutes: Double
+    let contextSwitchCount: Int
+    let contextSwitchesPerActiveHour: Double
+    let topCategory: ProductivityTopCategory?
+    let topHour: ProductivityTopHour?
+    let longestFocusBlock: ProductivityFocusBlock?
+
+    enum CodingKeys: String, CodingKey {
+        case activeMinutes = "active_minutes"
+        case contextSwitchCount = "context_switch_count"
+        case contextSwitchesPerActiveHour = "context_switches_per_active_hour"
+        case topCategory = "top_category"
+        case topHour = "top_hour"
+        case longestFocusBlock = "longest_focus_block"
+    }
+}
+
+struct ProductivityTopCategory: Codable, Equatable {
+    let category: String
+    let minutes: Double
+    let sourceCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case category, minutes
+        case sourceCount = "source_count"
+    }
+}
+
+struct ProductivityTopHour: Codable, Equatable {
+    let hour: String
+    let minutes: Double
+    let sourceCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case hour, minutes
+        case sourceCount = "source_count"
+    }
+}
+
+struct ProductivityFocusBlock: Codable, Equatable {
+    let category: String?
+    let seconds: Double
+    let sessionCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case category, seconds
+        case sessionCount = "session_count"
+    }
+}
+
 /// Local memory DB counters decoded from `openbird data stats`.
 struct MemoryStats: Codable, Equatable {
     let observations: Int
@@ -1186,6 +1272,23 @@ final class OpenBirdService: @unchecked Sendable {
     static func parseBriefing(_ output: String) -> DayBriefing? {
         guard let data = output.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(DayBriefing.self, from: data)
+    }
+
+    /// Load deterministic, local-only productivity facts for a day. This may build
+    /// day memory on first use, so it gets the same order-of-magnitude timeout as
+    /// briefing rather than the cheap timeline read.
+    func dailyProductivity(dayOffset: Int, timeout: TimeInterval = 60) async -> DayProductivity? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
+        let result = await runAsync(
+            cli, arguments: ["productivity", "--day", String(dayOffset), "--json"], timeout: timeout
+        )
+        guard result.exitCode == 0 else { return nil }
+        return Self.parseProductivity(result.stdout)
+    }
+
+    static func parseProductivity(_ output: String) -> DayProductivity? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(DayProductivity.self, from: data)
     }
 
     // MARK: - Internals

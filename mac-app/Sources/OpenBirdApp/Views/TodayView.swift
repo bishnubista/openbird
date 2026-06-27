@@ -26,6 +26,7 @@ struct TodayView: View {
             VStack(alignment: .leading, spacing: OB.Space.l) {
                 header
                 briefingCard
+                productivityCard
                 timelineSection
             }
             .padding(OB.Space.xl)
@@ -223,6 +224,122 @@ struct TodayView: View {
             .overlay(Capsule().strokeBorder(OB.separator(scheme), lineWidth: 0.5))
     }
 
+    // MARK: Productivity facts
+
+    private var productivityCard: some View {
+        VStack(alignment: .leading, spacing: OB.Space.m) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("PRODUCTIVITY")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(OB.accent)
+                Spacer()
+                if let route = model.productivity?.routeLabel {
+                    Text(route)
+                        .font(.system(size: 12))
+                        .foregroundStyle(OB.textTertiary(scheme))
+                }
+            }
+            productivityBody
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(OB.Space.l)
+        .glassSurface(cornerRadius: OB.Radius.card)
+    }
+
+    @ViewBuilder
+    private var productivityBody: some View {
+        if model.loadingProductivity && model.productivity == nil {
+            HStack(spacing: OB.Space.sm) {
+                ProgressView().controlSize(.small)
+                Text("Loading local facts…")
+                    .font(.callout)
+                    .foregroundStyle(OB.textSecondary(scheme))
+            }
+        } else if let productivity = model.productivity {
+            if productivity.hasActivityFacts {
+                productivityFacts(productivity)
+            } else {
+                Text("No productivity facts were recorded for this day.")
+                    .font(.callout)
+                    .foregroundStyle(OB.textSecondary(scheme))
+            }
+        } else if let error = model.productivityError {
+            Label(error, systemImage: "exclamationmark.triangle")
+                .font(.callout)
+                .foregroundStyle(.orange)
+        } else {
+            Text("No productivity facts available for this day.")
+                .font(.callout)
+                .foregroundStyle(OB.textSecondary(scheme))
+        }
+    }
+
+    private func productivityFacts(_ productivity: DayProductivity) -> some View {
+        let facts = productivity.facts
+        return VStack(alignment: .leading, spacing: OB.Space.s) {
+            productivityStatChips(facts)
+            if let top = facts.topCategory {
+                productivityRow(
+                    label: "Top category",
+                    value: "\(Self.categoryLabel(top.category)) · \(Self.minutesLabel(top.minutes))",
+                    detail: "\(top.sourceCount) source\(top.sourceCount == 1 ? "" : "s")"
+                )
+            }
+            if let hour = facts.topHour {
+                productivityRow(
+                    label: "Strongest hour",
+                    value: "\(hour.hour) · \(Self.minutesLabel(hour.minutes))",
+                    detail: "\(hour.sourceCount) source\(hour.sourceCount == 1 ? "" : "s")"
+                )
+            }
+            if let block = facts.longestFocusBlock {
+                productivityRow(
+                    label: "Longest block",
+                    value: "\(Self.categoryLabel(block.category ?? "unknown")) · \(Self.durationLabel(block.seconds))",
+                    detail: "\(block.sessionCount) session\(block.sessionCount == 1 ? "" : "s")"
+                )
+            }
+        }
+    }
+
+    private func productivityStatChips(_ facts: ProductivityFacts) -> some View {
+        let active = "\(Self.minutesLabel(facts.activeMinutes)) active"
+        let switches = "\(facts.contextSwitchCount) switch\(facts.contextSwitchCount == 1 ? "" : "es")"
+        let rate = "\(Self.rateLabel(facts.contextSwitchesPerActiveHour))/active hour"
+
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: OB.Space.sm) {
+                statChip(active)
+                statChip(switches)
+                statChip(rate)
+            }
+            VStack(alignment: .leading, spacing: OB.Space.sm) {
+                statChip(active)
+                statChip(switches)
+                statChip(rate)
+            }
+        }
+    }
+
+    private func productivityRow(label: String, value: String, detail: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(OB.textTertiary(scheme))
+                .frame(width: 96, alignment: .leading)
+            Text(value)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(OB.textPrimary(scheme))
+                .lineLimit(1)
+            Spacer(minLength: OB.Space.s)
+            Text(detail)
+                .font(.system(size: 12))
+                .monospacedDigit()
+                .foregroundStyle(OB.textSecondary(scheme))
+        }
+    }
+
     // MARK: Session timeline
 
     @ViewBuilder
@@ -369,4 +486,24 @@ struct TodayView: View {
     static func grouped(_ n: Int) -> String { TimelineFormatting.grouped(n) }
 
     static func durationLabel(_ seconds: Double) -> String { TimelineFormatting.durationLabel(seconds) }
+
+    static func minutesLabel(_ minutes: Double) -> String {
+        durationLabel(max(0, minutes) * 60.0)
+    }
+
+    static func rateLabel(_ value: Double) -> String {
+        if value.rounded() == value {
+            return String(Int(value))
+        }
+        return String(format: "%.1f", value)
+    }
+
+    static func categoryLabel(_ value: String) -> String {
+        value
+            .split(separator: "_")
+            .map { part in
+                part.prefix(1).uppercased() + part.dropFirst()
+            }
+            .joined(separator: " ")
+    }
 }
