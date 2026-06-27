@@ -65,7 +65,18 @@ def _window(y: int, mo: int, d: int, *, offset: int) -> dict:
 
 def test_preview_builds_locally_with_cloud_off_and_no_source_ids(tmp_path):
     start = _day(2026, 6, 12, 9)
-    rows = [(_obs("o1", h="h1", ts=start, window="openbird issue"), "fix issue")]
+    rows = [
+        (
+            _obs(
+                "leaky-session-source-id",
+                h="h1",
+                ts=start,
+                window="Review github.com/bishnubista/openbird/pull/180",
+                url="https://github.com/bishnubista/openbird/pull/180",
+            ),
+            "todo review github.com/bishnubista/openbird/pull/180",
+        )
+    ]
     settings = Settings(data_dir=tmp_path)
 
     packet = build_deep_brain_preview(
@@ -83,7 +94,15 @@ def test_preview_builds_locally_with_cloud_off_and_no_source_ids(tmp_path):
     assert "OPENBIRD_ALLOW_CLOUD" in " ".join(packet["blocked_reasons"])
     assert "OPENBIRD_DEEP_BRAIN_ENABLED" in " ".join(packet["blocked_reasons"])
     assert _has_key(packet["memory_summary"], "source_ids") is False
+    rendered_summary = json.dumps(packet["memory_summary"], sort_keys=True)
+    assert "leaky-session-source-id" not in rendered_summary
     assert "source_fingerprint" not in packet["memory_summary"]
+    cues = packet["memory_summary"]["sessions"][0]["cues"]
+    assert {"value": "github.com", "count": 1} in cues["domains"]
+    assert {"value": "bishnubista/openbird", "count": 1} in cues["repos"]
+    assert any(item == {"token": "bishnubista", "count": 3} for item in cues["title_tokens"])
+    assert cues["open_loops"][0]["kind"] == "github_pr"
+    assert "source_count" in cues["open_loops"][0]
 
 
 def test_period_preview_days_one_matches_existing_preview(tmp_path):

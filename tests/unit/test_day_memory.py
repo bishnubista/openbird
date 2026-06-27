@@ -174,6 +174,70 @@ def test_build_day_memory_payload_has_metrics_sources_and_no_narrative_text():
     assert payload["source_fingerprint"]["count"] == 3
 
 
+def test_build_day_memory_sessions_include_grounded_bounded_cues():
+    start = _ts(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "repo-source-id",
+                ts=start,
+                app="com.google.Chrome",
+                window="Review github.com/bishnubista/openbird/pull/180",
+                url="https://github.com/bishnubista/openbird/pull/180",
+                session_id="s1",
+            ),
+            "todo review route labels in github.com/bishnubista/openbird/pull/180",
+        ),
+        (
+            _obs(
+                "docs-source-id",
+                ts=start + 60,
+                app="com.google.Chrome",
+                window="OpenBird local memory notes",
+                url="https://docs.example.com/openbird",
+                session_id="s1",
+            ),
+            "follow up on local memory notes",
+        ),
+    ]
+
+    built = build_day_memory(
+        rows,
+        start_ts=start,
+        end_ts=start + 120,
+        day_offset=0,
+        gap_seconds=300,
+    )
+    rebuilt = build_day_memory(
+        list(reversed(rows)),
+        start_ts=start,
+        end_ts=start + 120,
+        day_offset=0,
+        gap_seconds=300,
+    )
+
+    cues = built.payload["sessions"][0]["cues"]
+    assert cues == rebuilt.payload["sessions"][0]["cues"]
+    assert {
+        "value": "github.com",
+        "count": 1,
+        "source_ids": ["repo-source-id"],
+    } in cues["domains"]
+    assert any(item["value"] == "bishnubista/openbird" for item in cues["repos"])
+    assert any(
+        item["kind"] == "github_pr" and item["source_ids"] == ["repo-source-id"]
+        for item in cues["open_loops"]
+    )
+    assert any(
+        item["token"] == "memory"
+        and item["source_ids"] == ["docs-source-id"]
+        for item in cues["title_tokens"]
+    )
+    assert all(
+        len(cues[key]) <= 5 for key in ("domains", "repos", "title_tokens", "open_loops")
+    )
+
+
 def test_build_day_memory_times_terminal_observation_against_window_end():
     start = _ts(2026, 6, 12, 9)
     rows = [
@@ -927,6 +991,7 @@ def test_ensure_day_memory_rebuilds_v2_payload_for_productivity(
 
         assert saved["extractor_version"] == EXTRACTOR_VERSION
         assert saved["payload"]["focus_blocks"]
+        assert saved["payload"]["sessions"][0]["cues"]
     finally:
         store.close()
 

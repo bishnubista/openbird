@@ -441,13 +441,7 @@ def _memory_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "sessions": coverage.get("sessions", 0),
             "apps": coverage.get("apps", 0),
         },
-        "sessions": [
-            _copy_mapping(
-                item,
-                ("app", "category", "category_confidence", "start", "end", "count", "title"),
-            )
-            for item in payload.get("sessions") or []
-        ],
+        "sessions": [_session_summary(item) for item in payload.get("sessions") or []],
         "workstreams": [
             _copy_mapping(
                 item,
@@ -624,6 +618,37 @@ def _entities_summary(entities: dict[str, Any]) -> dict[str, Any]:
         "title_tokens": [
             _copy_mapping(item, ("token", "count"))
             for item in entities.get("title_tokens") or []
+        ],
+    }
+
+
+def _session_summary(item: Any) -> dict[str, Any]:
+    summary = _copy_mapping(
+        item,
+        ("app", "category", "category_confidence", "start", "end", "count", "title"),
+    )
+    if isinstance(item, dict) and isinstance(item.get("cues"), dict):
+        summary["cues"] = _session_cues_summary(item["cues"])
+    return summary
+
+
+def _session_cues_summary(cues: dict[str, Any]) -> dict[str, Any]:
+    """Project local session cues into the model-safe Deep Brain packet shape."""
+    return {
+        "domains": [
+            _copy_mapping(item, ("value", "count"))
+            for item in cues.get("domains") or []
+        ],
+        "repos": [
+            _copy_mapping(item, ("value", "count")) for item in cues.get("repos") or []
+        ],
+        "title_tokens": [
+            _copy_mapping(item, ("token", "count"))
+            for item in cues.get("title_tokens") or []
+        ],
+        "open_loops": [
+            _copy_mapping(item, ("kind", "title", "cue", "source_count"))
+            for item in cues.get("open_loops") or []
         ],
     }
 

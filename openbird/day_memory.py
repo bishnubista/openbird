@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 from openbird.types import Observation
 
-EXTRACTOR_VERSION = "day-memory-v3"
+EXTRACTOR_VERSION = "day-memory-v4"
 _UNGROUNDED_PRODUCTIVITY_COACH_ANSWER = (
     "I could not ground productivity coaching in the local facts packet."
 )
@@ -628,6 +628,7 @@ def _build_sessions(rows: list[tuple[Observation, str]]) -> list[dict]:
                 "end": items[-1][0].ts,
                 "count": len(items),
                 "title": title,
+                "cues": _session_cues(items),
                 "source_ids": source_ids,
             }
         )
@@ -986,7 +987,20 @@ def _workstreams(
     )[:12]
 
 
-def _open_loops(rows: list[tuple[Observation, str]]) -> list[dict]:
+def _session_cues(items: list[tuple[Observation, str]]) -> dict:
+    """Return bounded, grounded cues for one local day-memory session."""
+    entities = _entities(items)
+    return {
+        "domains": list(entities.get("domains") or [])[:5],
+        "repos": list(entities.get("repos") or [])[:5],
+        "title_tokens": list(entities.get("title_tokens") or [])[:5],
+        "open_loops": _open_loops(items, limit=5, source_id_limit=5),
+    }
+
+
+def _open_loops(
+    rows: list[tuple[Observation, str]], *, limit: int = 12, source_id_limit: int = 12
+) -> list[dict]:
     loops: dict[tuple[str, str], dict] = {}
     for obs, text in rows:
         blob = " ".join(part for part in (obs.window or "", obs.url or "", text[:500]) if part)
@@ -1022,12 +1036,12 @@ def _open_loops(rows: list[tuple[Observation, str]]) -> list[dict]:
 
     out: list[dict] = []
     for item in loops.values():
-        item["source_ids"] = sorted(set(item["source_ids"]))[:12]
+        item["source_ids"] = sorted(set(item["source_ids"]))[:source_id_limit]
         out.append(item)
     return sorted(
         out,
         key=lambda item: (-int(item["source_count"]), item["kind"], item["title"]),
-    )[:12]
+    )[:limit]
 
 
 def _clean_title(value: str, *, limit: int = 140) -> str:
