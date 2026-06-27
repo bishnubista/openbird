@@ -157,6 +157,41 @@ routes:
       - cli.deep_brain_ask
       - cli.CLOUD_ACTIVE
 
+  - id: briefing.model
+    class: unknown
+    source: explicit model-written briefing over exclusion-filtered distilled day memory packet
+    captured_fields:
+      - model_briefing_prompt
+      - distilled_day_memory_content
+      - selected_citation_snippets
+      - selected_source_observation_id
+      - selected_source_app
+      - selected_source_window_or_url
+      - selected_source_timestamp
+      - packet_build_route
+      - packet_route
+      - packet_preview_egress_label
+      - packet_local_date
+      - packet_day_offset
+      - packet_source_scope
+      - opt_in_gate_status
+      - generated_briefing
+      - validated_citations
+      - exclusion_counts
+    storage: []
+    egress:
+      default: inherits_active_model_route
+      inherited_from:
+        - chat.local
+        - chat.remote
+      warning: distilled day memory plus selected snippets leave this machine when the active LLM route is remote
+    enforcement:
+      requires: OPENBIRD_ALLOW_CLOUD
+      note: The --model flag is the feature opt-in for model-written briefings; no OPENBIRD_DEEP_BRAIN_ENABLED gate is required.
+    truth_surface:
+      - cli.briefing_model
+      - cli.CLOUD_ACTIVE
+
   - id: productivity.local_facts
     class: local
     source: deterministic day-memory metrics and source references

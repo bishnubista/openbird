@@ -512,42 +512,59 @@ def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> Non
 
 
 def _briefing_model(day: int, start: float, end: float, *, as_json: bool) -> None:
-    """Opt-in briefing: model-written prose via the configured provider."""
-    from openbird.routines.templates import get_template, select_briefing_sources
+    """Opt-in briefing: model-written prose over a distilled day packet."""
+    from openbird.deep_brain import (
+        build_deep_brain_preview,
+        complete_from_deep_brain_packet,
+    )
 
-    # Open WITHOUT the cloud gate / LLM first; only construct the completion
-    # provider when the day actually has capture content (an empty day returns the
-    # deterministic no-activity line for free, never touching the model/cloud gate).
+    settings = get_settings()
     store = _store_maintenance()
-    provider = None
     try:
-        if store.day_sessions(start, end):
-            store.close()
-            provider = _provider()
-            store = _store(provider=provider)
-        # Fetch the grounding rows ONCE, then derive both the prose and the source
-        # trail from the SAME rows so the trail is faithful by construction: it can
-        # only point at observations the prose was actually built from (identical
-        # [start, end] window and source="capture" the template consumes).
         rows = store.time_range_text(start, end, source="capture")
-        text = get_template("yesterday").run_rows(provider, start, end, rows)
-        sources, total_sources = select_briefing_sources(rows)
     finally:
         store.close()
 
-    # Route truth keys on the LLM role ONLY: a briefing is a pure completion that
-    # never embeds or reranks, so remote embed/rerank is irrelevant here. When no
-    # provider was constructed (empty day), no model ran -> local_deterministic.
-    # Keying cloud/local_model on `provider is not None` is conservative: it can
-    # only ever OVER-warn (label a degraded all-filtered day as model-routed),
-    # never hide a real egress.
-    if provider is None:
-        reasoning_route = "local_deterministic"
-    else:
-        from openbird.llm.provider import classify_models
+    packet = build_deep_brain_preview(
+        rows,
+        start_ts=start,
+        end_ts=end,
+        day_offset=day,
+        source_scope="capture",
+        settings=settings,
+        blocked_reasons=[],
+    )
+    if not packet.get("selected_sources"):
+        payload = {
+            "day_offset": day,
+            "start": start,
+            "end": end,
+            "text": "I do not have enough cited briefing evidence for that day.",
+            "confidence": "insufficient_evidence",
+            "grounded": False,
+            "reasoning_route": "local_deterministic",
+            "egress": "none",
+            "packet_route": packet.get("route"),
+            "packet_build_route": packet.get("packet_build_route"),
+            "sources": [],
+            "sources_total": packet.get("sources_total", 0),
+            "exclusions": packet.get("exclusions", {}),
+        }
+        if as_json:
+            _console.print_json(json.dumps(payload))
+            return
+        _console.print(payload["text"])
+        return
 
-        remote = classify_models(get_settings())
-        reasoning_route = "cloud_reasoning_active" if remote.get("llm") else "local_model"
+    provider = _completion_provider(packet_label="day briefing packet")
+    result = complete_from_deep_brain_packet(
+        "Write a concise briefing for this day from the packet.",
+        packet,
+        provider,
+        settings=settings,
+        ungrounded_answer="I could not ground a model-written briefing in the day packet.",
+    )
+    sources = _briefing_sources_from_packet_citations(result.get("citations", []))
 
     if as_json:
         _console.print_json(
@@ -556,15 +573,35 @@ def _briefing_model(day: int, start: float, end: float, *, as_json: bool) -> Non
                     "day_offset": day,
                     "start": start,
                     "end": end,
-                    "text": text,
-                    "reasoning_route": reasoning_route,
+                    "text": result["answer"],
+                    "confidence": result.get("confidence"),
+                    "grounded": result.get("grounded", False),
+                    "reasoning_route": result.get("reasoning_route"),
+                    "egress": result.get("egress"),
+                    "packet_route": result.get("packet_route"),
+                    "packet_build_route": result.get("packet_build_route"),
                     "sources": sources,
-                    "sources_total": total_sources,
+                    "sources_total": packet.get("sources_total", 0),
+                    "exclusions": packet.get("exclusions", {}),
                 }
             )
         )
         return
-    _console.print(text)
+    _console.print(result["answer"])
+
+
+def _briefing_sources_from_packet_citations(citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert packet citation metadata back to the briefing source JSON shape."""
+    return [
+        {
+            "observation_id": source.get("observation_id"),
+            "app": source.get("app"),
+            "window": source.get("window_or_url"),
+            "ts": source.get("ts"),
+            "snippet": source.get("snippet"),
+        }
+        for source in citations
+    ]
 
 
 def _briefing_signals(day: int, start: float, end: float, *, as_json: bool) -> None:

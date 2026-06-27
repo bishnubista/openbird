@@ -50,6 +50,7 @@ def build_deep_brain_preview(
     source_scope: str,
     settings: Settings,
     sources_limit: int = DEFAULT_BRIEFING_SOURCES,
+    blocked_reasons: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Build the local-only preview packet for a future Deep Brain route.
 
@@ -69,14 +70,18 @@ def build_deep_brain_preview(
     raw_sources, total_sources = select_briefing_sources(
         list(filtered_rows), limit=sources_limit
     )
-    blocked_reasons = deep_brain_blocked_reasons(settings)
+    reasons = (
+        list(deep_brain_blocked_reasons(settings))
+        if blocked_reasons is None
+        else list(blocked_reasons)
+    )
     return {
         "route": "deep_brain.preview",
         # Packet provenance: this is intentionally not an answer reasoning_route.
         "packet_build_route": PACKET_BUILD_ROUTE_DETERMINISTIC,
         "egress": "none_preview",
-        "cloud_ready": not blocked_reasons,
-        "blocked_reasons": blocked_reasons,
+        "cloud_ready": not reasons,
+        "blocked_reasons": reasons,
         "local_date": local_date_for_window(start_ts),
         "day_offset": day_offset,
         "source_scope": source_scope,
@@ -273,6 +278,30 @@ def answer_deep_brain(
             "exclusions": packet.get("exclusions", {}),
         }
 
+    result = complete_from_deep_brain_packet(
+        question,
+        packet,
+        provider,
+        settings=settings,
+        ungrounded_answer=_UNGROUNDED_DEEP_BRAIN_ANSWER,
+    )
+    return {
+        **result,
+        "question": question,
+        "sources_total": packet.get("sources_total", 0),
+        "exclusions": packet.get("exclusions", {}),
+    }
+
+
+def complete_from_deep_brain_packet(
+    question: str,
+    packet: dict[str, Any],
+    provider: Any,
+    *,
+    settings: Settings,
+    ungrounded_answer: str,
+) -> dict[str, Any]:
+    """Complete one model response over a packet and validate its citations."""
     messages = build_deep_brain_messages(question, packet)
     raw = provider.complete(messages, json_schema=DEEP_BRAIN_RESPONSE_SCHEMA)
     parsed = raw if isinstance(raw, dict) else {}
@@ -281,14 +310,13 @@ def answer_deep_brain(
     citations = _valid_citations(packet, parsed.get("citation_ids"))
     grounded = bool(citations)
     if not answer or not grounded:
-        answer = _UNGROUNDED_DEEP_BRAIN_ANSWER
+        answer = ungrounded_answer
         confidence = "insufficient_evidence"
         citations = []
 
     remote_llm = classify_models(settings).get("llm")
     return {
         "ok": True,
-        "question": question,
         "answer": answer,
         "confidence": confidence,
         "grounded": bool(citations),
@@ -296,9 +324,8 @@ def answer_deep_brain(
         "egress": "active_model_route" if remote_llm else "none",
         "model": getattr(provider, "llm_model", settings.llm_model),
         "packet_route": packet.get("route"),
+        "packet_build_route": packet.get("packet_build_route"),
         "citations": citations,
-        "sources_total": packet.get("sources_total", 0),
-        "exclusions": packet.get("exclusions", {}),
     }
 
 
