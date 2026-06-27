@@ -13,8 +13,10 @@ from openbird.day_memory import (
     answer_productivity_coach,
     build_day_memory,
     build_productivity_coach_packet,
+    build_productivity_coach_report,
     build_productivity_report,
     classify_observation,
+    productivity_exclusions_block,
     productivity_coach_packet_json_for_model,
 )
 from openbird.memory.store import MemoryStore
@@ -39,6 +41,7 @@ def _obs(
     window: str | None = None,
     url: str | None = None,
     session_id: str | None = None,
+    source: str = "capture",
 ) -> Observation:
     return Observation(
         id=oid,
@@ -48,7 +51,7 @@ def _obs(
         window=window,
         url=url,
         session_id=session_id,
-        source="capture",
+        source=source,
     )
 
 
@@ -82,6 +85,19 @@ def _saved_day_memory(rows, *, start: float, end: float, day_offset: int = 0):
         "generated_at": end,
         "extractor_version": EXTRACTOR_VERSION,
     }
+
+
+def _coach_report(
+    rows, *, start: float, end: float, settings: Settings | None = None
+) -> dict:
+    return build_productivity_coach_report(
+        rows,
+        start_ts=start,
+        end_ts=end,
+        day_offset=0,
+        source_scope="capture",
+        settings=settings or Settings(),
+    )
 
 
 def test_classify_observation_uses_descriptive_categories():
@@ -364,24 +380,174 @@ def test_productivity_coach_packet_uses_synthetic_ids_and_local_citation_map():
     assert packet["model_packet"]["facts"]["top_hour"]["citation_id"] == "hour:09:00"
 
 
-def test_productivity_coach_local_model_needs_feature_gate_only():
+def test_productivity_exclusions_block_matches_deep_brain_shape():
+    from openbird.deep_brain import filter_rows_for_deep_brain
+
+    rows = [(_obs("c1", ts=_ts(2026, 6, 12, 9)), "coding")]
+    _filtered, exclusions = filter_rows_for_deep_brain(rows, settings=Settings())
+
+    assert set(productivity_exclusions_block(exclusions)) == set(exclusions)
+
+
+def test_productivity_coach_filters_excluded_rows_before_prompt_and_citations():
+    start = _ts(2026, 6, 12, 9)
+    settings = Settings(
+        deep_brain_enabled=True,
+        deep_brain_excluded_apps=["com.mitchellh.ghostty"],
+        deep_brain_excluded_sources=["private"],
+        deep_brain_excluded_observation_ids=["secret-id"],
+    )
+    rows = [
+        (
+            _obs(
+                "secret-app",
+                ts=start,
+                app="com.mitchellh.ghostty",
+                window="SECRET_APP_WINDOW",
+            ),
+            "SECRET_APP_TEXT",
+        ),
+        (
+            _obs(
+                "secret-source",
+                ts=start + 10,
+                app="com.apple.dt.Xcode",
+                source="private",
+                window="SECRET_SOURCE_WINDOW",
+            ),
+            "SECRET_SOURCE_TEXT",
+        ),
+        (
+            _obs(
+                "secret-id",
+                ts=start + 20,
+                app="com.apple.dt.Xcode",
+                window="SECRET_ID_WINDOW",
+            ),
+            "SECRET_ID_TEXT",
+        ),
+        (
+            _obs(
+                "kept",
+                ts=start + 30,
+                app="com.apple.dt.Xcode",
+                window="openbird coding",
+                session_id="s1",
+            ),
+            "coding openbird",
+        ),
+    ]
+    report = _coach_report(rows, start=start, end=start + 90, settings=settings)
+    packet = build_productivity_coach_packet(report)
+    provider = _Provider(
+        {
+            "answer": "Your coding block was grounded.",
+            "citation_ids": ["category:coding"],
+            "confidence": "medium",
+        }
+    )
+
+    result = answer_productivity_coach("coach me", report, provider, settings=settings)
+    rendered = json.dumps(
+        {
+            "model_packet": packet["model_packet"],
+            "citation_map": packet["citation_map"],
+            "result": result,
+            "prompt": provider.messages[1]["content"],
+        },
+        sort_keys=True,
+    )
+
+    assert report["productivity"]["coach_ready_packet"]["source_count"] == 1
+    assert packet["exclusions"]["kept_observations"] == 1
+    assert packet["exclusions"]["excluded_by"] == {
+        "app": 1,
+        "observation_id": 1,
+        "source": 1,
+    }
+    assert packet["citation_count"] > 0
+    assert result["citations"][0]["source_ids"] == ["kept"]
+    assert result["exclusions"]["excluded_observations"] == 3
+    assert "secret-app" not in rendered
+    assert "secret-source" not in rendered
+    assert "secret-id" not in rendered
+    assert "SECRET_APP" not in rendered
+    assert "SECRET_SOURCE" not in rendered
+    assert "SECRET_ID" not in rendered
+    assert "com.mitchellh.ghostty" not in provider.messages[1]["content"]
+
+
+def test_productivity_coach_all_excluded_rows_never_call_model():
+    start = _ts(2026, 6, 12, 9)
+    settings = Settings(
+        deep_brain_enabled=True,
+        deep_brain_excluded_sources=["capture"],
+    )
+    report = _coach_report(
+        [(_obs("c1", ts=start, app="com.apple.dt.Xcode"), "coding")],
+        start=start,
+        end=start + 60,
+        settings=settings,
+    )
+    provider = _Provider(
+        {
+            "answer": "should not run",
+            "citation_ids": ["category:coding"],
+            "confidence": "high",
+        }
+    )
+
+    result = answer_productivity_coach("coach me", report, provider, settings=settings)
+
+    assert result["confidence"] == "insufficient_evidence"
+    assert result["citations"] == []
+    assert result["exclusions"]["kept_observations"] == 0
+    assert result["exclusions"]["excluded_by"] == {"source": 1}
+    assert provider.messages is None
+
+
+def test_productivity_coach_refuses_report_without_exclusions_sidecar():
     start = _ts(2026, 6, 12, 9)
     report = build_productivity_report(
         _saved_day_memory(
-            [
-                (
-                    _obs(
-                        "c1",
-                        ts=start,
-                        app="com.mitchellh.ghostty",
-                        session_id="s1",
-                    ),
-                    "coding",
-                )
-            ],
+            [(_obs("c1", ts=start, app="com.apple.dt.Xcode"), "coding")],
             start=start,
             end=start + 60,
         )
+    )
+    provider = _Provider(
+        {
+            "answer": "should not run",
+            "citation_ids": ["category:coding"],
+            "confidence": "medium",
+        }
+    )
+
+    result = answer_productivity_coach(
+        "coach me", report, provider, settings=Settings(deep_brain_enabled=True)
+    )
+
+    assert result["ok"] is False
+    assert "not prepared with exclusions" in " ".join(result["blocked_reasons"])
+    assert provider.messages is None
+
+
+def test_productivity_coach_local_model_needs_feature_gate_only():
+    start = _ts(2026, 6, 12, 9)
+    report = _coach_report(
+        [
+            (
+                _obs(
+                    "c1",
+                    ts=start,
+                    app="com.mitchellh.ghostty",
+                    session_id="s1",
+                ),
+                "coding",
+            )
+        ],
+        start=start,
+        end=start + 60,
     )
     provider = _Provider(
         {
@@ -408,12 +574,10 @@ def test_productivity_coach_local_model_needs_feature_gate_only():
 
 def test_productivity_coach_refuses_remote_without_cloud_optin():
     start = _ts(2026, 6, 12, 9)
-    report = build_productivity_report(
-        _saved_day_memory(
-            [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
-            start=start,
-            end=start + 60,
-        )
+    report = _coach_report(
+        [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+        start=start,
+        end=start + 60,
     )
     provider = _Provider(
         {"answer": "should not run", "citation_ids": ["category:coding"], "confidence": "low"}
@@ -433,12 +597,10 @@ def test_productivity_coach_refuses_remote_without_cloud_optin():
 
 def test_productivity_coach_remote_route_truth_with_both_gates():
     start = _ts(2026, 6, 12, 9)
-    report = build_productivity_report(
-        _saved_day_memory(
-            [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
-            start=start,
-            end=start + 60,
-        )
+    report = _coach_report(
+        [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+        start=start,
+        end=start + 60,
     )
     provider = _Provider(
         {
@@ -467,12 +629,10 @@ def test_productivity_coach_remote_route_truth_with_both_gates():
 
 def test_productivity_coach_drops_hallucinated_citations():
     start = _ts(2026, 6, 12, 9)
-    report = build_productivity_report(
-        _saved_day_memory(
-            [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
-            start=start,
-            end=start + 60,
-        )
+    report = _coach_report(
+        [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+        start=start,
+        end=start + 60,
     )
     provider = _Provider(
         {"answer": "Unsupported coaching.", "citation_ids": ["block:99"], "confidence": "high"}
@@ -492,9 +652,7 @@ def test_productivity_coach_drops_hallucinated_citations():
 
 def test_productivity_coach_empty_packet_never_calls_model():
     start = _ts(2026, 6, 12, 0)
-    report = build_productivity_report(
-        _saved_day_memory([], start=start, end=start + 3600)
-    )
+    report = _coach_report([], start=start, end=start + 3600)
     provider = _Provider(
         {"answer": "Unsupported coaching.", "citation_ids": [], "confidence": "high"}
     )
@@ -515,12 +673,10 @@ def test_productivity_coach_empty_packet_never_calls_model():
 
 def test_productivity_coach_uncitable_facts_never_call_model():
     start = _ts(2026, 6, 12, 9)
-    report = build_productivity_report(
-        _saved_day_memory(
-            [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
-            start=start,
-            end=start + 60,
-        )
+    report = _coach_report(
+        [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+        start=start,
+        end=start + 60,
     )
     report["productivity"]["coach_ready_packet"]["category_sources"] = []
     report["productivity"]["coach_ready_packet"]["focus_blocks"] = []
@@ -908,6 +1064,7 @@ def test_productivity_coach_cli_refuses_before_provider_without_feature_gate(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_APPS", "com.mitchellh.ghostty")
     reset_settings_cache()
     today = (
         dt.datetime.now()
@@ -938,7 +1095,9 @@ def test_productivity_coach_cli_refuses_before_provider_without_feature_gate(
     payload = json.loads(res.stdout)
     assert payload["ok"] is False
     assert "OPENBIRD_DEEP_BRAIN_ENABLED" in " ".join(payload["blocked_reasons"])
-    assert payload["packet"]["citation_count"] > 0
+    assert payload["packet"]["citation_count"] == 0
+    assert payload["packet"]["exclusions"]["kept_observations"] == 0
+    assert payload["packet"]["exclusions"]["excluded_by"] == {"app": 1}
 
 
 def test_productivity_coach_cli_uses_packet_label_when_enabled(monkeypatch, tmp_path):

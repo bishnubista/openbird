@@ -13,6 +13,7 @@ import datetime as dt
 import hashlib
 import json
 import re
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
@@ -33,6 +34,16 @@ PRODUCTIVITY_COACH_RESPONSE_SCHEMA: dict[str, Any] = {
         "confidence": {"type": "string"},
     },
 }
+PRODUCTIVITY_EXCLUSION_KEYS = (
+    "input_observations",
+    "kept_observations",
+    "excluded_observations",
+    "excluded_by",
+    "unknown_app_kept",
+    "excluded_apps_configured",
+    "excluded_sources_configured",
+    "excluded_observation_ids_configured",
+)
 
 _BROWSER_APPS = {
     "com.google.chrome",
@@ -160,7 +171,7 @@ def build_day_memory(
     return DayMemoryBuild(payload=payload, source_ids=source_ids)
 
 
-def build_productivity_report(saved: dict) -> dict:
+def build_productivity_report(saved: dict, *, exclusions: dict | None = None) -> dict:
     """Build a local-only productivity facts report from a saved day memory."""
     payload = saved.get("payload", {})
     metrics = payload.get("metrics", {})
@@ -194,7 +205,7 @@ def build_productivity_report(saved: dict) -> dict:
             or payload.get("coverage", {}).get("observations", 0)
         ),
     }
-    return {
+    report = {
         "route": "productivity.local_facts",
         "egress": "none",
         "productivity_status": "local_facts_only",
@@ -210,6 +221,64 @@ def build_productivity_report(saved: dict) -> dict:
             "coach_ready_packet": coach_ready_packet,
         },
     }
+    if exclusions is not None:
+        report["exclusions"] = productivity_exclusions_block(exclusions)
+    return report
+
+
+def build_productivity_coach_report(
+    rows: list[tuple[Observation, str]],
+    *,
+    start_ts: float,
+    end_ts: float,
+    day_offset: int,
+    source_scope: str,
+    settings,
+) -> dict:
+    """Build a transient, exclusion-filtered report for a model coaching route."""
+    from openbird.deep_brain import filter_rows_for_deep_brain
+
+    filtered_rows, exclusions = filter_rows_for_deep_brain(rows, settings=settings)
+    as_of = min(end_ts, time.time())
+    built = build_day_memory(
+        list(filtered_rows),
+        start_ts=start_ts,
+        end_ts=end_ts,
+        day_offset=day_offset,
+        source_scope=source_scope,
+        gap_seconds=settings.session_gap_seconds,
+        as_of=as_of,
+    )
+    saved = {
+        "payload": built.payload,
+        "local_date": built.payload.get("local_date"),
+        "source_scope": source_scope,
+        "source_count": len(set(built.source_ids)),
+        "source_ids": list(built.source_ids),
+        "generated_at": as_of,
+        "extractor_version": EXTRACTOR_VERSION,
+    }
+    return build_productivity_report(saved, exclusions=exclusions)
+
+
+def productivity_exclusions_block(exclusions: dict | None) -> dict:
+    """Return the canonical local-only exclusions accounting block."""
+    source = exclusions or {}
+    block = {
+        "input_observations": int(source.get("input_observations") or 0),
+        "kept_observations": int(source.get("kept_observations") or 0),
+        "excluded_observations": int(source.get("excluded_observations") or 0),
+        "excluded_by": dict(source.get("excluded_by") or {}),
+        "unknown_app_kept": int(source.get("unknown_app_kept") or 0),
+        "excluded_apps_configured": list(source.get("excluded_apps_configured") or []),
+        "excluded_sources_configured": list(
+            source.get("excluded_sources_configured") or []
+        ),
+        "excluded_observation_ids_configured": int(
+            source.get("excluded_observation_ids_configured") or 0
+        ),
+    }
+    return {key: block[key] for key in PRODUCTIVITY_EXCLUSION_KEYS}
 
 
 def productivity_coach_blocked_reasons(settings) -> list[str]:
@@ -302,7 +371,7 @@ def build_productivity_coach_packet(report: dict) -> dict:
             "source_ids": list(raw_top_hour.get("source_ids") or []),
         }
 
-    return {
+    packet = {
         "route": "productivity.coach_packet",
         "egress": "model_packet_only",
         "local_date": report.get("local_date"),
@@ -312,6 +381,9 @@ def build_productivity_coach_packet(report: dict) -> dict:
         "citation_map": citation_map,
         "citation_count": len(citation_map),
     }
+    if report.get("exclusions") is not None:
+        packet["exclusions"] = productivity_exclusions_block(report.get("exclusions"))
+    return packet
 
 
 def productivity_coach_packet_json_for_model(packet: dict) -> str:
@@ -364,7 +436,10 @@ def answer_productivity_coach(
     """Answer a coaching question from local productivity facts."""
     from openbird.llm.provider import classify_models
 
+    packet = build_productivity_coach_packet(report)
     blocked = productivity_coach_blocked_reasons(settings)
+    if "exclusions" not in packet:
+        blocked.append("productivity coaching packet was not prepared with exclusions")
     if blocked:
         return {
             "ok": False,
@@ -374,9 +449,9 @@ def answer_productivity_coach(
             "egress": "none",
             "citations": [],
             "packet_route": "productivity.local_facts",
+            "exclusions": packet.get("exclusions", {}),
         }
 
-    packet = build_productivity_coach_packet(report)
     if packet["citation_count"] == 0:
         return {
             "ok": True,
@@ -391,6 +466,7 @@ def answer_productivity_coach(
             "citations": [],
             "local_date": report.get("local_date"),
             "source_scope": report.get("source_scope"),
+            "exclusions": packet.get("exclusions", {}),
         }
 
     messages = build_productivity_coach_messages(question, packet)
@@ -418,6 +494,7 @@ def answer_productivity_coach(
         "citations": citations,
         "local_date": report.get("local_date"),
         "source_scope": report.get("source_scope"),
+        "exclusions": packet.get("exclusions", {}),
     }
 
 

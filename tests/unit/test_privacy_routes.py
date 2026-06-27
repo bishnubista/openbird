@@ -203,6 +203,8 @@ def test_productivity_coach_inherits_route_and_forbids_prompt_source_ids() -> No
         "synthetic_citation_ids",
         "generated_coaching",
         "validated_citations_local_source_ids",
+        "exclusion_counts",
+        "exclusion_metadata",
     }.issubset(set(route["captured_fields"]))
     assert {
         "captured_text",

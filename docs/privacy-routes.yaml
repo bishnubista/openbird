@@ -184,13 +184,15 @@ routes:
 
   - id: productivity.coach
     class: unknown
-    source: user question plus sanitized local productivity facts packet
+    source: user question plus exclusion-filtered sanitized local productivity facts packet
     captured_fields:
       - user_question
       - productivity_facts
       - synthetic_citation_ids
       - generated_coaching
       - validated_citations_local_source_ids
+      - exclusion_counts
+      - exclusion_metadata
     forbidden_fields:
       - captured_text
       - raw_window_title

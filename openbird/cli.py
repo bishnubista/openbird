@@ -951,28 +951,26 @@ def productivity_coach(
     from openbird.day_memory import (
         answer_productivity_coach,
         build_productivity_coach_packet,
-        build_productivity_report,
-        local_date_for_window,
+        build_productivity_coach_report,
         productivity_coach_blocked_reasons,
     )
 
     start, end = _day_window(day)
-    local_date = local_date_for_window(start)
     settings = get_settings()
     store = _store_maintenance()
     try:
-        saved = store.ensure_day_memory(
-            local_date=local_date,
-            start_ts=start,
-            end_ts=end,
-            day_offset=day,
-            source_scope=source_scope,
-            force=False,
-        )
+        rows = store.time_range_text(start, end, source=source_scope)
     finally:
         store.close()
 
-    report = build_productivity_report(saved)
+    report = build_productivity_coach_report(
+        rows,
+        start_ts=start,
+        end_ts=end,
+        day_offset=day,
+        source_scope=source_scope,
+        settings=settings,
+    )
     packet = build_productivity_coach_packet(report)
     blocked = productivity_coach_blocked_reasons(settings)
     if blocked:
@@ -988,6 +986,7 @@ def productivity_coach(
                 "day_offset": packet.get("day_offset"),
                 "source_scope": packet.get("source_scope"),
                 "citation_count": packet.get("citation_count", 0),
+                "exclusions": packet.get("exclusions", {}),
             },
         }
         if as_json:
@@ -1012,6 +1011,7 @@ def productivity_coach(
             "citations": [],
             "local_date": report.get("local_date"),
             "source_scope": report.get("source_scope"),
+            "exclusions": packet.get("exclusions", {}),
         }
         if as_json:
             _console.print_json(json.dumps(payload))
