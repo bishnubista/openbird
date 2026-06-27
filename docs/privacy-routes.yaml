@@ -229,6 +229,7 @@ routes:
     truth_surface:
       - cli.deep_brain_ask
       - cli.CLOUD_ACTIVE
+      - cli.data_reasoning_ledger
 
   - id: briefing.model
     class: unknown
@@ -276,6 +277,7 @@ routes:
     truth_surface:
       - cli.briefing_model
       - cli.CLOUD_ACTIVE
+      - cli.data_reasoning_ledger
 
   - id: productivity.local_facts
     class: local
@@ -344,6 +346,7 @@ routes:
     truth_surface:
       - cli.productivity_coach
       - cli.CLOUD_ACTIVE
+      - cli.data_reasoning_ledger
 
   - id: chat.remote
     class: unknown

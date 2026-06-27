@@ -148,6 +148,7 @@ def test_deep_brain_ask_inherits_active_model_route() -> None:
     assert route["egress"]["inherited_from"] == ["chat.local", "chat.remote"]
     assert "requires" not in route.get("enforcement", {})
     assert route["enforcement"]["feature_requires"] == "OPENBIRD_DEEP_BRAIN_ENABLED"
+    assert "cli.data_reasoning_ledger" in route["truth_surface"]
     assert {
         "distilled_day_memory_content",
         "distilled_day_or_week_memory_content",
@@ -199,6 +200,7 @@ def test_briefing_model_uses_distilled_packet_and_cloud_opt_in_only() -> None:
     assert "feature_requires" not in route["enforcement"]
     assert "cli.briefing_model" in route["truth_surface"]
     assert "cli.CLOUD_ACTIVE" in route["truth_surface"]
+    assert "cli.data_reasoning_ledger" in route["truth_surface"]
     assert {
         "model_briefing_prompt",
         "distilled_day_memory_content",
@@ -344,6 +346,7 @@ def test_productivity_coach_inherits_route_and_forbids_prompt_source_ids() -> No
     assert route["egress"]["inherited_from"] == ["chat.local", "chat.remote"]
     assert route["enforcement"]["feature_requires"] == "OPENBIRD_DEEP_BRAIN_ENABLED"
     assert "cli.productivity_coach" in route["truth_surface"]
+    assert "cli.data_reasoning_ledger" in route["truth_surface"]
     assert {
         "user_question",
         "productivity_facts",
