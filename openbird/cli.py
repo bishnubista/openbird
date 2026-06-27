@@ -53,9 +53,14 @@ day_memory_app = typer.Typer(
     help="Build and inspect deterministic daily memory artifacts.",
     no_args_is_help=True,
 )
+deep_brain_app = typer.Typer(
+    help="Preview the local packet for opt-in Deep Brain reasoning.",
+    no_args_is_help=True,
+)
 app.add_typer(routine_app, name="routine")
 app.add_typer(eval_app, name="eval")
 app.add_typer(day_memory_app, name="day-memory")
+app.add_typer(deep_brain_app, name="deep-brain")
 register_capture_command(app)
 
 from openbird.prompts.cli import prompts_app  # noqa: E402 - after app is defined
@@ -549,6 +554,59 @@ def _briefing_signals(day: int, start: float, end: float, *, as_json: bool) -> N
         )
         return
     _console.print(text)
+
+
+# --------------------------------------------------------------------------- #
+# Deep Brain preview                                                          #
+# --------------------------------------------------------------------------- #
+
+
+@deep_brain_app.command("preview")
+def deep_brain_preview(
+    day: int = typer.Option(0, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    source_scope: str = typer.Option(
+        "capture", "--source-scope", help="Observation source to preview."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Build a local-only Deep Brain packet preview.
+
+    The preview is a consent surface: it applies configured exclusions before
+    distillation and shows what a future cloud reasoning route would be eligible
+    to use. It never constructs a provider and never sends data off this Mac.
+    """
+    if day < 0:
+        _err_console.print("[red]--day must be >= 0.[/]")
+        raise typer.Exit(code=2)
+
+    from openbird.deep_brain import build_deep_brain_preview
+
+    start, end = _day_window(day)
+    settings = get_settings()
+    store = _store_maintenance()
+    try:
+        rows = store.time_range_text(start, end, source=source_scope)
+    finally:
+        store.close()
+
+    packet = build_deep_brain_preview(
+        rows,
+        start_ts=start,
+        end_ts=end,
+        day_offset=day,
+        source_scope=source_scope,
+        settings=settings,
+    )
+    if as_json:
+        _console.print_json(json.dumps(packet))
+        return
+    ready = "ready" if packet["cloud_ready"] else "not ready"
+    _console.print(
+        f"Deep Brain preview for {packet['local_date']} ({ready}); "
+        f"{packet['exclusions']['kept_observations']} kept, "
+        f"{packet['exclusions']['excluded_observations']} excluded. "
+        "No data was sent."
+    )
 
 
 # --------------------------------------------------------------------------- #
