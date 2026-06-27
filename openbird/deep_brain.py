@@ -26,6 +26,7 @@ Rows = Sequence[tuple[Observation, str]]
 _SOURCE_META_LEN = 160
 MAX_DEEP_BRAIN_DAYS = 7
 PRIOR_DAY_SOURCES = 3
+PACKET_BUILD_ROUTE_DETERMINISTIC = "deterministic_distillation"
 _UNGROUNDED_DEEP_BRAIN_ANSWER = (
     "I could not ground that answer in the Deep Brain packet."
 )
@@ -71,6 +72,8 @@ def build_deep_brain_preview(
     blocked_reasons = deep_brain_blocked_reasons(settings)
     return {
         "route": "deep_brain.preview",
+        # Packet provenance: this is intentionally not an answer reasoning_route.
+        "packet_build_route": PACKET_BUILD_ROUTE_DETERMINISTIC,
         "egress": "none_preview",
         "cloud_ready": not blocked_reasons,
         "blocked_reasons": blocked_reasons,
@@ -163,6 +166,8 @@ def build_deep_brain_period_preview(
     blocked_reasons = deep_brain_blocked_reasons(settings)
     return {
         "route": "deep_brain.preview",
+        # Packet provenance: this is intentionally not an answer reasoning_route.
+        "packet_build_route": PACKET_BUILD_ROUTE_DETERMINISTIC,
         "egress": "none_preview",
         "cloud_ready": not blocked_reasons,
         "blocked_reasons": blocked_reasons,

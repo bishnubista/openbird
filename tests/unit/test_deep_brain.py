@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 from openbird import cli
 from openbird.config import Settings, reset_settings_cache
 from openbird.deep_brain import (
+    PACKET_BUILD_ROUTE_DETERMINISTIC,
     answer_deep_brain,
     build_deep_brain_messages,
     build_deep_brain_period_preview,
@@ -89,6 +90,7 @@ def test_preview_builds_locally_with_cloud_off_and_no_source_ids(tmp_path):
     )
 
     assert packet["route"] == "deep_brain.preview"
+    assert packet["packet_build_route"] == PACKET_BUILD_ROUTE_DETERMINISTIC
     assert packet["egress"] == "none_preview"
     assert packet["cloud_ready"] is False
     assert "OPENBIRD_ALLOW_CLOUD" in " ".join(packet["blocked_reasons"])
@@ -128,6 +130,7 @@ def test_period_preview_days_one_matches_existing_preview(tmp_path):
     )
 
     assert period == existing
+    assert period["packet_build_route"] == PACKET_BUILD_ROUTE_DETERMINISTIC
 
 
 def test_period_preview_compacts_days_and_keeps_oldest_day_grounded(tmp_path):
@@ -156,6 +159,7 @@ def test_period_preview_compacts_days_and_keeps_oldest_day_grounded(tmp_path):
     )
 
     assert packet["period"]["days"] == 2
+    assert packet["packet_build_route"] == PACKET_BUILD_ROUTE_DETERMINISTIC
     assert [item["local_date"] for item in packet["memory_summaries"]] == [
         "2026-06-10",
         "2026-06-11",
@@ -504,6 +508,8 @@ def test_deep_brain_ask_empty_packet_never_calls_model(tmp_path):
     assert result["answer"] == "I do not have enough Deep Brain packet evidence to answer that."
     assert result["confidence"] == "insufficient_evidence"
     assert result["grounded"] is False
+    assert packet["packet_build_route"] == PACKET_BUILD_ROUTE_DETERMINISTIC
+    assert packet["packet_build_route"] != result["reasoning_route"]
     assert result["egress"] == "none"
     assert result["citations"] == []
     assert provider.messages is None
@@ -531,9 +537,12 @@ def test_deep_brain_ask_remote_route_truth_with_both_gates(tmp_path):
 
     result = answer_deep_brain("productivity?", packet, provider, settings=settings)
 
+    assert packet["packet_build_route"] == PACKET_BUILD_ROUTE_DETERMINISTIC
+    assert packet["packet_build_route"] != result["reasoning_route"]
     assert result["reasoning_route"] == "cloud_reasoning_active"
     assert result["egress"] == "active_model_route"
     assert result["model"] == "stub-model"
+    assert f'"packet_build_route":"{PACKET_BUILD_ROUTE_DETERMINISTIC}"' in provider.messages[1]["content"]
 
 
 def test_deep_brain_ask_drops_hallucinated_citations_and_gates_answer(tmp_path):
@@ -637,6 +646,7 @@ def test_deep_brain_preview_cli_uses_maintenance_store_not_model_provider(monkey
     assert used_maintenance_store is True
     packet = json.loads(res.stdout)
     assert packet["route"] == "deep_brain.preview"
+    assert packet["packet_build_route"] == PACKET_BUILD_ROUTE_DETERMINISTIC
     assert packet["egress"] == "none_preview"
     assert packet["selected_sources"][0]["observation_id"] == "o1"
 

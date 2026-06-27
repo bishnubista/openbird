@@ -116,6 +116,7 @@ routes:
       - selected_source_app
       - selected_source_window_or_url
       - selected_source_timestamp
+      - packet_build_route
       - exclusion_counts
       - opt_in_gate_status
     storage: []
@@ -138,6 +139,7 @@ routes:
       - selected_source_app
       - selected_source_window_or_url
       - selected_source_timestamp
+      - packet_build_route
       - generated_answer
       - validated_citations
       - exclusion_counts
