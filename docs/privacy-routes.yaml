@@ -146,6 +146,7 @@ routes:
       warning: packet content leaves this machine when the active model route is remote
     enforcement:
       feature_requires: OPENBIRD_DEEP_BRAIN_ENABLED
+      note: Feature gate covers Deep Brain ask and productivity coaching.
     truth_surface:
       - cli.deep_brain_ask
       - cli.CLOUD_ACTIVE
@@ -176,6 +177,36 @@ routes:
       note: no provider is constructed; coaching packets are local read-time projections
     truth_surface:
       - cli.productivity
+
+  - id: productivity.coach
+    class: unknown
+    source: user question plus sanitized local productivity facts packet
+    captured_fields:
+      - user_question
+      - productivity_facts
+      - synthetic_citation_ids
+      - generated_coaching
+      - validated_citations_local_source_ids
+    forbidden_fields:
+      - captured_text
+      - raw_window_title
+      - raw_url
+      - raw_title
+      - source_ids_in_prompt
+      - observation_ids_in_prompt
+    storage: []
+    egress:
+      default: inherits_active_model_route
+      inherited_from:
+        - chat.local
+        - chat.remote
+      warning: sanitized productivity facts leave this machine when the active model route is remote
+    enforcement:
+      feature_requires: OPENBIRD_DEEP_BRAIN_ENABLED
+      note: Same frontier-reasoning gate as Deep Brain ask; cloud egress still requires OPENBIRD_ALLOW_CLOUD when the active LLM is remote.
+    truth_surface:
+      - cli.productivity_coach
+      - cli.CLOUD_ACTIVE
 
   - id: chat.remote
     class: unknown
