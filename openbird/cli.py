@@ -34,6 +34,7 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from openbird.capture.cli import register_capture_command
@@ -484,27 +485,19 @@ def day_memory_build(
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
 
-    from openbird.day_memory import EXTRACTOR_VERSION, build_day_memory, local_date_for_window
+    from openbird.day_memory import local_date_for_window
 
     start, end = _day_window(day)
     local_date = local_date_for_window(start)
     store = _store_maintenance()
     try:
-        rows = store.time_range_text(start, end, source=source_scope)
-        built = build_day_memory(
-            rows,
+        saved = store.ensure_day_memory(
+            local_date=local_date,
             start_ts=start,
             end_ts=end,
             day_offset=day,
             source_scope=source_scope,
-            gap_seconds=get_settings().session_gap_seconds,
-        )
-        saved = store.save_day_memory(
-            local_date=local_date,
-            source_scope=source_scope,
-            extractor_version=EXTRACTOR_VERSION,
-            payload=built.payload,
-            source_ids=built.source_ids,
+            force=True,
         )
     finally:
         store.close()
@@ -529,7 +522,7 @@ def day_memory_show(
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
-    """Show a previously built deterministic daily memory artifact."""
+    """Show a fresh deterministic daily memory artifact, building if needed."""
     if day < 0:
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
@@ -540,7 +533,14 @@ def day_memory_show(
     local_date = local_date_for_window(start)
     store = _store_maintenance()
     try:
-        saved = store.get_day_memory(local_date=local_date, source_scope=source_scope)
+        saved = store.ensure_day_memory(
+            local_date=local_date,
+            start_ts=start,
+            end_ts=_end,
+            day_offset=day,
+            source_scope=source_scope,
+            force=False,
+        )
     finally:
         store.close()
 
@@ -1028,20 +1028,34 @@ def chat(
         _console.print_json(json.dumps(result.to_public_dict()))
         raise typer.Exit(code=0)
 
-    if not result.grounded and result.answer:
+    if result.grounding == "ungrounded" and result.answer:
         # Surface the grounding gate up front so an ungrounded answer is never
         # mistaken for verified memory.
         _console.print("[yellow]⚠ ungrounded — no verified source for this answer[/]")
-    _console.print(result.answer or "[dim](no answer)[/]")
+    if result.answer:
+        _console.print(escape(result.answer))
+    else:
+        _console.print("[dim](no answer)[/]")
     if result.citations:
         _console.print("\n[bold]Sources[/]")
         for i, c in enumerate(result.citations, start=1):
             when = _fmt_ts(c.ts)
             where = " / ".join(p for p in (c.app, c.window) if p) or "unknown"
-            _console.print(f"  [cyan][{i}][/] {where} · {when}")
-            _console.print(f"      [dim]{c.snippet}[/]")
+            _console.print(f"  [cyan][{i}][/] {escape(where)} · {when}")
+            _console.print(f"      [dim]{escape(c.snippet)}[/]")
+    if result.derived_citations:
+        _console.print("\n[bold]Derived sources[/]")
+        for c in result.derived_citations:
+            _console.print(
+                f"  [cyan][{c.index}][/] {escape(c.label)} · "
+                f"{c.derived_from_total} source observation(s)"
+            )
+            _console.print(f"      [dim]{escape(c.snippet)}[/]")
     else:
-        _console.print("\n[dim]No citations (answer not grounded in a stored occurrence).[/]")
+        if not result.citations:
+            _console.print(
+                "\n[dim]No citations (answer not grounded in a stored occurrence).[/]"
+            )
 
 
 # --------------------------------------------------------------------------- #

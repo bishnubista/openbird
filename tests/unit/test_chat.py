@@ -60,6 +60,15 @@ class EchoCiteAllLLM:
         return {"answer": "Here is what I found.", "citations": ids}
 
 
+class BoomLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, *, json_schema=None):
+        self.calls += 1
+        raise AssertionError("provider must not be called")
+
+
 def _obs(obs_id: str, *, app=None, window=None, session_id=None, ts=1.0) -> Observation:
     return Observation(
         id=obs_id,
@@ -336,19 +345,15 @@ def test_schema_is_passed_to_provider():
     assert "citations" in llm.last_schema["properties"]
 
 
-def test_temporal_query_routes_to_time_range(mem_settings, fake_provider):
-    """"what did I do yesterday?" uses the observation time-range scan, not semantic.
-
-    The observations' text contains none of the query's words, so a semantic-only
-    path would not reliably select yesterday's entry — proving temporal routing.
-    """
+def test_temporal_query_routes_to_day_memory(mem_settings, fake_provider):
+    """"what did I do yesterday?" uses deterministic single-day memory."""
     import datetime as dt
 
     store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
     try:
         now = dt.datetime(2026, 6, 13, 15, 0, 0).timestamp()
         yday = dt.datetime(2026, 6, 12, 10, 0, 0).timestamp()
-        store.add_observation(
+        yobs = store.add_observation(
             "Reviewed the budget spreadsheet and emailed finance.",
             source="capture", app="Numbers", ts=yday,
         )
@@ -361,10 +366,12 @@ def test_temporal_query_routes_to_time_range(mem_settings, fake_provider):
         chatter._now = lambda: now  # deterministic "yesterday"
         result = chatter.answer("what did I do yesterday?")
 
-        assert result.grounded
-        assert len(result.used_hits) == 1  # only yesterday's observation is in window
-        assert result.citations[0].ts == yday
-        assert result.citations[0].observation_id is not None
+        assert result.grounding == "derived"
+        assert result.citations == []
+        assert result.derived_citations
+        assert result.memory_context["local_date"] == "2026-06-12"
+        assert result.memory_context["coverage"]["observations"] == 1
+        assert yobs.id in result.derived_citations[0].derived_from
     finally:
         store.close()
 
@@ -456,6 +463,113 @@ def test_explicit_window_hard_scopes_to_that_day(mem_settings, fake_provider):
         store.close()
 
 
+def test_broad_single_day_uses_deterministic_day_memory(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 13, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 13, 23, 59, 59).timestamp()
+        store.add_observation(
+            "Worked on https://github.com/bishnubista/openbird/pull/168 review",
+            source="capture",
+            app="com.google.Chrome",
+            window="feat(memory): add deterministic day memory CLI",
+            url="https://github.com/bishnubista/openbird/pull/168",
+            ts=start + 3600,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: end
+
+        result = chatter.answer("what did I work on today?", window=(start, end))
+
+        assert llm.calls == 0
+        assert result.grounding == "derived"
+        assert result.grounded is True
+        assert result.citations == []
+        assert result.derived_citations
+        assert result.memory_context["route"] == "local_deterministic"
+        assert "openbird" in result.answer.lower()
+    finally:
+        store.close()
+
+
+def test_empty_single_day_is_empty_not_ungrounded(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 13, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 13, 23, 59, 59).timestamp()
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: end
+
+        result = chatter.answer("summarize my day", window=(start, end))
+
+        assert llm.calls == 0
+        assert result.grounding == "empty"
+        assert result.grounded is False
+        assert result.derived_citations == []
+        assert "recorded evidence" in result.answer
+    finally:
+        store.close()
+
+
+def test_specific_single_day_keeps_occurrence_rag(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 13, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 13, 23, 59, 59).timestamp()
+        obs = store.add_observation(
+            "The rocket launch was delayed by weather.",
+            source="capture",
+            app="Notes",
+            window="Rocket notes",
+            ts=start + 3600,
+        )
+        llm = EchoCiteAllLLM()
+        chatter = RAG(store, llm)
+
+        result = chatter.answer("what about the rocket today?", window=(start, end))
+
+        assert llm.last_messages is not None
+        assert result.grounding == "occurrence"
+        assert result.derived_citations == []
+        assert result.citations[0].observation_id == obs.id
+    finally:
+        store.close()
+
+
+def test_multiday_broad_query_does_not_use_day_memory(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        now = dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+        store.add_observation(
+            "Reviewed release notes this week.",
+            source="capture",
+            app="Notes",
+            window="Release notes",
+            ts=now - 3600,
+        )
+        llm = EchoCiteAllLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: now
+
+        result = chatter.answer("what did I do this week?")
+
+        assert llm.last_messages is not None
+        assert result.grounding == "occurrence"
+        assert result.derived_citations == []
+    finally:
+        store.close()
+
+
 def test_explicit_window_overrides_temporal_phrase(mem_settings, fake_provider):
     """An explicit window wins over the query-phrase temporal detection.
 
@@ -472,16 +586,17 @@ def test_explicit_window_overrides_temporal_phrase(mem_settings, fake_provider):
         win_end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
         d12 = dt.datetime(2026, 6, 12, 9, 0, 0).timestamp()
         d13 = dt.datetime(2026, 6, 13, 9, 0, 0).timestamp()
-        store.add_observation("Twelfth-day note.", source="capture", app="Notes", ts=d12)
+        obs12 = store.add_observation("Twelfth-day note.", source="capture", app="Notes", ts=d12)
         store.add_observation("Thirteenth-day note.", source="capture", app="Notes", ts=d13)
 
         chatter = RAG(store, EchoCiteAllLLM())
         chatter._now = lambda: dt.datetime(2026, 6, 14, 12, 0, 0).timestamp()
         result = chatter.answer("what did I do yesterday?", window=(win_start, win_end))
 
-        assert result.grounded
-        assert len(result.used_hits) == 1
-        assert result.citations[0].ts == d12  # explicit window, not phrase "yesterday"
+        assert result.grounding == "derived"
+        assert result.memory_context["local_date"] == "2026-06-12"
+        assert result.memory_context["coverage"]["observations"] == 1
+        assert obs12.id in result.derived_citations[0].derived_from
     finally:
         store.close()
 
@@ -665,6 +780,7 @@ def test_answer_result_to_public_dict_shape():
     d = result.to_public_dict()
     assert d["answer"] == "Storage uses SQLite."
     assert d["grounded"] is True
+    assert d["grounding"] == "occurrence"
     assert d["citations"] == [
         {
             "index": 1,
@@ -676,13 +792,22 @@ def test_answer_result_to_public_dict_shape():
             "snippet": "store in sqlite",
         }
     ]
+    assert d["derived_citations"] == []
+    assert d["memory_context"] is None
 
 
 def test_answer_result_to_public_dict_empty():
     from openbird.chat.rag import AnswerResult
 
     d = AnswerResult(answer="", citations=[], grounded=False).to_public_dict()
-    assert d == {"answer": "", "grounded": False, "citations": []}
+    assert d == {
+        "answer": "",
+        "grounded": False,
+        "grounding": "none",
+        "citations": [],
+        "derived_citations": [],
+        "memory_context": None,
+    }
 
 
 def test_chat_cli_json_output(monkeypatch):

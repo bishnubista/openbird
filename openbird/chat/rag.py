@@ -35,7 +35,7 @@ from openbird.chat.rag_debug import (
 )
 from openbird.prompts import FenceSpec, PromptSpec, render
 from openbird.prompts import registry as _prompt_registry
-from openbird.types import Citation, SearchHit
+from openbird.types import Citation, DerivedCitation, SearchHit
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +400,21 @@ class AnswerResult:
     answer: str
     citations: list[Citation] = field(default_factory=list)
     used_hits: list[SearchHit] = field(default_factory=list)
-    grounded: bool = False  # True iff >=1 validated citation backs the answer
+    grounded: bool | None = None
+    grounding: str = "none"
+    derived_citations: list[DerivedCitation] = field(default_factory=list)
+    memory_context: dict | None = None
+
+    def __post_init__(self) -> None:
+        if self.grounding == "none":
+            if self.derived_citations:
+                self.grounding = "derived"
+            elif self.citations:
+                self.grounding = "occurrence"
+            elif self.grounded is True:
+                self.grounding = "occurrence"
+        if self.grounded is None:
+            self.grounded = self.grounding in {"occurrence", "derived", "mixed"}
 
     def __str__(self) -> str:  # pragma: no cover - convenience only
         return self.answer
@@ -411,7 +425,8 @@ class AnswerResult:
         + ids) so the UI can render and link each source."""
         return {
             "answer": self.answer,
-            "grounded": self.grounded,
+            "grounded": bool(self.grounded),
+            "grounding": self.grounding,
             "citations": [
                 {
                     "index": i,
@@ -424,6 +439,19 @@ class AnswerResult:
                 }
                 for i, c in enumerate(self.citations, start=1)
             ],
+            "derived_citations": [
+                {
+                    "index": c.index,
+                    "source_id": c.source_id,
+                    "type": c.type,
+                    "label": c.label,
+                    "snippet": c.snippet,
+                    "derived_from": c.derived_from,
+                    "derived_from_total": c.derived_from_total,
+                }
+                for c in self.derived_citations
+            ],
+            "memory_context": self.memory_context,
         }
 
 
@@ -503,6 +531,10 @@ class RAG:
                     "explicit day scope requires a store exposing time_range_text()"
                 )
             if self._is_synthesis_query(query):
+                if self._can_answer_from_day_memory(window):
+                    day_result = self._answer_day_memory(query, window)
+                    if day_result is not None:
+                        return day_result
                 return self._answer_temporal(query, window, route="explicit_window")
             return self._answer_scoped_specific(
                 query, window, route="explicit_window_specific"
@@ -532,6 +564,10 @@ class RAG:
                 else:
                     route = "intent_synthesis"
             if is_synthesis:
+                if self._can_answer_from_day_memory(intent_window):
+                    day_result = self._answer_day_memory(query, intent_window)
+                    if day_result is not None:
+                        return day_result
                 return self._answer_temporal(query, intent_window, route)
             return self._answer_scoped_specific(query, intent_window, route)
 
@@ -573,7 +609,7 @@ class RAG:
             answer=answer_text,
             citations=citations,
             used_hits=used_hits,
-            grounded=grounded,
+            grounding="occurrence" if grounded else "ungrounded",
         )
 
     # -- temporal / activity path ---------------------------------------------
@@ -657,7 +693,7 @@ class RAG:
             )
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
-                citations=[], used_hits=[], grounded=False,
+                citations=[], used_hits=[], grounding="empty",
             )
 
         if not deduped:
@@ -667,7 +703,7 @@ class RAG:
             )
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
-                citations=[], used_hits=[], grounded=False,
+                citations=[], used_hits=[], grounding="empty",
             )
 
         # Selection: `rows` is ORDER BY ts ASC, so taking the first ``max_context``
@@ -716,8 +752,161 @@ class RAG:
             answer_text = _UNGROUNDED_MESSAGE
         return AnswerResult(
             answer=answer_text, citations=citations,
-            used_hits=[i.hit for i in context], grounded=grounded,
+            used_hits=[i.hit for i in context],
+            grounding="occurrence" if grounded else "ungrounded",
         )
+
+    def _can_answer_from_day_memory(self, window: tuple[float, float]) -> bool:
+        if not hasattr(self.store, "ensure_day_memory"):
+            return False
+        start, end = window
+        start_dt = _dt.datetime.fromtimestamp(start)
+        end_dt = _dt.datetime.fromtimestamp(end)
+        day_start = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + _dt.timedelta(days=1) - _dt.timedelta(microseconds=1)
+        return start_dt == day_start and start_dt.date() == end_dt.date() and end <= day_end.timestamp()
+
+    def _answer_day_memory(
+        self, query: str, window: tuple[float, float]
+    ) -> AnswerResult | None:
+        del query  # deterministic day-memory answers depend only on the day window.
+        from openbird.day_memory import local_date_for_window
+
+        start, end = window
+        local_date = local_date_for_window(start)
+        today = _dt.datetime.fromtimestamp(self._now()).date()
+        day_date = _dt.datetime.fromtimestamp(start).date()
+        day_offset = max(0, (today - day_date).days)
+        saved = self.store.ensure_day_memory(  # type: ignore[attr-defined]
+            local_date=local_date,
+            start_ts=start,
+            end_ts=end,
+            day_offset=day_offset,
+            source_scope="capture",
+            force=False,
+        )
+        payload = saved.get("payload", {})
+        memory_context = self._day_memory_context(saved)
+        coverage = payload.get("coverage", {})
+        observations = int(coverage.get("observations") or 0)
+        if observations <= 0:
+            return AnswerResult(
+                answer=f"I do not have recorded evidence for {local_date}.",
+                citations=[],
+                derived_citations=[],
+                grounding="empty",
+                memory_context=memory_context,
+            )
+
+        derived = self._day_memory_derived_citations(payload)
+        if not derived:
+            return None
+        return AnswerResult(
+            answer=self._render_day_memory_answer(payload),
+            citations=[],
+            derived_citations=derived,
+            grounding="derived",
+            memory_context=memory_context,
+        )
+
+    @staticmethod
+    def _day_memory_context(saved: dict) -> dict:
+        payload = saved.get("payload", {})
+        coverage = payload.get("coverage", {})
+        return {
+            "type": "day_memory",
+            "route": "local_deterministic",
+            "local_date": saved.get("local_date") or payload.get("local_date"),
+            "source_scope": saved.get("source_scope") or payload.get("source_scope"),
+            "as_of": payload.get("as_of"),
+            "source_fingerprint": payload.get("source_fingerprint"),
+            "coverage": {
+                "observations": coverage.get("observations", 0),
+                "sessions": coverage.get("sessions", 0),
+                "apps": coverage.get("apps", 0),
+            },
+            "extractor_version": saved.get("extractor_version") or payload.get("extractor_version"),
+        }
+
+    @staticmethod
+    def _day_memory_derived_citations(payload: dict) -> list[DerivedCitation]:
+        local_date = str(payload.get("local_date") or "day")
+        citations: list[DerivedCitation] = []
+
+        def add(label: str, snippet: str, source_ids: list[str], total: int | None = None) -> None:
+            if not source_ids:
+                return
+            index = len(citations) + 1
+            citations.append(
+                DerivedCitation(
+                    index=index,
+                    source_id=f"D{local_date.replace('-', '')}-{index}",
+                    label=label,
+                    snippet=snippet,
+                    derived_from=sorted(set(source_ids))[:12],
+                    derived_from_total=total if total is not None else len(set(source_ids)),
+                )
+            )
+
+        coverage = payload.get("coverage", {})
+        metrics = payload.get("metrics", {})
+        source_ids = list(coverage.get("source_ids") or [])
+        active = metrics.get("active_seconds", 0)
+        add(
+            "Daily metrics",
+            f"{coverage.get('observations', 0)} observations, "
+            f"{coverage.get('sessions', 0)} sessions, {round(float(active) / 60, 1)} minutes active",
+            source_ids,
+            len(source_ids),
+        )
+        for stream in payload.get("workstreams", [])[:4]:
+            ids = list(stream.get("source_ids") or [])
+            add(
+                f"Workstream: {stream.get('label', 'unknown')}",
+                f"{stream.get('kind', 'workstream')} cue in {stream.get('category', 'unknown')} "
+                f"across {stream.get('session_count', 0)} session(s)",
+                ids,
+                int(stream.get("source_count") or len(ids)),
+            )
+        for loop in payload.get("open_loops", [])[:4]:
+            ids = list(loop.get("source_ids") or [])
+            add(
+                f"Open-loop cue: {loop.get('cue', 'cue')}",
+                str(loop.get("title") or loop.get("cue") or "detected cue"),
+                ids,
+                int(loop.get("source_count") or len(ids)),
+            )
+        return citations
+
+    @staticmethod
+    def _render_day_memory_answer(payload: dict) -> str:
+        coverage = payload.get("coverage", {})
+        metrics = payload.get("metrics", {})
+        local_date = payload.get("local_date", "the selected day")
+        active_minutes = round(float(metrics.get("active_seconds") or 0.0) / 60)
+        pieces = [
+            f"For {local_date}, I found {coverage.get('observations', 0)} recorded observations "
+            f"across {coverage.get('sessions', 0)} session(s)"
+        ]
+        if active_minutes:
+            pieces[-1] += f", with about {active_minutes} recorded active minute(s)."
+        else:
+            pieces[-1] += "."
+
+        streams = payload.get("workstreams", [])[:3]
+        if streams:
+            labels = ", ".join(str(s.get("label", "unknown")) for s in streams)
+            pieces.append(f"Main detected workstreams: {labels}.")
+        categories = metrics.get("time_by_category") or {}
+        if categories:
+            top = sorted(categories.items(), key=lambda kv: (-float(kv[1]), kv[0]))[:3]
+            labels = ", ".join(f"{name} ({round(float(seconds) / 60)}m)" for name, seconds in top)
+            pieces.append(f"Recorded time by category: {labels}.")
+        loops = payload.get("open_loops", [])[:3]
+        if loops:
+            labels = ", ".join(str(item.get("title") or item.get("cue")) for item in loops)
+            pieces.append(f"Detected follow-up/open-loop cues: {labels}.")
+        return " ".join(pieces)
 
     def _answer_scoped_specific(
         self, query: str, window: tuple[float, float], route: str
@@ -730,7 +919,7 @@ class RAG:
             )
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
-                citations=[], used_hits=[], grounded=False,
+                citations=[], used_hits=[], grounding="empty",
             )
         if not deduped:
             emit_retrieval_empty(
@@ -739,7 +928,7 @@ class RAG:
             )
             return AnswerResult(
                 answer="I don't have any recorded activity in that time window.",
-                citations=[], used_hits=[], grounded=False,
+                citations=[], used_hits=[], grounding="empty",
             )
 
         chosen = self._select_specific_rows(query, deduped)
@@ -749,7 +938,7 @@ class RAG:
                 answer="I don't have anything in memory about that.",
                 citations=[],
                 used_hits=[],
-                grounded=False,
+                grounding="empty",
             )
 
         messages = self._build_messages(query, context)
@@ -778,7 +967,8 @@ class RAG:
             answer_text = _UNGROUNDED_MESSAGE
         return AnswerResult(
             answer=answer_text, citations=citations,
-            used_hits=[i.hit for i in context], grounded=grounded,
+            used_hits=[i.hit for i in context],
+            grounding="occurrence" if grounded else "ungrounded",
         )
 
     def _prepared_window_rows(

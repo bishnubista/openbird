@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import sqlite3
 import struct
 import time
 import uuid
@@ -808,8 +809,115 @@ class MemoryStore:
             raise
         return self.get_day_memory(local_date=local_date, source_scope=source_scope) or {}
 
+    def ensure_day_memory(
+        self,
+        *,
+        local_date: str,
+        start_ts: float,
+        end_ts: float,
+        day_offset: int,
+        source_scope: str = "capture",
+        force: bool = False,
+    ) -> dict:
+        """Return a fresh persisted day memory for ``local_date``.
+
+        This is the safe reader entrypoint. It compares the stored extractor
+        version and source fingerprint against the current source rows under a
+        ``BEGIN IMMEDIATE`` write lock, so concurrent readers rebuilding today's
+        open day converge on one row rather than racing a stale cache.
+        """
+        from openbird.day_memory import EXTRACTOR_VERSION, build_day_memory
+
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                self._begin()
+                rows = self.time_range_text(start_ts, end_ts, source=source_scope)
+                fingerprint = self.day_memory_source_fingerprint_from_rows(rows)
+                existing = self._get_day_memory_unchecked(
+                    local_date=local_date, source_scope=source_scope
+                )
+                if (
+                    not force
+                    and existing is not None
+                    and existing["extractor_version"] == EXTRACTOR_VERSION
+                    and existing["payload"].get("source_fingerprint") == fingerprint
+                ):
+                    self.conn.commit()
+                    return existing
+
+                built = build_day_memory(
+                    rows,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    day_offset=day_offset,
+                    source_scope=source_scope,
+                    gap_seconds=self.settings.session_gap_seconds,
+                    source_fingerprint=fingerprint,
+                    as_of=min(end_ts, time.time()),
+                )
+                day_memory_id = uuid.uuid4().hex
+                generated = time.time()
+                payload_json = json.dumps(
+                    built.payload, ensure_ascii=False, sort_keys=True
+                )
+                unique_source_ids = sorted(set(built.source_ids))
+                self.conn.execute(
+                    "DELETE FROM day_memories WHERE local_date = ? AND source_scope = ?",
+                    (local_date, source_scope),
+                )
+                self.conn.execute(
+                    "INSERT INTO day_memories("
+                    "id, local_date, source_scope, extractor_version, generated_at, "
+                    "payload_json, source_count"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        day_memory_id,
+                        local_date,
+                        source_scope,
+                        EXTRACTOR_VERSION,
+                        generated,
+                        payload_json,
+                        len(unique_source_ids),
+                    ),
+                )
+                self.conn.executemany(
+                    "INSERT INTO day_memory_sources(day_memory_id, observation_id) "
+                    "VALUES (?, ?)",
+                    [(day_memory_id, obs_id) for obs_id in unique_source_ids],
+                )
+                self.conn.commit()
+                return self._get_day_memory_unchecked(
+                    local_date=local_date, source_scope=source_scope
+                ) or {}
+            except (sqlite3.OperationalError, sqlite3.IntegrityError):
+                self.conn.rollback()
+                if attempt + 1 >= attempts:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+            except Exception:
+                self.conn.rollback()
+                raise
+        raise RuntimeError("failed to ensure day memory")
+
+    @staticmethod
+    def day_memory_source_fingerprint_from_rows(
+        rows: list[tuple[Observation, str]]
+    ) -> dict:
+        from openbird.day_memory import source_fingerprint_for_rows
+
+        return source_fingerprint_for_rows(rows)
+
     def get_day_memory(self, *, local_date: str, source_scope: str = "capture") -> dict | None:
         """Return a stored day memory, or ``None`` when it has not been built."""
+        return self._get_day_memory_unchecked(
+            local_date=local_date, source_scope=source_scope
+        )
+
+    def _get_day_memory_unchecked(
+        self, *, local_date: str, source_scope: str = "capture"
+    ) -> dict | None:
+        """Return a stored day memory without checking source freshness."""
         row = self.conn.execute(
             "SELECT * FROM day_memories WHERE local_date = ? AND source_scope = ?",
             (local_date, source_scope),
