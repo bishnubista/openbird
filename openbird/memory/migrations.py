@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -92,6 +92,44 @@ def _apply_v2_day_memories(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _apply_v3_reasoning_send_ledger(conn: sqlite3.Connection) -> None:
+    """Add redacted remote-reasoning send-attempt ledger metadata."""
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS reasoning_send_ledger (
+            id                    TEXT PRIMARY KEY,
+            created_at            REAL NOT NULL,
+            feature               TEXT NOT NULL,
+            packet_route          TEXT,
+            reasoning_route       TEXT,
+            egress                TEXT NOT NULL,
+            route_class           TEXT NOT NULL,
+            provider_family       TEXT NOT NULL,
+            model                 TEXT,
+            packet_hash           TEXT,
+            packet_bytes          INTEGER,
+            selected_source_count INTEGER NOT NULL DEFAULT 0,
+            citation_count        INTEGER NOT NULL DEFAULT 0,
+            excluded_observations INTEGER NOT NULL DEFAULT 0,
+            excluded_by_json      TEXT NOT NULL DEFAULT '{}',
+            outcome               TEXT NOT NULL,
+            error_kind            TEXT,
+            deletion_caveat       TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_reasoning_send_ledger_created_at
+            ON reasoning_send_ledger(created_at)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_reasoning_send_ledger_feature
+            ON reasoning_send_ledger(feature, created_at)
+        """,
+    ]
+    for statement in statements:
+        conn.execute(statement)
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
 # so migrations here only ever upgrade an existing DB from one version to the
 # next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
@@ -101,6 +139,11 @@ MIGRATIONS: list[Migration] = [
         version=2,
         description="add purge-safe deterministic day memories",
         apply=_apply_v2_day_memories,
+    ),
+    Migration(
+        version=3,
+        description="add redacted reasoning send ledger",
+        apply=_apply_v3_reasoning_send_ledger,
     ),
 ]
 

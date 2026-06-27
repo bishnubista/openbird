@@ -109,3 +109,33 @@ BEGIN
         WHERE observation_id = OLD.id
     );
 END;
+
+-- Redacted audit metadata for remote reasoning packet send attempts. This table
+-- intentionally stores counts and a packet-content hash only — never raw
+-- question text, answer text, packet JSON, snippets, window titles, URLs,
+-- observation IDs, citation IDs, or configured exclusion names.
+CREATE TABLE IF NOT EXISTS reasoning_send_ledger (
+    id                    TEXT PRIMARY KEY,
+    created_at            REAL NOT NULL,
+    feature               TEXT NOT NULL,
+    packet_route          TEXT,
+    reasoning_route       TEXT,
+    egress                TEXT NOT NULL,
+    route_class           TEXT NOT NULL,
+    provider_family       TEXT NOT NULL,
+    model                 TEXT,
+    packet_hash           TEXT,
+    packet_bytes          INTEGER,
+    selected_source_count INTEGER NOT NULL DEFAULT 0,
+    citation_count        INTEGER NOT NULL DEFAULT 0,
+    excluded_observations INTEGER NOT NULL DEFAULT 0,
+    excluded_by_json      TEXT NOT NULL DEFAULT '{}',
+    outcome               TEXT NOT NULL,
+    error_kind            TEXT,
+    deletion_caveat       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reasoning_send_ledger_created_at
+    ON reasoning_send_ledger(created_at);
+CREATE INDEX IF NOT EXISTS idx_reasoning_send_ledger_feature
+    ON reasoning_send_ledger(feature, created_at);

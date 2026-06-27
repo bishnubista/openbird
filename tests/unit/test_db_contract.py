@@ -7,12 +7,12 @@ behaviors that must stay reliable in production.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sqlite3
 import sys
 import threading
 import time
-import types
 
 import pytest
 
@@ -223,7 +223,7 @@ def test_fresh_store_ships_session_index(tmp_path):
         s.close()
 
 
-def test_fresh_store_ships_day_memory_tables_and_before_delete_trigger(tmp_path):
+def test_fresh_store_ships_day_memory_and_reasoning_ledger_tables(tmp_path):
     db = str(tmp_path / "daymem-schema.db")
     s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
                     provider=FakeProvider(embed_dim=64))
@@ -234,7 +234,11 @@ def test_fresh_store_ships_day_memory_tables_and_before_delete_trigger(tmp_path)
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        assert {"day_memories", "day_memory_sources"} <= tables
+        assert {
+            "day_memories",
+            "day_memory_sources",
+            "reasoning_send_ledger",
+        } <= tables
         trigger = s.conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='trigger' "
             "AND name='trg_day_memory_observation_delete'"
@@ -537,6 +541,51 @@ def test_real_v1_db_migrates_to_v2_day_memory_shape(tmp_path):
         conn.close()
 
 
+def test_real_v2_db_migrates_to_v3_reasoning_send_ledger_shape(tmp_path):
+    """A v2-stamped DB gets the v3 redacted reasoning-send ledger."""
+    conn = _make_v1_shaped_db(tmp_path / "real_v2_to_v3.db")
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_reasoning_send_ledger_feature")
+        conn.execute("DROP INDEX IF EXISTS idx_reasoning_send_ledger_created_at")
+        conn.execute("DROP TABLE IF EXISTS reasoning_send_ledger")
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='reasoning_send_ledger'"
+        ).fetchone()
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='reasoning_send_ledger'"
+            ).fetchall()
+        }
+        assert {
+            "idx_reasoning_send_ledger_feature",
+            "idx_reasoning_send_ledger_created_at",
+        }.issubset(indexes)
+        cols = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(reasoning_send_ledger)"
+            ).fetchall()
+        }
+        assert {
+            "packet_hash",
+            "packet_bytes",
+            "citation_count",
+            "excluded_by_json",
+            "outcome",
+            "error_kind",
+        }.issubset(cols)
+    finally:
+        conn.close()
+
+
 def test_newer_than_supported_db_is_refused(tmp_path):
     """A DB stamped NEWER than this build must RAISE, not silently corrupt."""
     conn = sqlite3.connect(tmp_path / "future.db")
@@ -665,6 +714,122 @@ def test_delete_leaves_no_orphans_and_integrity_ok(tmp_path):
         assert _count_orphans(s.conn) == 0
         ic = s.conn.execute("PRAGMA integrity_check").fetchone()
         assert next(iter(ic.values())) == "ok"
+    finally:
+        s.close()
+
+
+def test_full_purge_deletes_reasoning_send_ledger(tmp_path):
+    db = str(tmp_path / "ledger-purge.db")
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    s = MemoryStore(db_path=db, settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        s.add_observation("packet source", source="capture", ts=1.0)
+        s.record_reasoning_send(
+            feature="deep_brain.ask",
+            packet_route="deep_brain.preview",
+            reasoning_route="cloud_reasoning_active",
+            egress="active_model_route",
+            route_class="third-party-cloud",
+            provider_family="openai",
+            model="gpt-5.5",
+            packet_hash="abc123",
+            packet_bytes=123,
+            selected_source_count=2,
+            citation_count=1,
+            excluded_observations=3,
+            excluded_by={"source": 3, "capture": 99, "observation_id": -2},
+            outcome="success",
+        )
+        rows = s.list_reasoning_send_ledger()
+        assert len(rows) == 1
+        assert rows[0]["excluded_by"] == {"source": 3}
+
+        s.delete(all=True)
+
+        assert s.list_reasoning_send_ledger() == []
+    finally:
+        s.close()
+
+
+def test_selective_delete_keeps_redacted_reasoning_send_ledger(tmp_path):
+    db = str(tmp_path / "ledger-selective-delete.db")
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    s = MemoryStore(db_path=db, settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        s.add_observation("old packet source", source="capture", ts=1.0)
+        s.add_observation("new packet source", source="capture", ts=10.0)
+        s.record_reasoning_send(
+            feature="deep_brain.ask",
+            packet_route="deep_brain.preview",
+            reasoning_route="cloud_reasoning_active",
+            egress="active_model_route",
+            route_class="third-party-cloud",
+            provider_family="openai",
+            model="gpt-5.5",
+            packet_hash="abc123",
+            packet_bytes=123,
+            selected_source_count=2,
+            citation_count=1,
+            excluded_observations=0,
+            excluded_by={},
+            outcome="success",
+        )
+
+        s.delete(before_ts=5.0)
+
+        rows = s.list_reasoning_send_ledger()
+        assert len(rows) == 1
+        assert rows[0]["feature"] == "deep_brain.ask"
+        assert rows[0]["packet_hash"] == "abc123"
+    finally:
+        s.close()
+
+
+def test_reasoning_send_ledger_sanitizes_error_kind(tmp_path):
+    db = str(tmp_path / "ledger-error-kind.db")
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    s = MemoryStore(db_path=db, settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        safe = s.record_reasoning_send(
+            feature="deep_brain.ask",
+            packet_route="deep_brain.preview",
+            reasoning_route="cloud_reasoning_active",
+            egress="active_model_route",
+            route_class="third-party-cloud",
+            provider_family="openai",
+            model="gpt-5.5",
+            packet_hash="abc123",
+            packet_bytes=123,
+            selected_source_count=2,
+            citation_count=1,
+            excluded_observations=0,
+            excluded_by={},
+            outcome="error",
+            error_kind="RuntimeError",
+        )
+        redacted = s.record_reasoning_send(
+            feature="deep_brain.ask",
+            packet_route="deep_brain.preview",
+            reasoning_route="cloud_reasoning_active",
+            egress="active_model_route",
+            route_class="third-party-cloud",
+            provider_family="openai",
+            model="gpt-5.5",
+            packet_hash="def456",
+            packet_bytes=456,
+            selected_source_count=2,
+            citation_count=1,
+            excluded_observations=0,
+            excluded_by={},
+            outcome="error",
+            error_kind="RuntimeError: secret provider text",
+        )
+
+        assert safe["error_kind"] == "RuntimeError"
+        assert redacted["error_kind"] == "error"
+        assert "secret provider text" not in json.dumps(
+            s.list_reasoning_send_ledger(), sort_keys=True
+        )
     finally:
         s.close()
 

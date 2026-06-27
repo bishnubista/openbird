@@ -205,7 +205,18 @@ routes:
       - validated_citations
       - exclusion_counts
       - exclusion_metadata
-    storage: []
+    storage:
+      - sqlite.reasoning_send_ledger_metadata
+    forbidden_fields:
+      - ledger_raw_question
+      - ledger_generated_answer
+      - ledger_packet_json
+      - ledger_snippets
+      - ledger_observation_ids
+      - ledger_citation_ids
+      - ledger_configured_exclusion_names
+      - ledger_source_app_names
+      - ledger_url_or_window_title_metadata
     egress:
       default: inherits_active_model_route
       inherited_from:
@@ -241,7 +252,18 @@ routes:
       - validated_citations
       - exclusion_counts
       - exclusion_metadata
-    storage: []
+    storage:
+      - sqlite.reasoning_send_ledger_metadata
+    forbidden_fields:
+      - ledger_raw_question
+      - ledger_generated_briefing
+      - ledger_packet_json
+      - ledger_snippets
+      - ledger_observation_ids
+      - ledger_citation_ids
+      - ledger_configured_exclusion_names
+      - ledger_source_app_names
+      - ledger_url_or_window_title_metadata
     egress:
       default: inherits_active_model_route
       inherited_from:
@@ -300,7 +322,16 @@ routes:
       - raw_title
       - source_ids_in_prompt
       - observation_ids_in_prompt
-    storage: []
+      - ledger_raw_question
+      - ledger_generated_coaching
+      - ledger_packet_json
+      - ledger_observation_ids
+      - ledger_citation_ids
+      - ledger_configured_exclusion_names
+      - ledger_source_app_names
+      - ledger_url_or_window_title_metadata
+    storage:
+      - sqlite.reasoning_send_ledger_metadata
     egress:
       default: inherits_active_model_route
       inherited_from:

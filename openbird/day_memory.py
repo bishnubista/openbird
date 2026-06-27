@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from openbird.types import Observation
+from openbird.reasoning_ledger import packet_payload_audit
 
 EXTRACTOR_VERSION = "day-memory-v5"
 _UNGROUNDED_PRODUCTIVITY_COACH_ANSWER = (
@@ -419,11 +420,20 @@ def build_productivity_coach_messages(
     question: str, packet: dict
 ) -> list[dict[str, str]]:
     """Build the fenced productivity coaching prompt over local facts."""
+    return build_productivity_coach_messages_from_packet_json(
+        question, productivity_coach_packet_json_for_model(packet)
+    )
+
+
+def build_productivity_coach_messages_from_packet_json(
+    question: str, packet_json: str
+) -> list[dict[str, str]]:
+    """Build the fenced productivity coaching prompt over canonical packet JSON."""
     from openbird.prompts import registry as _prompt_registry
 
     _prompt_registry.ensure_loaded()
     fence = _prompt_registry.get("rag").fence
-    packet_json = fence.neutralize(productivity_coach_packet_json_for_model(packet))
+    packet_json = fence.neutralize(packet_json)
     return [
         {
             "role": "system",
@@ -451,11 +461,12 @@ def answer_productivity_coach(
     provider,
     *,
     settings,
+    packet: dict | None = None,
 ) -> dict:
     """Answer a coaching question from local productivity facts."""
     from openbird.llm.provider import classify_models
 
-    packet = build_productivity_coach_packet(report)
+    packet = packet or build_productivity_coach_packet(report)
     blocked = productivity_coach_blocked_reasons(settings)
     if "exclusions" not in packet:
         blocked.append("productivity coaching packet was not prepared with exclusions")
@@ -488,7 +499,8 @@ def answer_productivity_coach(
             "exclusions": packet.get("exclusions", {}),
         }
 
-    messages = build_productivity_coach_messages(question, packet)
+    packet_json = productivity_coach_packet_json_for_model(packet)
+    messages = build_productivity_coach_messages_from_packet_json(question, packet_json)
     raw = provider.complete(messages, json_schema=PRODUCTIVITY_COACH_RESPONSE_SCHEMA)
     parsed = raw if isinstance(raw, dict) else {}
     answer = str(parsed.get("answer") or "").strip()
@@ -500,6 +512,11 @@ def answer_productivity_coach(
         citations = []
 
     remote_llm = classify_models(settings).get("llm")
+    audit = packet_payload_audit(
+        packet_json,
+        selected_source_count=0,
+        exclusions=packet.get("exclusions"),
+    )
     return {
         "ok": True,
         "question": question,
@@ -514,6 +531,11 @@ def answer_productivity_coach(
         "local_date": report.get("local_date"),
         "source_scope": report.get("source_scope"),
         "exclusions": packet.get("exclusions", {}),
+        "packet_hash": audit["packet_hash"],
+        "packet_bytes": audit["packet_bytes"],
+        "selected_source_count": audit["selected_source_count"],
+        "excluded_observations": audit["excluded_observations"],
+        "excluded_by": audit["excluded_by"],
     }
 
 

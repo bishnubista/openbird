@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import os
 import sys
 from dataclasses import replace
@@ -70,6 +71,7 @@ app.add_typer(prompts_app, name="prompts")
 
 _console = Console()
 _err_console = Console(stderr=True)
+_log = logging.getLogger("openbird.cli")
 
 
 # --------------------------------------------------------------------------- #
@@ -389,6 +391,150 @@ def _has_cli_cloud_exclusions(
     return bool(exclude_app or exclude_source or exclude_observation_id)
 
 
+def _packet_audit_from_deep_brain_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    from openbird.deep_brain import packet_json_for_model
+    from openbird.reasoning_ledger import packet_payload_audit
+
+    return packet_payload_audit(
+        packet_json_for_model(packet),
+        selected_source_count=len(packet.get("selected_sources") or []),
+        exclusions=packet.get("exclusions"),
+    )
+
+
+def _packet_audit_from_productivity_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    from openbird.day_memory import productivity_coach_packet_json_for_model
+    from openbird.reasoning_ledger import packet_payload_audit
+
+    return packet_payload_audit(
+        productivity_coach_packet_json_for_model(packet),
+        selected_source_count=0,
+        exclusions=packet.get("exclusions"),
+    )
+
+
+def _safe_packet_audit_from_deep_brain_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _packet_audit_from_deep_brain_packet(packet)
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive audit path
+        _log.info("reasoning_packet_audit_skipped reason=%s", type(exc).__name__)
+        return {}
+
+
+def _safe_packet_audit_from_productivity_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _packet_audit_from_productivity_packet(packet)
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive audit path
+        _log.info("reasoning_packet_audit_skipped reason=%s", type(exc).__name__)
+        return {}
+
+
+def _record_reasoning_send_success(
+    *, feature: str, settings, result: dict[str, Any]
+) -> None:
+    try:
+        if result.get("egress") != "active_model_route":
+            return
+        _record_reasoning_send(
+            feature=feature,
+            settings=settings,
+            packet_route=result.get("packet_route"),
+            reasoning_route=result.get("reasoning_route"),
+            egress="active_model_route",
+            model=result.get("model"),
+            packet_hash=result.get("packet_hash"),
+            packet_bytes=result.get("packet_bytes"),
+            selected_source_count=int(result.get("selected_source_count") or 0),
+            citation_count=len(result.get("citations") or []),
+            excluded_observations=int(result.get("excluded_observations") or 0),
+            excluded_by=result.get("excluded_by") or {},
+            outcome="success",
+        )
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive best-effort audit
+        _log.info("reasoning_send_ledger_skipped reason=%s", type(exc).__name__)
+
+
+def _record_reasoning_send_error(
+    *,
+    feature: str,
+    settings,
+    packet_route: str | None,
+    packet_audit: dict[str, Any] | None,
+    error: BaseException,
+) -> None:
+    try:
+        from openbird.llm.provider import classify_models
+
+        remote_model = classify_models(settings).get("llm")
+        if not remote_model:
+            return
+        audit = packet_audit or {}
+        _record_reasoning_send(
+            feature=feature,
+            settings=settings,
+            packet_route=packet_route,
+            reasoning_route="cloud_reasoning_active",
+            egress="active_model_route",
+            model=remote_model,
+            packet_hash=audit.get("packet_hash"),
+            packet_bytes=audit.get("packet_bytes"),
+            selected_source_count=int(audit.get("selected_source_count") or 0),
+            citation_count=0,
+            excluded_observations=int(audit.get("excluded_observations") or 0),
+            excluded_by=audit.get("excluded_by") or {},
+            outcome="error",
+            error_kind=type(error).__name__,
+        )
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive best-effort audit
+        _log.info("reasoning_send_ledger_skipped reason=%s", type(exc).__name__)
+
+
+def _record_reasoning_send(
+    *,
+    feature: str,
+    settings,
+    packet_route: str | None,
+    reasoning_route: str | None,
+    egress: str,
+    model: str | None,
+    packet_hash: str | None,
+    packet_bytes: int | None,
+    selected_source_count: int,
+    citation_count: int,
+    excluded_observations: int,
+    excluded_by: dict[str, int],
+    outcome: str,
+    error_kind: str | None = None,
+) -> None:
+    """Best-effort redacted ledger write; never mask the command result."""
+    try:
+        from openbird.reasoning_ledger import advisory_route_class, provider_family
+
+        store = _store_maintenance()
+        try:
+            store.record_reasoning_send(
+                feature=feature,
+                packet_route=packet_route,
+                reasoning_route=reasoning_route,
+                egress=egress,
+                route_class=advisory_route_class(model, settings),
+                provider_family=provider_family(model),
+                model=model,
+                packet_hash=packet_hash,
+                packet_bytes=packet_bytes,
+                selected_source_count=selected_source_count,
+                citation_count=citation_count,
+                excluded_observations=excluded_observations,
+                excluded_by=excluded_by,
+                outcome=outcome,
+                error_kind=error_kind,
+            )
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive best-effort audit
+        _log.info("reasoning_send_ledger_skipped reason=%s", type(exc).__name__)
+
+
 def _deep_brain_day_windows(day: int, days: int) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
     for offset in range(day + days - 1, day - 1, -1):
@@ -687,12 +833,25 @@ def _briefing_model(
         return
 
     provider = _completion_provider(packet_label="day briefing packet")
-    result = complete_from_deep_brain_packet(
-        "Write a concise briefing for this day from the packet.",
-        packet,
-        provider,
-        settings=settings,
-        ungrounded_answer="I could not ground a model-written briefing in the day packet.",
+    try:
+        result = complete_from_deep_brain_packet(
+            "Write a concise briefing for this day from the packet.",
+            packet,
+            provider,
+            settings=settings,
+            ungrounded_answer="I could not ground a model-written briefing in the day packet.",
+        )
+    except Exception as exc:  # noqa: BLE001 - provider/audit errors must preserve original failure
+        _record_reasoning_send_error(
+            feature="briefing.model",
+            settings=settings,
+            packet_route=packet.get("route"),
+            packet_audit=_safe_packet_audit_from_deep_brain_packet(packet),
+            error=exc,
+        )
+        raise
+    _record_reasoning_send_success(
+        feature="briefing.model", settings=settings, result=result
     )
     sources = _briefing_sources_from_packet_citations(result.get("citations", []))
 
@@ -951,7 +1110,20 @@ def deep_brain_ask(
         raise typer.Exit(code=2)
 
     provider = _completion_provider()
-    result = answer_deep_brain(question, packet, provider, settings=settings)
+    try:
+        result = answer_deep_brain(question, packet, provider, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - provider/audit errors must preserve original failure
+        _record_reasoning_send_error(
+            feature="deep_brain.ask",
+            settings=settings,
+            packet_route=packet.get("route"),
+            packet_audit=_safe_packet_audit_from_deep_brain_packet(packet),
+            error=exc,
+        )
+        raise
+    _record_reasoning_send_success(
+        feature="deep_brain.ask", settings=settings, result=result
+    )
     if as_json:
         _console.print_json(json.dumps(result))
         return
@@ -1247,7 +1419,22 @@ def productivity_coach(
         return
 
     provider = _completion_provider(packet_label="productivity coaching packet")
-    result = answer_productivity_coach(question, report, provider, settings=settings)
+    try:
+        result = answer_productivity_coach(
+            question, report, provider, settings=settings, packet=packet
+        )
+    except Exception as exc:  # noqa: BLE001 - provider/audit errors must preserve original failure
+        _record_reasoning_send_error(
+            feature="productivity.coach",
+            settings=settings,
+            packet_route=packet.get("route"),
+            packet_audit=_safe_packet_audit_from_productivity_packet(packet),
+            error=exc,
+        )
+        raise
+    _record_reasoning_send_success(
+        feature="productivity.coach", settings=settings, result=result
+    )
     if as_json:
         _console.print_json(json.dumps(result))
         return

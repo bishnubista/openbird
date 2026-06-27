@@ -18,6 +18,7 @@ from openbird.config import Settings
 from openbird.day_memory import build_day_memory, local_date_for_window
 from openbird.llm.provider import classify_models
 from openbird.prompts import registry as _prompt_registry
+from openbird.reasoning_ledger import packet_payload_audit
 from openbird.routines.templates import DEFAULT_BRIEFING_SOURCES, select_briefing_sources
 from openbird.types import Observation
 
@@ -216,9 +217,18 @@ def packet_json_for_model(packet: dict[str, Any]) -> str:
 
 def build_deep_brain_messages(question: str, packet: dict[str, Any]) -> list[dict[str, str]]:
     """Build the fenced prompt over the exact preview packet."""
+    return build_deep_brain_messages_from_packet_json(
+        question, packet_json_for_model(packet)
+    )
+
+
+def build_deep_brain_messages_from_packet_json(
+    question: str, packet_json: str
+) -> list[dict[str, str]]:
+    """Build the fenced prompt over an already-canonicalized packet."""
     _prompt_registry.ensure_loaded()
     fence = _prompt_registry.get("rag").fence
-    packet_json = fence.neutralize(packet_json_for_model(packet))
+    packet_json = fence.neutralize(packet_json)
     return [
         {
             "role": "system",
@@ -302,7 +312,8 @@ def complete_from_deep_brain_packet(
     ungrounded_answer: str,
 ) -> dict[str, Any]:
     """Complete one model response over a packet and validate its citations."""
-    messages = build_deep_brain_messages(question, packet)
+    packet_json = packet_json_for_model(packet)
+    messages = build_deep_brain_messages_from_packet_json(question, packet_json)
     raw = provider.complete(messages, json_schema=DEEP_BRAIN_RESPONSE_SCHEMA)
     parsed = raw if isinstance(raw, dict) else {}
     answer = str(parsed.get("answer") or "").strip()
@@ -315,6 +326,11 @@ def complete_from_deep_brain_packet(
         citations = []
 
     remote_llm = classify_models(settings).get("llm")
+    audit = packet_payload_audit(
+        packet_json,
+        selected_source_count=len(packet.get("selected_sources") or []),
+        exclusions=packet.get("exclusions"),
+    )
     return {
         "ok": True,
         "answer": answer,
@@ -326,6 +342,11 @@ def complete_from_deep_brain_packet(
         "packet_route": packet.get("route"),
         "packet_build_route": packet.get("packet_build_route"),
         "citations": citations,
+        "packet_hash": audit["packet_hash"],
+        "packet_bytes": audit["packet_bytes"],
+        "selected_source_count": audit["selected_source_count"],
+        "excluded_observations": audit["excluded_observations"],
+        "excluded_by": audit["excluded_by"],
     }
 
 
