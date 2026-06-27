@@ -351,6 +351,11 @@ class _Completion:
         return "SUMMARY"
 
 
+class _EmptyDayMemory(_Completion):
+    def ensure_day_memory(self, **kwargs):
+        return {}
+
+
 def _patch_briefing_store(monkeypatch, stub):
     monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
     monkeypatch.setattr(cli, "_store", lambda *a, **k: stub)
@@ -429,4 +434,18 @@ def test_briefing_cli_json_empty_day_has_no_sources(monkeypatch, tmp_path):
     assert payload["memory_context"]["coverage"]["observations"] == 0
     assert payload["sources"] == []
     assert payload["sources_total"] == 0
+    assert "no activity" in payload["text"].lower()
+
+
+def test_briefing_cli_handles_empty_day_memory_result(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    _patch_briefing_store(monkeypatch, _EmptyDayMemory([]))
+
+    res = CliRunner().invoke(cli.app, ["briefing", "--json", "--day", "0"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert payload["memory_context"]["route"] == "local_deterministic"
+    assert payload["sources"] == []
     assert "no activity" in payload["text"].lower()

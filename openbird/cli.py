@@ -395,7 +395,7 @@ def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> Non
     finally:
         store.close()
 
-    text = render_day_memory_prose(saved["payload"])
+    text = render_day_memory_prose(saved.get("payload", {}))
     sources, total_sources = select_briefing_sources(rows)
     if as_json:
         _console.print_json(
