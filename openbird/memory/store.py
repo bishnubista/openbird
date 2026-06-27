@@ -13,6 +13,7 @@ resolves every hit back to a concrete observation for occurrence-aware citations
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import struct
@@ -751,6 +752,86 @@ class MemoryStore:
             source=row["source"],
         )
 
+    # -- day memories ---------------------------------------------------------
+
+    def save_day_memory(
+        self,
+        *,
+        local_date: str,
+        source_scope: str,
+        extractor_version: str,
+        payload: dict,
+        source_ids: list[str],
+        generated_at: float | None = None,
+    ) -> dict:
+        """Persist one deterministic daily memory and its source dependencies.
+
+        Rebuild semantics are current-row only: any existing row for
+        ``(local_date, source_scope)`` is deleted first, which cascades its old
+        dependency rows. The new parent and dependencies are inserted in the same
+        transaction. Payloads are derived sensitive data, so callers must not log
+        them; this method logs nothing.
+        """
+        day_memory_id = uuid.uuid4().hex
+        generated = time.time() if generated_at is None else generated_at
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        unique_source_ids = sorted(set(source_ids))
+        try:
+            self._begin()
+            self.conn.execute(
+                "DELETE FROM day_memories WHERE local_date = ? AND source_scope = ?",
+                (local_date, source_scope),
+            )
+            self.conn.execute(
+                "INSERT INTO day_memories("
+                "id, local_date, source_scope, extractor_version, generated_at, "
+                "payload_json, source_count"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    day_memory_id,
+                    local_date,
+                    source_scope,
+                    extractor_version,
+                    generated,
+                    payload_json,
+                    len(unique_source_ids),
+                ),
+            )
+            self.conn.executemany(
+                "INSERT INTO day_memory_sources(day_memory_id, observation_id) "
+                "VALUES (?, ?)",
+                [(day_memory_id, obs_id) for obs_id in unique_source_ids],
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return self.get_day_memory(local_date=local_date, source_scope=source_scope) or {}
+
+    def get_day_memory(self, *, local_date: str, source_scope: str = "capture") -> dict | None:
+        """Return a stored day memory, or ``None`` when it has not been built."""
+        row = self.conn.execute(
+            "SELECT * FROM day_memories WHERE local_date = ? AND source_scope = ?",
+            (local_date, source_scope),
+        ).fetchone()
+        if row is None:
+            return None
+        source_rows = self.conn.execute(
+            "SELECT observation_id FROM day_memory_sources WHERE day_memory_id = ? "
+            "ORDER BY observation_id",
+            (row["id"],),
+        ).fetchall()
+        return {
+            "id": row["id"],
+            "local_date": row["local_date"],
+            "source_scope": row["source_scope"],
+            "extractor_version": row["extractor_version"],
+            "generated_at": row["generated_at"],
+            "source_count": row["source_count"],
+            "source_ids": [r["observation_id"] for r in source_rows],
+            "payload": json.loads(row["payload_json"]),
+        }
+
     # -- delete ---------------------------------------------------------------
 
     def delete(
@@ -789,6 +870,11 @@ class MemoryStore:
                 count = cur.execute(
                     "SELECT COUNT(*) AS c FROM observations"
                 ).fetchone()["c"]
+                # Derived day memories are sensitive distilled data. Remove them
+                # explicitly before the raw observation wipe so no synthesized
+                # daily artifact survives a full purge.
+                cur.execute("DELETE FROM day_memories")
+                cur.execute("DELETE FROM day_memory_sources")
                 cur.execute("DELETE FROM observations")
                 cur.execute("DELETE FROM blob_chunks")
                 cur.execute("DELETE FROM chunks")
@@ -940,6 +1026,7 @@ class MemoryStore:
             "blobs": count("content_blobs"),
             "chunks": count("chunks"),
             "vectors": count("vec_chunks"),
+            "day_memories": count("day_memories"),
             "embed_dim": self.embed_dim,
             "cohort_key": cohort_row["value"] if cohort_row else None,
             "encryption_enabled": self.settings.encryption_enabled,

@@ -71,3 +71,41 @@ CREATE TABLE IF NOT EXISTS embedding_meta (
     key        TEXT PRIMARY KEY,
     value      TEXT
 );
+
+-- Durable deterministic day memories. These are derived from captured activity,
+-- so they live in the same encrypted DB as observations and are invalidated when
+-- any source observation is deleted.
+CREATE TABLE IF NOT EXISTS day_memories (
+    id                TEXT PRIMARY KEY,
+    local_date        TEXT NOT NULL,
+    source_scope      TEXT NOT NULL DEFAULT 'capture',
+    extractor_version TEXT NOT NULL,
+    generated_at      REAL NOT NULL,
+    payload_json      TEXT NOT NULL,
+    source_count      INTEGER NOT NULL,
+    UNIQUE(local_date, source_scope)
+);
+
+CREATE TABLE IF NOT EXISTS day_memory_sources (
+    day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,
+    observation_id TEXT NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+    PRIMARY KEY(day_memory_id, observation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_day_memories_date_scope
+    ON day_memories(local_date, source_scope);
+CREATE INDEX IF NOT EXISTS idx_day_memory_sources_observation
+    ON day_memory_sources(observation_id);
+
+-- Use BEFORE DELETE so the junction row is still present when the trigger reads
+-- it; SQLite FK cascades would remove day_memory_sources before an AFTER trigger.
+CREATE TRIGGER IF NOT EXISTS trg_day_memory_observation_delete
+BEFORE DELETE ON observations
+BEGIN
+    DELETE FROM day_memories
+    WHERE id IN (
+        SELECT day_memory_id
+        FROM day_memory_sources
+        WHERE observation_id = OLD.id
+    );
+END;

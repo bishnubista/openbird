@@ -13,10 +13,10 @@ error at query time. This introduces an explicit version contract:
     transaction so a crash cannot leave a half-applied schema), and REFUSES to
     open a DB stamped NEWER than this build (rather than silently corrupting it).
 
-Version 1 is the current schema as defined by ``schema.sql`` (the
-``content_blobs`` / ``observations`` / ``chunks`` / ``blob_chunks`` /
-``fts_chunks`` / ``embedding_meta`` tables; ``vec_chunks`` is created in Python
-because its dimension is dynamic).
+Version 1 is the original baseline schema (``content_blobs`` / ``observations`` /
+``chunks`` / ``blob_chunks`` / ``fts_chunks`` / ``embedding_meta`` tables;
+``vec_chunks`` is created in Python because its dimension is dynamic). Later
+versions append forward migrations for additive durable features.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -45,11 +45,57 @@ class Migration:
     apply: Callable[[sqlite3.Connection], None]
 
 
+def _apply_v2_day_memories(conn: sqlite3.Connection) -> None:
+    """Add purge-safe deterministic day-memory tables."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS day_memories (
+            id                TEXT PRIMARY KEY,
+            local_date        TEXT NOT NULL,
+            source_scope      TEXT NOT NULL DEFAULT 'capture',
+            extractor_version TEXT NOT NULL,
+            generated_at      REAL NOT NULL,
+            payload_json      TEXT NOT NULL,
+            source_count      INTEGER NOT NULL,
+            UNIQUE(local_date, source_scope)
+        );
+
+        CREATE TABLE IF NOT EXISTS day_memory_sources (
+            day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,
+            observation_id TEXT NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+            PRIMARY KEY(day_memory_id, observation_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_day_memories_date_scope
+            ON day_memories(local_date, source_scope);
+        CREATE INDEX IF NOT EXISTS idx_day_memory_sources_observation
+            ON day_memory_sources(observation_id);
+
+        CREATE TRIGGER IF NOT EXISTS trg_day_memory_observation_delete
+        BEFORE DELETE ON observations
+        BEGIN
+            DELETE FROM day_memories
+            WHERE id IN (
+                SELECT day_memory_id
+                FROM day_memory_sources
+                WHERE observation_id = OLD.id
+            );
+        END;
+        """
+    )
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
-# so there is no migration that *creates* it — migrations here only ever upgrade
-# an existing DB from one version to the next. Append future steps (version 2,
-# 3, ...) in order; never edit or reorder a released migration.
-MIGRATIONS: list[Migration] = []
+# so migrations here only ever upgrade an existing DB from one version to the
+# next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
+# released migration.
+MIGRATIONS: list[Migration] = [
+    Migration(
+        version=2,
+        description="add purge-safe deterministic day memories",
+        apply=_apply_v2_day_memories,
+    ),
+]
 
 
 def _scalar(row: object) -> object:
