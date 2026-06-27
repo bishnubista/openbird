@@ -62,6 +62,7 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "model.local_ollama",
         "model.remote_ollama",
         "model.third_party_cloud",
+        "productivity.local_facts",
         "rerank.remote",
         "routines.summary",
     }.issubset(routes)
@@ -149,6 +150,27 @@ def test_deep_brain_ask_inherits_active_model_route() -> None:
         "generated_answer",
         "validated_citations",
     }.issubset(set(route["captured_fields"]))
+
+
+def test_productivity_local_facts_route_is_local_and_content_safe() -> None:
+    route = _routes()["productivity.local_facts"]
+
+    assert route["class"] == "local"
+    assert route["egress"]["default"] == "none"
+    assert route["storage"] == ["sqlite.day_memories"]
+    assert {
+        "active_seconds",
+        "context_switch_count",
+        "focus_blocks",
+        "category_sources",
+        "source_ids",
+    }.issubset(set(route["captured_fields"]))
+    assert {
+        "captured_text",
+        "raw_window_title",
+        "raw_url",
+        "raw_title",
+    }.issubset(set(route["forbidden_fields"]))
 
 
 # --------------------------------------------------------------------------- #
