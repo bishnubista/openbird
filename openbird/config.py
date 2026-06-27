@@ -177,6 +177,13 @@ class Settings:
     # (anything not ollama/* or an mlx local backend) silently POSTs private
     # memory to a third party, so it MUST be explicitly opted into. Default off.
     allow_cloud: bool = False
+    # Deep Brain is a separate, future cloud-reasoning consent layer. The preview
+    # command is local-only; this flag only marks whether a future sender may use
+    # its packet once OPENBIRD_ALLOW_CLOUD is also enabled.
+    deep_brain_enabled: bool = False
+    deep_brain_excluded_apps: list[str] = field(default_factory=list)
+    deep_brain_excluded_sources: list[str] = field(default_factory=list)
+    deep_brain_excluded_observation_ids: list[str] = field(default_factory=list)
 
     # Runtime Ollama host: the base URL threaded into LiteLLM as api_base
     # for ollama/* models, so the runtime provider talks to the SAME host that
@@ -269,12 +276,13 @@ class Settings:
 
 def _coerce(name: str, raw: str, default: object) -> object:
     """Coerce an env-var string to the type implied by the field default."""
-    if name in ("allowlist", "blocklist"):
+    if isinstance(default, list):
         return [item.strip() for item in raw.split(",") if item.strip()]
     if isinstance(default, bool) or name in (
         "ocr_enabled",
         "encryption_enabled",
         "allow_cloud",
+        "deep_brain_enabled",
         "require_encryption",
         "capture_urls",
     ):
@@ -292,6 +300,10 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "ocr_enabled": False,
     "encryption_enabled": False,
     "allow_cloud": False,
+    "deep_brain_enabled": False,
+    "deep_brain_excluded_apps": [],
+    "deep_brain_excluded_sources": [],
+    "deep_brain_excluded_observation_ids": [],
     "require_encryption": False,
     "capture_urls": False,
     "retention_days": 0,

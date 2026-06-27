@@ -42,6 +42,19 @@ def test_allow_cloud_coerced_from_env(monkeypatch):
     assert get_settings().allow_cloud is False
 
 
+def test_deep_brain_settings_coerced_from_env(monkeypatch):
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_APPS", "com.a, glob:com.b.*")
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_SOURCES", "capture,meeting")
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_OBSERVATION_IDS", "obs-1, obs-2")
+
+    s = get_settings()
+    assert s.deep_brain_enabled is True
+    assert s.deep_brain_excluded_apps == ["com.a", "glob:com.b.*"]
+    assert s.deep_brain_excluded_sources == ["capture", "meeting"]
+    assert s.deep_brain_excluded_observation_ids == ["obs-1", "obs-2"]
+
+
 def test_capture_urls_coerced_to_bool_from_env(monkeypatch):
     # Default off (opt-in); truthy/falsey strings coerce to a real bool, never a
     # string (a stray "0" must not read as truthy).
@@ -221,6 +234,8 @@ def test_defaults_are_sane():
     assert s.embed_timeout == 30.0
     assert s.llm_num_retries == 2
     assert s.allow_cloud is False
+    assert s.deep_brain_enabled is False
+    assert s.deep_brain_excluded_apps == []
     assert s.ollama_host is None
 
 

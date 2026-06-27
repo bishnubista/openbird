@@ -104,6 +104,25 @@ routes:
       - cli.cloud_banner
       - app.privacyTransmissionSummary
 
+  - id: deep_brain.preview
+    class: local
+    source: exclusion-filtered daily memory plus selected cited snippets
+    captured_fields:
+      - distilled_day_memory_content
+      - selected_citation_snippets
+      - selected_source_observation_id
+      - selected_source_app
+      - selected_source_window_or_url
+      - selected_source_timestamp
+      - exclusion_counts
+      - opt_in_gate_status
+    storage: []
+    egress:
+      default: none
+      note: local preview only; no provider is constructed
+    truth_surface:
+      - cli.deep_brain_preview
+
   - id: chat.remote
     class: unknown
     source: user prompt plus retrieved local memory
