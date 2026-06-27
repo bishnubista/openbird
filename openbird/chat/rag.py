@@ -173,7 +173,7 @@ _FACT_CONTENT_QUERY_RE = re.compile(
 )
 _FACT_ADVICE_RE = re.compile(
     r"\b(advice|advise|coach|coaching|improve|improvement|better|optimi[sz]e|"
-    r"recommend|suggest|should|could|where\s+could\s+i)\b",
+    r"recommend|suggest|should\s+i|could\s+i|where\s+could\s+i)\b",
     re.IGNORECASE,
 )
 _FACT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -231,7 +231,7 @@ _FACT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"how\s+(much\s+)?(active|recorded|focus|focused|productive|work)"
             r"\s+time|"
             r"how\s+long\s+was\s+i\s+(active|focused|productive|working)|"
-            r"(active|recorded|focus|focused|productive|work)\s+minutes"
+            r"(active|recorded|focus|focused|productive|work)\s+(minutes|time)"
             r")\b",
             re.IGNORECASE,
         ),

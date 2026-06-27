@@ -733,6 +733,41 @@ def test_day_fact_scalar_answers_use_whole_day_citations(mem_settings, fake_prov
         store.close()
 
 
+def test_day_fact_common_metric_phrasings_stay_local(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        obs1 = store.add_observation(
+            "Edited code.",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            ts=start + 9 * 3600,
+        )
+        obs2 = store.add_observation(
+            "Answered email.",
+            source="capture",
+            app="Mail",
+            ts=start + 9 * 3600 + 120,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: start + 12 * 3600
+
+        active = chatter.answer("active time today?")
+        switches = chatter.answer("could you tell me how many context switches today?")
+
+        assert llm.calls == 0
+        assert active.reasoning_route == "local_deterministic"
+        assert "active minute" in active.answer
+        assert switches.reasoning_route == "local_deterministic"
+        assert "1 context switch" in switches.answer
+        assert set(switches.derived_citations[0].derived_from) == {obs1.id, obs2.id}
+    finally:
+        store.close()
+
+
 def test_day_fact_longest_focus_block_is_local(mem_settings, fake_provider):
     import datetime as dt
 
