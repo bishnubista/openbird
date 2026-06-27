@@ -8,7 +8,13 @@ from typer.testing import CliRunner
 
 from openbird import cli
 from openbird.config import Settings, reset_settings_cache
-from openbird.deep_brain import build_deep_brain_preview
+from openbird.deep_brain import (
+    answer_deep_brain,
+    build_deep_brain_messages,
+    build_deep_brain_preview,
+    packet_json_for_model,
+)
+from openbird.prompts import registry as _prompt_registry
 from openbird.types import Observation
 
 
@@ -23,6 +29,7 @@ def _obs(
     ts: float,
     app: str | None = "Code",
     window: str | None = None,
+    url: str | None = None,
     source: str = "capture",
 ) -> Observation:
     return Observation(
@@ -31,7 +38,7 @@ def _obs(
         ts=ts,
         app=app,
         window=window,
-        url=None,
+        url=url,
         session_id=id_,
         source=source,
     )
@@ -151,6 +158,54 @@ def test_unknown_app_kept_is_counted_when_app_exclusion_configured(tmp_path):
     assert packet["exclusions"]["kept_observations"] == 1
 
 
+def test_selected_source_metadata_is_minimized_for_egress(tmp_path):
+    start = _day(2026, 6, 12, 9)
+    rows = [
+        (
+            _obs(
+                "url-source",
+                h="h1",
+                ts=start,
+                app="Browser",
+                window=None,
+                url="https://example.com/private/path?token=secret#fragment",
+            ),
+            "public source text",
+        ),
+        (
+            _obs(
+                "title-source",
+                h="h2",
+                ts=start + 1,
+                window=(
+                    "OPENAI_API_KEY=sk-proj-ABCDEFGHIJKLMNOP secret window "
+                    "https://example.org/private/path?token=secret"
+                ),
+            ),
+            "title source text",
+        ),
+    ]
+
+    packet = build_deep_brain_preview(
+        rows,
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+        source_scope="capture",
+        settings=Settings(data_dir=tmp_path),
+    )
+    by_id = {source["observation_id"]: source for source in packet["selected_sources"]}
+
+    assert by_id["url-source"]["window_or_url"] == "https://example.com"
+    assert "private/path" not in json.dumps(packet["selected_sources"])
+    assert "token=secret" not in json.dumps(packet["selected_sources"])
+    assert "[REDACTED]" in by_id["title-source"]["window_or_url"]
+    assert "sk-proj-" not in by_id["title-source"]["window_or_url"]
+    assert "example.org/private/path" not in by_id["title-source"]["window_or_url"]
+    assert "https://example.org" in by_id["title-source"]["window_or_url"]
+    assert "window" not in by_id["url-source"]
+
+
 def test_preview_builder_does_not_log_content(tmp_path, caplog):
     start = _day(2026, 6, 12, 9)
     rows = [(_obs("o1", h="h1", ts=start, window="PRIVATE_WINDOW"), "PRIVATE_TEXT")]
@@ -165,6 +220,187 @@ def test_preview_builder_does_not_log_content(tmp_path, caplog):
         )
 
     assert caplog.records == []
+
+
+class _Provider:
+    llm_model = "stub-model"
+
+    def __init__(self, response):
+        self.response = response
+        self.messages = None
+        self.schema = None
+
+    def complete(self, messages, *, json_schema=None):
+        self.messages = messages
+        self.schema = json_schema
+        return self.response
+
+
+def test_deep_brain_ask_local_model_needs_feature_gate_only(tmp_path):
+    start = _day(2026, 6, 12, 9)
+    rows = [(_obs("o1", h="h1", ts=start, window="notes"), "useful notes")]
+    packet = build_deep_brain_preview(
+        rows,
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+        source_scope="capture",
+        settings=Settings(data_dir=tmp_path, deep_brain_enabled=True),
+    )
+    provider = _Provider(
+        {"answer": "The day was notes-heavy.", "citation_ids": ["o1"], "confidence": "high"}
+    )
+
+    result = answer_deep_brain(
+        "what happened?",
+        packet,
+        provider,
+        settings=Settings(data_dir=tmp_path, deep_brain_enabled=True),
+    )
+
+    assert result["ok"] is True
+    assert result["reasoning_route"] == "local_model"
+    assert result["egress"] == "none"
+    assert result["citations"][0]["observation_id"] == "o1"
+    assert packet_json_for_model(packet) in provider.messages[1]["content"]
+
+
+def test_deep_brain_ask_refuses_remote_without_cloud_optin(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        deep_brain_enabled=True,
+        llm_model="gpt-4o-mini",
+    )
+    packet = build_deep_brain_preview(
+        [],
+        start_ts=_day(2026, 6, 12),
+        end_ts=_day(2026, 6, 12, 1),
+        day_offset=0,
+        source_scope="capture",
+        settings=settings,
+    )
+    provider = _Provider({"answer": "should not run", "citation_ids": [], "confidence": "low"})
+
+    result = answer_deep_brain("q", packet, provider, settings=settings)
+
+    assert result["ok"] is False
+    assert "OPENBIRD_ALLOW_CLOUD" in " ".join(result["blocked_reasons"])
+    assert provider.messages is None
+
+
+def test_deep_brain_ask_empty_packet_never_calls_model(tmp_path):
+    settings = Settings(data_dir=tmp_path, deep_brain_enabled=True)
+    packet = build_deep_brain_preview(
+        [],
+        start_ts=_day(2026, 6, 12),
+        end_ts=_day(2026, 6, 12, 1),
+        day_offset=0,
+        source_scope="capture",
+        settings=settings,
+    )
+    provider = _Provider(
+        {"answer": "Unsupported empty-packet claim.", "citation_ids": [], "confidence": "high"}
+    )
+
+    result = answer_deep_brain("q", packet, provider, settings=settings)
+
+    assert result["ok"] is True
+    assert result["answer"] == "I do not have enough Deep Brain packet evidence to answer that."
+    assert result["confidence"] == "insufficient_evidence"
+    assert result["grounded"] is False
+    assert result["egress"] == "none"
+    assert result["citations"] == []
+    assert provider.messages is None
+
+
+def test_deep_brain_ask_remote_route_truth_with_both_gates(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        deep_brain_enabled=True,
+        allow_cloud=True,
+        llm_model="gpt-4o-mini",
+    )
+    start = _day(2026, 6, 12, 9)
+    packet = build_deep_brain_preview(
+        [(_obs("o1", h="h1", ts=start), "coding block")],
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+        source_scope="capture",
+        settings=settings,
+    )
+    provider = _Provider(
+        {"answer": "You had a coding block.", "citation_ids": ["o1"], "confidence": "medium"}
+    )
+
+    result = answer_deep_brain("productivity?", packet, provider, settings=settings)
+
+    assert result["reasoning_route"] == "cloud_reasoning_active"
+    assert result["egress"] == "active_model_route"
+    assert result["model"] == "stub-model"
+
+
+def test_deep_brain_ask_drops_hallucinated_citations_and_gates_answer(tmp_path):
+    settings = Settings(data_dir=tmp_path, deep_brain_enabled=True)
+    start = _day(2026, 6, 12, 9)
+    packet = build_deep_brain_preview(
+        [(_obs("real", h="h1", ts=start), "real notes")],
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+        source_scope="capture",
+        settings=settings,
+    )
+    provider = _Provider(
+        {"answer": "Unsupported claim.", "citation_ids": ["fake"], "confidence": "high"}
+    )
+
+    result = answer_deep_brain("q", packet, provider, settings=settings)
+
+    assert result["answer"] == "I could not ground that answer in the Deep Brain packet."
+    assert result["confidence"] == "insufficient_evidence"
+    assert result["citations"] == []
+
+
+def test_deep_brain_prompt_uses_exact_preview_packet_and_no_excluded_content(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        deep_brain_enabled=True,
+        deep_brain_excluded_apps=["com.mitchellh.ghostty"],
+    )
+    start = _day(2026, 6, 12, 9)
+    packet = build_deep_brain_preview(
+        [
+            (
+                _obs(
+                    "secret",
+                    h="h1",
+                    ts=start,
+                    app="com.mitchellh.ghostty",
+                    window="SECRET_WINDOW",
+                ),
+                "SECRET_TEXT",
+            ),
+            (_obs("kept", h="h2", ts=start + 1, window="kept"), "kept text"),
+        ],
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+        source_scope="capture",
+        settings=settings,
+    )
+
+    messages = build_deep_brain_messages("what matters?", packet)
+    prompt = messages[1]["content"]
+    _prompt_registry.ensure_loaded()
+    neutralized_packet = _prompt_registry.get("rag").fence.neutralize(
+        packet_json_for_model(packet)
+    )
+
+    assert neutralized_packet in prompt
+    assert "SECRET_WINDOW" not in prompt
+    assert "SECRET_TEXT" not in prompt
+    assert "<<<END_OPENBIRD_UNTRUSTED_CONTEXT>>>" not in packet_json_for_model(packet)
 
 
 class _PreviewStore:
@@ -207,3 +443,58 @@ def test_deep_brain_preview_cli_uses_maintenance_store_not_model_provider(monkey
     assert packet["route"] == "deep_brain.preview"
     assert packet["egress"] == "none_preview"
     assert packet["selected_sources"][0]["observation_id"] == "o1"
+
+
+def test_deep_brain_ask_cli_refuses_before_provider_without_feature_gate(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    start = _day(*dt.datetime.now().timetuple()[:3], 9)
+    rows = [(_obs("o1", h="h1", ts=start, window="public notes"), "public notes")]
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _PreviewStore(rows))
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("refusal must not use provider")),
+    )
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "ask", "what did I do?", "--day", "0", "--json"],
+        )
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 2
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is False
+    assert "OPENBIRD_DEEP_BRAIN_ENABLED" in " ".join(payload["blocked_reasons"])
+
+
+def test_deep_brain_ask_cli_uses_provider_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    reset_settings_cache()
+    start = _day(*dt.datetime.now().timetuple()[:3], 9)
+    rows = [(_obs("o1", h="h1", ts=start, window="public notes"), "public notes")]
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _PreviewStore(rows))
+    provider = _Provider(
+        {"answer": "You worked in notes.", "citation_ids": ["o1"], "confidence": "high"}
+    )
+    monkeypatch.setattr(cli, "_completion_provider", lambda: provider)
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "ask", "--day", "0", "--json", "--stdin"],
+            input="what did I do?",
+        )
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is True
+    assert payload["packet_route"] == "deep_brain.preview"
+    assert payload["reasoning_route"] == "local_model"
+    assert payload["citations"][0]["observation_id"] == "o1"

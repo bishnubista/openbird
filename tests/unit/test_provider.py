@@ -390,6 +390,26 @@ def test_factory_refuses_cloud_without_opt_in():
     assert exc.value.remote_models == {"llm": "gpt-4o-mini"}
 
 
+def test_factory_can_gate_completion_only_cloud_roles():
+    s = Settings(embed_dim=1536, embed_model="text-embedding-3-small")
+
+    provider = create_llm_provider(s, cloud_roles=("llm",))
+
+    assert isinstance(provider, LiteLLMProvider)
+    with pytest.raises(CloudOptInRequired) as exc:
+        create_llm_provider(s)
+    assert exc.value.remote_models == {"embed": "text-embedding-3-small"}
+
+
+def test_factory_completion_only_gate_still_refuses_remote_llm():
+    s = Settings(embed_dim=768, llm_model="gpt-4o-mini")
+
+    with pytest.raises(CloudOptInRequired) as exc:
+        create_llm_provider(s, cloud_roles=("llm",))
+
+    assert exc.value.remote_models == {"llm": "gpt-4o-mini"}
+
+
 def test_factory_proceeds_with_settings_opt_in():
     s = Settings(embed_dim=768, llm_model="gpt-4o-mini", allow_cloud=True)
     provider = create_llm_provider(s)

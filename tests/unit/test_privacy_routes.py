@@ -53,6 +53,8 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "chat.local",
         "chat.remote",
         "data.export",
+        "deep_brain.ask",
+        "deep_brain.preview",
         "diagnostics.logs",
         "embedding.remote",
         "ingest.files",
@@ -130,6 +132,23 @@ def test_capture_pause_is_enforced_at_helper_boundary() -> None:
 
     assert route["enforcement"]["boundary"] == "Swift helper before AX read"
     assert route["enforcement"]["failure_mode"] == "fail_closed"
+
+
+def test_deep_brain_ask_inherits_active_model_route() -> None:
+    route = _routes()["deep_brain.ask"]
+
+    assert route["class"] == "unknown"
+    assert route["egress"]["default"] == "inherits_active_model_route"
+    assert route["egress"]["inherited_from"] == ["chat.local", "chat.remote"]
+    assert "requires" not in route.get("enforcement", {})
+    assert route["enforcement"]["feature_requires"] == "OPENBIRD_DEEP_BRAIN_ENABLED"
+    assert {
+        "distilled_day_memory_content",
+        "selected_citation_snippets",
+        "selected_source_window_or_url",
+        "generated_answer",
+        "validated_citations",
+    }.issubset(set(route["captured_fields"]))
 
 
 # --------------------------------------------------------------------------- #
