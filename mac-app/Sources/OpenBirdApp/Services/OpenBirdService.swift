@@ -225,27 +225,50 @@ struct BriefingSource: Codable, Identifiable, Equatable {
 /// rather than silently truncating.
 struct DayBriefing: Codable, Equatable {
     let text: String
+    let reasoningRoute: String?
     let sources: [BriefingSource]
     let sourcesTotal: Int
 
     enum CodingKeys: String, CodingKey {
         case text
+        case reasoningRoute = "reasoning_route"
         case sources
         case sourcesTotal = "sources_total"
     }
 
+    var routeLabel: String? {
+        switch reasoningRoute {
+        case "local_deterministic":
+            return "Local only"
+        case "cloud_reasoning_active":
+            return "Cloud reasoning active"
+        case "local_model":
+            return "Local model"
+        default:
+            return nil
+        }
+    }
+
     /// Decode tolerantly: `sources`/`sources_total` are absent on older CLI
-    /// builds (and the experimental `--signals` path), so default them so a stale
-    /// CLI still yields a text-only briefing instead of failing to decode.
+    /// builds (and the experimental `--signals` path), and `reasoning_route` is
+    /// absent on older CLIs that may still have used the configured model. Missing
+    /// or unknown routes intentionally resolve to no label, never "Local only."
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         text = try c.decode(String.self, forKey: .text)
+        reasoningRoute = try c.decodeIfPresent(String.self, forKey: .reasoningRoute)
         sources = try c.decodeIfPresent([BriefingSource].self, forKey: .sources) ?? []
         sourcesTotal = try c.decodeIfPresent(Int.self, forKey: .sourcesTotal) ?? sources.count
     }
 
-    init(text: String, sources: [BriefingSource] = [], sourcesTotal: Int? = nil) {
+    init(
+        text: String,
+        reasoningRoute: String? = nil,
+        sources: [BriefingSource] = [],
+        sourcesTotal: Int? = nil
+    ) {
         self.text = text
+        self.reasoningRoute = reasoningRoute
         self.sources = sources
         self.sourcesTotal = sourcesTotal ?? sources.count
     }
@@ -1148,11 +1171,10 @@ final class OpenBirdService: @unchecked Sendable {
         return try? JSONDecoder().decode(DayTimeline.self, from: data)
     }
 
-    /// Generate a day's grounded prose briefing + source trail (`openbird briefing
-    /// --json`). This makes one local LLM call, so the timeout is generous; an empty
-    /// day returns a deterministic line (and no sources) cheaply. Callers cache per
-    /// day.
-    func dailyBriefing(dayOffset: Int, timeout: TimeInterval = 120) async -> DayBriefing? {
+    /// Generate a day's grounded briefing + source trail (`openbird briefing
+    /// --json`). The default CLI route is local deterministic day memory; callers
+    /// cache per day.
+    func dailyBriefing(dayOffset: Int, timeout: TimeInterval = 60) async -> DayBriefing? {
         guard let cli = resolveOpenBirdCLI() else { return nil }
         let result = await runAsync(
             cli, arguments: ["briefing", "--day", String(dayOffset), "--json"], timeout: timeout

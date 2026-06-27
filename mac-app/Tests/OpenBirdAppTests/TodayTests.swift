@@ -35,10 +35,38 @@ final class TodayTimelineDecodingTests: XCTestCase {
     func testParseBriefingExtractsText() {
         let briefing = OpenBirdService.parseBriefing("{\"text\": \"You worked on X.\"}")
         XCTAssertEqual(briefing?.text, "You worked on X.")
+        XCTAssertNil(briefing?.reasoningRoute)
+        XCTAssertNil(briefing?.routeLabel)
         // No sources key -> empty trail, total defaults to 0 (a stale-CLI briefing).
         XCTAssertEqual(briefing?.sources, [])
         XCTAssertEqual(briefing?.sourcesTotal, 0)
         XCTAssertNil(OpenBirdService.parseBriefing("nope"))
+    }
+
+    func testParseBriefingDecodesKnownReasoningRoutes() {
+        let local = OpenBirdService.parseBriefing("""
+        {"text": "Local facts.", "reasoning_route": "local_deterministic"}
+        """)
+        XCTAssertEqual(local?.reasoningRoute, "local_deterministic")
+        XCTAssertEqual(local?.routeLabel, "Local only")
+
+        let cloud = OpenBirdService.parseBriefing("""
+        {"text": "Cloud prose.", "reasoning_route": "cloud_reasoning_active"}
+        """)
+        XCTAssertEqual(cloud?.routeLabel, "Cloud reasoning active")
+
+        let localModel = OpenBirdService.parseBriefing("""
+        {"text": "Local model prose.", "reasoning_route": "local_model"}
+        """)
+        XCTAssertEqual(localModel?.routeLabel, "Local model")
+    }
+
+    func testParseBriefingUnknownReasoningRouteIsNeutral() {
+        let briefing = OpenBirdService.parseBriefing("""
+        {"text": "Future route.", "reasoning_route": "partial_cloud_review"}
+        """)
+        XCTAssertEqual(briefing?.reasoningRoute, "partial_cloud_review")
+        XCTAssertNil(briefing?.routeLabel)
     }
 
     func testParseBriefingDecodesSourceTrail() {

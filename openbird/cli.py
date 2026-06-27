@@ -325,27 +325,103 @@ def timeline(
 def briefing(
     day: int = typer.Option(1, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
     as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    model: bool = typer.Option(
+        False,
+        "--model",
+        help="Opt in to model-written prose (configured provider) instead of the "
+        "default local deterministic day-memory summary.",
+    ),
     signals: bool = typer.Option(
         False,
         "--signals",
         help="Use the experimental high-signal local classifier instead of broad prose.",
     ),
 ) -> None:
-    """Generate a grounded prose briefing for a day (on-demand; one LLM call).
+    """Generate a grounded day briefing.
 
-    Reuses the ``yesterday`` routine template over the SAME bounds as
-    ``timeline --day N``. An empty day returns a deterministic line without calling
-    the model.
+    Default (privacy-preserving): renders a deterministic, no-model, local-only
+    summary distilled from the persisted day memory, with the same clickable source
+    trail. No completion provider is constructed and no model is called.
+
+    ``--model`` is the explicit opt-in escape hatch for model-written prose via the
+    configured provider (the ``yesterday`` routine template over the SAME bounds as
+    ``timeline --day N``); a remote model still requires the cloud opt-in enforced
+    at provider construction. ``--signals`` is the separate experimental local
+    classifier path. ``--model`` and ``--signals`` are mutually exclusive.
     """
     if day < 0:
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
-    from openbird.routines.templates import get_template, select_briefing_sources
+    if model and signals:
+        _err_console.print("[red]--model and --signals are mutually exclusive.[/]")
+        raise typer.Exit(code=2)
 
     start, end = _day_window(day)
     if signals:
         _briefing_signals(day, start, end, as_json=as_json)
         return
+
+    if model:
+        _briefing_model(day, start, end, as_json=as_json)
+        return
+
+    _briefing_local(day, start, end, as_json=as_json)
+
+
+def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> None:
+    """Default briefing: deterministic, no-model, local-only day-memory summary."""
+    from openbird.day_memory import (
+        day_memory_context,
+        local_date_for_window,
+        render_day_memory_prose,
+    )
+    from openbird.routines.templates import select_briefing_sources
+
+    store = _store_maintenance()
+    try:
+        # Fetch the grounding rows for the source trail, and (re)build the persisted
+        # day memory over the SAME [start, end] + source. Both reads use identical
+        # bounds; on an OPEN day a row landing between the two reads could appear in
+        # one but not the other: bounded and non-privacy (accepted tradeoff vs.
+        # threading pre-fetched rows through the store API).
+        rows = store.time_range_text(start, end, source="capture")
+        saved = store.ensure_day_memory(
+            local_date=local_date_for_window(start),
+            start_ts=start,
+            end_ts=end,
+            day_offset=day,
+            source_scope="capture",
+        )
+    finally:
+        store.close()
+
+    text = render_day_memory_prose(saved.get("payload", {}))
+    sources, total_sources = select_briefing_sources(rows)
+    if as_json:
+        _console.print_json(
+            json.dumps(
+                {
+                    "day_offset": day,
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                    # No model touched the data; the route the UI shows is truthful.
+                    "reasoning_route": "local_deterministic",
+                    "memory_context": day_memory_context(saved),
+                    "sources": sources,
+                    # Full count of distinct grounding groups; > len(sources) means
+                    # the trail was capped (UI shows "N of M"), never silent.
+                    "sources_total": total_sources,
+                }
+            )
+        )
+        return
+    _console.print(text)
+
+
+def _briefing_model(day: int, start: float, end: float, *, as_json: bool) -> None:
+    """Opt-in briefing: model-written prose via the configured provider."""
+    from openbird.routines.templates import get_template, select_briefing_sources
 
     # Open WITHOUT the cloud gate / LLM first; only construct the completion
     # provider when the day actually has capture content (an empty day returns the
@@ -366,6 +442,21 @@ def briefing(
         sources, total_sources = select_briefing_sources(rows)
     finally:
         store.close()
+
+    # Route truth keys on the LLM role ONLY: a briefing is a pure completion that
+    # never embeds or reranks, so remote embed/rerank is irrelevant here. When no
+    # provider was constructed (empty day), no model ran -> local_deterministic.
+    # Keying cloud/local_model on `provider is not None` is conservative: it can
+    # only ever OVER-warn (label a degraded all-filtered day as model-routed),
+    # never hide a real egress.
+    if provider is None:
+        reasoning_route = "local_deterministic"
+    else:
+        from openbird.llm.provider import classify_models
+
+        remote = classify_models(get_settings())
+        reasoning_route = "cloud_reasoning_active" if remote.get("llm") else "local_model"
+
     if as_json:
         _console.print_json(
             json.dumps(
@@ -374,9 +465,8 @@ def briefing(
                     "start": start,
                     "end": end,
                     "text": text,
+                    "reasoning_route": reasoning_route,
                     "sources": sources,
-                    # Full count of distinct grounding groups; > len(sources) means
-                    # the trail was capped (UI shows "N of M"), never silent.
                     "sources_total": total_sources,
                 }
             )
