@@ -312,6 +312,8 @@ class _Completion:
     def __init__(self, rows):
         self._rows = rows
         self.messages = []
+        self.json_schemas = []
+        self.provider_kwargs = []
 
     # Store seam used by the briefing command.
     def day_sessions(self, start, end):
@@ -350,6 +352,7 @@ class _Completion:
     # Provider seam.
     def complete(self, messages, *, json_schema=None):
         self.messages.append(messages)
+        self.json_schemas.append(json_schema)
         citation_ids = [self._rows[0][0].id] if self._rows else []
         return {
             "answer": "SUMMARY",
@@ -367,7 +370,12 @@ def _patch_briefing_store(monkeypatch, stub):
     monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
     monkeypatch.setattr(cli, "_store", lambda *a, **k: stub)
     monkeypatch.setattr(cli, "_provider", lambda: stub)
-    monkeypatch.setattr(cli, "_completion_provider", lambda **_: stub)
+
+    def _completion_provider(**kwargs):
+        stub.provider_kwargs.append(kwargs)
+        return stub
+
+    monkeypatch.setattr(cli, "_completion_provider", _completion_provider)
 
 
 def test_briefing_cli_json_defaults_to_local_day_memory(monkeypatch, tmp_path):
@@ -436,6 +444,11 @@ def test_briefing_cli_model_flag_uses_configured_provider(monkeypatch, tmp_path)
     assert payload["sources_total"] == 1
     assert [source["observation_id"] for source in payload["sources"]] == ["o1"]
     assert payload["sources"][0]["window"] == "rag.py"
+    assert stub.provider_kwargs == [{"packet_label": "day briefing packet"}]
+    assert stub.json_schemas
+    assert {"answer", "citation_ids", "confidence"}.issubset(
+        set(stub.json_schemas[0]["required"])
+    )
 
     prompt = "\n\n".join(message["content"] for message in stub.messages[0])
     assert '"packet_build_route":"deterministic_distillation"' in prompt
