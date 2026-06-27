@@ -608,6 +608,345 @@ def test_broad_single_day_uses_deterministic_day_memory(mem_settings, fake_provi
         store.close()
 
 
+def test_day_fact_top_hour_is_local_with_derived_citation(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        obs1 = store.add_observation(
+            "SECRET_TEXT one",
+            source="capture",
+            app="com.secret.BUNDLE",
+            window="SECRET_WINDOW github.com/private/repo",
+            ts=start + 9 * 3600,
+        )
+        obs2 = store.add_observation(
+            "SECRET_TEXT two",
+            source="capture",
+            app="com.secret.BUNDLE",
+            window="SECRET_WINDOW github.com/private/repo",
+            ts=start + 9 * 3600 + 120,
+        )
+        store.add_observation(
+            "SECRET_TEXT three",
+            source="capture",
+            app="com.secret.BUNDLE",
+            window="SECRET_WINDOW github.com/private/repo",
+            ts=start + 9 * 3600 + 240,
+        )
+        store.add_observation(
+            "later activity",
+            source="capture",
+            app="com.secret.BUNDLE",
+            window="other raw window",
+            ts=start + 10 * 3600,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+        result = chatter.answer(
+            "when was my most active hour today?", window=(start, end)
+        )
+
+        assert llm.calls == 0
+        assert result.grounding == "derived"
+        assert result.reasoning_route == "local_deterministic"
+        assert result.memory_context["route"] == "local_deterministic"
+        assert "source_ids" not in json.dumps(result.memory_context, sort_keys=True)
+        assert "09:00" in result.answer
+        assert result.derived_citations
+        assert obs1.id in result.derived_citations[0].derived_from
+        assert obs2.id in result.derived_citations[0].derived_from
+        rendered = " ".join(
+            [
+                result.answer,
+                result.derived_citations[0].label,
+                result.derived_citations[0].snippet,
+                json.dumps(result.memory_context, sort_keys=True),
+            ]
+        )
+        for forbidden in (
+            "SECRET_TEXT",
+            "SECRET_WINDOW",
+            "com.secret.BUNDLE",
+            "private/repo",
+            obs1.id,
+        ):
+            assert forbidden not in rendered
+    finally:
+        store.close()
+
+
+def test_day_fact_scalar_answers_use_whole_day_citations(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        obs1 = store.add_observation(
+            "Edited code.",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            ts=start + 9 * 3600,
+        )
+        obs2 = store.add_observation(
+            "Answered email.",
+            source="capture",
+            app="Mail",
+            ts=start + 9 * 3600 + 120,
+        )
+        obs3 = store.add_observation(
+            "Returned to code.",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            ts=start + 9 * 3600 + 240,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+        active = chatter.answer("how much active time today?", window=(start, end))
+        switches = chatter.answer(
+            "how many context switches today?", window=(start, end)
+        )
+
+        assert llm.calls == 0
+        assert "active minute" in active.answer
+        assert active.derived_citations
+        assert set(active.derived_citations[0].derived_from) == {
+            obs1.id,
+            obs2.id,
+            obs3.id,
+        }
+        assert "2 context switch" in switches.answer
+        assert switches.derived_citations
+        assert set(switches.derived_citations[0].derived_from) == {
+            obs1.id,
+            obs2.id,
+            obs3.id,
+        }
+    finally:
+        store.close()
+
+
+def test_day_fact_longest_focus_block_is_local(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        obs1 = store.add_observation(
+            "Implemented local day fact answers.",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            ts=start + 9 * 3600,
+        )
+        obs2 = store.add_observation(
+            "Added regression tests.",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            ts=start + 9 * 3600 + 600,
+        )
+        store.add_observation(
+            "Checked email.",
+            source="capture",
+            app="Mail",
+            ts=start + 9 * 3600 + 1200,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+        result = chatter.answer(
+            "what was my longest focus block today?", window=(start, end)
+        )
+
+        assert llm.calls == 0
+        assert "coding" in result.answer
+        assert "09:00" in result.answer
+        assert "09:15" in result.answer
+        assert result.derived_citations
+        assert set(result.derived_citations[0].derived_from) == {obs1.id, obs2.id}
+    finally:
+        store.close()
+
+
+def test_day_fact_advice_query_stays_on_occurrence_rag(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        store.add_observation(
+            "Productivity retro notes mention batching notifications.",
+            source="capture",
+            app="Notes",
+            ts=start + 3600,
+        )
+        llm = EchoCiteAllLLM()
+        chatter = RAG(store, llm)
+
+        result = chatter.answer(
+            "how could I improve my productivity today?", window=(start, end)
+        )
+
+        assert llm.last_messages is not None
+        assert result.grounding == "occurrence"
+        assert result.derived_citations == []
+    finally:
+        store.close()
+
+
+def test_day_fact_metric_qualifier_content_query_stays_on_occurrence_rag(
+    mem_settings, fake_provider
+):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        obs = store.add_observation(
+            "Used Calendar during the most active hour.",
+            source="capture",
+            app="Calendar",
+            ts=start + 9 * 3600,
+        )
+        llm = EchoCiteAllLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: start + 12 * 3600
+
+        result = chatter.answer("which app did I use during my most active hour today?")
+
+        assert llm.last_messages is not None
+        assert result.grounding == "occurrence"
+        assert result.derived_citations == []
+        assert result.citations[0].observation_id == obs.id
+    finally:
+        store.close()
+
+
+def test_day_fact_synthesis_collision_keeps_day_memory(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        store.add_observation(
+            "Worked on https://github.com/bishnubista/openbird/pull/186",
+            source="capture",
+            app="com.google.Chrome",
+            window="feat(memory): local day facts",
+            url="https://github.com/bishnubista/openbird/pull/186",
+            ts=start + 3600,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+        result = chatter.answer("what was I working on today?", window=(start, end))
+
+        assert llm.calls == 0
+        assert result.grounding == "derived"
+        assert "most active hour" not in result.answer.lower()
+        assert "openbird" in result.answer.lower()
+    finally:
+        store.close()
+
+
+def test_day_fact_multiday_window_does_not_take_local_fact_path(
+    mem_settings, fake_provider
+):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 14, 23, 59, 59).timestamp()
+        store.add_observation(
+            "Most active hour notes.",
+            source="capture",
+            app="Notes",
+            ts=start + 3600,
+        )
+        llm = EchoCiteAllLLM()
+        chatter = RAG(store, llm)
+
+        result = chatter.answer(
+            "when was my most active hour today?", window=(start, end)
+        )
+
+        assert llm.last_messages is not None
+        assert result.grounding == "occurrence"
+        assert result.derived_citations == []
+    finally:
+        store.close()
+
+
+def test_day_fact_unavailable_is_terminal_local(monkeypatch):
+    import datetime as dt
+
+    start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+    end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+    saved = {
+        "payload": {
+            "local_date": "2026-06-12",
+            "source_scope": "capture",
+            "coverage": {
+                "observations": 1,
+                "sessions": 1,
+                "apps": 1,
+                "source_ids": ["o1"],
+            },
+            "metrics": {},
+            "window": {"start": start, "end": end},
+        },
+        "local_date": "2026-06-12",
+        "source_scope": "capture",
+        "extractor_version": "test",
+    }
+
+    class _FactStore:
+        def time_range_text(self, *_a, **_k):
+            raise AssertionError("must not fall through to occurrence RAG")
+
+        def ensure_day_memory(self, **_kwargs):
+            return saved
+
+    def fake_report(_saved):
+        return {
+            "productivity": {
+                "facts": {
+                    "top_category": {
+                        "category": "coding",
+                        "seconds": 60,
+                        "source_ids": [],
+                        "source_count": 0,
+                    }
+                }
+            }
+        }
+
+    monkeypatch.setattr("openbird.day_memory.build_productivity_report", fake_report)
+    llm = BoomLLM()
+    chatter = RAG(_FactStore(), llm)
+    chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+    result = chatter.answer("what was my top category today?", window=(start, end))
+
+    assert llm.calls == 0
+    assert result.grounding == "empty"
+    assert result.derived_citations == []
+    assert "not have enough local day-memory facts" in result.answer
+
+
 def test_empty_single_day_is_empty_not_ungrounded(mem_settings, fake_provider):
     import datetime as dt
 

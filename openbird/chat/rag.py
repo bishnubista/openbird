@@ -162,6 +162,82 @@ _QUERY_STOPWORDS = frozenset(
 )
 _QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_'-]*")
 
+_FACT_CONTENT_QUERY_RE = re.compile(
+    r"\b("
+    r"which|what|who"
+    r")\s+("
+    r"app|application|site|website|domain|page|person|people|file|repo|repository|"
+    r"window|tab|document|doc|message"
+    r")\b",
+    re.IGNORECASE,
+)
+_FACT_ADVICE_RE = re.compile(
+    r"\b(advice|advise|coach|coaching|improve|improvement|better|optimi[sz]e|"
+    r"recommend|suggest|should|could|where\s+could\s+i)\b",
+    re.IGNORECASE,
+)
+_FACT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "context_switches",
+        re.compile(
+            r"\b("
+            r"how\s+many\s+context\s+switch(?:es)?|"
+            r"context\s+switch(?:es)?\s+count|"
+            r"count\s+of\s+context\s+switch(?:es)?"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "longest_focus_block",
+        re.compile(
+            r"\b("
+            r"(what|when|how\s+long)\s+(was\s+)?(my\s+)?longest\s+"
+            r"(focus|focused|productive|coding)\s+block|"
+            r"longest\s+(focus|focused|productive|coding)\s+block"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "top_hour",
+        re.compile(
+            r"\b("
+            r"(when|what\s+time|which\s+hour)\s+(was\s+)?(my\s+)?"
+            r"(most|top|peak)\s+(active|productive|focused|focus)|"
+            r"what\s+(was|is)\s+(my\s+)?(most|top|peak)\s+"
+            r"(active|productive|focused|focus)\s+hour|"
+            r"(my\s+)?(most|top|peak)\s+(active|productive|focused|focus)\s+hour"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "top_category",
+        re.compile(
+            r"\b("
+            r"what\s+(was|is)\s+(my\s+)?top\s+(category|activity\s+type)|"
+            r"which\s+(category|activity\s+type)\s+did\s+i\s+spend\s+"
+            r"(the\s+)?most\s+time\s+(on|in)|"
+            r"top\s+(category|activity\s+type)"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "active_time",
+        re.compile(
+            r"\b("
+            r"how\s+(much\s+)?(active|recorded|focus|focused|productive|work)"
+            r"\s+time|"
+            r"how\s+long\s+was\s+i\s+(active|focused|productive|working)|"
+            r"(active|recorded|focus|focused|productive|work)\s+minutes"
+            r")\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
 # Generic window titles that carry almost no activity signal on their own (a
 # bare app name, a transient sheet). Used to down-rank low-signal observations
 # when selecting what to ground a synthesis answer on — derived from the real
@@ -546,6 +622,9 @@ class RAG:
                     if day_result is not None:
                         return day_result
                 return self._answer_temporal(query, window, route="explicit_window")
+            fact_kind = self._day_fact_kind(query)
+            if fact_kind is not None and self._can_answer_from_day_memory(window):
+                return self._answer_day_memory_fact(query, window, fact_kind)
             return self._answer_scoped_specific(
                 query, window, route="explicit_window_specific"
             )
@@ -579,6 +658,9 @@ class RAG:
                     if day_result is not None:
                         return day_result
                 return self._answer_temporal(query, intent_window, route)
+            fact_kind = self._day_fact_kind(query)
+            if fact_kind is not None and self._can_answer_from_day_memory(intent_window):
+                return self._answer_day_memory_fact(query, intent_window, fact_kind)
             return self._answer_scoped_specific(query, intent_window, route)
 
         hits = self.store.search(query, k=k, semantic=semantic)
@@ -779,12 +861,28 @@ class RAG:
         end_dt = _dt.datetime.fromtimestamp(end)
         day_start = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         day_end = day_start + _dt.timedelta(days=1) - _dt.timedelta(microseconds=1)
-        return start_dt == day_start and start_dt.date() == end_dt.date() and end <= day_end.timestamp()
+        return (
+            start_dt == day_start
+            and start_dt.date() == end_dt.date()
+            and end <= day_end.timestamp()
+        )
 
-    def _answer_day_memory(
-        self, query: str, window: tuple[float, float]
-    ) -> AnswerResult | None:
-        del query  # deterministic day-memory answers depend only on the day window.
+    @staticmethod
+    def _day_fact_kind(query: str) -> str | None:
+        """Return a local productivity fact kind only when the metric is requested.
+
+        Metric words can appear inside content questions ("which app did I use
+        during my most active hour?"). Those stay on occurrence RAG; this gate
+        only claims queries asking for the metric value itself.
+        """
+        if _FACT_ADVICE_RE.search(query) or _FACT_CONTENT_QUERY_RE.search(query):
+            return None
+        for kind, pattern in _FACT_PATTERNS:
+            if pattern.search(query):
+                return kind
+        return None
+
+    def _ensure_day_memory_for_window(self, window: tuple[float, float]) -> dict:
         from openbird.day_memory import local_date_for_window
 
         start, end = window
@@ -792,7 +890,7 @@ class RAG:
         today = _dt.datetime.fromtimestamp(self._now()).date()
         day_date = _dt.datetime.fromtimestamp(start).date()
         day_offset = max(0, (today - day_date).days)
-        saved = self.store.ensure_day_memory(  # type: ignore[attr-defined]
+        return self.store.ensure_day_memory(  # type: ignore[attr-defined]
             local_date=local_date,
             start_ts=start,
             end_ts=end,
@@ -800,7 +898,15 @@ class RAG:
             source_scope="capture",
             force=False,
         )
+
+    def _answer_day_memory(
+        self, query: str, window: tuple[float, float]
+    ) -> AnswerResult | None:
+        del query  # deterministic day-memory answers depend only on the day window.
+
+        saved = self._ensure_day_memory_for_window(window)
         payload = saved.get("payload", {})
+        local_date = payload.get("local_date") or saved.get("local_date") or "that day"
         memory_context = self._day_memory_context(saved)
         coverage = payload.get("coverage", {})
         observations = int(coverage.get("observations") or 0)
@@ -824,6 +930,181 @@ class RAG:
             grounding="derived",
             memory_context=memory_context,
             reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+        )
+
+    def _answer_day_memory_fact(
+        self, query: str, window: tuple[float, float], fact_kind: str
+    ) -> AnswerResult:
+        del query
+        from openbird.day_memory import build_productivity_report
+
+        saved = self._ensure_day_memory_for_window(window)
+        payload = saved.get("payload", {})
+        memory_context = self._day_memory_context(saved)
+        local_date = str(
+            payload.get("local_date") or saved.get("local_date") or "that day"
+        )
+        coverage = payload.get("coverage", {})
+        source_ids = list(coverage.get("source_ids") or [])
+        if int(coverage.get("observations") or 0) <= 0:
+            return self._day_fact_unavailable(local_date, memory_context)
+
+        report = build_productivity_report(saved)
+        facts = (report.get("productivity") or {}).get("facts") or {}
+        rendered = self._render_day_fact(fact_kind, facts, payload)
+        if rendered is None:
+            return self._day_fact_unavailable(local_date, memory_context)
+        answer, label, snippet, fact_source_ids, source_total = rendered
+        if fact_kind in {"active_time", "context_switches"}:
+            fact_source_ids = source_ids
+            source_total = len(source_ids)
+        if not fact_source_ids:
+            return self._day_fact_unavailable(local_date, memory_context)
+
+        citation = self._day_fact_citation(
+            local_date=local_date,
+            label=label,
+            snippet=snippet,
+            source_ids=fact_source_ids,
+            total=source_total,
+        )
+        return AnswerResult(
+            answer=answer,
+            citations=[],
+            derived_citations=[citation],
+            grounding="derived",
+            memory_context=memory_context,
+            reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+        )
+
+    @staticmethod
+    def _day_fact_unavailable(local_date: str, memory_context: dict) -> AnswerResult:
+        return AnswerResult(
+            answer=(
+                f"I do not have enough local day-memory facts to answer that "
+                f"metric for {local_date}."
+            ),
+            citations=[],
+            derived_citations=[],
+            grounding="empty",
+            memory_context=memory_context,
+            reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+        )
+
+    def _render_day_fact(
+        self, fact_kind: str, facts: dict, payload: dict
+    ) -> tuple[str, str, str, list[str], int] | None:
+        local_date = str(payload.get("local_date") or "that day")
+        window = payload.get("window") or {}
+        current_day = (
+            _dt.datetime.fromtimestamp(float(window.get("start") or 0)).date()
+            == _dt.datetime.fromtimestamp(self._now()).date()
+        )
+        qualifier = "recorded so far" if current_day else "recorded"
+
+        if fact_kind == "top_hour":
+            fact = facts.get("top_hour")
+            if not isinstance(fact, dict) or not fact.get("hour"):
+                return None
+            minutes = _minutes(fact.get("seconds"))
+            hour = str(fact.get("hour"))
+            answer = (
+                f"For {local_date}, the most active hour {qualifier} was {hour}, "
+                f"with about {minutes} active minute(s)."
+            )
+            snippet = f"Most active hour: {hour}, {minutes} active minute(s)"
+            return (
+                answer,
+                "Most active hour",
+                snippet,
+                list(fact.get("source_ids") or []),
+                int(fact.get("source_count") or 0),
+            )
+
+        if fact_kind == "top_category":
+            fact = facts.get("top_category")
+            if not isinstance(fact, dict) or not fact.get("category"):
+                return None
+            minutes = _minutes(fact.get("seconds"))
+            category = str(fact.get("category"))
+            answer = (
+                f"For {local_date}, the top recorded activity category was "
+                f"{category}, with about {minutes} active minute(s)."
+            )
+            snippet = f"Top category: {category}, {minutes} active minute(s)"
+            return (
+                answer,
+                "Top activity category",
+                snippet,
+                list(fact.get("source_ids") or []),
+                int(fact.get("source_count") or 0),
+            )
+
+        if fact_kind == "longest_focus_block":
+            fact = facts.get("longest_focus_block")
+            if not isinstance(fact, dict) or not fact.get("category"):
+                return None
+            minutes = _minutes(fact.get("seconds"))
+            category = str(fact.get("category"))
+            start = _clock(fact.get("start"))
+            end = _clock(fact.get("end"))
+            when = f" from {start} to {end}" if start and end else ""
+            answer = (
+                f"For {local_date}, the longest same-category focus block "
+                f"{qualifier} was {category} for about {minutes} minute(s){when}."
+            )
+            snippet = f"Longest focus block: {category}, {minutes} minute(s)"
+            return (
+                answer,
+                "Longest focus block",
+                snippet,
+                list(fact.get("source_ids") or []),
+                int(fact.get("source_count") or 0),
+            )
+
+        if fact_kind == "active_time":
+            active_seconds = facts.get("active_seconds")
+            if active_seconds is None:
+                return None
+            minutes = _minutes(active_seconds)
+            answer = (
+                f"For {local_date}, I found about {minutes} active minute(s) "
+                f"{qualifier}."
+            )
+            snippet = f"Daily active time: {minutes} active minute(s)"
+            return answer, "Daily active time", snippet, [], 0
+
+        if fact_kind == "context_switches":
+            switches = facts.get("context_switch_count")
+            if switches is None:
+                return None
+            count = int(switches or 0)
+            answer = (
+                f"For {local_date}, I counted {count} context switch(es) "
+                f"{qualifier}."
+            )
+            snippet = f"Daily context switches: {count}"
+            return answer, "Daily context switches", snippet, [], 0
+
+        return None
+
+    @staticmethod
+    def _day_fact_citation(
+        *,
+        local_date: str,
+        label: str,
+        snippet: str,
+        source_ids: list[str],
+        total: int,
+    ) -> DerivedCitation:
+        unique = sorted(set(source_ids))
+        return DerivedCitation(
+            index=1,
+            source_id=f"D{local_date.replace('-', '')}-fact-1",
+            label=label,
+            snippet=snippet,
+            derived_from=unique[:12],
+            derived_from_total=total or len(unique),
         )
 
     @staticmethod
@@ -1341,6 +1622,17 @@ def _truncate(text: str, limit: int) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _minutes(seconds: Any) -> float:
+    """Render seconds as one-decimal active minutes for deterministic fact prose."""
+    return round(float(seconds or 0.0) / 60.0, 1)
+
+
+def _clock(ts: Any) -> str | None:
+    if ts is None:
+        return None
+    return _dt.datetime.fromtimestamp(float(ts)).strftime("%H:%M")
 
 
 def answer(
