@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 from openbird.types import Observation
 
-EXTRACTOR_VERSION = "day-memory-v4"
+EXTRACTOR_VERSION = "day-memory-v5"
 _UNGROUNDED_PRODUCTIVITY_COACH_ANSWER = (
     "I could not ground productivity coaching in the local facts packet."
 )
@@ -44,6 +44,14 @@ PRODUCTIVITY_EXCLUSION_KEYS = (
     "excluded_sources_configured",
     "excluded_observation_ids_configured",
 )
+_MODEL_STRIPPED_LOCAL_ID_KEYS = {
+    "source_ids",
+    "observation_id",
+    "observation_ids",
+    "session_id",
+    "session_ids",
+    "session_refs",
+}
 
 _BROWSER_APPS = {
     "com.google.chrome",
@@ -175,7 +183,11 @@ def build_productivity_report(saved: dict, *, exclusions: dict | None = None) ->
     """Build a local-only productivity facts report from a saved day memory."""
     payload = saved.get("payload", {})
     metrics = payload.get("metrics", {})
-    focus_blocks = list(payload.get("focus_blocks") or [])
+    session_refs_by_source = _session_refs_by_source(payload.get("sessions") or [])
+    focus_blocks = [
+        _with_session_refs(dict(block), session_refs_by_source)
+        for block in payload.get("focus_blocks") or []
+    ]
     category_sources = _category_sources_from_blocks(focus_blocks)
 
     active_seconds = float(metrics.get("active_seconds") or 0.0)
@@ -190,7 +202,11 @@ def build_productivity_report(saved: dict, *, exclusions: dict | None = None) ->
             else 0.0
         ),
         "top_category": _top_category_fact(metrics, category_sources),
-        "top_hour": _top_hour_fact(metrics, payload.get("hour_sources") or []),
+        "top_hour": _top_hour_fact(
+            metrics,
+            payload.get("hour_sources") or [],
+            session_refs_by_source=session_refs_by_source,
+        ),
         "longest_focus_block": _longest_focus_block(focus_blocks),
     }
     coach_ready_packet = {
@@ -328,6 +344,7 @@ def build_productivity_coach_packet(report: dict) -> dict:
             "seconds": item.get("active_seconds"),
             "source_count": int(raw.get("source_count") or item.get("source_count") or 0),
             "source_ids": list(raw.get("source_ids") or []),
+            "session_refs": list(raw.get("session_refs") or []),
         }
 
     raw_blocks = list(productivity.get("focus_blocks") or [])
@@ -348,6 +365,7 @@ def build_productivity_coach_packet(report: dict) -> dict:
             "session_count": int(raw.get("session_count") or item.get("session_count") or 0),
             "source_count": len(raw.get("source_ids") or []),
             "source_ids": list(raw.get("source_ids") or []),
+            "session_refs": list(raw.get("session_refs") or []),
         }
 
     facts = model_packet.get("facts") or {}
@@ -369,6 +387,7 @@ def build_productivity_coach_packet(report: dict) -> dict:
                 or 0
             ),
             "source_ids": list(raw_top_hour.get("source_ids") or []),
+            "session_refs": list(raw_top_hour.get("session_refs") or []),
         }
 
     packet = {
@@ -610,7 +629,7 @@ def classify_observation(obs: Observation, text: str = "") -> tuple[str, float]:
 def _build_sessions(rows: list[tuple[Observation, str]]) -> list[dict]:
     grouped: dict[tuple[str, str], list[tuple[Observation, str]]] = defaultdict(list)
     for obs, text in rows:
-        key = (obs.session_id or obs.id, obs.app or "unknown")
+        key = (_session_bucket(obs), obs.app or "unknown")
         grouped[key].append((obs, text))
 
     sessions: list[dict] = []
@@ -619,8 +638,10 @@ def _build_sessions(rows: list[tuple[Observation, str]]) -> list[dict]:
         category, confidence = _classify_many(items)
         title = _representative_title(items)
         source_ids = [obs.id for obs, _ in items]
+        session_id = _real_session_id(items)
         sessions.append(
             {
+                "session_id": session_id,
                 "app": app,
                 "category": category,
                 "category_confidence": confidence,
@@ -642,6 +663,23 @@ def _build_sessions(rows: list[tuple[Observation, str]]) -> list[dict]:
         )
     )
     return sessions
+
+
+def _session_bucket(obs: Observation) -> str:
+    if obs.session_id:
+        return f"session:{obs.session_id}"
+    return f"observation:{obs.id}"
+
+
+def _real_session_id(items: list[tuple[Observation, str]]) -> str | None:
+    """Return the real session id for a grouped session, never the legacy bucket id."""
+    values = {obs.session_id for obs, _text in items if obs.session_id}
+    if len(values) != 1:
+        return None
+    session_id = next(iter(values))
+    if any(obs.session_id != session_id for obs, _text in items):
+        return None
+    return session_id
 
 
 def _classify_many(items: list[tuple[Observation, str]]) -> tuple[str, float]:
@@ -756,6 +794,66 @@ def _longest_focus_block_metric(focus_blocks: list[dict]) -> dict | None:
     return {"category": block["category"], "seconds": block["seconds"]}
 
 
+def _session_refs_by_source(sessions: list[dict]) -> dict[str, dict]:
+    refs: dict[str, dict] = {}
+    for session in sessions:
+        source_ids = list(session.get("source_ids") or [])
+        ref = {
+            "session_id": session.get("session_id"),
+            "app": session.get("app"),
+            "category": session.get("category"),
+            "start": session.get("start"),
+            "end": session.get("end"),
+            "source_count": len(source_ids),
+        }
+        for source_id in source_ids:
+            refs[str(source_id)] = ref
+    return refs
+
+
+def _with_session_refs(item: dict, refs_by_source: dict[str, dict]) -> dict:
+    source_ids = list(item.get("source_ids") or [])
+    refs = [
+        refs_by_source[source_id]
+        for source_id in source_ids
+        if source_id in refs_by_source
+    ]
+    if refs:
+        item["session_refs"] = _sorted_session_refs(refs)
+    return item
+
+
+def _sorted_session_refs(refs) -> list[dict]:
+    unique: dict[tuple, dict] = {}
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        unique[_session_ref_key(ref)] = dict(ref)
+    return [
+        unique[key]
+        for key in sorted(
+            unique,
+            key=lambda key: (
+                float(key[3] or 0.0),
+                str(key[1] or ""),
+                str(key[0] or ""),
+                float(key[4] or 0.0),
+                str(key[2] or ""),
+            ),
+        )
+    ]
+
+
+def _session_ref_key(ref: dict) -> tuple:
+    return (
+        ref.get("session_id"),
+        ref.get("app"),
+        ref.get("category"),
+        ref.get("start"),
+        ref.get("end"),
+    )
+
+
 def _longest_focus_block(focus_blocks: list[dict]) -> dict | None:
     if not focus_blocks:
         return None
@@ -773,6 +871,7 @@ def _longest_focus_block(focus_blocks: list[dict]) -> dict | None:
         "end": block.get("end"),
         "seconds": round(float(block.get("seconds") or 0.0), 3),
         "source_ids": list(block.get("source_ids") or []),
+        "session_refs": list(block.get("session_refs") or []),
         "session_count": int(block.get("session_count") or 0),
     }
 
@@ -787,18 +886,22 @@ def _category_sources_from_blocks(focus_blocks: list[dict]) -> list[dict]:
                 "category": category,
                 "active_seconds": 0.0,
                 "source_ids": set(),
+                "session_refs": {},
                 "block_count": 0,
                 "session_count": 0,
             },
         )
         item["active_seconds"] += float(block.get("seconds") or 0.0)
         item["source_ids"].update(block.get("source_ids") or [])
+        for ref in block.get("session_refs") or []:
+            item["session_refs"][_session_ref_key(ref)] = ref
         item["block_count"] += 1
         item["session_count"] += int(block.get("session_count") or 0)
 
     out: list[dict] = []
     for item in grouped.values():
         source_ids = sorted(item["source_ids"])
+        session_refs = _sorted_session_refs(item["session_refs"].values())
         out.append(
             {
                 "category": item["category"],
@@ -806,8 +909,9 @@ def _category_sources_from_blocks(focus_blocks: list[dict]) -> list[dict]:
                 "active_minutes": round(float(item["active_seconds"]) / 60.0, 1),
                 "source_ids": source_ids,
                 "source_count": len(source_ids),
+                "session_refs": session_refs,
                 "block_count": item["block_count"],
-                "session_count": item["session_count"],
+                "session_count": len(session_refs) or item["session_count"],
             }
         )
     return sorted(
@@ -836,10 +940,16 @@ def _top_category_fact(metrics: dict, category_sources: list[dict]) -> dict | No
         "minutes": round(float(seconds) / 60.0, 1),
         "source_ids": list(sources.get("source_ids") or []),
         "source_count": int(sources.get("source_count") or 0),
+        "session_refs": list(sources.get("session_refs") or []),
     }
 
 
-def _top_hour_fact(metrics: dict, hour_sources: list[dict]) -> dict | None:
+def _top_hour_fact(
+    metrics: dict,
+    hour_sources: list[dict],
+    *,
+    session_refs_by_source: dict[str, dict] | None = None,
+) -> dict | None:
     hours = metrics.get("time_by_hour") or {}
     if not hours:
         return None
@@ -852,13 +962,14 @@ def _top_hour_fact(metrics: dict, hour_sources: list[dict]) -> dict | None:
         ),
         [],
     )
-    return {
+    fact = {
         "hour": hour,
         "seconds": round(float(seconds), 3),
         "minutes": round(float(seconds) / 60.0, 1),
         "source_ids": sorted(source_ids),
         "source_count": len(source_ids),
     }
+    return _with_session_refs(fact, session_refs_by_source or {})
 
 
 def _valid_productivity_coach_citations(packet: dict, values) -> list[dict]:
@@ -881,7 +992,7 @@ def _without_source_ids(value):
         return {
             key: _without_source_ids(item)
             for key, item in value.items()
-            if key not in {"source_ids", "observation_id", "observation_ids"}
+            if key not in _MODEL_STRIPPED_LOCAL_ID_KEYS
         }
     if isinstance(value, list):
         return [_without_source_ids(item) for item in value]

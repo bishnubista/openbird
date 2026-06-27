@@ -331,6 +331,7 @@ def test_ensure_day_memory_rebuilds_old_extractor_payload(store):
     assert "workstreams" in saved["payload"]
     assert saved["payload"]["extractor_version"] == saved["extractor_version"]
     assert saved["payload"]["sessions"][0]["cues"]
+    assert "session_id" in saved["payload"]["sessions"][0]
 
 
 def test_concurrent_ensure_day_memory_converges_to_one_row(tmp_path, fake_provider):
