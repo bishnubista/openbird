@@ -178,21 +178,31 @@ class _PreviewStore:
         pass
 
 
-def test_deep_brain_preview_cli_never_constructs_provider(monkeypatch, tmp_path):
+def test_deep_brain_preview_cli_uses_maintenance_store_not_model_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
     start = _day(*dt.datetime.now().timetuple()[:3], 9)
     rows = [(_obs("o1", h="h1", ts=start, window="public notes"), "public notes")]
-    monkeypatch.setattr(cli, "_store_maintenance", lambda: _PreviewStore(rows))
+    used_maintenance_store = False
+
+    def _fake_store_maintenance():
+        nonlocal used_maintenance_store
+        used_maintenance_store = True
+        return _PreviewStore(rows)
+
+    monkeypatch.setattr(cli, "_store_maintenance", _fake_store_maintenance)
     monkeypatch.setattr(
         cli,
         "_provider",
-        lambda: (_ for _ in ()).throw(AssertionError("preview must not use provider")),
+        lambda: (_ for _ in ()).throw(
+            AssertionError("preview must not use configured model provider")
+        ),
     )
 
     res = CliRunner().invoke(cli.app, ["deep-brain", "preview", "--day", "0", "--json"])
 
     assert res.exit_code == 0, res.output
+    assert used_maintenance_store is True
     packet = json.loads(res.stdout)
     assert packet["route"] == "deep_brain.preview"
     assert packet["egress"] == "none_preview"

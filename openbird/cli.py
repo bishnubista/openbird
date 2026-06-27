@@ -573,7 +573,9 @@ def deep_brain_preview(
 
     The preview is a consent surface: it applies configured exclusions before
     distillation and shows what a future cloud reasoning route would be eligible
-    to use. It never constructs a provider and never sends data off this Mac.
+    to use. It never constructs the configured LLM/model provider and never
+    sends data off this Mac. Store access uses the local maintenance provider
+    stub, whose embed/complete methods fail closed if accidentally called.
     """
     if day < 0:
         _err_console.print("[red]--day must be >= 0.[/]")
