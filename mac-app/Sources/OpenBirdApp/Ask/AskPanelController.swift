@@ -214,14 +214,55 @@ final class AskPanelController: NSObject, ObservableObject {
         return panel
     }
 
+    /// Guards SYNCHRONOUS re-entry of `handleCompactSize` — `setContentSize` re-lays-out
+    /// the hosting view, which can flush preferences again within this call. Not the
+    /// convergence mechanism (that's `compactResizeTarget`'s clamp+ceil+epsilon); just a
+    /// belt-and-suspenders against a same-callstack recurse.
+    private var isApplyingCompactSize = false
+
     /// Resize the compact panel to fit SwiftUI content, keeping the top edge anchored.
     /// Applies ONLY to the compact panel; the expanded window sizes itself.
     private func handleCompactSize(_ size: CGSize) {
-        guard let panel = compactPanel, panel.isVisible else { return }
-        let newHeight = ceil(size.height)
-        guard newHeight > 0, abs(panel.frame.height - newHeight) > 0.5 else { return }
-        panel.setContentSize(NSSize(width: compactWidth, height: newHeight))
+        guard let panel = compactPanel, panel.isVisible, !isApplyingCompactSize else { return }
+        // Bound the request by the space actually available BELOW the panel's fixed top
+        // anchor (positionCompact pins the top edge at ~80% screen height and grows the
+        // card downward), not the full screen — so the reachable fixed point is a fully
+        // visible panel, not one clipped off the bottom (#169, CodeRabbit).
+        let maxHeight: CGFloat
+        if let visibleFrame = (panel.screen ?? NSScreen.main)?.visibleFrame {
+            let topY = anchorTopY ?? (visibleFrame.minY + visibleFrame.height * 0.80)
+            maxHeight = max(0, topY - visibleFrame.minY)
+        } else {
+            maxHeight = size.height
+        }
+        guard let target = Self.compactResizeTarget(
+            reportedHeight: size.height,
+            currentHeight: panel.frame.height,
+            maxHeight: maxHeight
+        ) else { return }
+        isApplyingCompactSize = true
+        defer { isApplyingCompactSize = false }
+        panel.setContentSize(NSSize(width: compactWidth, height: target))
         positionCompact(panel, freshAnchor: false)
+    }
+
+    /// Pure resize decision (no AppKit state) so it is unit-testable and its convergence
+    /// is auditable. Returns the panel height to apply, or `nil` when already settled.
+    ///
+    /// Clamping the request to `maxHeight` (the screen's displayable height) is what
+    /// breaks the #169 layout loop: if the SwiftUI content reports a height larger than
+    /// the window server will grant, `panel.frame.height` could never reach an unclamped
+    /// target, so `abs(current - target) > 0.5` would stay true and the Core-Animation
+    /// display cycle would resize the panel every frame forever. `ceil` + the 0.5 epsilon
+    /// give a stable fixed point once the content height settles (a stable report yields
+    /// an identical clamped target, so the second call returns nil).
+    nonisolated static func compactResizeTarget(reportedHeight: CGFloat,
+                                                currentHeight: CGFloat,
+                                                maxHeight: CGFloat) -> CGFloat? {
+        guard reportedHeight.isFinite, maxHeight > 0 else { return nil }
+        let target = min(ceil(reportedHeight), floor(maxHeight))
+        guard target > 0, abs(currentHeight - target) > 0.5 else { return nil }
+        return target
     }
 
     private func positionCompact(_ panel: AskPanel, freshAnchor: Bool) {

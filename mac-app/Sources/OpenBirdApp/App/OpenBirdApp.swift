@@ -5,6 +5,11 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let log = Logger(subsystem: "ai.openbird.OpenBird", category: "selftest")
 
+    /// Detects the #169 main-thread layout feedback loop (CPU pin) and logs a privacy-safe
+    /// reason code. Held for the process lifetime; nil when disabled (release builds without
+    /// OPENBIRD_LAYOUT_WATCHDOG). Not installed in headless self-test mode.
+    private var layoutWatchdog: LayoutLoopWatchdog?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // DEVELOP/SELF-TEST MODE: when OPENBIRD_SELFTEST_ASK=<query> is set, run that
         // ask headlessly through the SAME OpenBirdService.askChat seam the Ask panel
@@ -31,6 +36,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         OpenBirdService.bootstrapDBKey()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        startLayoutWatchdogIfEnabled()
+    }
+
+    /// Install the #169 layout-loop watchdog when enabled (DEBUG, or
+    /// OPENBIRD_LAYOUT_WATCHDOG set). Reached only past the self-test early-return above,
+    /// so the headless verifier never starts it.
+    private func startLayoutWatchdogIfEnabled() {
+        #if DEBUG
+        let isDebug = true
+        #else
+        let isDebug = false
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        guard LayoutLoopWatchdog.isEnabled(
+            environment: environment, isDebug: isDebug
+        ) else { return }
+        // Build from the same environment so OPENBIRD_LAYOUT_WATCHDOG_SECONDS is honored.
+        let watchdog = LayoutLoopWatchdog(environment: environment)
+        layoutWatchdog = watchdog
+        watchdog.start()
     }
 
     /// Run one ask through the real service off the main thread, print a parseable
