@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 from openbird.types import Observation
 from openbird.reasoning_ledger import packet_payload_audit
 
-EXTRACTOR_VERSION = "day-memory-v5"
+EXTRACTOR_VERSION = "day-memory-v6"
 _UNGROUNDED_PRODUCTIVITY_COACH_ANSWER = (
     "I could not ground productivity coaching in the local facts packet."
 )
@@ -738,7 +738,7 @@ def _timed_observations(
     for idx, (obs, text) in enumerate(rows):
         category, _confidence = classify_observation(obs, text)
         if idx + 1 >= len(rows):
-            seconds = max(0.0, min(end_ts - obs.ts, gap_seconds))
+            seconds = 0.0
         else:
             seconds = max(0.0, min(rows[idx + 1][0].ts - obs.ts, gap_seconds))
         out.append((obs, text, category, seconds))
