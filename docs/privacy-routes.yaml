@@ -106,9 +106,11 @@ routes:
 
   - id: deep_brain.preview
     class: local
-    source: exclusion-filtered daily memory plus selected cited snippets
+    source: exclusion-filtered day/week memory plus selected cited snippets
     captured_fields:
       - distilled_day_memory_content
+      - distilled_day_or_week_memory_content
+      - period_metadata
       - selected_citation_snippets
       - selected_source_observation_id
       - selected_source_app
@@ -125,10 +127,12 @@ routes:
 
   - id: deep_brain.ask
     class: unknown
-    source: user question plus exclusion-filtered daily memory packet
+    source: user question plus exclusion-filtered day/week memory packet
     captured_fields:
       - user_question
       - distilled_day_memory_content
+      - distilled_day_or_week_memory_content
+      - period_metadata
       - selected_citation_snippets
       - selected_source_observation_id
       - selected_source_app

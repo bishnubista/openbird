@@ -30,7 +30,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from rich.console import Console
@@ -292,6 +292,42 @@ def _day_window(day_offset: int) -> tuple[float, float]:
     from openbird.routines.templates import _day_bounds
 
     return _day_bounds(_dt.datetime.now().timestamp(), offset_days=-day_offset)
+
+
+def _validate_deep_brain_days(days: int) -> None:
+    from openbird.deep_brain import MAX_DEEP_BRAIN_DAYS
+
+    if days < 1 or days > MAX_DEEP_BRAIN_DAYS:
+        _err_console.print(
+            f"[red]--days must be between 1 and {MAX_DEEP_BRAIN_DAYS}.[/]"
+        )
+        raise typer.Exit(code=2)
+
+
+def _deep_brain_day_windows(day: int, days: int) -> list[dict[str, Any]]:
+    windows: list[dict[str, Any]] = []
+    for offset in range(day + days - 1, day - 1, -1):
+        start, end = _day_window(offset)
+        windows.append(
+            {
+                "start": start,
+                "end": end,
+                "day_offset": offset,
+                "local_date": _dt.datetime.fromtimestamp(start).date().isoformat(),
+            }
+        )
+    return windows
+
+
+def _group_rows_by_day_windows(rows, windows: list[dict[str, Any]]) -> list[list]:
+    grouped: list[list] = [[] for _ in windows]
+    for item in rows:
+        obs, _text = item
+        for idx, window in enumerate(windows):
+            if float(window["start"]) <= obs.ts <= float(window["end"]):
+                grouped[idx].append(item)
+                break
+    return grouped
 
 
 @app.command("timeline")
@@ -592,6 +628,7 @@ def _briefing_signals(day: int, start: float, end: float, *, as_json: bool) -> N
 @deep_brain_app.command("preview")
 def deep_brain_preview(
     day: int = typer.Option(0, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    days: int = typer.Option(1, "--days", help="Trailing local days to include, max 7."),
     source_scope: str = typer.Option(
         "capture", "--source-scope", help="Observation source to preview."
     ),
@@ -608,10 +645,13 @@ def deep_brain_preview(
     if day < 0:
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
+    _validate_deep_brain_days(days)
 
-    from openbird.deep_brain import build_deep_brain_preview
+    from openbird.deep_brain import build_deep_brain_period_preview
 
-    start, end = _day_window(day)
+    windows = _deep_brain_day_windows(day, days)
+    start = float(windows[0]["start"])
+    end = float(windows[-1]["end"])
     settings = get_settings()
     store = _store_maintenance()
     try:
@@ -619,11 +659,11 @@ def deep_brain_preview(
     finally:
         store.close()
 
-    packet = build_deep_brain_preview(
-        rows,
-        start_ts=start,
-        end_ts=end,
+    packet = build_deep_brain_period_preview(
+        _group_rows_by_day_windows(rows, windows),
+        day_windows=windows,
         day_offset=day,
+        days=days,
         source_scope=source_scope,
         settings=settings,
     )
@@ -631,8 +671,12 @@ def deep_brain_preview(
         _console.print_json(json.dumps(packet))
         return
     ready = "ready" if packet["cloud_ready"] else "not ready"
+    label = packet["local_date"]
+    if packet.get("period"):
+        period = packet["period"]
+        label = f"{period['start_local_date']}..{period['end_local_date']}"
     _console.print(
-        f"Deep Brain preview for {packet['local_date']} ({ready}); "
+        f"Deep Brain preview for {label} ({ready}); "
         f"{packet['exclusions']['kept_observations']} kept, "
         f"{packet['exclusions']['excluded_observations']} excluded. "
         "No data was sent."
@@ -643,6 +687,7 @@ def deep_brain_preview(
 def deep_brain_ask(
     question: Optional[str] = typer.Argument(None, help="Question to answer from the day packet."),
     day: int = typer.Option(0, "--day", help="Day offset: 0=today, 1=yesterday, ..."),
+    days: int = typer.Option(1, "--days", help="Trailing local days to include, max 7."),
     source_scope: str = typer.Option(
         "capture", "--source-scope", help="Observation source to distill."
     ),
@@ -653,6 +698,7 @@ def deep_brain_ask(
     if day < 0:
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
+    _validate_deep_brain_days(days)
     if stdin:
         question = sys.stdin.read().strip()
     if not question:
@@ -661,11 +707,13 @@ def deep_brain_ask(
 
     from openbird.deep_brain import (
         answer_deep_brain,
-        build_deep_brain_preview,
+        build_deep_brain_period_preview,
         deep_brain_ask_blocked_reasons,
     )
 
-    start, end = _day_window(day)
+    windows = _deep_brain_day_windows(day, days)
+    start = float(windows[0]["start"])
+    end = float(windows[-1]["end"])
     settings = get_settings()
     store = _store_maintenance()
     try:
@@ -673,11 +721,11 @@ def deep_brain_ask(
     finally:
         store.close()
 
-    packet = build_deep_brain_preview(
-        rows,
-        start_ts=start,
-        end_ts=end,
+    packet = build_deep_brain_period_preview(
+        _group_rows_by_day_windows(rows, windows),
+        day_windows=windows,
         day_offset=day,
+        days=days,
         source_scope=source_scope,
         settings=settings,
     )
@@ -694,6 +742,7 @@ def deep_brain_ask(
                 "local_date": packet.get("local_date"),
                 "day_offset": packet.get("day_offset"),
                 "source_scope": packet.get("source_scope"),
+                "period": packet.get("period"),
                 "coverage": packet.get("memory_summary", {}).get("coverage", {}),
                 "sources_total": packet.get("sources_total", 0),
                 "exclusions": packet.get("exclusions", {}),

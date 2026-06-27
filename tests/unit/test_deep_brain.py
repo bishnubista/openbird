@@ -11,6 +11,7 @@ from openbird.config import Settings, reset_settings_cache
 from openbird.deep_brain import (
     answer_deep_brain,
     build_deep_brain_messages,
+    build_deep_brain_period_preview,
     build_deep_brain_preview,
     packet_json_for_model,
 )
@@ -52,6 +53,16 @@ def _has_key(value, key: str) -> bool:
     return False
 
 
+def _window(y: int, mo: int, d: int, *, offset: int) -> dict:
+    start = _day(y, mo, d)
+    return {
+        "start": start,
+        "end": start + 86400 - 0.000001,
+        "day_offset": offset,
+        "local_date": dt.date(y, mo, d).isoformat(),
+    }
+
+
 def test_preview_builds_locally_with_cloud_off_and_no_source_ids(tmp_path):
     start = _day(2026, 6, 12, 9)
     rows = [(_obs("o1", h="h1", ts=start, window="openbird issue"), "fix issue")]
@@ -73,6 +84,172 @@ def test_preview_builds_locally_with_cloud_off_and_no_source_ids(tmp_path):
     assert "OPENBIRD_DEEP_BRAIN_ENABLED" in " ".join(packet["blocked_reasons"])
     assert _has_key(packet["memory_summary"], "source_ids") is False
     assert "source_fingerprint" not in packet["memory_summary"]
+
+
+def test_period_preview_days_one_matches_existing_preview(tmp_path):
+    start = _day(2026, 6, 12, 9)
+    rows = [(_obs("o1", h="h1", ts=start, window="openbird issue"), "fix issue")]
+    settings = Settings(data_dir=tmp_path)
+
+    existing = build_deep_brain_preview(
+        rows,
+        start_ts=_day(2026, 6, 12),
+        end_ts=_day(2026, 6, 13) - 0.000001,
+        day_offset=0,
+        source_scope="capture",
+        settings=settings,
+    )
+    period = build_deep_brain_period_preview(
+        [rows],
+        day_windows=[_window(2026, 6, 12, offset=0)],
+        day_offset=0,
+        days=1,
+        source_scope="capture",
+        settings=settings,
+    )
+
+    assert period == existing
+
+
+def test_period_preview_compacts_days_and_keeps_oldest_day_grounded(tmp_path):
+    old = _day(2026, 6, 10, 9)
+    new = _day(2026, 6, 11, 9)
+    old_rows = [(_obs("old-anchor", h="old", ts=old, window="old notes"), "old notes")]
+    new_rows = [
+        (
+            _obs(f"new-{idx}", h=f"new-{idx}", ts=new + idx, window=f"new {idx}"),
+            f"new notes {idx}",
+        )
+        for idx in range(20)
+    ]
+    settings = Settings(data_dir=tmp_path, deep_brain_enabled=True)
+
+    packet = build_deep_brain_period_preview(
+        [old_rows, new_rows],
+        day_windows=[
+            _window(2026, 6, 10, offset=1),
+            _window(2026, 6, 11, offset=0),
+        ],
+        day_offset=0,
+        days=2,
+        source_scope="capture",
+        settings=settings,
+    )
+
+    assert packet["period"]["days"] == 2
+    assert [item["local_date"] for item in packet["memory_summaries"]] == [
+        "2026-06-10",
+        "2026-06-11",
+    ]
+    rendered = json.dumps(packet, sort_keys=True)
+    assert '"source_ids"' not in rendered
+    assert "source_fingerprint" not in rendered
+    assert all("sessions" not in item for item in packet["memory_summaries"])
+    assert "time_by_hour" not in json.dumps(packet["memory_summaries"], sort_keys=True)
+    assert "time_by_hour" not in json.dumps(packet["memory_summary"], sort_keys=True)
+    assert packet["memory_summary"]["coverage"]["observations"] == 21
+    assert packet["memory_summary"]["coverage"]["sessions"] == 21
+    assert packet["memory_summary"]["coverage"]["active_day_count"] == 2
+    assert packet["memory_summary"]["coverage"]["apps_active_day_sum"] == 2
+    assert packet["selected_sources"][0]["observation_id"] == "old-anchor"
+    assert packet["selected_sources"][0]["local_date"] == "2026-06-10"
+    assert len([s for s in packet["selected_sources"] if s["local_date"] == "2026-06-11"]) == 12
+
+    provider = _Provider(
+        {
+            "answer": "The older day and newer day both have anchors.",
+            "citation_ids": ["old-anchor", "new-19"],
+            "confidence": "medium",
+        }
+    )
+    result = answer_deep_brain("what changed?", packet, provider, settings=settings)
+    assert result["grounded"] is True
+    assert [item["observation_id"] for item in result["citations"]] == [
+        "old-anchor",
+        "new-19",
+    ]
+
+
+def test_period_preview_applies_exclusions_per_day_without_config_duplication(tmp_path):
+    old = _day(2026, 6, 10, 9)
+    new = _day(2026, 6, 11, 9)
+    settings = Settings(
+        data_dir=tmp_path,
+        deep_brain_excluded_apps=["com.mitchellh.ghostty"],
+        deep_brain_excluded_sources=["private"],
+    )
+
+    packet = build_deep_brain_period_preview(
+        [
+            [
+                (
+                    _obs(
+                        "old-secret",
+                        h="s1",
+                        ts=old,
+                        app="com.mitchellh.ghostty",
+                        window="SECRET_OLD_WINDOW",
+                    ),
+                    "SECRET_OLD_TEXT",
+                ),
+                (_obs("old-kept", h="k1", ts=old + 1, window="old kept"), "old kept"),
+            ],
+            [
+                (
+                    _obs(
+                        "new-secret",
+                        h="s2",
+                        ts=new,
+                        source="private",
+                        window="SECRET_NEW_WINDOW",
+                    ),
+                    "SECRET_NEW_TEXT",
+                ),
+                (_obs("new-kept", h="k2", ts=new + 1, window="new kept"), "new kept"),
+            ],
+        ],
+        day_windows=[
+            _window(2026, 6, 10, offset=1),
+            _window(2026, 6, 11, offset=0),
+        ],
+        day_offset=0,
+        days=2,
+        source_scope="capture",
+        settings=settings,
+    )
+
+    rendered = json.dumps(packet, sort_keys=True)
+    assert "SECRET_OLD_WINDOW" not in rendered
+    assert "SECRET_OLD_TEXT" not in rendered
+    assert "SECRET_NEW_WINDOW" not in rendered
+    assert "SECRET_NEW_TEXT" not in rendered
+    assert packet["exclusions"]["excluded_by"] == {"app": 1, "source": 1}
+    assert packet["exclusions"]["excluded_apps_configured"] == ["com.mitchellh.ghostty"]
+    assert packet["exclusions"]["excluded_sources_configured"] == ["private"]
+
+
+def test_period_empty_packet_never_calls_model(tmp_path):
+    settings = Settings(data_dir=tmp_path, deep_brain_enabled=True)
+    packet = build_deep_brain_period_preview(
+        [[], []],
+        day_windows=[
+            _window(2026, 6, 10, offset=1),
+            _window(2026, 6, 11, offset=0),
+        ],
+        day_offset=0,
+        days=2,
+        source_scope="capture",
+        settings=settings,
+    )
+    provider = _Provider({"answer": "unsupported", "citation_ids": [], "confidence": "high"})
+
+    result = answer_deep_brain("summarize", packet, provider, settings=settings)
+
+    assert packet["memory_summary"]["coverage"]["observations"] == 0
+    assert packet["memory_summary"]["metrics"]["first_seen"] is None
+    assert packet["memory_summary"]["metrics"]["last_seen"] is None
+    assert result["confidence"] == "insufficient_evidence"
+    assert provider.messages is None
 
 
 def test_preview_cloud_ready_requires_both_opt_ins(tmp_path):
@@ -498,3 +675,85 @@ def test_deep_brain_ask_cli_uses_provider_when_enabled(monkeypatch, tmp_path):
     assert payload["packet_route"] == "deep_brain.preview"
     assert payload["reasoning_route"] == "local_model"
     assert payload["citations"][0]["observation_id"] == "o1"
+
+
+def test_deep_brain_cli_rejects_out_of_range_days(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+
+    try:
+        too_low = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "preview", "--days", "0", "--json"],
+        )
+        too_high = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "ask", "what happened?", "--days", "8", "--json"],
+        )
+    finally:
+        reset_settings_cache()
+
+    assert too_low.exit_code == 2
+    assert too_high.exit_code == 2
+
+
+def test_deep_brain_ask_cli_days_refuses_before_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    today = dt.datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    rows = [
+        (_obs("old", h="h-old", ts=(today - dt.timedelta(days=1)).timestamp()), "old notes"),
+        (_obs("new", h="h-new", ts=today.timestamp()), "new notes"),
+    ]
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _PreviewStore(rows))
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("refusal must not use provider")),
+    )
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "ask", "what happened?", "--days", "2", "--json"],
+        )
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 2
+    payload = json.loads(res.stdout)
+    assert payload["packet"]["period"]["days"] == 2
+    assert "OPENBIRD_DEEP_BRAIN_ENABLED" in " ".join(payload["blocked_reasons"])
+
+
+def test_deep_brain_ask_cli_days_uses_provider_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    reset_settings_cache()
+    today = dt.datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    rows = [
+        (_obs("old", h="h-old", ts=(today - dt.timedelta(days=1)).timestamp()), "old notes"),
+        (_obs("new", h="h-new", ts=today.timestamp()), "new notes"),
+    ]
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: _PreviewStore(rows))
+    provider = _Provider(
+        {"answer": "The older day is grounded.", "citation_ids": ["old"], "confidence": "high"}
+    )
+    monkeypatch.setattr(cli, "_completion_provider", lambda: provider)
+
+    try:
+        res = CliRunner().invoke(
+            cli.app,
+            ["deep-brain", "ask", "--days", "2", "--json", "--stdin"],
+            input="what happened?",
+        )
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["ok"] is True
+    assert payload["packet_route"] == "deep_brain.preview"
+    assert payload["citations"][0]["observation_id"] == "old"
+    assert payload["citations"][0]["local_date"]
+    assert '"source_ids"' not in provider.messages[1]["content"]
