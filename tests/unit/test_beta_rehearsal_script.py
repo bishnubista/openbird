@@ -32,6 +32,7 @@ def _make_repo(
     enabled_productivity_coach: bool = False,
     bad_productivity_coach: bool = False,
     raw_productivity_coach: bool = False,
+    ask_verifier_mode: str = "pass",
 ) -> tuple[Path, Path, Path]:
     repo = tmp_path / "repo"
     (repo / "script").mkdir(parents=True)
@@ -47,14 +48,49 @@ printf 'release status metadata only\\n'
 exit 0
 """,
     )
-    _write_executable(
-        repo / "script" / "verify_ask_app.sh",
-        """#!/usr/bin/env bash
+    ask_scripts = {
+        "pass": """#!/usr/bin/env bash
 set -euo pipefail
 printf 'VERDICT: PASS - grounded=1 citations=1 derived=0 sources=1\\n'
 exit 0
 """,
-    )
+        "legacy_decrypt": """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' '[verify-ask] signal: SELFTEST ask.outcome error=1' >&2
+printf '%s\\n' '[verify-ask] BLOCKED: legacy untyped self-test error, but bundled CLI decrypted encrypted store (observations=450 day_memories=3); selected app likely predates typed self-test diagnostics or is stale; install a fresh Developer ID-signed app and rerun' >&2
+printf 'VERDICT: BLOCKED\\n'
+exit 2
+""",
+        "legacy_probe_failed": """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' '[verify-ask] signal: SELFTEST ask.outcome error=1' >&2
+printf '%s\\n' '[verify-ask] BLOCKED: legacy untyped self-test error (reason=legacy_untyped_selftest probe=cli_key_probe_failed rc=137); install a fresh app with typed self-test diagnostics and rerun' >&2
+printf 'VERDICT: BLOCKED\\n'
+exit 2
+""",
+        "db_key_decrypt": """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' '[verify-ask] signal: SELFTEST ask.outcome error=1 kind=db_key_unavailable' >&2
+printf '%s\\n' '[verify-ask] BLOCKED: app-owned DB key unavailable, but bundled CLI decrypted encrypted store (observations=12 day_memories=3); likely Developer ID-signed app Keychain ACL/app identity issue' >&2
+printf 'VERDICT: BLOCKED\\n'
+exit 2
+""",
+        "raw_tail": """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' '[verify-ask] BLOCKED: no SELFTEST outcome (exit 2). Tail of run log:' >&2
+printf '%s\\n' 'SECRET_RAW_TAIL should never leak' >&2
+printf 'VERDICT: BLOCKED\\n'
+exit 2
+""",
+        "unknown_typed": """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' '[verify-ask] signal: SELFTEST ask.outcome error=1 kind=model_unavailable' >&2
+printf '%s\\n' '[verify-ask] BLOCKED: self-test ask errored (kind=model_unavailable, exit 2) - not a fix verdict SECRET_KIND' >&2
+printf 'VERDICT: BLOCKED\\n'
+exit 2
+""",
+    }
+    _write_executable(repo / "script" / "verify_ask_app.sh", ask_scripts[ask_verifier_mode])
 
     app = tmp_path / "Applications" / "OpenBird.app"
     cli = app / "Contents" / "MacOS" / "openbird-cli"
@@ -365,6 +401,13 @@ def _run_rehearsal(
     )
 
 
+def _stdout_line(result: subprocess.CompletedProcess[str], needle: str) -> str:
+    for line in result.stdout.splitlines():
+        if needle in line:
+            return line
+    raise AssertionError(f"missing line containing {needle!r} in:\n{result.stdout}")
+
+
 def test_beta_rehearsal_outputs_counts_without_content_and_cleans_export(tmp_path: Path) -> None:
     repo, app, export_log = _make_repo(tmp_path)
 
@@ -391,6 +434,82 @@ def test_beta_rehearsal_outputs_counts_without_content_and_cleans_export(tmp_pat
     exported = [Path(line) for line in export_log.read_text(encoding="utf-8").splitlines()]
     assert exported
     assert all(not path.exists() for path in exported)
+
+
+def test_beta_rehearsal_reports_legacy_ask_stale_reason_without_leaking(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, ask_verifier_mode="legacy_decrypt")
+
+    result = _run_rehearsal(repo, app)
+    ask_line = _stdout_line(result, "ask app self-test:")
+
+    assert result.returncode == 2
+    assert ask_line.startswith("BLOCKED ask app self-test:")
+    assert "reason=legacy_untyped_selftest" in ask_line
+    assert "cli_encrypted=1" in ask_line
+    assert "observations=450" in ask_line
+    assert "day_memories=3" in ask_line
+    assert "stale_app_likely=1" in ask_line
+    assert "predates typed self-test diagnostics" not in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_beta_rehearsal_reports_legacy_ask_probe_reason_without_counts(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, ask_verifier_mode="legacy_probe_failed")
+
+    result = _run_rehearsal(repo, app)
+    ask_line = _stdout_line(result, "ask app self-test:")
+
+    assert result.returncode == 2
+    assert ask_line.startswith("BLOCKED ask app self-test:")
+    assert "reason=legacy_untyped_selftest" in ask_line
+    assert "probe=cli_key_probe_failed rc=137" in ask_line
+    assert "cli_encrypted=1" not in ask_line
+    assert "observations=" not in ask_line
+    assert "SECRET_" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_beta_rehearsal_reports_db_key_ask_reason_without_leaking(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, ask_verifier_mode="db_key_decrypt")
+
+    result = _run_rehearsal(repo, app)
+    ask_line = _stdout_line(result, "ask app self-test:")
+
+    assert result.returncode == 2
+    assert ask_line.startswith("BLOCKED ask app self-test:")
+    assert "reason=db_key_unavailable" in ask_line
+    assert "cli_encrypted=1" in ask_line
+    assert "observations=12" in ask_line
+    assert "day_memories=3" in ask_line
+    assert "app_signature_hint=developer_id" in ask_line
+    assert "Keychain ACL" not in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_beta_rehearsal_drops_raw_ask_verifier_tail(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, ask_verifier_mode="raw_tail")
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 2
+    assert "BLOCKED ask app self-test: rc=2 reason=blocked" in result.stdout
+    assert "SECRET_RAW_TAIL" not in result.stdout
+    assert "Tail of run log" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_beta_rehearsal_drops_unknown_typed_ask_verifier_stderr(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, ask_verifier_mode="unknown_typed")
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 2
+    assert "BLOCKED ask app self-test: rc=2 reason=blocked" in result.stdout
+    assert "model_unavailable" not in result.stdout
+    assert "SECRET_KIND" not in result.stdout
+    assert result.stderr == ""
 
 
 def test_beta_rehearsal_blocks_unparseable_without_leaking_sibling_content(tmp_path: Path) -> None:
