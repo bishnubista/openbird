@@ -239,7 +239,7 @@ def test_build_day_memory_sessions_include_grounded_bounded_cues():
     )
 
 
-def test_build_day_memory_times_terminal_observation_against_window_end():
+def test_build_day_memory_terminal_observation_has_no_inferred_active_time():
     start = _ts(2026, 6, 12, 9)
     rows = [
         (
@@ -263,9 +263,10 @@ def test_build_day_memory_times_terminal_observation_against_window_end():
     )
 
     metrics = built.payload["metrics"]
-    assert metrics["active_seconds"] == 120
-    assert metrics["time_by_category"]["coding"] == 120
-    assert metrics["longest_same_category_streak"] == {"category": "coding", "seconds": 120}
+    assert metrics["active_seconds"] == 0
+    assert metrics["time_by_category"] == {}
+    assert metrics["longest_same_category_streak"] is None
+    assert built.payload["focus_blocks"] == []
 
 
 def test_productivity_focus_blocks_share_canonical_category_metrics():
@@ -343,14 +344,6 @@ def test_productivity_focus_blocks_share_canonical_category_metrics():
             "source_ids": ["m1"],
             "session_count": 1,
         },
-        {
-            "category": "coding",
-            "start": start + 180,
-            "end": start + 240,
-            "seconds": 60,
-            "source_ids": ["c3"],
-            "session_count": 1,
-        },
     ]
     assert metrics["longest_same_category_streak"] == {
         "category": "coding",
@@ -361,13 +354,12 @@ def test_productivity_focus_blocks_share_canonical_category_metrics():
     facts = productivity["facts"]
     assert facts["active_seconds"] == metrics["active_seconds"]
     assert facts["context_switch_count"] == metrics["context_switch_count"]
-    assert facts["context_switches_per_active_hour"] == 30.0
+    assert facts["context_switches_per_active_hour"] == 40.0
     assert facts["top_category"]["category"] == "coding"
     assert facts["top_category"]["seconds"] == metrics["time_by_category"]["coding"]
-    assert facts["top_category"]["source_ids"] == ["c1", "c2", "c3"]
+    assert facts["top_category"]["source_ids"] == ["c1", "c2"]
     assert [ref["session_id"] for ref in facts["top_category"]["session_refs"]] == [
         "s1",
-        "s3",
     ]
     assert facts["longest_focus_block"]["session_refs"] == [
         {
@@ -383,10 +375,9 @@ def test_productivity_focus_blocks_share_canonical_category_metrics():
     by_category = {item["category"]: item for item in productivity["category_sources"]}
     for category, seconds in metrics["time_by_category"].items():
         assert by_category[category]["active_seconds"] == seconds
-    assert by_category["coding"]["source_ids"] == ["c1", "c2", "c3"]
+    assert by_category["coding"]["source_ids"] == ["c1", "c2"]
     assert [ref["session_id"] for ref in by_category["coding"]["session_refs"]] == [
         "s1",
-        "s3",
     ]
 
 
@@ -439,7 +430,18 @@ def test_productivity_coach_packet_uses_synthetic_ids_and_local_citation_map():
                 session_id="s1",
             ),
             "ULTRA_SECRET_TEXT",
-        )
+        ),
+        (
+            _obs(
+                "SRC_SECRET_2",
+                ts=start + 60,
+                app="com.mitchellh.ghostty",
+                window="ULTRA_SECRET_WINDOW",
+                url="https://example.com/ULTRA_SECRET_URL",
+                session_id="s1",
+            ),
+            "ULTRA_SECRET_TEXT",
+        ),
     ]
     report = build_productivity_report(
         _saved_day_memory(rows, start=start, end=start + 60)
@@ -459,8 +461,8 @@ def test_productivity_coach_packet_uses_synthetic_ids_and_local_citation_map():
             "app": "com.mitchellh.ghostty",
             "category": "coding",
             "start": start,
-            "end": start,
-            "source_count": 1,
+            "end": start + 60,
+            "source_count": 2,
         }
     ]
     assert "source_ids" not in serialized
@@ -468,6 +470,7 @@ def test_productivity_coach_packet_uses_synthetic_ids_and_local_citation_map():
     assert "session_id" not in serialized
     assert "s1" not in serialized
     assert "SRC_SECRET" not in serialized
+    assert "SRC_SECRET_2" not in serialized
     assert "ULTRA_SECRET_WINDOW" not in serialized
     assert "ULTRA_SECRET_URL" not in serialized
     assert "ULTRA_SECRET_TEXT" not in serialized
@@ -532,6 +535,16 @@ def test_productivity_coach_filters_excluded_rows_before_prompt_and_citations():
             ),
             "coding openbird",
         ),
+        (
+            _obs(
+                "kept-2",
+                ts=start + 60,
+                app="com.apple.dt.Xcode",
+                window="openbird coding continued",
+                session_id="s1",
+            ),
+            "coding openbird continued",
+        ),
     ]
     report = _coach_report(rows, start=start, end=start + 90, settings=settings)
     packet = build_productivity_coach_packet(report)
@@ -554,8 +567,8 @@ def test_productivity_coach_filters_excluded_rows_before_prompt_and_citations():
         sort_keys=True,
     )
 
-    assert report["productivity"]["coach_ready_packet"]["source_count"] == 1
-    assert packet["exclusions"]["kept_observations"] == 1
+    assert report["productivity"]["coach_ready_packet"]["source_count"] == 2
+    assert packet["exclusions"]["kept_observations"] == 2
     assert packet["exclusions"]["excluded_by"] == {
         "app": 1,
         "observation_id": 1,
@@ -640,7 +653,16 @@ def test_productivity_coach_local_model_needs_feature_gate_only():
                     session_id="s1",
                 ),
                 "coding",
-            )
+            ),
+            (
+                _obs(
+                    "c2",
+                    ts=start + 60,
+                    app="com.mitchellh.ghostty",
+                    session_id="s1",
+                ),
+                "coding",
+            ),
         ],
         start=start,
         end=start + 60,
@@ -671,8 +693,8 @@ def test_productivity_coach_local_model_needs_feature_gate_only():
             "app": "com.mitchellh.ghostty",
             "category": "coding",
             "start": start,
-            "end": start,
-            "source_count": 1,
+            "end": start + 60,
+            "source_count": 2,
         }
     ]
     assert "source_ids" not in provider.messages[1]["content"]
@@ -683,9 +705,12 @@ def test_productivity_coach_local_model_needs_feature_gate_only():
 def test_productivity_coach_refuses_remote_without_cloud_optin():
     start = _ts(2026, 6, 12, 9)
     report = _coach_report(
-        [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+        [
+            (_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding"),
+            (_obs("c2", ts=start + 60, app="com.mitchellh.ghostty"), "coding"),
+        ],
         start=start,
-        end=start + 60,
+        end=start + 120,
     )
     provider = _Provider(
         {"answer": "should not run", "citation_ids": ["category:coding"], "confidence": "low"}
@@ -706,9 +731,12 @@ def test_productivity_coach_refuses_remote_without_cloud_optin():
 def test_productivity_coach_remote_route_truth_with_both_gates():
     start = _ts(2026, 6, 12, 9)
     report = _coach_report(
-        [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+        [
+            (_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding"),
+            (_obs("c2", ts=start + 60, app="com.mitchellh.ghostty"), "coding"),
+        ],
         start=start,
-        end=start + 60,
+        end=start + 120,
     )
     provider = _Provider(
         {
@@ -738,9 +766,12 @@ def test_productivity_coach_remote_route_truth_with_both_gates():
 def test_productivity_coach_drops_hallucinated_citations():
     start = _ts(2026, 6, 12, 9)
     report = _coach_report(
-        [(_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+        [
+            (_obs("c1", ts=start, app="com.mitchellh.ghostty"), "coding"),
+            (_obs("c2", ts=start + 60, app="com.mitchellh.ghostty"), "coding"),
+        ],
         start=start,
-        end=start + 60,
+        end=start + 120,
     )
     provider = _Provider(
         {"answer": "Unsupported coaching.", "citation_ids": ["block:99"], "confidence": "high"}
@@ -856,13 +887,13 @@ def test_productivity_top_hour_sources_use_observation_hour_bucket():
 
     assert built.payload["metrics"]["time_by_hour"] == {
         "09:00": 60,
-        "10:00": 600,
+        "10:00": 300,
     }
     assert top_hour["hour"] == "10:00"
-    assert top_hour["seconds"] == 600
-    assert top_hour["minutes"] == 10.0
-    assert top_hour["source_ids"] == ["o10a", "o10b"]
-    assert top_hour["source_count"] == 2
+    assert top_hour["seconds"] == 300
+    assert top_hour["minutes"] == 5.0
+    assert top_hour["source_ids"] == ["o10a"]
+    assert top_hour["source_count"] == 1
     assert top_hour["session_refs"] == [
         {
             "session_id": "s1",
@@ -873,6 +904,53 @@ def test_productivity_top_hour_sources_use_observation_hour_bucket():
             "source_count": 3,
         }
     ]
+
+
+def test_day_memory_active_seconds_matches_timeline_and_productivity(
+    mem_settings, fake_provider
+):
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = _ts(2026, 6, 12, 9)
+        store.add_observation(
+            "coding one",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            session_id="s1",
+            ts=start,
+        )
+        store.add_observation(
+            "coding two",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            session_id="s1",
+            ts=start + 60,
+        )
+        store.add_observation(
+            "browser research",
+            source="capture",
+            app="com.google.Chrome",
+            session_id="s2",
+            ts=start + 460,
+        )
+
+        timeline_active = store.active_seconds(start, start + 900, 300.0)
+        saved = store.ensure_day_memory(
+            local_date="2026-06-12",
+            start_ts=start,
+            end_ts=start + 900,
+            day_offset=0,
+            source_scope="capture",
+        )
+        productivity_active = build_productivity_report(saved)["productivity"]["facts"][
+            "active_seconds"
+        ]
+
+        assert timeline_active == 360.0
+        assert saved["payload"]["metrics"]["active_seconds"] == timeline_active
+        assert productivity_active == timeline_active
+    finally:
+        store.close()
 
 
 def test_productivity_empty_day_is_zero_safe():
@@ -1072,6 +1150,13 @@ def test_ensure_day_memory_rebuilds_v2_payload_for_productivity(
             session_id="s1",
             ts=start,
         )
+        obs2 = store.add_observation(
+            "coding continued",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            session_id="s1",
+            ts=start + 60,
+        )
         rows = store.time_range_text(start, start + 60, source="capture")
         fingerprint = store.day_memory_source_fingerprint_from_rows(rows)
         store.save_day_memory(
@@ -1084,7 +1169,7 @@ def test_ensure_day_memory_rebuilds_v2_payload_for_productivity(
                 "source_fingerprint": fingerprint,
                 "metrics": {},
             },
-            source_ids=[obs.id],
+            source_ids=[obs.id, obs2.id],
             generated_at=start,
         )
 
@@ -1162,6 +1247,15 @@ def test_day_memory_build_cli_is_no_model_and_json(monkeypatch, tmp_path):
     today = dt.datetime.now().replace(hour=9, minute=0, second=0, microsecond=0).timestamp()
     rows = [
         (_obs("o1", ts=today, app="com.mitchellh.ghostty", window="openbird"), "coding"),
+        (
+            _obs(
+                "o2",
+                ts=today + 60,
+                app="com.mitchellh.ghostty",
+                window="openbird",
+            ),
+            "coding continued",
+        ),
     ]
     stub = _DayMemoryStoreStub(rows)
     monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
@@ -1175,7 +1269,7 @@ def test_day_memory_build_cli_is_no_model_and_json(monkeypatch, tmp_path):
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
     assert payload["built"] is True
-    assert payload["day_memory"]["source_ids"] == ["o1"]
+    assert payload["day_memory"]["source_ids"] == ["o1", "o2"]
     assert payload["day_memory"]["payload"]["narrative_status"] == "not_persisted"
 
 
@@ -1206,6 +1300,15 @@ def test_productivity_cli_json_uses_local_route(monkeypatch, tmp_path):
     )
     rows = [
         (_obs("o1", ts=today, app="com.mitchellh.ghostty", window="openbird"), "coding"),
+        (
+            _obs(
+                "o2",
+                ts=today + 60,
+                app="com.mitchellh.ghostty",
+                window="openbird",
+            ),
+            "coding continued",
+        ),
     ]
     stub = _DayMemoryStoreStub(rows)
     monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
@@ -1247,6 +1350,15 @@ def test_productivity_coach_cli_refuses_before_provider_without_feature_gate(
     )
     rows = [
         (_obs("o1", ts=today, app="com.mitchellh.ghostty", window="openbird"), "coding"),
+        (
+            _obs(
+                "o2",
+                ts=today + 60,
+                app="com.mitchellh.ghostty",
+                window="openbird",
+            ),
+            "coding continued",
+        ),
     ]
     monkeypatch.setattr(cli, "_store_maintenance", lambda: _DayMemoryStoreStub(rows))
     monkeypatch.setattr(
@@ -1271,7 +1383,7 @@ def test_productivity_coach_cli_refuses_before_provider_without_feature_gate(
     assert "OPENBIRD_DEEP_BRAIN_ENABLED" in " ".join(payload["blocked_reasons"])
     assert payload["packet"]["citation_count"] == 0
     assert payload["packet"]["exclusions"]["kept_observations"] == 0
-    assert payload["packet"]["exclusions"]["excluded_by"] == {"app": 1}
+    assert payload["packet"]["exclusions"]["excluded_by"] == {"app": 2}
 
 
 def test_productivity_coach_cli_uses_packet_label_when_enabled(monkeypatch, tmp_path):
@@ -1285,6 +1397,15 @@ def test_productivity_coach_cli_uses_packet_label_when_enabled(monkeypatch, tmp_
     )
     rows = [
         (_obs("o1", ts=today, app="com.mitchellh.ghostty", window="openbird"), "coding"),
+        (
+            _obs(
+                "o2",
+                ts=today + 60,
+                app="com.mitchellh.ghostty",
+                window="openbird",
+            ),
+            "coding continued",
+        ),
     ]
     provider = _Provider(
         {
