@@ -29,9 +29,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.setActivationPolicy(.prohibited)
             if Self.shouldBootstrapDBKeyForSelfTest() {
                 Self.emitSelfTestSignal("SELFTEST db_key.bootstrap start")
-                let ok = OpenBirdService.bootstrapDBKey(timeout: Self.selfTestDBKeyTimeout())
-                Self.emitSelfTestSignal("SELFTEST db_key.bootstrap done ok=\(ok ? 1 : 0)")
-                if !ok {
+                let report = OpenBirdService.bootstrapDBKeyReport(
+                    timeout: Self.selfTestDBKeyTimeout()
+                )
+                Self.emitSelfTestSignal("SELFTEST db_key.bootstrap done ok=\(report.ok ? 1 : 0) outcome=\(report.outcome)")
+                if !report.ok {
                     Self.emitSelfTestOutcomeAndExit(
                         "SELFTEST ask.outcome error=1 kind=db_key_unavailable",
                         code: 2

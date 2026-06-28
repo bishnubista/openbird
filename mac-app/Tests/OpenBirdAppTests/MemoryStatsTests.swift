@@ -137,12 +137,12 @@ final class MemoryStatsTests: XCTestCase {
         defer { OpenBirdService.resetInjectedDBKeyForTests() }
 
         let start = Date()
-        let ok = OpenBirdService.bootstrapDBKey(timeout: 0.05) { _ in
+        let report = OpenBirdService.bootstrapDBKeyReport(timeout: 0.05) { _ in
             Thread.sleep(forTimeInterval: 1)
             return ("a", .loaded)
         }
 
-        XCTAssertFalse(ok)
+        XCTAssertEqual(report, DBKeyBootstrapReport(ok: false, outcome: "timeout"))
         XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
         XCTAssertNil(OpenBirdService.childEnvironment(base: [:])["OPENBIRD_DB_KEY"])
     }
@@ -152,12 +152,43 @@ final class MemoryStatsTests: XCTestCase {
         defer { OpenBirdService.resetInjectedDBKeyForTests() }
         let fakeKey = String(repeating: "a", count: 64)
 
-        let ok = OpenBirdService.bootstrapDBKey(timeout: 1) { _ in
+        let report = OpenBirdService.bootstrapDBKeyReport(timeout: 1) { _ in
             (fakeKey, .loaded)
+        }
+
+        XCTAssertEqual(report, DBKeyBootstrapReport(ok: true, outcome: "loaded"))
+        XCTAssertEqual(OpenBirdService.childEnvironment(base: [:])["OPENBIRD_DB_KEY"], fakeKey)
+    }
+
+    func testDBKeyBootstrapBoolWrapperMatchesReportInjectionGate() {
+        OpenBirdService.resetInjectedDBKeyForTests()
+        defer { OpenBirdService.resetInjectedDBKeyForTests() }
+        let fakeKey = String(repeating: "b", count: 64)
+
+        let ok = OpenBirdService.bootstrapDBKey(timeout: 1) { _ in
+            (fakeKey, .created)
         }
 
         XCTAssertTrue(ok)
         XCTAssertEqual(OpenBirdService.childEnvironment(base: [:])["OPENBIRD_DB_KEY"], fakeKey)
+    }
+
+    func testDBKeyBootstrapReportUsesSafeFailureWireCodesWithoutInjecting() {
+        for (outcome, code) in [
+            (KeychainKeyProvider.Outcome.denied, "denied"),
+            (.strandedDb, "stranded_db"),
+            (.error, "error"),
+        ] {
+            OpenBirdService.resetInjectedDBKeyForTests()
+            let report = OpenBirdService.bootstrapDBKeyReport(timeout: 1) { _ in
+                (nil, outcome)
+            }
+
+            XCTAssertEqual(report, DBKeyBootstrapReport(ok: false, outcome: code))
+            XCTAssertNil(OpenBirdService.childEnvironment(base: [:])["OPENBIRD_DB_KEY"])
+            XCTAssertNotNil(code.range(of: #"^[a-z0-9_]+$"#, options: .regularExpression))
+        }
+        OpenBirdService.resetInjectedDBKeyForTests()
     }
 
     func testParseMemoryStatsDecodesCliJson() {

@@ -126,6 +126,11 @@ struct ProcessResult: Sendable {
     let stderr: String
 }
 
+struct DBKeyBootstrapReport: Equatable, Sendable {
+    let ok: Bool
+    let outcome: String
+}
+
 typealias PromptEditRunner = @Sendable (String, [String], [String: String]) -> ProcessResult
 
 /// `@unchecked Sendable`: the only mutable instance state is `captureProcess`,
@@ -787,37 +792,52 @@ final class OpenBirdService: @unchecked Sendable {
             KeychainKeyProvider.resolveKey(dbPath: dbPath)
         }
     ) -> Bool {
+        bootstrapDBKeyReport(timeout: timeout, resolver: resolver).ok
+    }
+
+    /// Same bootstrap path as `bootstrapDBKey`, but returns a privacy-safe reason
+    /// code for headless beta rehearsal. Never includes key material or paths.
+    static func bootstrapDBKeyReport(
+        timeout: TimeInterval? = nil,
+        resolver: @escaping DBKeyResolver = { dbPath in
+            KeychainKeyProvider.resolveKey(dbPath: dbPath)
+        }
+    ) -> DBKeyBootstrapReport {
         let dbPath = databaseURL().path
-        let key: String?
+        let resolved: (key: String?, outcome: KeychainKeyProvider.Outcome)
         if let timeout {
-            guard timeout > 0 else { return false }
+            guard timeout > 0 else {
+                return DBKeyBootstrapReport(ok: false, outcome: "timeout")
+            }
             let semaphore = DispatchSemaphore(value: 0)
             let lock = NSLock()
-            var resolved: (key: String?, outcome: KeychainKeyProvider.Outcome)?
+            var asyncResolved: (key: String?, outcome: KeychainKeyProvider.Outcome)?
             DispatchQueue.global(qos: .userInitiated).async {
                 let value = resolver(dbPath)
                 lock.lock()
-                resolved = value
+                asyncResolved = value
                 lock.unlock()
                 semaphore.signal()
             }
             guard semaphore.wait(timeout: .now() + timeout) == .success else {
-                return false
+                return DBKeyBootstrapReport(ok: false, outcome: "timeout")
             }
             lock.lock()
-            let value = resolved
+            let value = asyncResolved
             lock.unlock()
-            key = value?.key
+            resolved = value ?? (nil, .error)
         } else {
-            let resolved = resolver(dbPath)  // outcome logged by provider
-            key = resolved.key
+            resolved = resolver(dbPath)  // outcome logged by provider
         }
-        guard let key else { return false }
+        let outcome = resolved.outcome.wireCode
+        guard let key = resolved.key, !key.isEmpty else {
+            return DBKeyBootstrapReport(ok: false, outcome: outcome)
+        }
         injectedDBKey = key
         // Belt-and-suspenders: also export into our own environment so a child
         // that inherits env without an explicit overlay still receives the key.
         setenv("OPENBIRD_DB_KEY", key, 1)
-        return true
+        return DBKeyBootstrapReport(ok: true, outcome: outcome)
     }
 
     #if DEBUG
