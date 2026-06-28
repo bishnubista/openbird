@@ -659,13 +659,13 @@ final class AppModel: ObservableObject {
         ChatErrorPresenter.describe(error)
     }
 
-    /// True when the CORE text-capture path is ready: local models + Accessibility.
-    /// Encryption is a data-at-rest enhancement (the product runs plaintext-0600 +
-    /// FileVault by design), and Screen Recording / Microphone are meetings-only —
-    /// none of them gate "Ready", so the badge never contradicts an optional or
-    /// informational checklist row.
+    /// True when the CORE text-memory path is ready enough to claim "Ready":
+    /// route + Accessibility are OK, an allowlisted app is being captured, and the
+    /// memory store has at least one observation. If stats cannot be read, this
+    /// conservatively stays false. Encryption is a data-at-rest enhancement, and
+    /// Screen Recording / Microphone are meetings-only; they do not gate this label.
     var isFullyConfigured: Bool {
-        localModelStatusState == .ok && accessibilityState == .ok
+        nextStepState == .ok
     }
 
     // MARK: - Derived step states
@@ -786,6 +786,24 @@ final class AppModel: ObservableObject {
         self.isRefreshing = false
         if let captureRunning {
             self.captureRunning = captureRunning
+        }
+    }
+
+    func setReadinessStateForTesting(
+        allowlist: [String]? = nil,
+        captureRunning: Bool? = nil,
+        memoryStats: MemoryStats? = nil
+    ) {
+        self.isRefreshing = false
+        if let allowlist {
+            self.allowlist = allowlist
+        }
+        if let captureRunning {
+            self.captureRunning = captureRunning
+        }
+        if let memoryStats {
+            self.memoryStats = memoryStats
+            self.memoryStatsState = .loaded(memoryStats)
         }
     }
     #endif
