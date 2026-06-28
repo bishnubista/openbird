@@ -371,7 +371,7 @@ final class MemoryStatsTests: XCTestCase {
         assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)
     }
 
-    func testRemoteActiveVerifiedRouteDisclosesTransmissionAndCanBeReady() {
+    func testRemoteActiveVerifiedRouteDisclosesTransmissionButNeedsCapturedMemoryForReadiness() {
         var report = remoteReport(runtimeOK: true, blocked: false, roles: [
             "llm": "openai/gpt-4o-mini"
         ])
@@ -381,7 +381,30 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(model.localModelStatusState, .ok)
         XCTAssertEqual(model.modelRouteProvisioningState, .remoteRoute)
         XCTAssertEqual(model.modelRouteFooterLabel, "remote model")
+        XCTAssertFalse(model.isFullyConfigured)
+        XCTAssertTrue(model.nextStepSummary.contains("capture allowlist"))
+        XCTAssertTrue(model.privacyTransmissionSummary.contains("may send captured memory"))
+        XCTAssertTrue(model.privacyTransmissionSummary.contains("openai/gpt-4o-mini"))
+        assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)
+    }
+
+    func testRemoteActiveVerifiedRouteWithCapturedMemoryCanBeReady() {
+        var report = remoteReport(runtimeOK: true, blocked: false, roles: [
+            "llm": "openai/gpt-4o-mini"
+        ])
+        report.grants["accessibility"] = "passed"
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+        model.setReadinessStateForTesting(
+            allowlist: ["com.example.editor"],
+            captureRunning: true,
+            memoryStats: MemoryStats(observations: 1, blobs: 1, chunks: 1, vectors: 1)
+        )
+
+        XCTAssertEqual(model.localModelStatusState, .ok)
+        XCTAssertEqual(model.modelRouteProvisioningState, .remoteRoute)
+        XCTAssertEqual(model.modelRouteFooterLabel, "remote model")
         XCTAssertTrue(model.isFullyConfigured)
+        XCTAssertEqual(model.nextStepSummary, "Ready: capture is storing memory. Ask a question when you need it.")
         XCTAssertTrue(model.privacyTransmissionSummary.contains("may send captured memory"))
         XCTAssertTrue(model.privacyTransmissionSummary.contains("openai/gpt-4o-mini"))
         assertNoAbsoluteDeviceClaim(model.privacyTransmissionSummary)

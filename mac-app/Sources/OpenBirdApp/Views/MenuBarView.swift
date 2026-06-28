@@ -103,8 +103,9 @@ struct MenuBarView: View {
 
     private var statusLine: String {
         if model.capturePaused { return "Paused" }
+        if model.isFullyConfigured { return "Ready" }
         if model.captureRunning { return "Capturing" }
-        return model.isFullyConfigured ? "Ready" : "Setup incomplete"
+        return "Setup incomplete"
     }
 
     private var encryptionStatus: String {
