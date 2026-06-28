@@ -381,6 +381,14 @@ struct SettingsView: View {
                 trailing: deepBrainPreviewTrailing
             )
             hairline
+            permissionRow(
+                icon: "terminal",
+                title: "Deep Brain ask (Terminal)",
+                badge: nil,
+                subtitle: model.deepBrainAskCommandSummary,
+                trailing: .secondary("Copy ask command") { model.copyDeepBrainAskCommand() }
+            )
+            hairline
             HStack(spacing: 8) {
                 Image(systemName: "lock.fill").font(.system(size: 11))
                 Text(model.privacyTransmissionSummary)

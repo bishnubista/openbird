@@ -245,6 +245,7 @@ routes:
       note: Feature gate covers Deep Brain ask and productivity coaching.
     truth_surface:
       - cli.deep_brain_ask
+      - app.deepBrainAskCommandRow
       - cli.CLOUD_ACTIVE
       - cli.data_reasoning_ledger
 

@@ -432,6 +432,7 @@ final class AppModel: ObservableObject {
 
     static let dataPruneCommand = "openbird data prune --older-than 90d"
     static let dataPurgeAllCommand = "openbird data purge --all"
+    static let deepBrainAskCommand = "OPENBIRD_DEEP_BRAIN_ENABLED=1 openbird deep-brain ask --day 0 --stdin"
 
     var dataDeletionSummary: String {
         "Terminal deletion commands ask for confirmation by default. `openbird data prune --older-than 90d` cascade-deletes old observations plus orphaned blobs/chunks/FTS/vector rows; `openbird data vacuum` reclaims disk space after deletion. Total wipe is available as `openbird data purge --all`."
@@ -440,6 +441,15 @@ final class AppModel: ObservableObject {
     func copyDataPruneCommand() {
         service.copyToPasteboard(Self.dataPruneCommand)
         lastActionMessage = "Copied confirmation-gated prune command."
+    }
+
+    var deepBrainAskCommandSummary: String {
+        "Copy a one-shot Terminal command for Deep Brain ask. Preview the packet first; the command enables Deep Brain for that ask only, does not persist consent, and reads your question from stdin. In Terminal, run it, type your question, then press Ctrl-D. Remote LLM routes still require separate OPENBIRD_ALLOW_CLOUD=1."
+    }
+
+    func copyDeepBrainAskCommand() {
+        service.copyToPasteboard(Self.deepBrainAskCommand)
+        lastActionMessage = "Copied one-shot Deep Brain ask command."
     }
 
     var modelRouteFooterLabel: String {
