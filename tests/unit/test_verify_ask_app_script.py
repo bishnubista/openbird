@@ -335,3 +335,132 @@ JSON
     assert "VERDICT: BLOCKED" in result.stdout
     assert "cli_key_probe_not_encrypted" in result.stderr
     assert "bundled CLI decrypted encrypted store" not in result.stderr
+
+
+def test_legacy_untyped_error_reports_stale_app_with_encrypted_probe_counts(
+    tmp_path: Path,
+) -> None:
+    repo, fake_bin, pkill_log = _make_repo(tmp_path)
+    app = _make_app_bundle(
+        tmp_path,
+        "Applications/OpenBird.app",
+        app_script="""#!/usr/bin/env bash
+printf '%s\n' 'SELFTEST ask.outcome error=1'
+exit 2
+""",
+        cli_script="""#!/usr/bin/env bash
+set -euo pipefail
+test "${OPENBIRD_REQUIRE_ENCRYPTION:-}" = "1"
+test "${1:-}" = "data"
+test "${2:-}" = "stats"
+cat <<'JSON'
+{
+  "observations": 450,
+  "blobs": 0,
+  "chunks": 381,
+  "vectors": 381,
+  "day_memories": 3,
+  "cohort_key": "legacy-should-not-leak",
+  "encryption_enabled": true
+}
+JSON
+""",
+    )
+
+    result = _run_verify(repo, fake_bin, pkill_log, "--app", str(app))
+
+    assert result.returncode == 2
+    assert "VERDICT: BLOCKED" in result.stdout
+    assert "legacy untyped self-test error" in result.stderr
+    assert "bundled CLI decrypted encrypted store" in result.stderr
+    assert "observations=450 day_memories=3" in result.stderr
+    assert "predates typed self-test diagnostics or is stale" in result.stderr
+    assert "app-owned DB key unavailable" not in result.stderr
+    assert "legacy-should-not-leak" not in result.stderr
+    assert "Example Developer" not in result.stderr
+    assert "ABCDE12345" not in result.stderr
+
+
+def test_legacy_untyped_error_keeps_generic_message_when_probe_fails(
+    tmp_path: Path,
+) -> None:
+    repo, fake_bin, pkill_log = _make_repo(tmp_path)
+    app = _make_app_bundle(
+        tmp_path,
+        "Applications/OpenBird.app",
+        app_script="""#!/usr/bin/env bash
+printf '%s\n' 'SELFTEST ask.outcome error=1'
+exit 2
+""",
+        cli_script="""#!/usr/bin/env bash
+printf '%s\n' 'legacy raw probe output must not leak' >&2
+exit 137
+""",
+    )
+
+    result = _run_verify(repo, fake_bin, pkill_log, "--app", str(app))
+
+    assert result.returncode == 2
+    assert "VERDICT: BLOCKED" in result.stdout
+    assert "legacy untyped self-test error" in result.stderr
+    assert "probe=cli_key_probe_failed rc=137" in result.stderr
+    assert "DB key unavailable" not in result.stderr
+    assert "bundled CLI decrypted encrypted store" not in result.stderr
+    assert "legacy raw probe output must not leak" not in result.stderr
+
+
+def test_legacy_untyped_error_does_not_treat_plaintext_probe_as_decrypted(
+    tmp_path: Path,
+) -> None:
+    repo, fake_bin, pkill_log = _make_repo(tmp_path)
+    app = _make_app_bundle(
+        tmp_path,
+        "Applications/OpenBird.app",
+        app_script="""#!/usr/bin/env bash
+printf '%s\n' 'SELFTEST ask.outcome error=1'
+exit 2
+""",
+        cli_script="""#!/usr/bin/env bash
+cat <<'JSON'
+{
+  "observations": 4,
+  "day_memories": 1,
+  "encryption_enabled": false
+}
+JSON
+""",
+    )
+
+    result = _run_verify(repo, fake_bin, pkill_log, "--app", str(app))
+
+    assert result.returncode == 2
+    assert "VERDICT: BLOCKED" in result.stdout
+    assert "legacy untyped self-test error" in result.stderr
+    assert "probe=cli_key_probe_not_encrypted" in result.stderr
+    assert "bundled CLI decrypted encrypted store" not in result.stderr
+
+
+def test_unknown_typed_error_does_not_run_legacy_cli_probe(tmp_path: Path) -> None:
+    repo, fake_bin, pkill_log = _make_repo(tmp_path)
+    probe_log = tmp_path / "probe.log"
+    app = _make_app_bundle(
+        tmp_path,
+        "Applications/OpenBird.app",
+        app_script="""#!/usr/bin/env bash
+printf '%s\n' 'SELFTEST ask.outcome error=1 kind=model_unavailable'
+exit 2
+""",
+        cli_script=f"""#!/usr/bin/env bash
+printf '%s\\n' invoked >> {probe_log}
+exit 0
+""",
+    )
+
+    result = _run_verify(repo, fake_bin, pkill_log, "--app", str(app))
+
+    assert result.returncode == 2
+    assert "VERDICT: BLOCKED" in result.stdout
+    assert "self-test ask errored (kind=model_unavailable" in result.stderr
+    assert "legacy untyped self-test error" not in result.stderr
+    assert "bundled CLI decrypted encrypted store" not in result.stderr
+    assert not probe_log.exists()
