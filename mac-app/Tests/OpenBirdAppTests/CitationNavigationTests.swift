@@ -75,6 +75,106 @@ final class ChatCitationDecodingTests: XCTestCase {
         XCTAssertNil(citation.observationId)
         XCTAssertNil(citation.chunkId)
     }
+
+    func testDecodesDerivedCitationsFromChatJson() throws {
+        // Mirrors Python `AnswerResult.to_public_dict()` for derived day-memory facts.
+        let json = """
+        {
+          "answer": "Your top activity was coding.",
+          "grounded": true,
+          "grounding": "derived",
+          "citations": [],
+          "derived_citations": [
+            {
+              "index": 1,
+              "source_id": "D20260627-review-1",
+              "type": "day_memory",
+              "label": "Top activity category",
+              "snippet": "Coding was the largest activity bucket.",
+              "derived_from": ["obs-1", "obs-2"],
+              "derived_from_total": 2
+            }
+          ],
+          "reasoning_route": "local_deterministic"
+        }
+        """
+
+        let result = try decodeResult(json)
+
+        XCTAssertTrue(result.grounded)
+        XCTAssertEqual(result.grounding, "derived")
+        XCTAssertEqual(result.reasoningRoute, "local_deterministic")
+        XCTAssertEqual(result.routeLabel, "Local only")
+        XCTAssertTrue(result.citations.isEmpty)
+        XCTAssertEqual(result.derivedCitations.count, 1)
+        let citation = try XCTUnwrap(result.derivedCitations.first)
+        XCTAssertEqual(citation.sourceId, "D20260627-review-1")
+        XCTAssertEqual(citation.label, "Top activity category")
+        XCTAssertEqual(citation.derivedFromTotal, 2)
+        XCTAssertEqual(result.sourceCount, 1)
+        XCTAssertTrue(result.hasDisplaySources)
+    }
+
+    func testMalformedDerivedCitationsDoNotDropAnswer() throws {
+        let json = """
+        {
+          "answer": "ok",
+          "grounded": true,
+          "citations": [],
+          "derived_citations": "not-an-array",
+          "reasoning_route": "local_deterministic"
+        }
+        """
+
+        let result = try decodeResult(json)
+
+        XCTAssertEqual(result.answer, "ok")
+        XCTAssertTrue(result.citations.isEmpty)
+        XCTAssertTrue(result.derivedCitations.isEmpty)
+        XCTAssertEqual(result.routeLabel, "Local only")
+    }
+
+    func testMalformedOccurrenceCitationsFailDecode() {
+        let json = """
+        {
+          "answer": "ok",
+          "grounded": true,
+          "citations": "not-an-array",
+          "derived_citations": []
+        }
+        """
+
+        XCTAssertThrowsError(try decodeResult(json))
+    }
+
+    func testDisplaySourceIdsAreNamespacedAndStable() {
+        let result = ChatResult(
+            answer: "mixed",
+            grounded: true,
+            citations: [ChatCitation(index: 1, app: "Code", window: "a.swift", ts: 1, snippet: "x")],
+            derivedCitations: [
+                DerivedChatCitation(
+                    index: 1,
+                    sourceId: "D-a",
+                    label: "Daily productivity facts",
+                    snippet: "x",
+                    derivedFromTotal: 2
+                ),
+                DerivedChatCitation(
+                    index: 1,
+                    sourceId: "D-b",
+                    label: "Top activity category",
+                    snippet: "y",
+                    derivedFromTotal: 3
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            result.displaySources.map(\.id),
+            ["occurrence-1", "derived-D-a", "derived-D-b"]
+        )
+    }
 }
 
 /// `AppModel.dayOffset(forTimestamp:)` must map a citation timestamp to the SAME

@@ -16,7 +16,7 @@
 # validation), not the SwiftUI rendering of the answer bubble. That's where the
 # grounding fix lives, so it's the meaningful signal.
 #
-# Exit: 0 = PASS (grounded, >=1 citation) · 1 = FAIL (ran, ungrounded)
+# Exit: 0 = PASS (grounded, >=1 display source) · 1 = FAIL (ran, ungrounded)
 #       2 = BLOCKED (no outcome line — build/launch/CLI problem, not a fix verdict)
 #
 # Usage: script/verify_ask_app.sh ["Summarize my day"] [--build]
@@ -79,10 +79,13 @@ if printf '%s' "$OUTCOME" | grep -q 'error=1'; then
 fi
 GROUNDED="$(printf '%s' "$OUTCOME" | grep -oE 'grounded=[0-9]+' | cut -d= -f2)"
 CITES="$(printf '%s' "$OUTCOME" | grep -oE 'citations=[0-9]+' | cut -d= -f2)"
+DERIVED="$(printf '%s' "$OUTCOME" | grep -oE 'derived=[0-9]+' | cut -d= -f2)"
+SOURCES="$(printf '%s' "$OUTCOME" | grep -oE 'sources=[0-9]+' | cut -d= -f2)"
+SOURCE_SIGNAL="${SOURCES:-${CITES:-0}}"
 
-if [ "${GROUNDED:-0}" = "1" ] && [ "${CITES:-0}" -ge 1 ]; then
-  echo "VERDICT: PASS — grounded=$GROUNDED citations=$CITES"
+if [ "${GROUNDED:-0}" = "1" ] && [ "${SOURCE_SIGNAL:-0}" -ge 1 ]; then
+  echo "VERDICT: PASS — grounded=$GROUNDED citations=${CITES:-?} derived=${DERIVED:-?} sources=${SOURCES:-$SOURCE_SIGNAL}"
   exit 0
 fi
-echo "VERDICT: FAIL — ungrounded (grounded=${GROUNDED:-?} citations=${CITES:-?})"
+echo "VERDICT: FAIL — ungrounded (grounded=${GROUNDED:-?} citations=${CITES:-?} derived=${DERIVED:-?} sources=${SOURCES:-$SOURCE_SIGNAL})"
 exit 1

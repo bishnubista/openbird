@@ -16,6 +16,32 @@ final class SourcesRailTests: XCTestCase {
         XCTAssertEqual(SourcesRail.cardTitle(citation(index: 1, app: "Zoom", window: "   ")), "Zoom")
         XCTAssertEqual(SourcesRail.cardTitle(citation(index: 1, app: "  ", window: "  ")), "Source")
     }
+
+    func testDerivedCardTitleAndCountUseAggregateMetadata() {
+        let source = DerivedChatCitation(
+            index: 1,
+            sourceId: "D1",
+            label: "  Daily productivity facts  ",
+            snippet: "12 active minutes",
+            derivedFromTotal: 14
+        )
+
+        XCTAssertEqual(SourcesRail.derivedCardTitle(source), "Daily productivity facts")
+        XCTAssertEqual(SourcesRail.derivedCountText(source), "14 source observations")
+    }
+
+    func testDerivedCardTitleFallsBack() {
+        let source = DerivedChatCitation(
+            index: 1,
+            sourceId: "D1",
+            label: "   ",
+            snippet: "",
+            derivedFromTotal: 1
+        )
+
+        XCTAssertEqual(SourcesRail.derivedCardTitle(source), "Derived source")
+        XCTAssertEqual(SourcesRail.derivedCountText(source), "1 source observation")
+    }
 }
 
 final class SourcesDisplayTests: XCTestCase {
@@ -23,14 +49,37 @@ final class SourcesDisplayTests: XCTestCase {
         ChatCitation(index: index, app: "VS Code", window: "f.py", ts: 0, snippet: "s")
     }
 
-    private func turn(_ question: String, grounded: Bool? = nil, citations: [ChatCitation] = [], error: String? = nil) -> AskPanelModel.Turn {
-        let result = grounded.map { ChatResult(answer: "a", grounded: $0, citations: citations) }
+    private func derived(_ id: String) -> DerivedChatCitation {
+        DerivedChatCitation(
+            index: 1,
+            sourceId: id,
+            label: "Daily productivity facts",
+            snippet: "12 active minutes",
+            derivedFromTotal: 2
+        )
+    }
+
+    private func turn(
+        _ question: String,
+        grounded: Bool? = nil,
+        citations: [ChatCitation] = [],
+        derivedCitations: [DerivedChatCitation] = [],
+        error: String? = nil
+    ) -> AskPanelModel.Turn {
+        let result = grounded.map {
+            ChatResult(
+                answer: "a",
+                grounded: $0,
+                citations: citations,
+                derivedCitations: derivedCitations
+            )
+        }
         return AskPanelModel.Turn(question: question, result: result, error: error)
     }
 
     func testDisplayHiddenWhenNoAnswerYet() {
         XCTAssertEqual(SourcesDisplay.make(thread: [], busy: false).indicator, .hidden)
-        XCTAssertTrue(SourcesDisplay.make(thread: [], busy: false).citations.isEmpty)
+        XCTAssertTrue(SourcesDisplay.make(thread: [], busy: false).sources.isEmpty)
     }
 
     func testDisplayThinkingWhileBusyKeepsPriorSources() {
@@ -40,7 +89,17 @@ final class SourcesDisplayTests: XCTestCase {
         ]
         let d = SourcesDisplay.make(thread: thread, busy: true)
         XCTAssertEqual(d.indicator, .thinking)
-        XCTAssertEqual(d.citations.map(\.index), [1])   // last successful answer's sources
+        XCTAssertEqual(d.sources.map(\.id), ["occurrence-1"])   // last successful answer's sources
+    }
+
+    func testDisplayThinkingWhileBusyKeepsPriorDerivedSources() {
+        let thread = [
+            turn("q1", grounded: true, derivedCitations: [derived("D1")]),
+            turn("q2"),   // pending
+        ]
+        let d = SourcesDisplay.make(thread: thread, busy: true)
+        XCTAssertEqual(d.indicator, .thinking)
+        XCTAssertEqual(d.sources.map(\.id), ["derived-D1"])
     }
 
     func testDisplayNeutralAndEmptyWhenLastTurnErrored() {
@@ -52,7 +111,7 @@ final class SourcesDisplayTests: XCTestCase {
         ]
         let d = SourcesDisplay.make(thread: thread, busy: false)
         XCTAssertEqual(d.indicator, .hidden)
-        XCTAssertTrue(d.citations.isEmpty)
+        XCTAssertTrue(d.sources.isEmpty)
     }
 
     func testDisplayReflectsLastSuccessfulAnswer() {
@@ -62,6 +121,15 @@ final class SourcesDisplayTests: XCTestCase {
         ]
         let d = SourcesDisplay.make(thread: thread, busy: false)
         XCTAssertEqual(d.indicator, .ungrounded)
-        XCTAssertEqual(d.citations.map(\.index), [2, 3])
+        XCTAssertEqual(d.sources.map(\.id), ["occurrence-2", "occurrence-3"])
+    }
+
+    func testDisplayReflectsDerivedOnlyAnswer() {
+        let thread = [
+            turn("q1", grounded: true, derivedCitations: [derived("D1")]),
+        ]
+        let d = SourcesDisplay.make(thread: thread, busy: false)
+        XCTAssertEqual(d.indicator, .grounded)
+        XCTAssertEqual(d.sources.map(\.id), ["derived-D1"])
     }
 }

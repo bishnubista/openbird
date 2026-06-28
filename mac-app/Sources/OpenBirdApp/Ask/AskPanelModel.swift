@@ -123,7 +123,7 @@ final class AskPanelModel: ObservableObject {
             update(turn.id) { $0.result = result }
             // Counts/booleans only — never the question/answer/citation text.
             Self.log.info(
-                "ask.outcome grounded=\(result.grounded ? 1 : 0, privacy: .public) citations=\(result.citations.count, privacy: .public) scoped=\(scope != nil ? 1 : 0, privacy: .public)"
+                "ask.outcome grounded=\(result.grounded ? 1 : 0, privacy: .public) citations=\(result.citations.count, privacy: .public) derived=\(result.derivedCitations.count, privacy: .public) sources=\(result.sourceCount, privacy: .public) scoped=\(scope != nil ? 1 : 0, privacy: .public)"
             )
         case .failure(let error):
             update(turn.id) { $0.error = ChatErrorPresenter.describe(error) }

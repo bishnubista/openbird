@@ -178,15 +178,75 @@ struct ChatCitation: Codable, Identifiable, Equatable {
     }
 }
 
+/// One aggregate citation behind a deterministic derived answer.
+///
+/// Unlike `ChatCitation`, this does not identify one navigable occurrence. The
+/// Python CLI emits `derived_from` observation ids for auditability, but the app
+/// intentionally does not decode or store them; the UI only needs the derived
+/// source's opaque id, label, snippet, and total backing-source count.
+struct DerivedChatCitation: Codable, Identifiable, Equatable {
+    let index: Int
+    let sourceId: String
+    let type: String
+    let label: String
+    let snippet: String
+    let derivedFromTotal: Int
+    var id: String { sourceId }
+    var displayLabel: String {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Derived source" : trimmed
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case index
+        case sourceId = "source_id"
+        case type, label, snippet
+        case derivedFromTotal = "derived_from_total"
+    }
+
+    init(
+        index: Int,
+        sourceId: String,
+        type: String = "day_memory",
+        label: String,
+        snippet: String,
+        derivedFromTotal: Int
+    ) {
+        self.index = index
+        self.sourceId = sourceId
+        self.type = type
+        self.label = label
+        self.snippet = snippet
+        self.derivedFromTotal = derivedFromTotal
+    }
+}
+
+/// A source the chat UI can display. Occurrence sources are clickable and
+/// navigable; derived sources are aggregate facts and render as non-clickable.
+enum ChatSource: Identifiable, Equatable {
+    case occurrence(ChatCitation)
+    case derived(DerivedChatCitation)
+
+    var id: String {
+        switch self {
+        case .occurrence(let citation): return "occurrence-\(citation.index)"
+        case .derived(let citation): return "derived-\(citation.sourceId)"
+        }
+    }
+}
+
 /// A grounded chat answer plus its citations (decoded from `openbird chat --json`).
 struct ChatResult: Codable, Equatable {
     let answer: String
     let grounded: Bool
+    let grounding: String?
     let citations: [ChatCitation]
+    let derivedCitations: [DerivedChatCitation]
     let reasoningRoute: String?
 
     enum CodingKeys: String, CodingKey {
-        case answer, grounded, citations
+        case answer, grounded, grounding, citations
+        case derivedCitations = "derived_citations"
         case reasoningRoute = "reasoning_route"
     }
 
@@ -194,13 +254,38 @@ struct ChatResult: Codable, Equatable {
         answer: String,
         grounded: Bool,
         citations: [ChatCitation],
+        grounding: String? = nil,
+        derivedCitations: [DerivedChatCitation] = [],
         reasoningRoute: String? = nil
     ) {
         self.answer = answer
         self.grounded = grounded
+        self.grounding = grounding
         self.citations = citations
+        self.derivedCitations = derivedCitations
         self.reasoningRoute = reasoningRoute
     }
+
+    /// Decode tolerantly around new source fields: older CLIs omit
+    /// `derived_citations`, and a malformed optional derived array should not drop
+    /// an otherwise valid answer.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        answer = try c.decode(String.self, forKey: .answer)
+        grounded = try c.decode(Bool.self, forKey: .grounded)
+        grounding = try c.decodeIfPresent(String.self, forKey: .grounding)
+        citations = try c.decodeIfPresent([ChatCitation].self, forKey: .citations) ?? []
+        derivedCitations = (try? c.decodeIfPresent([DerivedChatCitation].self, forKey: .derivedCitations)) ?? []
+        reasoningRoute = try c.decodeIfPresent(String.self, forKey: .reasoningRoute)
+    }
+
+    var displaySources: [ChatSource] {
+        citations.map(ChatSource.occurrence) + derivedCitations.map(ChatSource.derived)
+    }
+
+    var sourceCount: Int { displaySources.count }
+
+    var hasDisplaySources: Bool { sourceCount > 0 }
 
     var routeLabel: String? {
         switch reasoningRoute {
