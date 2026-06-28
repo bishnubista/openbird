@@ -24,7 +24,7 @@ enum KeychainKeyProvider {
     private static let log = Logger(subsystem: "ai.openbird.OpenBird", category: "keychain")
 
     /// Privacy-safe outcome reason codes (never includes the key).
-    enum Outcome: String {
+    enum Outcome: String, Sendable {
         case loaded      // existing item read successfully
         case created     // generated + stored a fresh key (no/plaintext DB)
         case denied      // user denied/cancelled the read; left untouched

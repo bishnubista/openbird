@@ -108,6 +108,58 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(AppDelegate.selfTestErrorSignal(NSError(domain: "x", code: 1)), "unknown")
     }
 
+    func testSelfTestDBKeyTimeoutParsingFallsBackForInvalidValues() {
+        XCTAssertEqual(AppDelegate.selfTestDBKeyTimeout(environment: [:]), 15)
+        XCTAssertEqual(
+            AppDelegate.selfTestDBKeyTimeout(environment: ["OPENBIRD_SELFTEST_DB_KEY_TIMEOUT": ""]),
+            15
+        )
+        XCTAssertEqual(
+            AppDelegate.selfTestDBKeyTimeout(environment: ["OPENBIRD_SELFTEST_DB_KEY_TIMEOUT": "0"]),
+            15
+        )
+        XCTAssertEqual(
+            AppDelegate.selfTestDBKeyTimeout(environment: ["OPENBIRD_SELFTEST_DB_KEY_TIMEOUT": "-1"]),
+            15
+        )
+        XCTAssertEqual(
+            AppDelegate.selfTestDBKeyTimeout(environment: ["OPENBIRD_SELFTEST_DB_KEY_TIMEOUT": "abc"]),
+            15
+        )
+        XCTAssertEqual(
+            AppDelegate.selfTestDBKeyTimeout(environment: ["OPENBIRD_SELFTEST_DB_KEY_TIMEOUT": "0.25"]),
+            0.25
+        )
+    }
+
+    func testTimedDBKeyBootstrapReturnsFalseWithoutInjectingOnTimeout() {
+        OpenBirdService.resetInjectedDBKeyForTests()
+        defer { OpenBirdService.resetInjectedDBKeyForTests() }
+
+        let start = Date()
+        let ok = OpenBirdService.bootstrapDBKey(timeout: 0.05) { _ in
+            Thread.sleep(forTimeInterval: 1)
+            return ("a", .loaded)
+        }
+
+        XCTAssertFalse(ok)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
+        XCTAssertNil(OpenBirdService.childEnvironment(base: [:])["OPENBIRD_DB_KEY"])
+    }
+
+    func testTimedDBKeyBootstrapInjectsSuccessfulResolverKey() {
+        OpenBirdService.resetInjectedDBKeyForTests()
+        defer { OpenBirdService.resetInjectedDBKeyForTests() }
+        let fakeKey = String(repeating: "a", count: 64)
+
+        let ok = OpenBirdService.bootstrapDBKey(timeout: 1) { _ in
+            (fakeKey, .loaded)
+        }
+
+        XCTAssertTrue(ok)
+        XCTAssertEqual(OpenBirdService.childEnvironment(base: [:])["OPENBIRD_DB_KEY"], fakeKey)
+    }
+
     func testParseMemoryStatsDecodesCliJson() {
         let stats = OpenBirdService.parseMemoryStats("""
         {
