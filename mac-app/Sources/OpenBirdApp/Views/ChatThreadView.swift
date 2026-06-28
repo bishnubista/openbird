@@ -64,23 +64,30 @@ struct ChatThreadView: View {
                 .foregroundStyle(OB.textPrimary(scheme))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            if !result.citations.isEmpty {
+            if !result.displaySources.isEmpty {
                 HStack(spacing: OB.Space.sm) {
-                    ForEach(result.citations) { sourceChip($0) }
+                    ForEach(result.displaySources) { sourceChip($0) }
                 }
             }
         }
     }
 
-    private func sourceChip(_ c: ChatCitation) -> some View {
-        Button { onSelectCitation(c) } label: {
-            sourceChipLabel(c)
+    @ViewBuilder
+    private func sourceChip(_ source: ChatSource) -> some View {
+        switch source {
+        case .occurrence(let citation):
+            Button { onSelectCitation(citation) } label: {
+                occurrenceSourceChipLabel(citation)
+            }
+            .buttonStyle(.plain)
+            .help("Open this source in Today")
+        case .derived(let citation):
+            derivedSourceChipLabel(citation)
+                .help("\(citation.derivedFromTotal) source observation\(citation.derivedFromTotal == 1 ? "" : "s")")
         }
-        .buttonStyle(.plain)
-        .help("Open this source in Today")
     }
 
-    private func sourceChipLabel(_ c: ChatCitation) -> some View {
+    private func occurrenceSourceChipLabel(_ c: ChatCitation) -> some View {
         let identity = SourceIdentity.forApp(c.app)
         return HStack(spacing: OB.Space.s) {
             Text(identity.glyph)
@@ -103,9 +110,31 @@ struct ChatThreadView: View {
         .contentShape(RoundedRectangle(cornerRadius: OB.Radius.control, style: .continuous))
     }
 
+    private func derivedSourceChipLabel(_ c: DerivedChatCitation) -> some View {
+        HStack(spacing: OB.Space.s) {
+            Text("D")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 18, height: 18)
+                .background(OB.accent, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            Text(c.label.isEmpty ? "Derived source" : c.label)
+                .font(.system(size: 11.5))
+                .foregroundStyle(OB.textSecondary(scheme))
+                .lineLimit(1)
+        }
+        .padding(.leading, 5)
+        .padding(.trailing, 9)
+        .padding(.vertical, 5)
+        .background(OB.fieldFill(scheme), in: RoundedRectangle(cornerRadius: OB.Radius.control, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: OB.Radius.control, style: .continuous)
+                .strokeBorder(OB.separator(scheme), lineWidth: 0.5)
+        )
+    }
+
     private func groundedLabel(_ result: ChatResult) -> String {
         guard result.grounded else { return "ungrounded — no verified source" }
-        let n = result.citations.count
+        let n = result.sourceCount
         return "grounded in \(n) source\(n == 1 ? "" : "s")"
     }
 }

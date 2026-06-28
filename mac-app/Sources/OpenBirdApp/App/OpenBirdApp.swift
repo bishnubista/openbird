@@ -69,8 +69,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let code: Int32
             do {
                 let r = try service.askChat(query, dayOffset: nil)
-                let grounded = r.grounded && !r.citations.isEmpty
-                line = "SELFTEST ask.outcome grounded=\(r.grounded ? 1 : 0) citations=\(r.citations.count)"
+                let grounded = r.grounded && r.hasDisplaySources
+                line = "SELFTEST ask.outcome grounded=\(r.grounded ? 1 : 0) citations=\(r.citations.count) derived=\(r.derivedCitations.count) sources=\(r.sourceCount)"
                 code = grounded ? 0 : 1
                 log.info("\(line, privacy: .public)")
             } catch {
