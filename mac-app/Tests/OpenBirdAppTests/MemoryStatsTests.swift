@@ -176,6 +176,7 @@ final class MemoryStatsTests: XCTestCase {
     func testDBKeyBootstrapReportUsesSafeFailureWireCodesWithoutInjecting() {
         for (outcome, code) in [
             (KeychainKeyProvider.Outcome.denied, "denied"),
+            (.interactionNotAllowed, "interaction_not_allowed"),
             (.strandedDb, "stranded_db"),
             (.error, "error"),
         ] {
@@ -189,6 +190,25 @@ final class MemoryStatsTests: XCTestCase {
             XCTAssertNotNil(code.range(of: #"^[a-z0-9_]+$"#, options: .regularExpression))
         }
         OpenBirdService.resetInjectedDBKeyForTests()
+    }
+
+    func testKeychainReadFailureStatusUsesPreciseSafeWireCode() {
+        XCTAssertEqual(
+            KeychainKeyProvider.outcomeForReadFailureStatus(errSecInteractionNotAllowed).wireCode,
+            "interaction_not_allowed"
+        )
+        XCTAssertEqual(
+            KeychainKeyProvider.outcomeForReadFailureStatus(errSecAuthFailed).wireCode,
+            "denied"
+        )
+        XCTAssertEqual(
+            KeychainKeyProvider.outcomeForReadFailureStatus(errSecUserCanceled).wireCode,
+            "denied"
+        )
+        XCTAssertEqual(
+            KeychainKeyProvider.outcomeForReadFailureStatus(errSecDecode).wireCode,
+            "error"
+        )
     }
 
     func testParseMemoryStatsDecodesCliJson() {

@@ -28,13 +28,18 @@ enum KeychainKeyProvider {
         case loaded      // existing item read successfully
         case created     // generated + stored a fresh key (no/plaintext DB)
         case denied      // user denied/cancelled the read; left untouched
+        case interactionNotAllowed  // no-UI read would require a Keychain prompt
         case strandedDb  // encrypted-looking DB but no key item -> fail closed
         case error       // unexpected Keychain/error condition
 
         var wireCode: String {
             switch self {
+            case .loaded: return "loaded"
+            case .created: return "created"
+            case .denied: return "denied"
+            case .interactionNotAllowed: return "interaction_not_allowed"
             case .strandedDb: return "stranded_db"
-            default: return rawValue
+            case .error: return "error"
             }
         }
     }
@@ -46,8 +51,23 @@ enum KeychainKeyProvider {
     ///   encrypted DB. We rely on the system "Always Allow" flow to add this app
     ///   to an existing item's ACL instead.
     /// - Generates a new key only when provably safe (Codex finding #2).
-    static func resolveKey(dbPath: String) -> (key: String?, outcome: Outcome) {
-        let (existing, status) = readKey()
+    static func resolveKey(
+        dbPath: String,
+        allowInteraction: Bool = true
+    ) -> (key: String?, outcome: Outcome) {
+        withKeychainUserInteractionAllowed(allowInteraction) {
+            resolveKeyWithCurrentInteractionSetting(
+                dbPath: dbPath,
+                allowInteraction: allowInteraction
+            )
+        }
+    }
+
+    private static func resolveKeyWithCurrentInteractionSetting(
+        dbPath: String,
+        allowInteraction: Bool
+    ) -> (key: String?, outcome: Outcome) {
+        let (existing, status) = readKey(allowInteraction: allowInteraction)
 
         switch status {
         case errSecSuccess:
@@ -59,24 +79,38 @@ enum KeychainKeyProvider {
             return (nil, .error)
 
         case errSecItemNotFound:
-            return generateIfSafe(dbPath: dbPath)
-
-        case errSecAuthFailed, errSecUserCanceled, errSecInteractionNotAllowed:
-            // Read denied/cancelled: do NOT generate — an existing encrypted DB
-            // could be stranded by a fresh, non-matching key.
-            log.error("db key read denied (\(Outcome.denied.rawValue, privacy: .public))")
-            return (nil, .denied)
+            return generateIfSafe(dbPath: dbPath, allowInteraction: allowInteraction)
 
         default:
+            let outcome = outcomeForReadFailureStatus(status)
+            if outcome == .denied || outcome == .interactionNotAllowed {
+                // Read denied/cancelled: do NOT generate — an existing encrypted DB
+                // could be stranded by a fresh, non-matching key.
+                log.error("db key read denied (\(outcome.wireCode, privacy: .public))")
+                return (nil, outcome)
+            }
             log.error("db key lookup failed (\(Outcome.error.rawValue, privacy: .public)) status=\(status, privacy: .public)")
             return (nil, .error)
+        }
+    }
+
+    static func outcomeForReadFailureStatus(_ status: OSStatus) -> Outcome {
+        switch status {
+        case errSecAuthFailed, errSecUserCanceled:
+            return .denied
+        case errSecInteractionNotAllowed:
+            // Read denied/cancelled: do NOT generate — an existing encrypted DB
+            // could be stranded by a fresh, non-matching key.
+            return .interactionNotAllowed
+        default:
+            return .error
         }
     }
 
     /// Read the existing key item. Returns the decoded key (when the payload is
     /// present and valid UTF-8) plus the raw `SecItemCopyMatching` status so the
     /// caller can distinguish not-found / denied / error.
-    private static func readKey() -> (key: String?, status: OSStatus) {
+    private static func readKey(allowInteraction: Bool) -> (key: String?, status: OSStatus) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -95,7 +129,10 @@ enum KeychainKeyProvider {
 
     /// Generate + store a fresh key, but only when no encrypted DB would be
     /// stranded. Otherwise fail closed.
-    private static func generateIfSafe(dbPath: String) -> (key: String?, outcome: Outcome) {
+    private static func generateIfSafe(
+        dbPath: String,
+        allowInteraction: Bool
+    ) -> (key: String?, outcome: Outcome) {
         if looksEncrypted(dbPath: dbPath) {
             log.error("encrypted-looking DB with no key item; failing closed (\(Outcome.strandedDb.rawValue, privacy: .public))")
             return (nil, .strandedDb)
@@ -116,7 +153,7 @@ enum KeychainKeyProvider {
             // A concurrent writer created the item between our not-found read and
             // this add. Re-read and use that key rather than failing bootstrap —
             // the item now exists and is the authoritative key.
-            let (existing, readStatus) = readKey()
+            let (existing, readStatus) = readKey(allowInteraction: allowInteraction)
             if readStatus == errSecSuccess, let key = existing, !key.isEmpty {
                 log.info("db key loaded after concurrent create (\(Outcome.loaded.rawValue, privacy: .public))")
                 return (key, .loaded)
@@ -130,6 +167,20 @@ enum KeychainKeyProvider {
         }
         log.info("db key generated (\(Outcome.created.rawValue, privacy: .public))")
         return (key, .created)
+    }
+
+    private static func withKeychainUserInteractionAllowed<T>(
+        _ allowed: Bool,
+        _ body: () -> T
+    ) -> T {
+        guard !allowed else { return body() }
+
+        var previous = DarwinBoolean(true)
+        let readStatus = SecKeychainGetUserInteractionAllowed(&previous)
+        let previousValue = readStatus == errSecSuccess ? previous.boolValue : true
+        _ = SecKeychainSetUserInteractionAllowed(false)
+        defer { _ = SecKeychainSetUserInteractionAllowed(previousValue) }
+        return body()
     }
 
     /// True iff the resolved DB file exists, is non-empty, and does NOT begin with

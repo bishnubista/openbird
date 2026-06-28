@@ -788,22 +788,27 @@ final class OpenBirdService: @unchecked Sendable {
     @discardableResult
     static func bootstrapDBKey(
         timeout: TimeInterval? = nil,
-        resolver: @escaping DBKeyResolver = { dbPath in
-            KeychainKeyProvider.resolveKey(dbPath: dbPath)
-        }
+        allowInteraction: Bool = true,
+        resolver: DBKeyResolver? = nil
     ) -> Bool {
-        bootstrapDBKeyReport(timeout: timeout, resolver: resolver).ok
+        bootstrapDBKeyReport(
+            timeout: timeout,
+            allowInteraction: allowInteraction,
+            resolver: resolver
+        ).ok
     }
 
     /// Same bootstrap path as `bootstrapDBKey`, but returns a privacy-safe reason
     /// code for headless beta rehearsal. Never includes key material or paths.
     static func bootstrapDBKeyReport(
         timeout: TimeInterval? = nil,
-        resolver: @escaping DBKeyResolver = { dbPath in
-            KeychainKeyProvider.resolveKey(dbPath: dbPath)
-        }
+        allowInteraction: Bool = true,
+        resolver: DBKeyResolver? = nil
     ) -> DBKeyBootstrapReport {
         let dbPath = databaseURL().path
+        let resolve: DBKeyResolver = resolver ?? { path in
+            KeychainKeyProvider.resolveKey(dbPath: path, allowInteraction: allowInteraction)
+        }
         let resolved: (key: String?, outcome: KeychainKeyProvider.Outcome)
         if let timeout {
             guard timeout > 0 else {
@@ -813,7 +818,7 @@ final class OpenBirdService: @unchecked Sendable {
             let lock = NSLock()
             var asyncResolved: (key: String?, outcome: KeychainKeyProvider.Outcome)?
             DispatchQueue.global(qos: .userInitiated).async {
-                let value = resolver(dbPath)
+                let value = resolve(dbPath)
                 lock.lock()
                 asyncResolved = value
                 lock.unlock()
@@ -827,7 +832,7 @@ final class OpenBirdService: @unchecked Sendable {
             lock.unlock()
             resolved = value ?? (nil, .error)
         } else {
-            resolved = resolver(dbPath)  // outcome logged by provider
+            resolved = resolve(dbPath)  // outcome logged by provider
         }
         let outcome = resolved.outcome.wireCode
         guard let key = resolved.key, !key.isEmpty else {
