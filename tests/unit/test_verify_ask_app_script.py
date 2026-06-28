@@ -61,6 +61,36 @@ shift
 "$@"
 """,
     )
+    _write_executable(
+        fake_bin / "codesign",
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "${FAKE_CODESIGN_MODE:-developer_id}" in
+  developer_id)
+    {
+      printf 'Executable=/tmp/OpenBird.app/Contents/MacOS/OpenBird\\n'
+      printf 'Authority=Developer ID Application: Example Developer (ABCDE12345)\\n'
+      printf 'Authority=Developer ID Certification Authority\\n'
+      printf 'TeamIdentifier=ABCDE12345\\n'
+    } >&2
+    exit 0
+    ;;
+  adhoc)
+    {
+      printf 'Executable=/tmp/OpenBird.app/Contents/MacOS/OpenBird\\n'
+      printf 'Signature=adhoc\\n'
+      printf 'TeamIdentifier=not set\\n'
+    } >&2
+    exit 0
+    ;;
+  unsigned)
+    printf 'code object is not signed at all\\n' >&2
+    exit 1
+    ;;
+esac
+exit 2
+""",
+    )
     return repo, fake_bin, pkill_log
 
 
@@ -70,12 +100,14 @@ def _run_verify(
     pkill_log: Path,
     *args: str,
     app_env: Path | None = None,
+    codesign_mode: str = "developer_id",
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update(
         {
             "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
             "FAKE_PKILL_LOG": str(pkill_log),
+            "FAKE_CODESIGN_MODE": codesign_mode,
             "OPENBIRD_VERIFY_WAIT": "1",
             "OPENBIRD_VERIFY_OUT": str(repo / ".verify-out"),
         }
@@ -201,8 +233,56 @@ JSON
     assert "VERDICT: BLOCKED" in result.stdout
     assert "bundled CLI decrypted encrypted store" in result.stderr
     assert "observations=0 day_memories=0" in result.stderr
-    assert "signed-app Keychain ACL/app identity issue" in result.stderr
+    assert "Developer ID-signed app Keychain ACL/app identity issue" in result.stderr
     assert "should-not-leak" not in result.stderr
+    assert "Example Developer" not in result.stderr
+    assert "ABCDE12345" not in result.stderr
+
+
+def test_db_key_unavailable_distinguishes_adhoc_app_from_signed_beta(tmp_path: Path) -> None:
+    repo, fake_bin, pkill_log = _make_repo(tmp_path)
+    app = _make_app_bundle(
+        tmp_path,
+        "dist/OpenBird.app",
+        app_script="""#!/usr/bin/env bash
+printf '%s\n' 'SELFTEST ask.outcome error=1 kind=db_key_unavailable'
+exit 2
+""",
+        cli_script="""#!/usr/bin/env bash
+set -euo pipefail
+test "${1:-}" = "data"
+test "${2:-}" = "stats"
+cat <<'JSON'
+{
+  "observations": 12,
+  "blobs": 0,
+  "chunks": 0,
+  "vectors": 0,
+  "day_memories": 3,
+  "cohort_key": "still-should-not-leak",
+  "encryption_enabled": true
+}
+JSON
+""",
+    )
+
+    result = _run_verify(
+        repo,
+        fake_bin,
+        pkill_log,
+        "--app",
+        str(app),
+        codesign_mode="adhoc",
+    )
+
+    assert result.returncode == 2
+    assert "VERDICT: BLOCKED" in result.stdout
+    assert "bundled CLI decrypted encrypted store" in result.stderr
+    assert "observations=12 day_memories=3" in result.stderr
+    assert "selected app is ad-hoc signed and not beta-proof" in result.stderr
+    assert "fresh Developer ID-signed app" in result.stderr
+    assert "still-should-not-leak" not in result.stderr
+    assert "TeamIdentifier" not in result.stderr
 
 
 def test_db_key_unavailable_keeps_generic_message_when_probe_fails(tmp_path: Path) -> None:
