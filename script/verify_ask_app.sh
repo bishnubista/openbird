@@ -77,6 +77,46 @@ done
 log() { printf '[verify-ask] %s\n' "$1" >&2; }
 mkdir -p "$OUT_DIR"
 
+app_signature_class() {
+  local out="" rc=0
+  if ! command -v codesign >/dev/null 2>&1; then
+    printf '%s\n' "unknown"
+    return
+  fi
+
+  out="$(codesign -dv --verbose=4 "$APP_BUNDLE" 2>&1)" || rc=$?
+  if printf '%s\n' "$out" | grep -q '^Signature=adhoc'; then
+    printf '%s\n' "adhoc"
+  elif printf '%s\n' "$out" | grep -q '^Authority=Developer ID Application'; then
+    printf '%s\n' "developer_id"
+  elif printf '%s\n' "$out" | grep -q '^Authority='; then
+    printf '%s\n' "other_signed"
+  elif [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -qi 'not signed\|code object is not signed'; then
+    printf '%s\n' "unsigned"
+  else
+    printf '%s\n' "unknown"
+  fi
+}
+
+db_key_unavailable_with_cli_decrypt_message() {
+  local observations="$1" day_memories="$2" signature
+  signature="$(app_signature_class)"
+  case "$signature" in
+    adhoc)
+      log "BLOCKED: app-owned DB key unavailable, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); selected app is ad-hoc signed and not beta-proof; no-UI Keychain denial is expected for rebuilt dist bundles; install a fresh Developer ID-signed app and rerun"
+      ;;
+    developer_id)
+      log "BLOCKED: app-owned DB key unavailable, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); likely Developer ID-signed app Keychain ACL/app identity issue"
+      ;;
+    other_signed|unsigned)
+      log "BLOCKED: app-owned DB key unavailable, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); selected app signing is not beta-proof (signature=$signature)"
+      ;;
+    *)
+      log "BLOCKED: app-owned DB key unavailable, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); selected app signing could not be verified"
+      ;;
+  esac
+}
+
 probe_bundled_cli_key_access() {
   local cli_bin="$APP_BUNDLE/Contents/MacOS/openbird-cli"
   local probe_out probe_rc parsed encrypted observations day_memories
@@ -127,7 +167,7 @@ print(f"{int(encrypted)} {observations} {day_memories}")
 
   read -r encrypted observations day_memories <<< "$parsed"
   if [ "$encrypted" = "1" ]; then
-    log "BLOCKED: app-owned DB key unavailable, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); likely signed-app Keychain ACL/app identity issue"
+    db_key_unavailable_with_cli_decrypt_message "$observations" "$day_memories"
   else
     log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=cli_key_probe_not_encrypted)"
   fi
