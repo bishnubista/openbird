@@ -28,7 +28,7 @@
 # drift it could not verify.
 #
 # Usage:
-#   script/release_status.sh
+#   script/release_status.sh [--beta-rehearsal]
 #
 # Exit codes:
 #   0  aligned, or a release legitimately in progress (nothing published yet to lag)
@@ -38,11 +38,21 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0")" >&2
+  echo "usage: $(basename "$0") [--beta-rehearsal]" >&2
   exit 2
 }
 
-[ "$#" -eq 0 ] || usage
+beta_rehearsal=0
+case "$#" in
+  0) ;;
+  1)
+    case "$1" in
+      --beta-rehearsal) beta_rehearsal=1 ;;
+      *) usage ;;
+    esac
+    ;;
+  *) usage ;;
+esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
@@ -80,14 +90,19 @@ done
 canonical_repo="bishnubista/openbird"
 dmg_tag="beta-dmg-$pyproject_v"
 src_tag="v$pyproject_v"
+dmg_url="https://github.com/$canonical_repo/releases/download/$dmg_tag/OpenBird.dmg"
+src_url="https://github.com/$canonical_repo/releases/download/$src_tag/openbird-$pyproject_v.tar.gz"
 gh_ok=0
 dmg_published="unknown"
 src_published="unknown"
+repo_visibility="unknown"
 
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   gh_ok=1
   if gh release view "$dmg_tag" --repo "$canonical_repo" >/dev/null 2>&1; then dmg_published="yes"; else dmg_published="no"; fi
   if gh release view "$src_tag" --repo "$canonical_repo" >/dev/null 2>&1; then src_published="yes"; else src_published="no"; fi
+  repo_visibility="$(gh repo view "$canonical_repo" --json visibility --jq '.visibility' 2>/dev/null || true)"
+  [ -n "$repo_visibility" ] || repo_visibility="unknown"
 fi
 
 # --- evaluate each row -------------------------------------------------------
@@ -139,6 +154,126 @@ set_flags "$cask_v" "$dmg_published"
 formula_status="$(status_for "$formula_v" "$src_published")"
 set_flags "$formula_v" "$src_published"
 
+# --- optional beta rehearsal probes -----------------------------------------
+
+http_status_code() {
+  local url="$1" code rc
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "unknown:no-curl"
+    return
+  fi
+  rc=0
+  code="$(curl -sS -L -o /dev/null -w '%{http_code}' --head --max-time 8 "$url" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$code" ] || [ "$code" = "000" ]; then
+    echo "unknown:http-000"
+    return
+  fi
+  echo "$code"
+}
+
+is_http_success() {
+  case "$1" in
+    2*|3*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_http_client_failure() {
+  case "$1" in
+    4*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+public_download_status() {
+  local published="$1" code="$2"
+  if [ "$published" != "yes" ]; then
+    echo "unknown (release not published)"
+    return
+  fi
+  case "$code" in
+    unknown:*) echo "unknown (${code#unknown:})"; return ;;
+  esac
+  if is_http_success "$code"; then
+    echo "ok (HTTP $code)"
+    return
+  fi
+  if [ "$repo_visibility" = "PRIVATE" ] && is_http_client_failure "$code"; then
+    echo "private_expected (HTTP $code; token-gated release)"
+    return
+  fi
+  if [ "$repo_visibility" = "PUBLIC" ] && is_http_client_failure "$code"; then
+    echo "blocked (HTTP $code)"
+    return
+  fi
+  echo "unknown (HTTP $code)"
+}
+
+resolve_link() {
+  local path="$1" target dir
+  while [ -L "$path" ]; do
+    target="$(readlink "$path" 2>/dev/null || true)"
+    [ -n "$target" ] || break
+    case "$target" in
+      /*) path="$target" ;;
+      *)
+        dir="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P || true)"
+        [ -n "$dir" ] || break
+        path="$dir/$target"
+        ;;
+    esac
+  done
+  echo "$path"
+}
+
+brew_version() {
+  local kind="$1"
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "unavailable"
+    return
+  fi
+  case "$kind" in
+    cask) brew list --cask --versions openbird 2>/dev/null | awk '{print $2; exit}' ;;
+    formula) brew list --versions openbird 2>/dev/null | awk '{print $2; exit}' ;;
+  esac
+}
+
+beta_blocker=0
+if [ "$beta_rehearsal" -eq 1 ]; then
+  dmg_http_code="$(http_status_code "$dmg_url")"
+  src_http_code="$(http_status_code "$src_url")"
+  dmg_public_status="$(public_download_status "$dmg_published" "$dmg_http_code")"
+  src_public_status="$(public_download_status "$src_published" "$src_http_code")"
+  case "$dmg_public_status" in blocked*) beta_blocker=1 ;; esac
+  case "$src_public_status" in blocked*) beta_blocker=1 ;; esac
+
+  beta_app_bundle="${OPENBIRD_RELEASE_STATUS_APP_BUNDLE:-/Applications/OpenBird.app}"
+  installed_app_v="missing"
+  if [ -f "$beta_app_bundle/Contents/Info.plist" ]; then
+    installed_app_v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$beta_app_bundle/Contents/Info.plist" 2>/dev/null || echo "unknown")"
+  fi
+  brew_cask_v="$(brew_version cask || true)"
+  [ -n "$brew_cask_v" ] || brew_cask_v="not-installed"
+  brew_formula_v="$(brew_version formula || true)"
+  [ -n "$brew_formula_v" ] || brew_formula_v="not-installed"
+  path_openbird="$(command -v openbird 2>/dev/null || true)"
+  [ -n "$path_openbird" ] || path_openbird="missing"
+  path_target="-"
+  path_status="missing"
+  if [ "$path_openbird" != "missing" ]; then
+    path_target="$(resolve_link "$path_openbird")"
+    if [ "$path_target" = "$beta_app_bundle/Contents/MacOS/openbird-cli" ]; then
+      path_status="bundled app CLI"
+    else
+      path_status="other target"
+    fi
+  fi
+  homebrew_token_status="absent"
+  if [ -n "${HOMEBREW_GITHUB_API_TOKEN:-}" ]; then
+    homebrew_token_status="present"
+  fi
+fi
+
 # --- report ------------------------------------------------------------------
 
 printf '\nOpenBird release alignment (source of truth: pyproject.toml = %s)\n\n' "$pyproject_v"
@@ -153,6 +288,21 @@ if [ "$gh_ok" -eq 1 ]; then
   printf '  %-22s %-8s %s\n' "release $src_tag" "-" "published=$src_published"
 else
   printf '\n  (gh unavailable or unauthenticated: channel-completion checks skipped)\n'
+fi
+
+if [ "$beta_rehearsal" -eq 1 ]; then
+  printf '\nBeta rehearsal distribution checks (advisory unless marked blocked)\n\n'
+  printf '  %-26s %s\n' "repo visibility" "$repo_visibility"
+  printf '  %-26s %s\n' "Homebrew GitHub token" "$homebrew_token_status"
+  printf '  %-26s %s\n' "DMG public download" "$dmg_public_status"
+  printf '  %-26s %s\n' "source public download" "$src_public_status"
+  printf '\nBeta rehearsal local install checks (advisory; this machine only)\n\n'
+  printf '  %-26s %s\n' "installed app" "$installed_app_v ($beta_app_bundle)"
+  printf '  %-26s %s\n' "brew cask receipt" "$brew_cask_v"
+  printf '  %-26s %s\n' "brew formula receipt" "$brew_formula_v"
+  printf '  %-26s %s\n' "PATH openbird" "$path_openbird"
+  printf '  %-26s %s\n' "PATH target" "$path_target"
+  printf '  %-26s %s\n' "PATH status" "$path_status"
 fi
 
 echo
@@ -172,6 +322,11 @@ if [ "$unverified" -eq 1 ]; then
   echo "   whether the $pyproject_v release was published (drift) or not (pending) is unknown."
   echo "   Re-run with an authenticated gh to resolve. NOT asserting aligned."
   exit 0
+fi
+if [ "$beta_rehearsal" -eq 1 ] && [ "$beta_blocker" -eq 1 ]; then
+  echo "=> beta blocker: a public release asset exists but its public download URL failed."
+  echo "   Fix the release asset URL/visibility before treating this as public-beta ready."
+  exit 1
 fi
 echo "=> aligned: every channel is on $pyproject_v."
 exit 0
