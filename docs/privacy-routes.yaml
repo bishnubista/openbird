@@ -363,6 +363,7 @@ routes:
       note: Same frontier-reasoning gate as Deep Brain ask; cloud egress still requires OPENBIRD_ALLOW_CLOUD when the active LLM is remote.
     truth_surface:
       - cli.productivity_coach
+      - app.productivityCoachCommandRow
       - cli.CLOUD_ACTIVE
       - cli.data_reasoning_ledger
 
