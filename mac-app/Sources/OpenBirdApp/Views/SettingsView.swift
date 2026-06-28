@@ -389,6 +389,14 @@ struct SettingsView: View {
                 trailing: .secondary("Copy ask command") { model.copyDeepBrainAskCommand() }
             )
             hairline
+            permissionRow(
+                icon: "terminal",
+                title: "Productivity coach (Terminal)",
+                badge: nil,
+                subtitle: model.productivityCoachCommandSummary,
+                trailing: .secondary("Copy coach command") { model.copyProductivityCoachCommand() }
+            )
+            hairline
             HStack(spacing: 8) {
                 Image(systemName: "lock.fill").font(.system(size: 11))
                 Text(model.privacyTransmissionSummary)

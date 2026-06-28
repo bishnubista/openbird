@@ -358,6 +358,42 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(model.lastActionMessage, "Copied one-shot Deep Brain ask command.")
     }
 
+    func testProductivityCoachCommandSummaryNamesLocalFactsAndSeparateCloudOptIn() {
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+
+        XCTAssertTrue(model.productivityCoachCommandSummary.contains("one-shot Terminal command"))
+        XCTAssertTrue(model.productivityCoachCommandSummary.contains("openbird productivity"))
+        XCTAssertTrue(model.productivityCoachCommandSummary.contains("local-only, no model"))
+        XCTAssertTrue(model.productivityCoachCommandSummary.contains("does not persist consent"))
+        XCTAssertTrue(model.productivityCoachCommandSummary.contains("type your question"))
+        XCTAssertTrue(model.productivityCoachCommandSummary.contains("press Ctrl-D"))
+        XCTAssertTrue(model.productivityCoachCommandSummary.contains("Remote LLM routes still require separate OPENBIRD_ALLOW_CLOUD=1"))
+        assertNoAbsoluteDeviceClaim(model.productivityCoachCommandSummary)
+    }
+
+    func testCopyProductivityCoachCommandUsesInjectedPasteboardAndKeepsCloudOptInSeparate() {
+        final class Recorder: @unchecked Sendable {
+            var copied: [String] = []
+        }
+        let recorder = Recorder()
+        let service = OpenBirdService(pasteboardWriter: { recorder.copied.append($0) })
+        let model = AppModel(service: service, initialReport: PreflightReport())
+
+        model.copyProductivityCoachCommand()
+
+        XCTAssertEqual(recorder.copied, [AppModel.productivityCoachCommand])
+        XCTAssertTrue(AppModel.productivityCoachCommand.contains("OPENBIRD_DEEP_BRAIN_ENABLED=1"))
+        XCTAssertTrue(AppModel.productivityCoachCommand.contains("openbird productivity-coach"))
+        XCTAssertTrue(AppModel.productivityCoachCommand.contains("--day 0"))
+        XCTAssertTrue(AppModel.productivityCoachCommand.contains("--stdin"))
+        XCTAssertFalse(AppModel.productivityCoachCommand.contains("OPENBIRD_ALLOW_CLOUD"))
+        XCTAssertFalse(AppModel.productivityCoachCommand.contains("OPENBIRD_LLM_MODEL"))
+        XCTAssertFalse(AppModel.productivityCoachCommand.contains("OPENBIRD_EMBED_MODEL"))
+        XCTAssertFalse(AppModel.productivityCoachCommand.contains("--yes"))
+        XCTAssertFalse(AppModel.productivityCoachCommand.contains("purge"))
+        XCTAssertEqual(model.lastActionMessage, "Copied one-shot productivity coach command.")
+    }
+
     func testParsePreflightDecodesLocalModelRoute() {
         let report = OpenBirdService.parsePreflight("""
         {
