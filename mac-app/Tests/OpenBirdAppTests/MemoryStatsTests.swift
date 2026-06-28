@@ -427,6 +427,42 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(model.lastActionMessage, "Copied confirmation-gated prune command.")
     }
 
+    func testDataExportSummaryNamesDecryptedDestinationRiskAndConfirmation() {
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+
+        XCTAssertTrue(model.dataExportSummary.contains("decrypted JSONL memory"))
+        XCTAssertTrue(model.dataExportSummary.contains("captured text in plaintext"))
+        XCTAssertTrue(model.dataExportSummary.contains("Edit the path before running"))
+        XCTAssertTrue(model.dataExportSummary.contains("local-only path"))
+        XCTAssertTrue(model.dataExportSummary.contains("iCloud"))
+        XCTAssertTrue(model.dataExportSummary.contains("outside OpenBird's control"))
+        XCTAssertTrue(model.dataExportSummary.contains("purge/prune will not delete exported copies"))
+        XCTAssertTrue(model.dataExportSummary.contains("asks for confirmation"))
+        XCTAssertFalse(model.dataExportSummary.contains("--yes"))
+        assertNoAbsoluteDeviceClaim(model.dataExportSummary)
+    }
+
+    func testCopyDataExportCommandUsesInjectedPasteboardAndKeepsConfirmationGate() {
+        final class Recorder: @unchecked Sendable {
+            var copied: [String] = []
+        }
+        let recorder = Recorder()
+        let service = OpenBirdService(pasteboardWriter: { recorder.copied.append($0) })
+        let model = AppModel(service: service, initialReport: PreflightReport())
+
+        model.copyDataExportCommand()
+
+        XCTAssertEqual(recorder.copied, [AppModel.dataExportCommand])
+        XCTAssertTrue(AppModel.dataExportCommand.contains("data export"))
+        XCTAssertTrue(AppModel.dataExportCommand.contains("--output ~/openbird-memory-export.jsonl"))
+        XCTAssertTrue(AppModel.dataExportCommand.hasSuffix("~/openbird-memory-export.jsonl"))
+        XCTAssertFalse(AppModel.dataExportCommand.contains("~/Desktop"))
+        XCTAssertFalse(AppModel.dataExportCommand.contains("~/Documents"))
+        XCTAssertFalse(AppModel.dataExportCommand.contains("~/Library/Mobile Documents"))
+        XCTAssertFalse(AppModel.dataExportCommand.contains("--yes"))
+        XCTAssertEqual(model.lastActionMessage, "Copied confirmation-gated export command.")
+    }
+
     func testDeepBrainAskCommandSummaryNamesOneShotStdinAndSeparateCloudOptIn() {
         let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
 

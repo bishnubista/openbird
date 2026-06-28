@@ -356,6 +356,14 @@ struct SettingsView: View {
             )
             hairline
             permissionRow(
+                icon: "square.and.arrow.up",
+                title: "Export memory (Terminal)",
+                badge: nil,
+                subtitle: model.dataExportSummary,
+                trailing: .secondary("Copy export command") { model.copyDataExportCommand() }
+            )
+            hairline
+            permissionRow(
                 icon: "trash",
                 title: "Delete memory (Terminal)",
                 badge: nil,
