@@ -16,12 +16,20 @@ def _write_executable(path: Path, text: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def _make_app_bundle(root: Path, relative: str) -> Path:
+def _make_app_bundle(
+    root: Path,
+    relative: str,
+    *,
+    app_script: str | None = None,
+    cli_script: str | None = None,
+) -> Path:
     bundle = root / relative
     _write_executable(
         bundle / "Contents" / "MacOS" / "OpenBird",
-        "#!/usr/bin/env bash\nexit 0\n",
+        app_script or "#!/usr/bin/env bash\nexit 0\n",
     )
+    if cli_script is not None:
+        _write_executable(bundle / "Contents" / "MacOS" / "openbird-cli", cli_script)
     return bundle
 
 
@@ -155,3 +163,95 @@ def test_build_with_custom_app_env_is_rejected_before_cleanup(tmp_path: Path) ->
     assert result.returncode == 2
     assert "--build only applies to the default dist app target" in result.stderr
     assert not pkill_log.exists()
+
+
+def test_db_key_unavailable_reports_bundled_cli_encrypted_probe_counts(tmp_path: Path) -> None:
+    repo, fake_bin, pkill_log = _make_repo(tmp_path)
+    app = _make_app_bundle(
+        tmp_path,
+        "Applications/OpenBird.app",
+        app_script="""#!/usr/bin/env bash
+printf '%s\n' 'SELFTEST ask.outcome error=1 kind=db_key_unavailable'
+exit 2
+""",
+        cli_script="""#!/usr/bin/env bash
+set -euo pipefail
+test "${OPENBIRD_REQUIRE_ENCRYPTION:-}" = "1"
+test "${OPENBIRD_KEYRING_TIMEOUT_SECONDS:-}" = "2"
+test "${OPENBIRD_DISABLE_KEYRING+x}" = ""
+test "${1:-}" = "data"
+test "${2:-}" = "stats"
+cat <<'JSON'
+{
+  "observations": 0,
+  "blobs": 0,
+  "chunks": 0,
+  "vectors": 0,
+  "day_memories": 0,
+  "cohort_key": "should-not-leak",
+  "encryption_enabled": true
+}
+JSON
+""",
+    )
+
+    result = _run_verify(repo, fake_bin, pkill_log, "--app", str(app))
+
+    assert result.returncode == 2
+    assert "VERDICT: BLOCKED" in result.stdout
+    assert "bundled CLI decrypted encrypted store" in result.stderr
+    assert "observations=0 day_memories=0" in result.stderr
+    assert "signed-app Keychain ACL/app identity issue" in result.stderr
+    assert "should-not-leak" not in result.stderr
+
+
+def test_db_key_unavailable_keeps_generic_message_when_probe_fails(tmp_path: Path) -> None:
+    repo, fake_bin, pkill_log = _make_repo(tmp_path)
+    app = _make_app_bundle(
+        tmp_path,
+        "Applications/OpenBird.app",
+        app_script="""#!/usr/bin/env bash
+printf '%s\n' 'SELFTEST ask.outcome error=1 kind=db_key_unavailable'
+exit 2
+""",
+        cli_script="""#!/usr/bin/env bash
+printf '%s\n' 'raw probe output must not leak' >&2
+exit 137
+""",
+    )
+
+    result = _run_verify(repo, fake_bin, pkill_log, "--app", str(app))
+
+    assert result.returncode == 2
+    assert "VERDICT: BLOCKED" in result.stdout
+    assert "cli_key_probe_failed rc=137" in result.stderr
+    assert "bundled CLI decrypted encrypted store" not in result.stderr
+    assert "raw probe output must not leak" not in result.stderr
+
+
+def test_db_key_unavailable_does_not_treat_plaintext_probe_as_decrypted(tmp_path: Path) -> None:
+    repo, fake_bin, pkill_log = _make_repo(tmp_path)
+    app = _make_app_bundle(
+        tmp_path,
+        "Applications/OpenBird.app",
+        app_script="""#!/usr/bin/env bash
+printf '%s\n' 'SELFTEST ask.outcome error=1 kind=db_key_unavailable'
+exit 2
+""",
+        cli_script="""#!/usr/bin/env bash
+cat <<'JSON'
+{
+  "observations": 4,
+  "day_memories": 1,
+  "encryption_enabled": false
+}
+JSON
+""",
+    )
+
+    result = _run_verify(repo, fake_bin, pkill_log, "--app", str(app))
+
+    assert result.returncode == 2
+    assert "VERDICT: BLOCKED" in result.stdout
+    assert "cli_key_probe_not_encrypted" in result.stderr
+    assert "bundled CLI decrypted encrypted store" not in result.stderr
