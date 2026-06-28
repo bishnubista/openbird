@@ -187,6 +187,7 @@ routes:
       note: local preview only; no provider is constructed
     truth_surface:
       - cli.deep_brain_preview
+      - app.deepBrainPreviewRow
 
   - id: deep_brain.status
     class: local

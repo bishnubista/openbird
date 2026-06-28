@@ -28,6 +28,13 @@ enum DeepBrainStatusState: Equatable {
     case failed
 }
 
+enum DeepBrainPreviewState: Equatable {
+    case unknown
+    case loading
+    case loaded(DeepBrainPreview)
+    case failed
+}
+
 enum ModelRouteProvisioningState: Equatable {
     case unknown
     case remoteRoute
@@ -121,6 +128,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var memoryStats = MemoryStats.empty
     @Published private(set) var memoryStatsState = MemoryStatsState.unknown
     @Published private(set) var deepBrainStatusState = DeepBrainStatusState.unknown
+    @Published private(set) var deepBrainPreviewState = DeepBrainPreviewState.unknown
     @Published private(set) var lastMemoryRefresh: Date?
     @Published private(set) var lastRefresh: Date?
     @Published private(set) var isRefreshing = false
@@ -355,6 +363,52 @@ final class AppModel: ObservableObject {
             return true
         case .loaded(let status):
             return status.deepBrainEnabled && !status.askAvailable
+        }
+    }
+
+    var deepBrainPreviewSummary: String {
+        switch deepBrainPreviewState {
+        case .unknown:
+            return "Preview today's local Deep Brain packet before any cloud reasoning. The preview is user-triggered and does not use a provider."
+        case .loading:
+            return "Building today's local packet preview from distilled day memory. No provider or cloud send is used."
+        case .failed:
+            return "Could not build the local packet preview. No provider or cloud send was used."
+        case .loaded(let preview):
+            let exclusions = preview.exclusions
+            let groups = preview.sourcesTotal == 1 ? "source group" : "source groups"
+            let eligible = exclusions.keptObservations == 1 ? "eligible observation" : "eligible observations"
+            let excluded = exclusions.excludedObservations == 1 ? "excluded observation" : "excluded observations"
+            let cloud = preview.cloudReady ? "Cloud gates are ready if you ask." : "Cloud gates are not fully enabled."
+            return "Local snapshot for \(preview.localDate): \(exclusions.keptObservations) \(eligible), \(exclusions.excludedObservations) \(excluded), \(preview.sourcesTotal) available \(groups). No provider or cloud send was used. \(cloud)"
+        }
+    }
+
+    var deepBrainPreviewBadge: String {
+        switch deepBrainPreviewState {
+        case .unknown:
+            return "Preview"
+        case .loading:
+            return "Loading"
+        case .failed:
+            return "Unavailable"
+        case .loaded:
+            return "Local preview"
+        }
+    }
+
+    func loadDeepBrainPreview() {
+        guard deepBrainPreviewState != .loading else { return }
+        deepBrainPreviewState = .loading
+        let service = self.service
+        Task {
+            if let preview = await service.deepBrainPreview(dayOffset: 0) {
+                deepBrainPreviewState = .loaded(preview)
+                lastActionMessage = "Built local Deep Brain packet preview."
+            } else {
+                deepBrainPreviewState = .failed
+                lastActionMessage = "Could not build local Deep Brain packet preview."
+            }
         }
     }
 
@@ -912,6 +966,10 @@ final class AppModel: ObservableObject {
 
     func setDeepBrainStatusForTesting(_ state: DeepBrainStatusState) {
         self.deepBrainStatusState = state
+    }
+
+    func setDeepBrainPreviewForTesting(_ state: DeepBrainPreviewState) {
+        self.deepBrainPreviewState = state
     }
     #endif
 

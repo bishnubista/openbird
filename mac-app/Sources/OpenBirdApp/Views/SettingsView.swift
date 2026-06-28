@@ -373,6 +373,14 @@ struct SettingsView: View {
                     : .affirm(model.deepBrainStatusBadge)
             )
             hairline
+            permissionRow(
+                icon: "doc.text.magnifyingglass",
+                title: "Deep Brain packet preview",
+                badge: nil,
+                subtitle: model.deepBrainPreviewSummary,
+                trailing: deepBrainPreviewTrailing
+            )
+            hairline
             HStack(spacing: 8) {
                 Image(systemName: "lock.fill").font(.system(size: 11))
                 Text(model.privacyTransmissionSummary)
@@ -390,6 +398,17 @@ struct SettingsView: View {
         case .ok: return "At-rest SQLCipher encryption is active"
         case .attention: return "Running plaintext — enable SQLCipher (bundled with the Homebrew build) to encrypt stored text"
         default: return "Encryption status could not be verified"
+        }
+    }
+
+    private var deepBrainPreviewTrailing: RowTrailing {
+        switch model.deepBrainPreviewState {
+        case .loading:
+            return .attention("Loading")
+        case .loaded:
+            return .affirm(model.deepBrainPreviewBadge)
+        case .unknown, .failed:
+            return .secondary(model.deepBrainPreviewBadge) { model.loadDeepBrainPreview() }
         }
     }
 

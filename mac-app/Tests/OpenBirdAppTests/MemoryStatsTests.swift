@@ -107,6 +107,123 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(status?.exclusions.excludedObservationIdsConfigured, 2)
     }
 
+    func testParseDeepBrainPreviewDecodesOnlyCountSurface() {
+        let preview = OpenBirdService.parseDeepBrainPreview("""
+        {
+          "route": "deep_brain.preview",
+          "packet_build_route": "deterministic_distillation",
+          "egress": "none_preview",
+          "cloud_ready": false,
+          "blocked_reasons": ["OPENBIRD_ALLOW_CLOUD is not enabled"],
+          "local_date": "2026-06-27",
+          "day_offset": 0,
+          "source_scope": "capture",
+          "memory_summary": {
+            "coverage": {"observations": 9},
+            "workstreams": [{"label": "secret launch plan"}]
+          },
+          "selected_sources": [
+            {
+              "observation_id": "obs-secret",
+              "app": "Code",
+              "window_or_url": "https://example.com/private?token=secret",
+              "ts": 1000,
+              "snippet": "secret packet snippet"
+            }
+          ],
+          "sources_total": 4,
+          "exclusions": {
+            "input_observations": 9,
+            "kept_observations": 7,
+            "excluded_observations": 2,
+            "excluded_by": {"app": 1, "source": 1},
+            "unknown_app_kept": 0,
+            "excluded_apps_configured": ["Code"],
+            "excluded_sources_configured": ["private"],
+            "excluded_observation_ids_configured": 1
+          }
+        }
+        """)
+
+        XCTAssertEqual(preview?.route, "deep_brain.preview")
+        XCTAssertEqual(preview?.egress, "none_preview")
+        XCTAssertEqual(preview?.localDate, "2026-06-27")
+        XCTAssertEqual(preview?.sourcesTotal, 4)
+        XCTAssertEqual(preview?.exclusions.inputObservations, 9)
+        XCTAssertEqual(preview?.exclusions.keptObservations, 7)
+        XCTAssertEqual(preview?.exclusions.excludedObservations, 2)
+        XCTAssertEqual(preview?.exclusions.excludedBy, ["app": 1, "source": 1])
+        XCTAssertEqual(preview?.exclusions.excludedAppsConfigured, ["Code"])
+        XCTAssertEqual(preview?.exclusions.excludedSourcesConfigured, ["private"])
+        XCTAssertEqual(preview?.exclusions.excludedObservationIdsConfigured, 1)
+    }
+
+    func testDeepBrainPreviewSummaryLabelsUnitsAndDoesNotLeakRawPacketContent() {
+        guard let preview = OpenBirdService.parseDeepBrainPreview("""
+        {
+          "route": "deep_brain.preview",
+          "egress": "none_preview",
+          "cloud_ready": true,
+          "local_date": "2026-06-27",
+          "day_offset": 0,
+          "source_scope": "capture",
+          "memory_summary": {"workstreams": [{"label": "secret launch plan"}]},
+          "selected_sources": [
+            {
+              "observation_id": "obs-secret",
+              "app": "Code",
+              "window_or_url": "https://example.com/private?token=secret",
+              "ts": 1000,
+              "snippet": "secret packet snippet"
+            }
+          ],
+          "sources_total": 4,
+          "exclusions": {
+            "input_observations": 9,
+            "kept_observations": 7,
+            "excluded_observations": 2,
+            "excluded_by": {"app": 1, "source": 1},
+            "unknown_app_kept": 0,
+            "excluded_apps_configured": ["Code"],
+            "excluded_sources_configured": ["private"],
+            "excluded_observation_ids_configured": 1
+          }
+        }
+        """) else {
+            XCTFail("expected preview JSON to decode")
+            return
+        }
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+
+        model.setDeepBrainPreviewForTesting(.loaded(preview))
+
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("Local snapshot"))
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("7 eligible observations"))
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("2 excluded observations"))
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("4 available source groups"))
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("No provider or cloud send was used"))
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("Cloud gates are ready if you ask"))
+        XCTAssertFalse(model.deepBrainPreviewSummary.contains("obs-secret"))
+        XCTAssertFalse(model.deepBrainPreviewSummary.contains("secret packet snippet"))
+        XCTAssertFalse(model.deepBrainPreviewSummary.contains("secret launch plan"))
+        XCTAssertFalse(model.deepBrainPreviewSummary.contains("token=secret"))
+        assertNoAbsoluteDeviceClaim(model.deepBrainPreviewSummary)
+    }
+
+    func testDeepBrainPreviewEmptyAndFailureCopyStayCautious() {
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("user-triggered"))
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("does not use a provider"))
+        model.setDeepBrainPreviewForTesting(.failed)
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("Could not build"))
+        XCTAssertTrue(model.deepBrainPreviewSummary.contains("No provider or cloud send was used"))
+    }
+
+    func testParseDeepBrainPreviewRejectsNonJsonOutput() {
+        XCTAssertNil(OpenBirdService.parseDeepBrainPreview("not json"))
+    }
+
     func testDeepBrainLocalAskSummaryStaysLocalAndDoesNotPrintObservationIds() {
         let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
         model.setDeepBrainStatusForTesting(.loaded(deepBrainStatus(
