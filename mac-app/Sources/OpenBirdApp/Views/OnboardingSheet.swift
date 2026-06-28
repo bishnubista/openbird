@@ -6,6 +6,7 @@ import SwiftUI
 /// successfully starts.
 struct OnboardingSheet: View {
     @ObservedObject var model: AppModel
+    @State private var actionInFlight = false
     var onComplete: () -> Void
     var onOpenSetup: () -> Void
 
@@ -13,7 +14,7 @@ struct OnboardingSheet: View {
         SetupSheetView(
             model: model,
             primaryLabel: model.onboardingPrimaryAction.label,
-            primaryDisabled: model.onboardingPrimaryAction.isDisabled,
+            primaryDisabled: actionInFlight || model.onboardingPrimaryAction.isDisabled,
             onPrimary: start
         )
             .padding(OB.Space.xl)
@@ -22,9 +23,12 @@ struct OnboardingSheet: View {
     }
 
     private func start() {
+        guard !actionInFlight else { return }
+        actionInFlight = true
         // The initial `.task` refresh may still be in flight on a very fast click, so
         // re-check before deciding whether this is a true completion or a setup handoff.
         Task { @MainActor in
+            defer { actionInFlight = false }
             if model.lastRefresh == nil { await model.refresh() }
             switch model.onboardingPrimaryAction {
             case .checking:

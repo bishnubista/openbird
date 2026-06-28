@@ -209,6 +209,34 @@ final class AppModelUXTests: XCTestCase {
         XCTAssertFalse(repeated.repaired)
     }
 
+    func testOnboardingRepairInstanceWritesDefaults() {
+        let defaults = UserDefaults.standard
+        let oldCompleted = defaults.object(forKey: AppModel.onboardingCompletedKey)
+        let oldRepair = defaults.object(forKey: AppModel.onboardingRepairV1DoneKey)
+        defer {
+            if let oldCompleted {
+                defaults.set(oldCompleted, forKey: AppModel.onboardingCompletedKey)
+            } else {
+                defaults.removeObject(forKey: AppModel.onboardingCompletedKey)
+            }
+            if let oldRepair {
+                defaults.set(oldRepair, forKey: AppModel.onboardingRepairV1DoneKey)
+            } else {
+                defaults.removeObject(forKey: AppModel.onboardingRepairV1DoneKey)
+            }
+        }
+
+        withRestoredAllowlist {
+            defaults.set(true, forKey: AppModel.onboardingCompletedKey)
+            defaults.set(false, forKey: AppModel.onboardingRepairV1DoneKey)
+            let model = onboardingModel(allowlist: [], captureRunning: false)
+
+            XCTAssertTrue(model.repairIncompleteOnboardingCompletionIfNeeded())
+            XCTAssertFalse(defaults.bool(forKey: AppModel.onboardingCompletedKey))
+            XCTAssertTrue(defaults.bool(forKey: AppModel.onboardingRepairV1DoneKey))
+        }
+    }
+
     private func XCTAssertBlocked(
         _ action: OnboardingPrimaryAction,
         contains expected: String,

@@ -20,7 +20,7 @@ struct AppShellView: View {
 
     /// One-time first-run flag; only a real capture start/completion flips it. Plain
     /// dismissal can hide the sheet for this session without claiming setup is done.
-    @AppStorage("openbird.onboarding.completed") private var onboardingCompleted = false
+    @AppStorage(AppModel.onboardingCompletedKey) private var onboardingCompleted = false
     @State private var onboardingPresented = false
     @State private var didPrepareOnboarding = false
 
