@@ -79,6 +79,103 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertNil(OpenBirdService.parseMemoryStats("not json"))
     }
 
+    func testParseDeepBrainStatusDecodesRouteAndCountsObservationIdExclusions() {
+        let status = OpenBirdService.parseDeepBrainStatus("""
+        {
+          "route": "deep_brain.status",
+          "egress": "none",
+          "route_label": "Deep Brain local ask available · no cloud",
+          "deep_brain_enabled": true,
+          "cloud_opt_in": false,
+          "cloud_gates_enabled": false,
+          "cloud_blocked_reasons": ["OPENBIRD_ALLOW_CLOUD is not enabled"],
+          "ask_available": true,
+          "ask_blocked_reasons": [],
+          "exclusions": {
+            "excluded_apps_configured": ["Code"],
+            "excluded_sources_configured": ["capture"],
+            "excluded_observation_ids_configured": 2
+          }
+        }
+        """)
+
+        XCTAssertEqual(status?.route, "deep_brain.status")
+        XCTAssertEqual(status?.egress, "none")
+        XCTAssertEqual(status?.routeLabel, "Deep Brain local ask available · no cloud")
+        XCTAssertEqual(status?.exclusions.excludedAppsConfigured, ["Code"])
+        XCTAssertEqual(status?.exclusions.excludedSourcesConfigured, ["capture"])
+        XCTAssertEqual(status?.exclusions.excludedObservationIdsConfigured, 2)
+    }
+
+    func testDeepBrainLocalAskSummaryStaysLocalAndDoesNotPrintObservationIds() {
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+        model.setDeepBrainStatusForTesting(.loaded(deepBrainStatus(
+            routeLabel: "Deep Brain local ask available · no cloud",
+            deepBrainEnabled: true,
+            cloudOptIn: false,
+            cloudGatesEnabled: false,
+            askAvailable: true,
+            apps: ["Code"],
+            sources: ["capture"],
+            observationIdCount: 2
+        )))
+
+        XCTAssertEqual(model.deepBrainStatusTitle, "Deep Brain local ask available · no cloud")
+        XCTAssertEqual(model.deepBrainStatusBadge, "Local ask")
+        XCTAssertFalse(model.deepBrainStatusNeedsAttention)
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("local model route without cloud"))
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("Status check is local"))
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("apps: Code"))
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("sources: capture"))
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("2 observation ids"))
+        XCTAssertFalse(model.deepBrainStatusSummary.contains("obs-secret"))
+        assertNoAbsoluteDeviceClaim(model.deepBrainStatusSummary)
+    }
+
+    func testDeepBrainCloudGatesSummaryDoesNotOverclaimNoEgress() {
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+        model.setDeepBrainStatusForTesting(.loaded(deepBrainStatus(
+            routeLabel: "Cloud reasoning gates enabled",
+            deepBrainEnabled: true,
+            cloudOptIn: true,
+            cloudGatesEnabled: true,
+            askAvailable: true
+        )))
+
+        XCTAssertEqual(model.deepBrainStatusBadge, "Cloud gates")
+        XCTAssertFalse(model.deepBrainStatusNeedsAttention)
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("Cloud reasoning gates are enabled"))
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("when you ask"))
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("Status check is local"))
+        assertNoAbsoluteDeviceClaim(model.deepBrainStatusSummary)
+    }
+
+    func testDeepBrainStatusFailureIsCautious() {
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+        model.setDeepBrainStatusForTesting(.failed)
+
+        XCTAssertEqual(model.deepBrainStatusTitle, "Deep Brain status unavailable")
+        XCTAssertEqual(model.deepBrainStatusBadge, "Unavailable")
+        XCTAssertTrue(model.deepBrainStatusNeedsAttention)
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("Could not read Deep Brain status"))
+    }
+
+    func testDeepBrainOffIsNotWarnedBecauseItIsOptional() {
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+        model.setDeepBrainStatusForTesting(.loaded(deepBrainStatus(
+            routeLabel: "Deep Brain off",
+            deepBrainEnabled: false,
+            cloudOptIn: false,
+            cloudGatesEnabled: false,
+            askAvailable: false
+        )))
+
+        XCTAssertEqual(model.deepBrainStatusBadge, "Off")
+        XCTAssertFalse(model.deepBrainStatusNeedsAttention)
+        XCTAssertTrue(model.deepBrainStatusSummary.contains("Deep Brain ask is off"))
+        assertNoAbsoluteDeviceClaim(model.deepBrainStatusSummary)
+    }
+
     func testParsePreflightDecodesLocalModelRoute() {
         let report = OpenBirdService.parsePreflight("""
         {
@@ -658,6 +755,34 @@ final class MemoryStatsTests: XCTestCase {
         report.llmModel = roles["llm"] ?? "ollama/llama3.2"
         report.embedModel = roles["embed"] ?? "ollama/nomic-embed-text"
         return report
+    }
+
+    private func deepBrainStatus(
+        routeLabel: String,
+        deepBrainEnabled: Bool,
+        cloudOptIn: Bool,
+        cloudGatesEnabled: Bool,
+        askAvailable: Bool,
+        apps: [String] = [],
+        sources: [String] = [],
+        observationIdCount: Int = 0
+    ) -> DeepBrainStatus {
+        DeepBrainStatus(
+            route: "deep_brain.status",
+            egress: "none",
+            routeLabel: routeLabel,
+            deepBrainEnabled: deepBrainEnabled,
+            cloudOptIn: cloudOptIn,
+            cloudGatesEnabled: cloudGatesEnabled,
+            cloudBlockedReasons: cloudGatesEnabled ? [] : ["OPENBIRD_ALLOW_CLOUD is not enabled"],
+            askAvailable: askAvailable,
+            askBlockedReasons: askAvailable ? [] : ["OPENBIRD_DEEP_BRAIN_ENABLED is not enabled"],
+            exclusions: DeepBrainStatus.Exclusions(
+                excludedAppsConfigured: apps,
+                excludedSourcesConfigured: sources,
+                excludedObservationIdsConfigured: observationIdCount
+            )
+        )
     }
 
     private func assertNoAbsoluteDeviceClaim(
