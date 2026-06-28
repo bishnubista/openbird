@@ -143,6 +143,59 @@ def _summarize_integrity(cli: list[str], timeout: float) -> Row:
     return Row("BLOCKED", "data integrity", f"rc={result.returncode}")
 
 
+def _summarize_preflight(cli: list[str], timeout: float) -> Row:
+    # preflight emits useful diagnostic JSON even when it exits non-zero.
+    result = _run(cli + ["preflight", "--json"], timeout=timeout)
+    if isinstance(result, TimeoutError):
+        return Row("BLOCKED", "preflight", "timeout")
+    try:
+        payload = json.loads(result.stdout)
+    except Exception:
+        return Row("BLOCKED", "preflight", f"rc={result.returncode} unparseable json")
+    if not isinstance(payload, dict):
+        return Row("BLOCKED", "preflight", f"rc={result.returncode} unparseable json")
+    try:
+        sqlite = _need_dict(payload, "sqlite")
+        encryption = _need_dict(payload, "encryption")
+        cloud = _need_dict(payload, "cloud")
+        privacy = _need_dict(payload, "privacy")
+        macos = _need_dict(payload, "macos")
+        ollama = _need_dict(payload, "ollama")
+        runtime_ok = _need(payload, "runtime_ok")
+        release_gate_ok = _need(payload, "release_gate_ok")
+        sqlite_vec = _need(sqlite, "vec_available")
+        sqlite_fts5 = _need(sqlite, "fts5_available")
+        encryption_status = _need(encryption, "status")
+        encryption_verified = _need(encryption, "verified")
+        macos_all_passed = _need(macos, "all_passed")
+        detail = (
+            f"rc={result.returncode} runtime_ok={_scalar(runtime_ok)} "
+            f"release_gate_ok={_scalar(release_gate_ok)} "
+            f"sqlite_vec={_scalar(sqlite_vec)} sqlite_fts5={_scalar(sqlite_fts5)} "
+            f"encryption_status={_scalar(encryption_status)} "
+            f"encryption_backend={_scalar(_need(encryption, 'backend'))} "
+            f"encryption_verified={_scalar(encryption_verified)} "
+            f"cloud_active={_scalar(_need(cloud, 'active'))} "
+            f"allowlist_count={len(_need_list(privacy, 'allowlist'))} "
+            f"blocklist_count={len(_need_list(privacy, 'blocklist'))} "
+            f"macos_all_passed={_scalar(macos_all_passed)} "
+            f"missing_model_count={len(_need_list(ollama, 'missing_models'))}"
+        )
+        ready = (
+            result.returncode == 0
+            and runtime_ok is True
+            and release_gate_ok is True
+            and sqlite_vec is True
+            and sqlite_fts5 is True
+            and encryption_status == "encrypted"
+            and encryption_verified is True
+            and macos_all_passed is True
+        )
+        return Row("PASS" if ready else "BLOCKED", "preflight", detail)
+    except ParseError as exc:
+        return _row_from_parse("preflight", exc)
+
+
 def _summarize_timeline(cli: list[str], day: int, timeout: float) -> Row:
     payload, error = _json_cmd(
         cli, ["timeline", "--day", str(day), "--json"], timeout=timeout
@@ -465,6 +518,7 @@ def main(argv: list[str] | None = None) -> int:
     cli = [str(cli_path)]
 
     rows.append(_release_status(app, args.timeout))
+    rows.append(_summarize_preflight(cli, args.timeout))
     stats_row, _observations = _summarize_stats(cli, args.timeout)
     rows.append(stats_row)
     rows.append(_summarize_integrity(cli, args.timeout))

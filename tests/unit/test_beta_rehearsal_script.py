@@ -23,6 +23,8 @@ def _make_repo(
     slow_stats: bool = False,
     no_capture_exclusion: bool = False,
     bad_exclusion_accounting: bool = False,
+    bad_preflight: bool = False,
+    plaintext_preflight: bool = False,
 ) -> tuple[Path, Path, Path]:
     repo = tmp_path / "repo"
     (repo / "script").mkdir(parents=True)
@@ -58,7 +60,44 @@ bad_briefing="{int(bad_briefing)}"
 slow_stats="{int(slow_stats)}"
 no_capture_exclusion="{int(no_capture_exclusion)}"
 bad_exclusion_accounting="{int(bad_exclusion_accounting)}"
+bad_preflight="{int(bad_preflight)}"
+plaintext_preflight="{int(plaintext_preflight)}"
 case "${{1:-}}" in
+  preflight)
+    if [ "$bad_preflight" = "1" ]; then
+      cat <<'JSON'
+{{"runtime_ok":false,"release_gate_ok":true,
+ "sqlite":{{"vec_available":true,"fts5_available":true}},
+ "encryption":{{"status":"encrypted","backend":"sqlcipher","verified":true}},
+ "cloud":{{"active":false,"remote_models":{{"SECRET_REMOTE_MODEL":true}}}},
+ "privacy":{{"allowlist":["SECRET_ALLOW_APP"],"blocklist":["SECRET_BLOCK_APP"]}},
+ "macos":{{"all_passed":true}},
+ "ollama":{{"missing_models":["SECRET_MISSING_MODEL"]}}}}
+JSON
+      exit 1
+    fi
+    if [ "$plaintext_preflight" = "1" ]; then
+      cat <<'JSON'
+{{"runtime_ok":true,"release_gate_ok":false,
+ "sqlite":{{"vec_available":true,"fts5_available":true}},
+ "encryption":{{"status":"plaintext-0600","backend":"sqlite","verified":false}},
+ "cloud":{{"active":false,"remote_models":{{"SECRET_REMOTE_MODEL":true}}}},
+ "privacy":{{"allowlist":["SECRET_ALLOW_APP"],"blocklist":["SECRET_BLOCK_APP"]}},
+ "macos":{{"all_passed":true}},
+ "ollama":{{"missing_models":[]}}}}
+JSON
+      exit 0
+    fi
+    cat <<'JSON'
+{{"runtime_ok":true,"release_gate_ok":true,
+ "sqlite":{{"vec_available":true,"fts5_available":true}},
+ "encryption":{{"status":"encrypted","backend":"sqlcipher","verified":true}},
+ "cloud":{{"active":false,"remote_models":{{"SECRET_REMOTE_MODEL":true}}}},
+ "privacy":{{"allowlist":["SECRET_ALLOW_APP"],"blocklist":["SECRET_BLOCK_APP"]}},
+ "macos":{{"all_passed":true}},
+ "ollama":{{"missing_models":[]}}}}
+JSON
+    ;;
   data)
     case "${{2:-}}" in
       stats)
@@ -219,6 +258,9 @@ def test_beta_rehearsal_outputs_counts_without_content_and_cleans_export(tmp_pat
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
     assert "PASS" in out
+    assert "PASS    preflight:" in out
+    assert "allowlist_count=1" in out
+    assert "blocklist_count=1" in out
     assert "observations=2" in out
     assert "session_count=1" in out
     assert "text_chars=" in out
@@ -239,6 +281,33 @@ def test_beta_rehearsal_blocks_unparseable_without_leaking_sibling_content(tmp_p
     assert "BLOCKED briefing day 1: unparseable text" in result.stdout
     assert "SECRET_" not in result.stdout
     assert "https://secret.example" not in result.stdout
+
+
+def test_beta_rehearsal_blocks_preflight_not_ready_without_leaking_raw_json(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, bad_preflight=True)
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 2
+    assert "BLOCKED preflight:" in result.stdout
+    assert "runtime_ok=false" in result.stdout
+    assert "missing_model_count=1" in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert "SECRET_" not in result.stderr
+
+
+def test_beta_rehearsal_blocks_preflight_release_gate_without_leaking_raw_json(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, plaintext_preflight=True)
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 2
+    assert "BLOCKED preflight:" in result.stdout
+    assert "runtime_ok=true" in result.stdout
+    assert "release_gate_ok=false" in result.stdout
+    assert "encryption_status=plaintext-0600" in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert "SECRET_" not in result.stderr
 
 
 def test_fake_export_fixture_writes_private_mode_before_harness_deletes(tmp_path: Path) -> None:
