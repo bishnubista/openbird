@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -613,6 +614,58 @@ def _release_status(app: Path, timeout: float) -> Row:
     return Row(status, "release status", f"rc={result.returncode}")
 
 
+_ASK_COUNT_RE = re.compile(r"\(observations=(\d+) day_memories=(\d+)\)")
+_ASK_PROBE_RE = re.compile(
+    r"legacy untyped self-test error "
+    r"\(reason=legacy_untyped_selftest probe=(missing_cli|cli_key_probe_unparseable|"
+    r"cli_key_probe_not_encrypted|unknown|cli_key_probe_failed rc=\d+)\)"
+)
+_DB_KEY_PROBE_RE = re.compile(
+    r"DB key unavailable; bundled CLI key probe (?:unavailable|failed) "
+    r"\(reason=(missing_cli|cli_key_probe_unparseable|cli_key_probe_not_encrypted|"
+    r"unknown|cli_key_probe_failed rc=\d+)\)"
+)
+
+
+def _ask_blocked_detail(returncode: int, stderr: str) -> str:
+    base = f"rc={returncode}"
+    if "legacy untyped self-test error, but bundled CLI decrypted encrypted store" in stderr:
+        count_match = _ASK_COUNT_RE.search(stderr)
+        parts = [base, "reason=legacy_untyped_selftest", "cli_encrypted=1"]
+        if count_match:
+            parts.append(f"observations={count_match.group(1)}")
+            parts.append(f"day_memories={count_match.group(2)}")
+        if "predates typed self-test diagnostics or is stale" in stderr:
+            parts.append("stale_app_likely=1")
+        return " ".join(parts)
+
+    probe_match = _ASK_PROBE_RE.search(stderr)
+    if probe_match:
+        return f"{base} reason=legacy_untyped_selftest probe={probe_match.group(1)}"
+
+    if "app-owned DB key unavailable, but bundled CLI decrypted encrypted store" in stderr:
+        count_match = _ASK_COUNT_RE.search(stderr)
+        parts = [base, "reason=db_key_unavailable", "cli_encrypted=1"]
+        if count_match:
+            parts.append(f"observations={count_match.group(1)}")
+            parts.append(f"day_memories={count_match.group(2)}")
+        if "is ad-hoc signed" in stderr:
+            parts.append("app_signature_hint=adhoc")
+        elif "likely Developer ID-signed app Keychain ACL" in stderr:
+            parts.append("app_signature_hint=developer_id")
+        elif "signing is not beta-proof (signature=" in stderr:
+            parts.append("app_signature_hint=not_beta_proof")
+        elif "signing could not be verified" in stderr:
+            parts.append("app_signature_hint=unknown")
+        return " ".join(parts)
+
+    db_probe_match = _DB_KEY_PROBE_RE.search(stderr)
+    if db_probe_match:
+        return f"{base} reason=db_key_unavailable probe={db_probe_match.group(1)}"
+
+    return f"{base} reason=blocked"
+
+
 def _ask_selftest(app: Path, timeout: float) -> Row:
     result = _run(
         [
@@ -629,7 +682,7 @@ def _ask_selftest(app: Path, timeout: float) -> Row:
         return Row("PASS", "ask app self-test", "grounded")
     if result.returncode == 1:
         return Row("FAIL", "ask app self-test", "ungrounded")
-    return Row("BLOCKED", "ask app self-test", f"rc={result.returncode}")
+    return Row("BLOCKED", "ask app self-test", _ask_blocked_detail(result.returncode, result.stderr))
 
 
 def _print_rows(rows: list[Row]) -> None:
