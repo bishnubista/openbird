@@ -104,8 +104,46 @@ def _developer_id_lines(output: str) -> list[str]:
     return [line for line in output.splitlines() if "Developer ID Application" in line]
 
 
+def _check_remote_sync() -> Row:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    fetch = _run(["git", "fetch", "origin", "main"], timeout=30.0, env=env)
+    if fetch.missing:
+        return Row("BLOCKED", "remote sync", "reason=git_unavailable")
+    if fetch.timed_out:
+        return Row("BLOCKED", "remote sync", "reason=timeout")
+    if fetch.returncode != 0:
+        return Row("BLOCKED", "remote sync", "reason=fetch_failed")
+
+    head = _run(["git", "rev-parse", "--verify", "HEAD"], timeout=5.0)
+    fetched = _run(["git", "rev-parse", "--verify", "FETCH_HEAD"], timeout=5.0)
+    if head.returncode != 0 or fetched.returncode != 0 or head.missing or fetched.missing:
+        return Row("BLOCKED", "remote sync", "reason=unreadable")
+
+    head_sha = head.stdout.strip()
+    fetch_sha = fetched.stdout.strip()
+    if head_sha and head_sha == fetch_sha:
+        return Row("PASS", "remote sync", "head_matches_fetch_head=1")
+
+    # A release must come from the reviewed commit on origin/main: behind, ahead,
+    # and diverged local main states are all blockers.
+    behind = _run(["git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"], timeout=5.0)
+    if behind.returncode > 1 or behind.missing or behind.timed_out:
+        return Row("BLOCKED", "remote sync", "reason=not_synced")
+    if behind.returncode == 0:
+        return Row("BLOCKED", "remote sync", "reason=behind")
+
+    ahead = _run(["git", "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD"], timeout=5.0)
+    if ahead.returncode > 1 or ahead.missing or ahead.timed_out:
+        return Row("BLOCKED", "remote sync", "reason=not_synced")
+    if ahead.returncode == 0:
+        return Row("BLOCKED", "remote sync", "reason=ahead")
+    return Row("BLOCKED", "remote sync", "reason=diverged")
+
+
 def _check_git() -> list[Row]:
     rows: list[Row] = []
+    on_main = False
     branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=5.0)
     if branch.missing:
         rows.append(Row("BLOCKED", "git branch", "reason=git_unavailable"))
@@ -114,6 +152,7 @@ def _check_git() -> list[Row]:
     else:
         current = branch.stdout.strip()
         if current == "main":
+            on_main = True
             rows.append(Row("PASS", "git branch", "main"))
         else:
             rows.append(Row("BLOCKED", "git branch", f"expected=main actual={current or 'unknown'}"))
@@ -127,6 +166,8 @@ def _check_git() -> list[Row]:
         rows.append(Row("BLOCKED", "tracked tree", "dirty_tracked_files=1"))
     else:
         rows.append(Row("PASS", "tracked tree", "clean_tracked_files=1"))
+    if on_main:
+        rows.append(_check_remote_sync())
     return rows
 
 

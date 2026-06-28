@@ -30,11 +30,48 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
         """#!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
-  rev-parse)
-    [ "${2:-}" = "--abbrev-ref" ]
-    [ "${3:-}" = "HEAD" ]
-    printf '%s\\n' "${FAKE_GIT_BRANCH:-main}"
+  fetch)
+    [ "${2:-}" = "origin" ]
+    [ "${3:-}" = "main" ]
+    if [ "${FAKE_GIT_FETCH:-ok}" != "ok" ]; then
+      printf 'SECRET_REMOTE_URL fetch failed\\n' >&2
+      exit 1
+    fi
     exit 0
+    ;;
+  rev-parse)
+    if [ "${2:-}" = "--abbrev-ref" ] && [ "${3:-}" = "HEAD" ]; then
+      printf '%s\\n' "${FAKE_GIT_BRANCH:-main}"
+      exit 0
+    fi
+    if [ "${2:-}" = "--verify" ] && [ "${3:-}" = "HEAD" ]; then
+      case "${FAKE_REMOTE_STATE:-synced}" in
+        synced|behind|diverged|merge_error) printf 'aaa\\n' ;;
+        ahead) printf 'bbb\\n' ;;
+      esac
+      exit 0
+    fi
+    if [ "${2:-}" = "--verify" ] && [ "${3:-}" = "FETCH_HEAD" ]; then
+      case "${FAKE_REMOTE_STATE:-synced}" in
+        synced|ahead) printf 'aaa\\n' ;;
+        behind|diverged|merge_error) printf 'bbb\\n' ;;
+      esac
+      exit 0
+    fi
+    exit 2
+    ;;
+  merge-base)
+    [ "${2:-}" = "--is-ancestor" ]
+    [ "${FAKE_REMOTE_STATE:-synced}" = "merge_error" ] && exit 2
+    if [ "${3:-}" = "HEAD" ] && [ "${4:-}" = "FETCH_HEAD" ]; then
+      [ "${FAKE_REMOTE_STATE:-synced}" = "behind" ] && exit 0
+      exit 1
+    fi
+    if [ "${3:-}" = "FETCH_HEAD" ] && [ "${4:-}" = "HEAD" ]; then
+      [ "${FAKE_REMOTE_STATE:-synced}" = "ahead" ] && exit 0
+      exit 1
+    fi
+    exit 2
     ;;
   status)
     [ "${2:-}" = "--porcelain" ]
@@ -136,6 +173,8 @@ def _run_prereqs(
     *args: str,
     branch: str = "main",
     git_status: str = "",
+    git_fetch: str = "ok",
+    remote_state: str = "synced",
     beta_tag_exists: str = "no",
     source_tag_exists: str = "no",
     identities: str = "one",
@@ -147,6 +186,8 @@ def _run_prereqs(
             "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
             "FAKE_GIT_BRANCH": branch,
             "FAKE_GIT_STATUS": git_status,
+            "FAKE_GIT_FETCH": git_fetch,
+            "FAKE_REMOTE_STATE": remote_state,
             "FAKE_BETA_TAG_EXISTS": beta_tag_exists,
             "FAKE_SOURCE_TAG_EXISTS": source_tag_exists,
             "FAKE_IDENTITIES": identities,
@@ -170,6 +211,8 @@ def test_release_prereqs_pass_with_single_identity_and_notary_profile(tmp_path: 
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS      git branch" in result.stdout
+    assert "PASS      remote sync" in result.stdout
+    assert "head_matches_fetch_head=1" in result.stdout
     assert "PASS      Developer ID identity" in result.stdout
     assert "developer_id_count=1" in result.stdout
     assert "PASS      notary profile" in result.stdout
@@ -266,6 +309,59 @@ def test_non_main_branch_blocks_release_preflight(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "BLOCKED   git branch" in result.stdout
     assert "expected=main actual=fix/release-prereq-diagnostic" in result.stdout
+    assert "remote sync" not in result.stdout
+
+
+def test_fetch_failure_blocks_remote_sync_without_raw_output(tmp_path: Path) -> None:
+    repo, fake_bin = _make_repo(tmp_path)
+
+    result = _run_prereqs(repo, fake_bin, git_fetch="fail")
+
+    assert result.returncode == 1
+    assert "BLOCKED   remote sync" in result.stdout
+    assert "reason=fetch_failed" in result.stdout
+    assert "SECRET_REMOTE_URL" not in result.stdout
+    assert "SECRET_REMOTE_URL" not in result.stderr
+
+
+def test_behind_origin_blocks_remote_sync(tmp_path: Path) -> None:
+    repo, fake_bin = _make_repo(tmp_path)
+
+    result = _run_prereqs(repo, fake_bin, remote_state="behind")
+
+    assert result.returncode == 1
+    assert "BLOCKED   remote sync" in result.stdout
+    assert "reason=behind" in result.stdout
+
+
+def test_ahead_of_origin_blocks_remote_sync(tmp_path: Path) -> None:
+    repo, fake_bin = _make_repo(tmp_path)
+
+    result = _run_prereqs(repo, fake_bin, remote_state="ahead")
+
+    assert result.returncode == 1
+    assert "BLOCKED   remote sync" in result.stdout
+    assert "reason=ahead" in result.stdout
+
+
+def test_diverged_from_origin_blocks_remote_sync(tmp_path: Path) -> None:
+    repo, fake_bin = _make_repo(tmp_path)
+
+    result = _run_prereqs(repo, fake_bin, remote_state="diverged")
+
+    assert result.returncode == 1
+    assert "BLOCKED   remote sync" in result.stdout
+    assert "reason=diverged" in result.stdout
+
+
+def test_merge_base_error_blocks_remote_sync_as_not_synced(tmp_path: Path) -> None:
+    repo, fake_bin = _make_repo(tmp_path)
+
+    result = _run_prereqs(repo, fake_bin, remote_state="merge_error")
+
+    assert result.returncode == 1
+    assert "BLOCKED   remote sync" in result.stdout
+    assert "reason=not_synced" in result.stdout
 
 
 def test_notary_missing_profile_reason_is_safe(tmp_path: Path) -> None:
