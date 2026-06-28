@@ -30,6 +30,13 @@ enum KeychainKeyProvider {
         case denied      // user denied/cancelled the read; left untouched
         case strandedDb  // encrypted-looking DB but no key item -> fail closed
         case error       // unexpected Keychain/error condition
+
+        var wireCode: String {
+            switch self {
+            case .strandedDb: return "stranded_db"
+            default: return rawValue
+            }
+        }
     }
 
     /// Resolve the DB key. Returns `nil` when no key can be *safely* provided.
