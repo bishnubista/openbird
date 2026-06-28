@@ -80,61 +80,39 @@ struct SettingsView: View {
     // MARK: Setup / status banner
 
     private var bannerState: BannerState? {
-        // 1) Recovery first: capture died and the index needs rebuilding.
-        if model.captureNeedsReindex {
-            return BannerState(
-                tone: .amber,
-                title: "Reindex needed to resume capture",
-                subtitle: "The memory index must be rebuilt for the current embedding model.",
-                buttonLabel: model.isReindexing ? "Reindexing…" : "Reindex now",
-                action: model.isReindexing ? nil : { model.reindexNow() }
-            )
-        }
-        // 2) Missing setup steps, in dependency order.
-        if model.accessibilityState != .ok {
-            return BannerState(
-                tone: .amber,
-                title: "Finish setup to start capturing",
-                subtitle: "Grant Accessibility so OpenBird can read active-window text.",
-                buttonLabel: "Grant Accessibility",
-                action: { model.requestAccessibility() }
-            )
-        }
-        if model.localModelStatusState != .ok {
-            return BannerState(
-                tone: .amber,
-                title: "Finish setup to start capturing",
-                subtitle: model.localModelStatusSummary,
-                buttonLabel: model.modelRouteActionLabel,
-                action: model.modelRouteActionLabel == nil ? nil : { model.performModelRouteAction { NSWorkspace.shared.open($0) } }
-            )
-        }
-        if model.allowlist.isEmpty {
-            return BannerState(
-                tone: .amber,
-                title: "Add an app to start capturing",
-                subtitle: "OpenBird records nothing until you allow at least one app below.",
-                buttonLabel: nil,
-                action: nil
-            )
-        }
-        if !model.captureRunning {
-            return BannerState(
-                tone: .amber,
-                title: "Ready to capture",
-                subtitle: "Start capturing to begin building your on-device memory.",
-                buttonLabel: "Start capturing",
-                action: { model.startCapture() }
-            )
-        }
-        // 3) Everything's set — green.
-        return BannerState(
-            tone: .green,
-            title: "\(model.capturePaused ? "Paused" : "Capturing") · everything's set",
-            subtitle: allGoodSubtitle,
-            buttonLabel: nil,
-            action: nil
+        let decision = SettingsBannerDecision.resolve(
+            captureNeedsReindex: model.captureNeedsReindex,
+            isReindexing: model.isReindexing,
+            accessibilityState: model.accessibilityState,
+            localModelStatusState: model.localModelStatusState,
+            localModelStatusSummary: model.localModelStatusSummary,
+            modelRouteActionLabel: model.modelRouteActionLabel,
+            allowlistCount: model.allowlist.count,
+            captureRunning: model.captureRunning,
+            capturePaused: model.capturePaused,
+            observationCount: model.memoryStats.observations,
+            memoryStatsState: model.memoryStatsState,
+            isRefreshing: model.isRefreshing,
+            nextStepSummary: model.nextStepSummary,
+            allGoodSubtitle: allGoodSubtitle
         )
+        return BannerState(decision: decision, action: bannerAction(for: decision.actionKind))
+    }
+
+    private func bannerAction(for kind: SettingsBannerActionKind) -> (() -> Void)? {
+        switch kind {
+        case .none:
+            return nil
+        case .reindex:
+            return model.isReindexing ? nil : { model.reindexNow() }
+        case .requestAccessibility:
+            return { model.requestAccessibility() }
+        case .modelRoute:
+            guard model.modelRouteActionLabel != nil else { return nil }
+            return { model.performModelRouteAction { NSWorkspace.shared.open($0) } }
+        case .startCapture:
+            return { model.startCapture() }
+        }
     }
 
     private var allGoodSubtitle: String {
@@ -648,13 +626,144 @@ private enum RowTrailing {
     case empty
 }
 
+enum SettingsBannerTone: Equatable {
+    case amber
+    case green
+}
+
+enum SettingsBannerActionKind: Equatable {
+    case none
+    case reindex
+    case requestAccessibility
+    case modelRoute
+    case startCapture
+}
+
+struct SettingsBannerDecision: Equatable {
+    let tone: SettingsBannerTone
+    let title: String
+    let subtitle: String
+    let buttonLabel: String?
+    let actionKind: SettingsBannerActionKind
+
+    static func resolve(
+        captureNeedsReindex: Bool,
+        isReindexing: Bool,
+        accessibilityState: StepState,
+        localModelStatusState: StepState,
+        localModelStatusSummary: String,
+        modelRouteActionLabel: String?,
+        allowlistCount: Int,
+        captureRunning: Bool,
+        capturePaused: Bool,
+        observationCount: Int,
+        memoryStatsState: MemoryStatsState,
+        isRefreshing _: Bool,
+        nextStepSummary: String,
+        allGoodSubtitle: String
+    ) -> SettingsBannerDecision {
+        if captureNeedsReindex {
+            return SettingsBannerDecision(
+                tone: .amber,
+                title: "Reindex needed to resume capture",
+                subtitle: "The memory index must be rebuilt for the current embedding model.",
+                buttonLabel: isReindexing ? "Reindexing…" : "Reindex now",
+                actionKind: isReindexing ? .none : .reindex
+            )
+        }
+        if accessibilityState != .ok {
+            return SettingsBannerDecision(
+                tone: .amber,
+                title: "Finish setup to start capturing",
+                subtitle: "Grant Accessibility so OpenBird can read active-window text.",
+                buttonLabel: "Grant Accessibility",
+                actionKind: .requestAccessibility
+            )
+        }
+        if localModelStatusState != .ok {
+            return SettingsBannerDecision(
+                tone: .amber,
+                title: "Finish setup to start capturing",
+                subtitle: localModelStatusSummary,
+                buttonLabel: modelRouteActionLabel,
+                actionKind: modelRouteActionLabel == nil ? .none : .modelRoute
+            )
+        }
+        if allowlistCount == 0 {
+            return SettingsBannerDecision(
+                tone: .amber,
+                title: "Add an app to start capturing",
+                subtitle: "OpenBird records nothing until you allow at least one app below.",
+                buttonLabel: nil,
+                actionKind: .none
+            )
+        }
+        if !captureRunning {
+            return SettingsBannerDecision(
+                tone: .amber,
+                title: "Ready to capture",
+                subtitle: "Start capturing to begin building your on-device memory.",
+                buttonLabel: "Start capturing",
+                actionKind: .startCapture
+            )
+        }
+        switch memoryStatsState {
+        case .unknown:
+            return SettingsBannerDecision(
+                tone: .amber,
+                title: "\(capturePaused ? "Paused" : "Capturing") · checking memory",
+                subtitle: "OpenBird is verifying whether captured memory is available.",
+                buttonLabel: nil,
+                actionKind: .none
+            )
+        case .failed:
+            return SettingsBannerDecision(
+                tone: .amber,
+                title: "Memory status unavailable",
+                subtitle: "Re-check setup to verify captured memory.",
+                buttonLabel: nil,
+                actionKind: .none
+            )
+        case .loaded:
+            break
+        }
+        if observationCount == 0 {
+            let status = capturePaused ? "Paused" : "Capturing"
+            let subtitle = capturePaused
+                ? "Resume capture and bring an allowed app to the front so memory starts filling."
+                : nextStepSummary
+            return SettingsBannerDecision(
+                tone: .amber,
+                title: "\(status) · waiting for memory",
+                subtitle: subtitle,
+                buttonLabel: nil,
+                actionKind: .none
+            )
+        }
+        return SettingsBannerDecision(
+            tone: .green,
+            title: "\(capturePaused ? "Paused" : "Capturing") · memory ready",
+            subtitle: allGoodSubtitle,
+            buttonLabel: nil,
+            actionKind: .none
+        )
+    }
+}
+
 private struct BannerState {
-    enum Tone { case amber, green }
-    let tone: Tone
+    let tone: SettingsBannerTone
     let title: String
     let subtitle: String
     let buttonLabel: String?
     let action: (() -> Void)?
+
+    init(decision: SettingsBannerDecision, action: (() -> Void)?) {
+        self.tone = decision.tone
+        self.title = decision.title
+        self.subtitle = decision.subtitle
+        self.buttonLabel = decision.buttonLabel
+        self.action = action
+    }
 }
 
 // MARK: - Banner
