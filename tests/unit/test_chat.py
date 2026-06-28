@@ -849,6 +849,9 @@ def test_productivity_review_with_advice_shape_stays_local_and_gated(
         assert result.reasoning_route == "local_deterministic"
         assert result.grounding == "derived"
         assert "recorded active minute" in result.answer
+        assert "Daily context switches" in [
+            citation.label for citation in result.derived_citations
+        ]
         assert "Improvement recommendations require" in result.answer
         assert "you should" not in result.answer.lower()
         serialized = json.dumps(result.to_public_dict(), sort_keys=True)
@@ -856,6 +859,43 @@ def test_productivity_review_with_advice_shape_stays_local_and_gated(
         assert "SECRET_WINDOW_TITLE" not in serialized
         assert "secret.example.com/private-plan" not in serialized
         assert "com.secret.ProductRoadmap" not in serialized
+    finally:
+        store.close()
+
+
+def test_productivity_review_equivalent_phrasings_stay_local(
+    mem_settings, fake_provider
+):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        store.add_observation(
+            "coding",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            ts=start + 9 * 3600,
+        )
+        store.add_observation(
+            "coding continued",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            ts=start + 9 * 3600 + 60,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+        productive = chatter.answer("Was I productive today?", window=(start, end))
+        focused = chatter.answer("How focused was I today?", window=(start, end))
+
+        assert llm.calls == 0
+        assert productive.reasoning_route == "local_deterministic"
+        assert focused.reasoning_route == "local_deterministic"
+        assert productive.grounding == "derived"
+        assert focused.grounding == "derived"
     finally:
         store.close()
 
@@ -952,6 +992,45 @@ def test_web_media_day_query_uses_minimized_local_facts(mem_settings, fake_provi
         assert "SECRET_GITHUB_WINDOW" not in serialized
         assert "SECRET_YOUTUBE_TITLE" not in serialized
         assert "watch?v=secret" not in serialized
+    finally:
+        store.close()
+
+
+def test_web_media_progressive_activity_phrasings_stay_local(
+    mem_settings, fake_provider
+):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        store.add_observation(
+            "openbird",
+            source="capture",
+            app="com.google.Chrome",
+            url="https://github.com/bishnubista/openbird",
+            ts=start + 9 * 3600,
+        )
+        store.add_observation(
+            "video",
+            source="capture",
+            app="com.google.Chrome",
+            url="https://youtube.com/watch?v=abc",
+            ts=start + 9 * 3600 + 60,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+        sites = chatter.answer("What sites was I browsing today?", window=(start, end))
+        videos = chatter.answer("What videos was I watching today?", window=(start, end))
+
+        assert llm.calls == 0
+        assert sites.reasoning_route == "local_deterministic"
+        assert videos.reasoning_route == "local_deterministic"
+        assert sites.grounding == "derived"
+        assert videos.grounding == "derived"
     finally:
         store.close()
 

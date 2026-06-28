@@ -178,8 +178,11 @@ _FACT_ADVICE_RE = re.compile(
 )
 _PRODUCTIVITY_REVIEW_RE = re.compile(
     r"\b("
+    r"was\s+i\s+productive|"
     r"how\s+productive\s+was\s+i|"
     r"how\s+did\s+i\s+do|"
+    r"was\s+i\s+focused|"
+    r"how\s+focused\s+was\s+i|"
     r"how\s+was\s+my\s+focus|"
     r"how\s+scattered\s+was\s+my\s+work|"
     r"where\s+could\s+i\s+improve\s+my\s+(productivity|focus)|"
@@ -200,8 +203,8 @@ _WEB_MEDIA_NOUN_RE = re.compile(
     re.IGNORECASE,
 )
 _WEB_MEDIA_ACTIVITY_RE = re.compile(
-    r"\b(look(?:ed)?\s+at|visit(?:ed)?|brows(?:e|ed)|open(?:ed)?|"
-    r"watch(?:ed)?|read|saw|see)\b",
+    r"\b(look(?:ed)?\s+at|visit(?:ed|ing)?|brows(?:e|ed|ing)|"
+    r"open(?:ed|ing)?|watch(?:ed|ing)?|read(?:ing)?|saw|see)\b",
     re.IGNORECASE,
 )
 _WEB_MEDIA_TOPIC_RE = re.compile(
@@ -1179,6 +1182,15 @@ class RAG:
         if switches is not None and source_ids:
             count = int(switches or 0)
             parts.append(f"I counted {count} recorded context switch(es).")
+            citations.append(
+                self._day_review_citation(
+                    local_date,
+                    "Daily context switches",
+                    f"Context switches: {count}",
+                    source_ids,
+                    len(source_ids),
+                )
+            )
 
         if not parts or not citations:
             return self._day_fact_unavailable(local_date, memory_context)
