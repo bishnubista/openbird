@@ -41,6 +41,25 @@ final class AppModelUXTests: XCTestCase {
         return report
     }
 
+    private func onboardingModel(
+        allowlist: [String] = ["com.example.editor"],
+        accessibility: Bool = true,
+        cli: String? = "/tmp/openbird",
+        captureRunning: Bool = false,
+        report: PreflightReport? = nil
+    ) -> AppModel {
+        let service = OpenBirdService(
+            accessibilityProbe: { accessibility },
+            openBirdCLIResolver: { cli },
+            externalLoopDaemonProbe: { captureRunning },
+            captureHelperRunningProbe: { false }
+        )
+        service.setAllowlist(allowlist)
+        let model = AppModel(service: service, initialReport: report ?? readyReport())
+        model.setOnboardingStateForTesting(lastRefresh: Date(), captureRunning: captureRunning)
+        return model
+    }
+
     func testAskUnavailableReasonPrefersModelReadiness() {
         var report = PreflightReport()
         report.ollamaReachable = false
@@ -105,6 +124,102 @@ final class AppModelUXTests: XCTestCase {
             let noCLIModel = AppModel(service: noCLI, initialReport: readyReport())
             XCTAssertFalse(noCLIModel.canStartCaptureNow)
         }
+    }
+
+    func testOnboardingPrimaryActionStartsOnlyWhenReady() {
+        withRestoredAllowlist {
+            let model = onboardingModel()
+
+            XCTAssertEqual(model.onboardingPrimaryAction, .start)
+        }
+    }
+
+    func testOnboardingPrimaryActionCheckingUntilRefreshed() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            service.setAllowlist(["com.example.editor"])
+            let model = AppModel(service: service, initialReport: readyReport())
+
+            XCTAssertEqual(model.onboardingPrimaryAction, .checking)
+        }
+    }
+
+    func testOnboardingPrimaryActionCompletesWhenAlreadyRunning() {
+        withRestoredAllowlist {
+            let model = onboardingModel(captureRunning: true)
+
+            XCTAssertEqual(model.onboardingPrimaryAction, .complete)
+        }
+    }
+
+    func testOnboardingPrimaryActionBlocksMissingSetup() {
+        withRestoredAllowlist {
+            XCTAssertBlocked(onboardingModel(allowlist: []).onboardingPrimaryAction, contains: "allowlist")
+            XCTAssertBlocked(
+                onboardingModel(accessibility: false).onboardingPrimaryAction,
+                contains: "Accessibility"
+            )
+
+            var modelMissing = readyReport()
+            modelMissing.runtimeOK = false
+            modelMissing.ollamaReachable = false
+            XCTAssertBlocked(
+                onboardingModel(report: modelMissing).onboardingPrimaryAction,
+                contains: "Ollama"
+            )
+
+            XCTAssertBlocked(onboardingModel(cli: nil).onboardingPrimaryAction, contains: "CLI")
+        }
+    }
+
+    func testOnboardingPresentationDismissDoesNotComplete() {
+        var state = OnboardingPresentationState(completed: false, presented: true)
+
+        state.dismissWithoutCompleting()
+
+        XCTAssertFalse(state.completed)
+        XCTAssertFalse(state.presented)
+
+        state.presented = true
+        state.complete()
+
+        XCTAssertTrue(state.completed)
+        XCTAssertFalse(state.presented)
+    }
+
+    func testOnboardingRepairIsOneShot() {
+        let repaired = AppModel.repairIncompleteOnboardingCompletionIfNeeded(
+            completed: true,
+            repairDone: false,
+            allowlistIsEmpty: true,
+            captureRunning: false
+        )
+        XCTAssertFalse(repaired.completed)
+        XCTAssertTrue(repaired.repairDone)
+        XCTAssertTrue(repaired.repaired)
+
+        let repeated = AppModel.repairIncompleteOnboardingCompletionIfNeeded(
+            completed: true,
+            repairDone: true,
+            allowlistIsEmpty: true,
+            captureRunning: false
+        )
+        XCTAssertTrue(repeated.completed)
+        XCTAssertTrue(repeated.repairDone)
+        XCTAssertFalse(repeated.repaired)
+    }
+
+    private func XCTAssertBlocked(
+        _ action: OnboardingPrimaryAction,
+        contains expected: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard case .blocked(let message) = action else {
+            XCTFail("Expected blocked action, got \(action)", file: file, line: line)
+            return
+        }
+        XCTAssertTrue(message.contains(expected), "Message was \(message)", file: file, line: line)
     }
 
     // MARK: - Capture exit-code mapping

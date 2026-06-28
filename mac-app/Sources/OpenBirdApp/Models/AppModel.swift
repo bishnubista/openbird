@@ -33,6 +33,48 @@ enum ModelRouteProvisioningState: Equatable {
     case error(String)
 }
 
+enum OnboardingPrimaryAction: Equatable {
+    case checking
+    case complete
+    case start
+    case blocked(String)
+
+    var label: String {
+        switch self {
+        case .checking:
+            "Checking setup..."
+        case .complete:
+            "Continue"
+        case .start:
+            "Start capturing"
+        case .blocked:
+            "Finish setup"
+        }
+    }
+
+    var isDisabled: Bool {
+        self == .checking
+    }
+}
+
+struct OnboardingPresentationState: Equatable {
+    var completed: Bool
+    var presented: Bool
+
+    mutating func presentIfNeeded() {
+        presented = !completed
+    }
+
+    mutating func dismissWithoutCompleting() {
+        presented = false
+    }
+
+    mutating func complete() {
+        completed = true
+        presented = false
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     static let embeddingGemmaMinimumOllamaVersion = "0.11.10"
@@ -447,6 +489,58 @@ final class AppModel: ObservableObject {
     /// `@AppStorage` (which defaults to `UserDefaults.standard`). Centralized here
     /// so the auto-resume gate reads the exact same key.
     static let onboardingCompletedKey = "openbird.onboarding.completed"
+    static let onboardingRepairV1DoneKey = "openbird.onboarding.repair.v1.done"
+
+    /// First-run onboarding asks for the fully useful stack (models + Accessibility +
+    /// allowlist) before claiming success, so the first captured memory can be searched
+    /// and answered. The Settings/MenuBar start path remains a lower-bar escape hatch
+    /// for users who intentionally want text capture running before models are ready.
+    var onboardingPrimaryAction: OnboardingPrimaryAction {
+        if isRefreshing || lastRefresh == nil {
+            return .checking
+        }
+        if captureRunning {
+            return .complete
+        }
+        guard localModelStatusState == .ok else {
+            return .blocked(nextStepSummary)
+        }
+        guard accessibilityState == .ok else {
+            return .blocked(nextStepSummary)
+        }
+        guard !allowlist.isEmpty else {
+            return .blocked(nextStepSummary)
+        }
+        guard service.canLaunchOpenBirdCLI() else {
+            return .blocked("Could not find the openbird CLI. Re-check setup or reinstall OpenBird.")
+        }
+        return .start
+    }
+
+    static func repairIncompleteOnboardingCompletionIfNeeded(
+        completed: Bool,
+        repairDone: Bool,
+        allowlistIsEmpty: Bool,
+        captureRunning: Bool
+    ) -> (completed: Bool, repairDone: Bool, repaired: Bool) {
+        guard !repairDone else { return (completed, repairDone, false) }
+        let shouldRepair = completed && allowlistIsEmpty && !captureRunning
+        return (shouldRepair ? false : completed, true, shouldRepair)
+    }
+
+    @discardableResult
+    func repairIncompleteOnboardingCompletionIfNeeded() -> Bool {
+        let defaults = UserDefaults.standard
+        let outcome = Self.repairIncompleteOnboardingCompletionIfNeeded(
+            completed: defaults.bool(forKey: Self.onboardingCompletedKey),
+            repairDone: defaults.bool(forKey: Self.onboardingRepairV1DoneKey),
+            allowlistIsEmpty: allowlist.isEmpty,
+            captureRunning: captureRunning
+        )
+        defaults.set(outcome.completed, forKey: Self.onboardingCompletedKey)
+        defaults.set(outcome.repairDone, forKey: Self.onboardingRepairV1DoneKey)
+        return outcome.repaired
+    }
 
     /// Whether capture should be (re)started automatically at launch. Builds on
     /// `canStartCaptureNow` (Accessibility granted, non-empty allowlist, CLI
@@ -686,6 +780,14 @@ final class AppModel: ObservableObject {
     func setProvisioningErrorForTesting(_ message: String) {
         provisioningError = message
     }
+
+    func setOnboardingStateForTesting(lastRefresh: Date?, captureRunning: Bool? = nil) {
+        self.lastRefresh = lastRefresh
+        self.isRefreshing = false
+        if let captureRunning {
+            self.captureRunning = captureRunning
+        }
+    }
     #endif
 
     // These trigger native TCC prompts only when the relevant grant is not already
@@ -729,11 +831,26 @@ final class AppModel: ObservableObject {
             return
         }
         lastActionMessage = "Starting capture..."
-        Task { await startCaptureAfterRefreshingStats() }
+        Task { _ = await startCaptureAfterRefreshingStats() }
+    }
+
+    @discardableResult
+    func startCaptureForOnboarding() async -> Bool {
+        guard !allowlist.isEmpty else {
+            lastActionMessage = "Add at least one app to the capture allowlist first."
+            return false
+        }
+        guard onboardingPrimaryAction == .start else {
+            lastActionMessage = nextStepSummary
+            return false
+        }
+        lastActionMessage = "Starting capture..."
+        return await startCaptureAfterRefreshingStats()
     }
 
     /// Start capture after recording the current observation count for health comparison.
-    private func startCaptureAfterRefreshingStats() async {
+    @discardableResult
+    private func startCaptureAfterRefreshingStats() async -> Bool {
         await refreshMemoryStats()
         captureHealthCheckTask?.cancel()
         captureStopRequested = false
@@ -746,6 +863,7 @@ final class AppModel: ObservableObject {
             captureRunning = true
             capturePaused = false
             captureNeedsReindex = false
+            UserDefaults.standard.set(true, forKey: Self.onboardingCompletedKey)
             lastActionMessage = "Capture started for \(allowlist.count) app(s). Waiting for memory updates."
             captureHealthCheckTask = Task {
                 await refreshMemoryStats()
@@ -756,8 +874,10 @@ final class AppModel: ObservableObject {
                     lastActionMessage = "Capture is running, but no new memory is stored yet. Bring an allowed app to the front or re-check setup."
                 }
             }
+            return true
         } else {
             lastActionMessage = "Could not start capture (CLI not found)."
+            return false
         }
     }
 
