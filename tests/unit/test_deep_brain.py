@@ -703,6 +703,129 @@ def test_cli_cloud_exclusion_settings_are_copied_not_mutated(tmp_path):
     assert copied.deep_brain_excluded_observation_ids == ["obs-1", "obs-2"]
 
 
+def test_deep_brain_status_default_is_local_no_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    monkeypatch.setattr(
+        cli,
+        "_completion_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("status must not use provider")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_store_maintenance",
+        lambda: (_ for _ in ()).throw(AssertionError("status must not open store")),
+    )
+
+    try:
+        res = CliRunner().invoke(cli.app, ["deep-brain", "status", "--json"])
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["route"] == "deep_brain.status"
+    assert payload["egress"] == "none"
+    assert payload["route_label"] == "Deep Brain off"
+    assert payload["deep_brain_enabled"] is False
+    assert payload["cloud_opt_in"] is False
+    assert payload["cloud_gates_enabled"] is False
+    assert payload["ask_available"] is False
+    assert "OPENBIRD_DEEP_BRAIN_ENABLED" in " ".join(payload["ask_blocked_reasons"])
+
+
+def test_deep_brain_status_local_ask_available_without_cloud(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    monkeypatch.setenv("OPENBIRD_LLM_MODEL", "ollama/llama3.2")
+    reset_settings_cache()
+
+    try:
+        res = CliRunner().invoke(cli.app, ["deep-brain", "status", "--json"])
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["route_label"] == "Deep Brain local ask available · no cloud"
+    assert payload["cloud_gates_enabled"] is False
+    assert payload["ask_available"] is True
+    assert payload["ask_blocked_reasons"] == []
+    assert "OPENBIRD_ALLOW_CLOUD" in " ".join(payload["cloud_blocked_reasons"])
+
+
+def test_deep_brain_status_cloud_gates_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    monkeypatch.setenv("OPENBIRD_ALLOW_CLOUD", "1")
+    monkeypatch.setenv("OPENBIRD_LLM_MODEL", "gpt-4o-mini")
+    reset_settings_cache()
+
+    try:
+        res = CliRunner().invoke(cli.app, ["deep-brain", "status", "--json"])
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["route_label"] == "Cloud reasoning gates enabled"
+    assert payload["cloud_gates_enabled"] is True
+    assert payload["cloud_blocked_reasons"] == []
+    assert payload["ask_available"] is True
+    assert payload["ask_blocked_reasons"] == []
+
+
+def test_deep_brain_status_remote_ask_blocked_without_cloud(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_ENABLED", "1")
+    monkeypatch.setenv("OPENBIRD_LLM_MODEL", "gpt-4o-mini")
+    reset_settings_cache()
+
+    try:
+        res = CliRunner().invoke(cli.app, ["deep-brain", "status", "--json"])
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["route_label"] == "Deep Brain blocked"
+    assert payload["ask_available"] is False
+    assert "OPENBIRD_ALLOW_CLOUD is not enabled for the remote LLM" in payload[
+        "ask_blocked_reasons"
+    ]
+
+
+def test_deep_brain_status_exclusions_count_ids_without_printing_them(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_APPS", "Code,Slack")
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_SOURCES", "capture,meeting")
+    monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_OBSERVATION_IDS", "obs-secret")
+    reset_settings_cache()
+
+    try:
+        json_res = CliRunner().invoke(cli.app, ["deep-brain", "status", "--json"])
+        text_res = CliRunner().invoke(cli.app, ["deep-brain", "status"])
+    finally:
+        reset_settings_cache()
+
+    assert json_res.exit_code == 0, json_res.output
+    payload = json.loads(json_res.stdout)
+    assert payload["exclusions"]["excluded_apps_configured"] == ["Code", "Slack"]
+    assert payload["exclusions"]["excluded_sources_configured"] == [
+        "capture",
+        "meeting",
+    ]
+    assert payload["exclusions"]["excluded_observation_ids_configured"] == 1
+    assert "obs-secret" not in json_res.stdout
+    assert text_res.exit_code == 0, text_res.output
+    assert "Code, Slack" in text_res.stdout
+    assert "capture, meeting" in text_res.stdout
+    assert "obs-secret" not in text_res.stdout
+    assert "No data was sent." in text_res.stdout
+
+
 def test_deep_brain_preview_cli_applies_one_off_cloud_exclusions(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("OPENBIRD_DEEP_BRAIN_EXCLUDED_APPS", "ExistingApp")

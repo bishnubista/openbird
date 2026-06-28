@@ -58,6 +58,7 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "data.export",
         "deep_brain.ask",
         "deep_brain.preview",
+        "deep_brain.status",
         "diagnostics.logs",
         "embedding.remote",
         "ingest.files",
@@ -186,6 +187,21 @@ def test_deep_brain_preview_declares_day_or_week_packet_metadata() -> None:
         "packet_build_route",
         "exclusion_counts",
         "exclusion_metadata",
+    }.issubset(set(route["captured_fields"]))
+
+
+def test_deep_brain_status_route_is_local_settings_only() -> None:
+    route = _routes()["deep_brain.status"]
+
+    assert route["class"] == "local"
+    assert route["storage"] == []
+    assert route["egress"]["default"] == "none"
+    assert "no provider" in route["egress"]["note"]
+    assert "cli.deep_brain_status" in route["truth_surface"]
+    assert {
+        "opt_in_gate_status",
+        "exclusion_metadata",
+        "configured_exclusion_counts",
     }.issubset(set(route["captured_fields"]))
 
 
