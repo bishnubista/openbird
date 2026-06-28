@@ -18,15 +18,11 @@ struct AppShellView: View {
     /// Open the expanded Ask overlay window (the `openbird://ask-expanded` E2E deep-link).
     var onAskExpanded: () -> Void = {}
 
-    /// One-time first-run flag; the onboarding sheet shows until the user taps
-    /// "Start capturing" (or dismisses), then never auto-presents again.
-    @AppStorage("openbird.onboarding.completed") private var onboardingCompleted = false
-
-    /// Drives the onboarding `.sheet` from the inverse of the completed flag; the
-    /// sheet (and its "Start capturing" button) sets it to dismiss.
-    private var onboardingBinding: Binding<Bool> {
-        Binding(get: { !onboardingCompleted }, set: { onboardingCompleted = !$0 })
-    }
+    /// One-time first-run flag; only a real capture start/completion flips it. Plain
+    /// dismissal can hide the sheet for this session without claiming setup is done.
+    @AppStorage(AppModel.onboardingCompletedKey) private var onboardingCompleted = false
+    @State private var onboardingPresented = false
+    @State private var didPrepareOnboarding = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -40,9 +36,14 @@ struct AppShellView: View {
         .frame(minWidth: 920, minHeight: 560)
         .background(GlassBackdrop())
         .background(WindowConfigurator())   // draggable by background (macOS-13-safe)
-        .sheet(isPresented: onboardingBinding) {
-            OnboardingSheet(model: model, isPresented: onboardingBinding)
+        .sheet(isPresented: $onboardingPresented) {
+            OnboardingSheet(
+                model: model,
+                onComplete: completeOnboarding,
+                onOpenSetup: openSetupFromOnboarding
+            )
         }
+        .onAppear(perform: prepareOnboardingPresentation)
         .onOpenURL { url in route(url) }
     }
 
@@ -74,5 +75,39 @@ struct AppShellView: View {
         default: return
         }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func prepareOnboardingPresentation() {
+        guard !didPrepareOnboarding else { return }
+        didPrepareOnboarding = true
+        model.repairIncompleteOnboardingCompletionIfNeeded()
+        onboardingCompleted = UserDefaults.standard.bool(forKey: AppModel.onboardingCompletedKey)
+        var state = OnboardingPresentationState(
+            completed: onboardingCompleted,
+            presented: onboardingPresented
+        )
+        state.presentIfNeeded()
+        onboardingPresented = state.presented
+    }
+
+    private func completeOnboarding() {
+        var state = OnboardingPresentationState(
+            completed: onboardingCompleted,
+            presented: onboardingPresented
+        )
+        state.complete()
+        onboardingCompleted = state.completed
+        onboardingPresented = state.presented
+    }
+
+    private func openSetupFromOnboarding() {
+        var state = OnboardingPresentationState(
+            completed: onboardingCompleted,
+            presented: onboardingPresented
+        )
+        state.dismissWithoutCompleting()
+        onboardingCompleted = state.completed
+        onboardingPresented = state.presented
+        model.selection = .setup
     }
 }

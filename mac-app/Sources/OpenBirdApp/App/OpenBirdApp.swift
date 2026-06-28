@@ -164,6 +164,7 @@ private struct MainWindowRoot: View {
             else { return }
             askPanel.installHotKeyIfNeeded()   // idempotent ⌥Space registration
             askPanel.openMainWindow = { openWindow(id: "main") }
+            model.repairIncompleteOnboardingCompletionIfNeeded()
             await model.refresh()
             // Resume capture if the user is already configured and didn't pause it.
             // After refresh() so allowlist / pause / running state is current.

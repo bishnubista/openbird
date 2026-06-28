@@ -15,8 +15,10 @@ import SwiftUI
 /// from two angles, exactly as the design intends.
 struct SetupSheetView: View {
     @ObservedObject var model: AppModel
-    /// Primary-button action. Onboarding starts capture + dismisses; the Setup tab just
-    /// starts capture. The label stays "Start capturing" in both.
+    /// Primary-button action. Onboarding uses a truth-gated label/state while preserving
+    /// the original default label for previews and any future reuse.
+    var primaryLabel: String = "Start capturing"
+    var primaryDisabled: Bool = false
     var onPrimary: () -> Void
     /// The design's window-chrome dots. Purely decorative (NOT live window controls) — a
     /// "this is a glass window" motif that is part of the pixel spec. The host window's
@@ -78,15 +80,29 @@ struct SetupSheetView: View {
             rows
 
             Button(action: onPrimary) {
-                Text("Start capturing")
+                Text(primaryLabel)
                     .font(.system(size: 14.5, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 13)
-                    .background(OB.accent, in: RoundedRectangle(cornerRadius: OB.Radius.card, style: .continuous))   // 11
+                    .background(
+                        primaryDisabled ? OB.textTertiary(scheme) : OB.accent,
+                        in: RoundedRectangle(cornerRadius: OB.Radius.card, style: .continuous)
+                    )   // 11
             }
             .buttonStyle(.plain)
+            .disabled(primaryDisabled)
             .padding(.top, OB.Space.xl)                // 22
+
+            if !model.lastActionMessage.isEmpty {
+                Text(model.lastActionMessage)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(OB.textSecondary(scheme))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 400)
+                    .padding(.top, 10)
+            }
 
             HStack(spacing: OB.Space.s) {              // 6
                 Image(systemName: "lock.fill").font(.system(size: 11))

@@ -20,6 +20,9 @@ struct SettingsView: View {
             ScrollView {
                 VStack(spacing: OB.Space.l) {            // 18 between sections
                     if let banner = bannerState { SettingsBanner(state: banner) }
+                    if !model.lastActionMessage.isEmpty {
+                        SettingsActionMessage(message: model.lastActionMessage)
+                    }
                     permissionsCard
                     allowlistCard
                     privacyCard
@@ -705,6 +708,33 @@ private struct SettingsBanner: View {
         .overlay(
             RoundedRectangle(cornerRadius: OB.Radius.setup, style: .continuous)
                 .strokeBorder(tint.opacity(0.35), lineWidth: 0.5)
+        )
+    }
+}
+
+private struct SettingsActionMessage: View {
+    let message: String
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        HStack(spacing: OB.Space.s) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 12.5, weight: .semibold))
+            Text(message)
+                .font(.system(size: 12.5))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(OB.textSecondary(scheme))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            OB.fieldFill(scheme),
+            in: RoundedRectangle(cornerRadius: OB.Radius.card, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: OB.Radius.card, style: .continuous)
+                .strokeBorder(OB.separator(scheme), lineWidth: 0.5)
         )
     }
 }
