@@ -376,6 +376,18 @@ final class AppModel: ObservableObject {
         return "Configured exclusions: \(pieces.joined(separator: "; "))."
     }
 
+    static let dataPruneCommand = "openbird data prune --older-than 90d"
+    static let dataPurgeAllCommand = "openbird data purge --all"
+
+    var dataDeletionSummary: String {
+        "Terminal deletion commands ask for confirmation by default. `openbird data prune --older-than 90d` cascade-deletes old observations plus orphaned blobs/chunks/FTS/vector rows; `openbird data vacuum` reclaims disk space after deletion. Total wipe is available as `openbird data purge --all`."
+    }
+
+    func copyDataPruneCommand() {
+        service.copyToPasteboard(Self.dataPruneCommand)
+        lastActionMessage = "Copied confirmation-gated prune command."
+    }
+
     var modelRouteFooterLabel: String {
         if report.error != nil { return "model route unknown" }
         if report.cloudBlocked { return "remote blocked" }

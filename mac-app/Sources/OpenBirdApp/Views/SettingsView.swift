@@ -356,6 +356,14 @@ struct SettingsView: View {
             )
             hairline
             permissionRow(
+                icon: "trash",
+                title: "Delete memory (Terminal)",
+                badge: nil,
+                subtitle: model.dataDeletionSummary,
+                trailing: .secondary("Copy prune command") { model.copyDataPruneCommand() }
+            )
+            hairline
+            permissionRow(
                 icon: "brain.head.profile",
                 title: "Deep Brain",
                 badge: .optional,
