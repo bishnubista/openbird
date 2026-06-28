@@ -117,13 +117,44 @@ db_key_unavailable_with_cli_decrypt_message() {
   esac
 }
 
-probe_bundled_cli_key_access() {
+legacy_untyped_selftest_with_cli_decrypt_message() {
+  local observations="$1" day_memories="$2" signature
+  signature="$(app_signature_class)"
+  case "$signature" in
+    adhoc)
+      log "BLOCKED: legacy untyped self-test error, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); selected app is ad-hoc signed and not beta-proof; install a fresh Developer ID-signed app with typed self-test diagnostics and rerun"
+      ;;
+    developer_id)
+      log "BLOCKED: legacy untyped self-test error, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); selected app likely predates typed self-test diagnostics or is stale; install a fresh Developer ID-signed app and rerun"
+      ;;
+    other_signed|unsigned)
+      log "BLOCKED: legacy untyped self-test error, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); selected app signing is not beta-proof (signature=$signature); install a fresh Developer ID-signed app with typed self-test diagnostics and rerun"
+      ;;
+    *)
+      log "BLOCKED: legacy untyped self-test error, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); selected app signing could not be verified; install a fresh app with typed self-test diagnostics and rerun"
+      ;;
+  esac
+}
+
+legacy_untyped_selftest_message() {
+  local reason="$1"
+  log "BLOCKED: legacy untyped self-test error (reason=legacy_untyped_selftest probe=$reason); install a fresh app with typed self-test diagnostics and rerun"
+}
+
+PROBE_REASON=""
+PROBE_OBSERVATIONS=""
+PROBE_DAY_MEMORIES=""
+
+probe_bundled_cli_key_access_facts() {
   local cli_bin="$APP_BUNDLE/Contents/MacOS/openbird-cli"
   local probe_out probe_rc parsed encrypted observations day_memories
+  PROBE_REASON=""
+  PROBE_OBSERVATIONS=""
+  PROBE_DAY_MEMORIES=""
 
   if [ ! -x "$cli_bin" ]; then
-    log "BLOCKED: DB key unavailable; bundled CLI key probe unavailable (reason=missing_cli)"
-    return
+    PROBE_REASON="missing_cli"
+    return 1
   fi
 
   # Differential diagnosis only: do not persist or print the raw stats JSON.
@@ -139,8 +170,8 @@ probe_bundled_cli_key_access() {
   probe_rc=$?
 
   if [ "$probe_rc" -ne 0 ]; then
-    log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=cli_key_probe_failed rc=$probe_rc)"
-    return
+    PROBE_REASON="cli_key_probe_failed rc=$probe_rc"
+    return 1
   fi
 
   parsed="$(printf '%s' "$probe_out" | python3 -c '
@@ -161,16 +192,53 @@ print(f"{int(encrypted)} {observations} {day_memories}")
   probe_rc=$?
 
   if [ "$probe_rc" -ne 0 ]; then
-    log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=cli_key_probe_unparseable)"
-    return
+    PROBE_REASON="cli_key_probe_unparseable"
+    return 1
   fi
 
   read -r encrypted observations day_memories <<< "$parsed"
+  PROBE_OBSERVATIONS="$observations"
+  PROBE_DAY_MEMORIES="$day_memories"
   if [ "$encrypted" = "1" ]; then
-    db_key_unavailable_with_cli_decrypt_message "$observations" "$day_memories"
+    return 0
   else
-    log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=cli_key_probe_not_encrypted)"
+    PROBE_REASON="cli_key_probe_not_encrypted"
+    return 1
   fi
+}
+
+probe_bundled_cli_key_access() {
+  if probe_bundled_cli_key_access_facts; then
+    db_key_unavailable_with_cli_decrypt_message "$PROBE_OBSERVATIONS" "$PROBE_DAY_MEMORIES"
+    return
+  fi
+
+  case "$PROBE_REASON" in
+    missing_cli)
+      log "BLOCKED: DB key unavailable; bundled CLI key probe unavailable (reason=missing_cli)"
+      ;;
+    cli_key_probe_failed*)
+      log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=$PROBE_REASON)"
+      ;;
+    cli_key_probe_unparseable)
+      log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=cli_key_probe_unparseable)"
+      ;;
+    cli_key_probe_not_encrypted)
+      log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=cli_key_probe_not_encrypted)"
+      ;;
+    *)
+      log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=unknown)"
+      ;;
+  esac
+}
+
+probe_legacy_untyped_selftest() {
+  if probe_bundled_cli_key_access_facts; then
+    legacy_untyped_selftest_with_cli_decrypt_message "$PROBE_OBSERVATIONS" "$PROBE_DAY_MEMORIES"
+    return
+  fi
+
+  legacy_untyped_selftest_message "${PROBE_REASON:-unknown}"
 }
 
 if [ "$DO_BUILD" -eq 1 ] && [ "$APP_WAS_OVERRIDDEN" -eq 1 ]; then
@@ -225,14 +293,13 @@ log "signal: $OUTCOME"
 # ungrounded answer), matching this script's documented exit contract.
 if printf '%s' "$OUTCOME" | grep -q 'error=1'; then
   KIND="$(printf '%s' "$OUTCOME" | grep -oE 'kind=[a-z0-9_]+' | cut -d= -f2)"
-  case "${KIND:-unknown}" in
-    db_key_unavailable)
-      probe_bundled_cli_key_access
-      ;;
-    *)
-      log "BLOCKED: self-test ask errored (kind=${KIND:-unknown}, exit $RC) — not a fix verdict"
-      ;;
-  esac
+  if [ -z "$KIND" ]; then
+    probe_legacy_untyped_selftest
+  elif [ "$KIND" = "db_key_unavailable" ]; then
+    probe_bundled_cli_key_access
+  else
+    log "BLOCKED: self-test ask errored (kind=$KIND, exit $RC) — not a fix verdict"
+  fi
   echo "VERDICT: BLOCKED"; exit 2
 fi
 GROUNDED="$(printf '%s' "$OUTCOME" | grep -oE 'grounded=[0-9]+' | cut -d= -f2)"
