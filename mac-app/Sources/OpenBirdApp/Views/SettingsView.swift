@@ -355,6 +355,16 @@ struct SettingsView: View {
                 trailing: .secondary("Reveal") { model.openDataFolder() }
             )
             hairline
+            permissionRow(
+                icon: "brain.head.profile",
+                title: "Deep Brain",
+                badge: .optional,
+                subtitle: model.deepBrainStatusSummary,
+                trailing: model.deepBrainStatusNeedsAttention
+                    ? .attention(model.deepBrainStatusBadge)
+                    : .affirm(model.deepBrainStatusBadge)
+            )
+            hairline
             HStack(spacing: 8) {
                 Image(systemName: "lock.fill").font(.system(size: 11))
                 Text(model.privacyTransmissionSummary)

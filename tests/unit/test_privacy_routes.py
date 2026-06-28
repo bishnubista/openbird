@@ -198,6 +198,7 @@ def test_deep_brain_status_route_is_local_settings_only() -> None:
     assert route["egress"]["default"] == "none"
     assert "no provider" in route["egress"]["note"]
     assert "cli.deep_brain_status" in route["truth_surface"]
+    assert "app.deepBrainStatusRow" in route["truth_surface"]
     assert {
         "opt_in_gate_status",
         "exclusion_metadata",

@@ -22,6 +22,12 @@ enum MemoryStatsState: Equatable {
     case failed
 }
 
+enum DeepBrainStatusState: Equatable {
+    case unknown
+    case loaded(DeepBrainStatus)
+    case failed
+}
+
 enum ModelRouteProvisioningState: Equatable {
     case unknown
     case remoteRoute
@@ -114,6 +120,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var microphoneGranted = false
     @Published private(set) var memoryStats = MemoryStats.empty
     @Published private(set) var memoryStatsState = MemoryStatsState.unknown
+    @Published private(set) var deepBrainStatusState = DeepBrainStatusState.unknown
     @Published private(set) var lastMemoryRefresh: Date?
     @Published private(set) var lastRefresh: Date?
     @Published private(set) var isRefreshing = false
@@ -292,6 +299,81 @@ final class AppModel: ObservableObject {
             return "Model requests stay on this Mac through local Ollama."
         }
         return "No remote model route is configured; finish local model setup before using AI features."
+    }
+
+    var deepBrainStatusTitle: String {
+        switch deepBrainStatusState {
+        case .unknown:
+            return "Checking Deep Brain status"
+        case .failed:
+            return "Deep Brain status unavailable"
+        case .loaded(let status):
+            return status.routeLabel
+        }
+    }
+
+    var deepBrainStatusSummary: String {
+        switch deepBrainStatusState {
+        case .unknown:
+            return "Re-check setup to read the local Deep Brain consent status."
+        case .failed:
+            return "Could not read Deep Brain status from the local CLI."
+        case .loaded(let status):
+            let exclusions = Self.deepBrainExclusionSummary(status.exclusions)
+            let check = "Status check is local; no memory packet or provider was used."
+            let route: String
+            if status.cloudGatesEnabled {
+                route = "Cloud reasoning gates are enabled for Deep Brain when you ask."
+            } else if status.askAvailable {
+                route = "Deep Brain ask can use the local model route without cloud."
+            } else if !status.deepBrainEnabled {
+                route = "Deep Brain ask is off until you enable the feature gate."
+            } else {
+                route = "Deep Brain ask is blocked by the current consent/model route."
+            }
+            return "\(route) \(check) \(exclusions)"
+        }
+    }
+
+    var deepBrainStatusBadge: String {
+        switch deepBrainStatusState {
+        case .unknown:
+            return "Check"
+        case .failed:
+            return "Unavailable"
+        case .loaded(let status):
+            if status.cloudGatesEnabled { return "Cloud gates" }
+            if status.askAvailable { return "Local ask" }
+            if !status.deepBrainEnabled { return "Off" }
+            return "Blocked"
+        }
+    }
+
+    var deepBrainStatusNeedsAttention: Bool {
+        switch deepBrainStatusState {
+        case .unknown, .failed:
+            return true
+        case .loaded(let status):
+            return status.deepBrainEnabled && !status.askAvailable
+        }
+    }
+
+    private static func deepBrainExclusionSummary(_ exclusions: DeepBrainStatus.Exclusions) -> String {
+        var pieces: [String] = []
+        if !exclusions.excludedAppsConfigured.isEmpty {
+            pieces.append("apps: \(exclusions.excludedAppsConfigured.joined(separator: ", "))")
+        }
+        if !exclusions.excludedSourcesConfigured.isEmpty {
+            pieces.append("sources: \(exclusions.excludedSourcesConfigured.joined(separator: ", "))")
+        }
+        if exclusions.excludedObservationIdsConfigured > 0 {
+            let n = exclusions.excludedObservationIdsConfigured
+            pieces.append("\(n) observation id\(n == 1 ? "" : "s")")
+        }
+        guard !pieces.isEmpty else {
+            return "No Deep Brain exclusions are configured."
+        }
+        return "Configured exclusions: \(pieces.joined(separator: "; "))."
     }
 
     var modelRouteFooterLabel: String {
@@ -710,6 +792,7 @@ final class AppModel: ObservableObject {
         refreshPermissionStates()
         report = await service.preflightReport()
         await refreshMemoryStats()
+        await refreshDeepBrainStatus()
         lastRefresh = Date()
     }
 
@@ -723,6 +806,14 @@ final class AppModel: ObservableObject {
             memoryStatsState = .failed
         }
         lastMemoryRefresh = Date()
+    }
+
+    func refreshDeepBrainStatus() async {
+        if let status = await service.deepBrainStatus() {
+            deepBrainStatusState = .loaded(status)
+        } else {
+            deepBrainStatusState = .failed
+        }
     }
 
     func pullMissingModels() async {
@@ -805,6 +896,10 @@ final class AppModel: ObservableObject {
             self.memoryStats = memoryStats
             self.memoryStatsState = .loaded(memoryStats)
         }
+    }
+
+    func setDeepBrainStatusForTesting(_ state: DeepBrainStatusState) {
+        self.deepBrainStatusState = state
     }
     #endif
 

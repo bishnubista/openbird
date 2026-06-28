@@ -200,6 +200,7 @@ routes:
       note: local settings read only; no provider, store, or packet is constructed
     truth_surface:
       - cli.deep_brain_status
+      - app.deepBrainStatusRow
 
   - id: deep_brain.ask
     class: unknown

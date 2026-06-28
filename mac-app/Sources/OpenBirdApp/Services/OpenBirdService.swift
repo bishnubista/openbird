@@ -486,6 +486,44 @@ struct MemoryStats: Codable, Equatable {
     static let empty = MemoryStats(observations: 0, blobs: 0, chunks: 0, vectors: 0)
 }
 
+/// Local-only Deep Brain consent/status payload decoded from
+/// `openbird deep-brain status --json`.
+struct DeepBrainStatus: Codable, Equatable {
+    struct Exclusions: Codable, Equatable {
+        let excludedAppsConfigured: [String]
+        let excludedSourcesConfigured: [String]
+        let excludedObservationIdsConfigured: Int
+
+        enum CodingKeys: String, CodingKey {
+            case excludedAppsConfigured = "excluded_apps_configured"
+            case excludedSourcesConfigured = "excluded_sources_configured"
+            case excludedObservationIdsConfigured = "excluded_observation_ids_configured"
+        }
+    }
+
+    let route: String
+    let egress: String
+    let routeLabel: String
+    let deepBrainEnabled: Bool
+    let cloudOptIn: Bool
+    let cloudGatesEnabled: Bool
+    let cloudBlockedReasons: [String]
+    let askAvailable: Bool
+    let askBlockedReasons: [String]
+    let exclusions: Exclusions
+
+    enum CodingKeys: String, CodingKey {
+        case route, egress, exclusions
+        case routeLabel = "route_label"
+        case deepBrainEnabled = "deep_brain_enabled"
+        case cloudOptIn = "cloud_opt_in"
+        case cloudGatesEnabled = "cloud_gates_enabled"
+        case cloudBlockedReasons = "cloud_blocked_reasons"
+        case askAvailable = "ask_available"
+        case askBlockedReasons = "ask_blocked_reasons"
+    }
+}
+
 /// One capture session in a day (decoded from `openbird timeline --json`).
 struct TimelineSession: Codable, Identifiable, Equatable {
     let sessionId: String?
@@ -1355,6 +1393,22 @@ final class OpenBirdService: @unchecked Sendable {
     static func parseMemoryStats(_ output: String) -> MemoryStats? {
         guard let data = output.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(MemoryStats.self, from: data)
+    }
+
+    /// Load the settings-only Deep Brain status. The CLI route is local/no-egress:
+    /// it reads configuration only and does not open the memory DB or provider.
+    func deepBrainStatus() async -> DeepBrainStatus? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
+        let result = await runAsync(
+            cli, arguments: ["deep-brain", "status", "--json"], timeout: 10
+        )
+        guard result.exitCode == 0 else { return nil }
+        return Self.parseDeepBrainStatus(result.stdout)
+    }
+
+    static func parseDeepBrainStatus(_ output: String) -> DeepBrainStatus? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(DeepBrainStatus.self, from: data)
     }
 
     /// Load a day's capture timeline (sessions + stat numbers). Pure local read;
