@@ -164,6 +164,18 @@ assert_selected_app_running() {
     || die "running $APP_NAME process $pid does not expose expected executable $APP_EXECUTABLE"
 }
 
+open_deeplink() {
+  local url="$1"
+  # Bare `open openbird://...` follows the default scheme-handler registration,
+  # which can wake a sibling OpenBird.app with the same bundle id. Target the
+  # selected bundle path instead. This assumes `relaunch` already cold-started the
+  # selected app with --enable-e2e-deeplinks; a cold `open -a ... URL` cannot pass
+  # that arg, so the assertion/capture after this stays the source of truth.
+  open -a "$APP_BUNDLE" "$url" >/dev/null 2>&1
+  /bin/sleep 0.6
+  assert_selected_app_running
+}
+
 prepare_launch_services() {
   if [[ -x "$ROOT/script/dev_cleanup.sh" ]]; then
     "$ROOT/script/dev_cleanup.sh" >/dev/null 2>&1 || log "WARN: dev_cleanup.sh did not fully clean LaunchServices registrations."
@@ -293,8 +305,7 @@ log "onboarding: resetting first-run flag + relaunching"
 prepare_launch_services
 defaults delete "$BUNDLE_ID" "$ONBOARDING_KEY" >/dev/null 2>&1 || true
 relaunch
-open "openbird://main" >/dev/null 2>&1 || true
-/bin/sleep 0.6
+open_deeplink "openbird://main"
 capture_window "$APP_NAME" "$OUT/06-setup-onboarding.png"
 
 # 2) Main window (config / SetupView). Mark onboarding complete first so the sheet
@@ -302,8 +313,7 @@ capture_window "$APP_NAME" "$OUT/06-setup-onboarding.png"
 #    is one pane of the single shell window now (openbird://main), not the default surface.
 defaults write "$BUNDLE_ID" "$ONBOARDING_KEY" -bool true >/dev/null 2>&1 || true
 relaunch
-open "openbird://main" >/dev/null 2>&1 || true
-/bin/sleep 0.6
+open_deeplink "openbird://main"
 capture_window "$APP_NAME" "$OUT/00-main-window.png"
 
 # 3) Ask Spotlight panel — summon via the global ⌥Space hotkey, then capture.
@@ -322,9 +332,8 @@ osascript -e 'tell application "System Events" to key code 53' >/dev/null 2>&1 |
 #    is now a pane of the single "OpenBird" window, not a separate "Today" window, so
 #    capture the main window after the pane switches.
 log "today: selecting via openbird://today deep-link"
-open "openbird://today" >/dev/null 2>&1 || true
-/bin/sleep 2
-assert_selected_app_running
+open_deeplink "openbird://today"
+/bin/sleep 1.4
 # No `|| true`: the Today surface is now a pane of the always-present "OpenBird"
 # window (same reliable target as the main-window capture above), not a race-prone
 # separate window — so a failure here is a real defect and should fail the run.
@@ -333,8 +342,7 @@ capture_window "$APP_NAME" "$OUT/05-today-dayview.png"
 # 4b) Expanded Ask (the unified surface: chat + optional Sources/Timeline rails) —
 #     opened via the gated openbird://ask-expanded deep-link. Poll until discoverable.
 log "ask (expanded): opening via openbird://ask-expanded deep-link"
-open "openbird://ask-expanded" >/dev/null 2>&1 || true
-assert_selected_app_running
+open_deeplink "openbird://ask-expanded"
 for _ in $(seq 1 20); do
   if capture_window "Ask" "$OUT/03-ask-expanded.png"; then break; fi
   /bin/sleep 0.2
