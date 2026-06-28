@@ -67,8 +67,7 @@ struct SourcesRail: View {
     }
 
     static func derivedCardTitle(_ c: DerivedChatCitation) -> String {
-        let label = c.label.trimmingCharacters(in: .whitespacesAndNewlines)
-        return label.isEmpty ? "Derived source" : label
+        c.displayLabel
     }
 
     static func derivedCountText(_ c: DerivedChatCitation) -> String {

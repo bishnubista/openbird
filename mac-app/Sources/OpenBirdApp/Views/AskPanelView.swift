@@ -204,7 +204,7 @@ struct AskPanelView: View {
                 .foregroundStyle(.white)
                 .frame(width: 18, height: 18)
                 .background(OB.accent, in: RoundedRectangle(cornerRadius: 5))
-            Text(c.label.isEmpty ? "Derived source" : c.label)
+            Text(c.displayLabel)
                 .font(.system(size: 11.5))
                 .foregroundStyle(OB.textSecondary(scheme))
                 .lineLimit(1)

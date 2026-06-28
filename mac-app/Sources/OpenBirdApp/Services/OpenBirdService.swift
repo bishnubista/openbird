@@ -192,6 +192,10 @@ struct DerivedChatCitation: Codable, Identifiable, Equatable {
     let snippet: String
     let derivedFromTotal: Int
     var id: String { sourceId }
+    var displayLabel: String {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Derived source" : trimmed
+    }
 
     enum CodingKeys: String, CodingKey {
         case index
