@@ -29,6 +29,9 @@ def _make_repo(
     skipped_model_probe: bool = False,
     real_export_race: bool = False,
     bad_real_export: bool = False,
+    enabled_productivity_coach: bool = False,
+    bad_productivity_coach: bool = False,
+    raw_productivity_coach: bool = False,
 ) -> tuple[Path, Path, Path]:
     repo = tmp_path / "repo"
     (repo / "script").mkdir(parents=True)
@@ -71,6 +74,9 @@ bad_model_probe="{int(bad_model_probe)}"
 skipped_model_probe="{int(skipped_model_probe)}"
 real_export_race="{int(real_export_race)}"
 bad_real_export="{int(bad_real_export)}"
+enabled_productivity_coach="{int(enabled_productivity_coach)}"
+bad_productivity_coach="{int(bad_productivity_coach)}"
+raw_productivity_coach="{int(raw_productivity_coach)}"
 stats_counter="{stats_counter}"
 case "${{1:-}}" in
   preflight)
@@ -234,6 +240,48 @@ JSON
  "productivity":{{"facts":{{"unsafe":"SECRET_FACT"}}}}}}
 JSON
     ;;
+  productivity-coach)
+    question="$(cat)"
+    if [ -z "$question" ]; then
+      exit 2
+    fi
+    if [ "$enabled_productivity_coach" = "1" ]; then
+      cat <<'JSON'
+{{"ok":true,"answer":"SECRET_COACH_ANSWER","grounded":true,
+ "reasoning_route":"local_model","egress":"none","packet_route":"productivity.coach_packet",
+ "citations":[{{"citation_id":"SECRET_CITATION","source_ids":["SECRET_SOURCE_ID"]}}]}}
+JSON
+      exit 0
+    fi
+    if [ "$bad_productivity_coach" = "1" ]; then
+      cat <<'JSON'
+{{"ok":true,"answer":"SECRET_COACH_ANSWER","grounded":false,
+ "reasoning_route":"local_model","egress":"none","packet_route":"productivity.coach_packet",
+ "citations":[]}}
+JSON
+      exit 0
+    fi
+    if [ "$raw_productivity_coach" = "1" ]; then
+      cat <<'JSON'
+{{"ok":true,"answer":"SECRET_COACH_ANSWER","grounded":true,
+ "reasoning_route":"local_model","egress":"raw","packet_route":"productivity.coach_packet",
+ "citations":[{{"citation_id":"SECRET_CITATION","source_ids":["SECRET_SOURCE_ID"]}}]}}
+JSON
+      exit 0
+    fi
+    cat <<'JSON'
+{{"ok":false,"answer":"SECRET_BLOCKED_ANSWER",
+ "blocked_reasons":["SECRET_BLOCK_REASON"],
+ "reasoning_route":"blocked","egress":"none","packet_route":"productivity.coach_packet",
+ "packet":{{"local_date":"2026-06-27","day_offset":1,"source_scope":"capture",
+   "citation_count":2,
+   "exclusions":{{"input_observations":2,"kept_observations":2,
+     "excluded_observations":0,"excluded_by":{{}},
+     "excluded_apps_configured":["SECRET_APP"],"excluded_sources_configured":["SECRET_SOURCE"],
+     "excluded_observation_ids_configured":0}}}}}}
+JSON
+    exit 2
+    ;;
   day-memory)
     cat <<'JSON'
 {{"built":true,"day_memory":{{"source_count":2,
@@ -332,6 +380,9 @@ def test_beta_rehearsal_outputs_counts_without_content_and_cleans_export(tmp_pat
     assert "completion_ok=true" in out
     assert "real export explicit: mode=600 lines=2 stats_before=2 stats_after=2" in out
     assert "observations=2" in out
+    assert "productivity coach gate day 1: rc=2 ok=false" in out
+    assert "blocked_reason_count=1" in out
+    assert "citation_count=2" in out
     assert "session_count=1" in out
     assert "text_chars=" in out
     assert "SECRET_" not in out
@@ -403,6 +454,46 @@ def test_beta_rehearsal_blocks_skipped_model_probe_without_leaking_raw_json(tmp_
     assert "BLOCKED preflight:" in result.stdout
     assert "embedding_probed=false" in result.stdout
     assert "completion_probed=false" in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert "SECRET_" not in result.stderr
+
+
+def test_beta_rehearsal_passes_enabled_productivity_coach_with_citations(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, enabled_productivity_coach=True)
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS    productivity coach gate day 1:" in result.stdout
+    assert "rc=0 ok=true" in result.stdout
+    assert "grounded=true" in result.stdout
+    assert "citation_count=1" in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert "SECRET_" not in result.stderr
+
+
+def test_beta_rehearsal_blocks_bad_productivity_coach_without_leaking(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, bad_productivity_coach=True)
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 2
+    assert "BLOCKED productivity coach gate day 1:" in result.stdout
+    assert "grounded=false" in result.stdout
+    assert "citation_count=0" in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert "SECRET_" not in result.stderr
+
+
+def test_beta_rehearsal_blocks_raw_productivity_coach_egress_without_leaking(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, raw_productivity_coach=True)
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 2
+    assert "BLOCKED productivity coach gate day 1:" in result.stdout
+    assert "egress=raw" in result.stdout
+    assert "citation_count=1" in result.stdout
     assert "SECRET_" not in result.stdout
     assert "SECRET_" not in result.stderr
 
