@@ -270,7 +270,7 @@ struct ChatResult: Codable, Equatable {
         answer = try c.decode(String.self, forKey: .answer)
         grounded = try c.decode(Bool.self, forKey: .grounded)
         grounding = try c.decodeIfPresent(String.self, forKey: .grounding)
-        citations = (try? c.decodeIfPresent([ChatCitation].self, forKey: .citations)) ?? []
+        citations = try c.decodeIfPresent([ChatCitation].self, forKey: .citations) ?? []
         derivedCitations = (try? c.decodeIfPresent([DerivedChatCitation].self, forKey: .derivedCitations)) ?? []
         reasoningRoute = try c.decodeIfPresent(String.self, forKey: .reasoningRoute)
     }

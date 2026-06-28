@@ -134,6 +134,19 @@ final class ChatCitationDecodingTests: XCTestCase {
         XCTAssertEqual(result.routeLabel, "Local only")
     }
 
+    func testMalformedOccurrenceCitationsFailDecode() {
+        let json = """
+        {
+          "answer": "ok",
+          "grounded": true,
+          "citations": "not-an-array",
+          "derived_citations": []
+        }
+        """
+
+        XCTAssertThrowsError(try decodeResult(json))
+    }
+
     func testDisplaySourceIdsAreNamespacedAndStable() {
         let result = ChatResult(
             answer: "mixed",
