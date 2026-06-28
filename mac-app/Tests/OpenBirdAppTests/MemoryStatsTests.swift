@@ -323,6 +323,41 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(model.lastActionMessage, "Copied confirmation-gated prune command.")
     }
 
+    func testDeepBrainAskCommandSummaryNamesOneShotStdinAndSeparateCloudOptIn() {
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+
+        XCTAssertTrue(model.deepBrainAskCommandSummary.contains("one-shot Terminal command"))
+        XCTAssertTrue(model.deepBrainAskCommandSummary.contains("Preview the packet first"))
+        XCTAssertTrue(model.deepBrainAskCommandSummary.contains("does not persist consent"))
+        XCTAssertTrue(model.deepBrainAskCommandSummary.contains("type your question"))
+        XCTAssertTrue(model.deepBrainAskCommandSummary.contains("press Ctrl-D"))
+        XCTAssertTrue(model.deepBrainAskCommandSummary.contains("Remote LLM routes still require separate OPENBIRD_ALLOW_CLOUD=1"))
+        assertNoAbsoluteDeviceClaim(model.deepBrainAskCommandSummary)
+    }
+
+    func testCopyDeepBrainAskCommandUsesInjectedPasteboardAndKeepsCloudOptInSeparate() {
+        final class Recorder: @unchecked Sendable {
+            var copied: [String] = []
+        }
+        let recorder = Recorder()
+        let service = OpenBirdService(pasteboardWriter: { recorder.copied.append($0) })
+        let model = AppModel(service: service, initialReport: PreflightReport())
+
+        model.copyDeepBrainAskCommand()
+
+        XCTAssertEqual(recorder.copied, [AppModel.deepBrainAskCommand])
+        XCTAssertTrue(AppModel.deepBrainAskCommand.contains("OPENBIRD_DEEP_BRAIN_ENABLED=1"))
+        XCTAssertTrue(AppModel.deepBrainAskCommand.contains("openbird deep-brain ask"))
+        XCTAssertTrue(AppModel.deepBrainAskCommand.contains("--day 0"))
+        XCTAssertTrue(AppModel.deepBrainAskCommand.contains("--stdin"))
+        XCTAssertFalse(AppModel.deepBrainAskCommand.contains("OPENBIRD_ALLOW_CLOUD"))
+        XCTAssertFalse(AppModel.deepBrainAskCommand.contains("OPENBIRD_LLM_MODEL"))
+        XCTAssertFalse(AppModel.deepBrainAskCommand.contains("OPENBIRD_EMBED_MODEL"))
+        XCTAssertFalse(AppModel.deepBrainAskCommand.contains("--yes"))
+        XCTAssertFalse(AppModel.deepBrainAskCommand.contains("purge"))
+        XCTAssertEqual(model.lastActionMessage, "Copied one-shot Deep Brain ask command.")
+    }
+
     func testParsePreflightDecodesLocalModelRoute() {
         let report = OpenBirdService.parsePreflight("""
         {
