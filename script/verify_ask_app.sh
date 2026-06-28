@@ -25,40 +25,77 @@
 # Exit: 0 = PASS (grounded, >=1 display source) · 1 = FAIL (ran, ungrounded)
 #       2 = BLOCKED (no outcome line — build/launch/CLI problem, not a fix verdict)
 #
-# Usage: script/verify_ask_app.sh ["Summarize my day"] [--build] [--plaintext-dev]
+# Usage: script/verify_ask_app.sh ["Summarize my day"] [--app /path/to/OpenBird.app] [--build] [--plaintext-dev]
 # =============================================================================
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BIN="$ROOT_DIR/dist/OpenBird.app/Contents/MacOS/OpenBird"
+DEFAULT_APP_BUNDLE="$ROOT_DIR/dist/OpenBird.app"
+APP_BUNDLE="${OPENBIRD_VERIFY_APP_PATH:-$DEFAULT_APP_BUNDLE}"
 OUT_DIR="${OPENBIRD_VERIFY_OUT:-$ROOT_DIR/.verify-out}"
 QUERY="Summarize my day"
 DO_BUILD=0
 PLAINTEXT_DEV=0
 WAIT_SECONDS="${OPENBIRD_VERIFY_WAIT:-120}"
+APP_WAS_OVERRIDDEN=0
 
-for arg in "$@"; do
-  case "$arg" in
-    --build) DO_BUILD=1 ;;
-    --plaintext-dev) PLAINTEXT_DEV=1 ;;
-    --*) echo "unknown flag: $arg" >&2; exit 2 ;;
-    *) QUERY="$arg" ;;
+if [ -n "${OPENBIRD_VERIFY_APP_PATH:-}" ]; then
+  APP_WAS_OVERRIDDEN=1
+fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --build)
+      DO_BUILD=1
+      shift
+      ;;
+    --plaintext-dev)
+      PLAINTEXT_DEV=1
+      shift
+      ;;
+    --app)
+      [ "$#" -ge 2 ] || { echo "--app requires a path" >&2; exit 2; }
+      APP_BUNDLE="$2"
+      APP_WAS_OVERRIDDEN=1
+      shift 2
+      ;;
+    --app=*)
+      APP_BUNDLE="${1#--app=}"
+      APP_WAS_OVERRIDDEN=1
+      shift
+      ;;
+    --*) echo "unknown flag: $1" >&2; exit 2 ;;
+    *)
+      QUERY="$1"
+      shift
+      ;;
   esac
 done
 
 log() { printf '[verify-ask] %s\n' "$1" >&2; }
 mkdir -p "$OUT_DIR"
 
+if [ "$DO_BUILD" -eq 1 ] && [ "$APP_WAS_OVERRIDDEN" -eq 1 ]; then
+  log "BLOCKED: --build only applies to the default dist app target"
+  echo "VERDICT: BLOCKED"; exit 2
+fi
+
 if [ "$DO_BUILD" -eq 1 ]; then
   log "building app bundle (slow)…"
   OPENBIRD_SWIFTPM_DISABLE_SANDBOX=1 "$ROOT_DIR/script/build_and_run.sh" --no-launch \
     > "$OUT_DIR/build.log" 2>&1 || { log "BLOCKED: build failed ($OUT_DIR/build.log)"; echo "VERDICT: BLOCKED"; exit 2; }
 fi
+
+APP_BUNDLE="$(cd "$APP_BUNDLE" 2>/dev/null && pwd -P || printf '%s' "$APP_BUNDLE")"
+APP_BIN="$APP_BUNDLE/Contents/MacOS/OpenBird"
+log "target app: $APP_BUNDLE"
 if [ ! -x "$APP_BIN" ]; then
   log "BLOCKED: no app bundle at $APP_BIN (run with --build)"; echo "VERDICT: BLOCKED"; exit 2
 fi
 
-pkill -f "dist/OpenBird.app/Contents/MacOS/OpenBird" 2>/dev/null && sleep 1
+if [ "$APP_WAS_OVERRIDDEN" -eq 0 ]; then
+  pkill -f "dist/OpenBird.app/Contents/MacOS/OpenBird" 2>/dev/null && sleep 1
+fi
 
 # Headless self-test: query via env. The app runs the ask and exits on its own;
 # `timeout` bounds a hung Keychain/model/CLI path. The query is NOT echoed to
