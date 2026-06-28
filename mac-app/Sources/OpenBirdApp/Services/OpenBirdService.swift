@@ -575,6 +575,7 @@ final class OpenBirdService: @unchecked Sendable {
     private let privacyPaneOpener: @Sendable (PrivacyPane) -> Void
     private let promptFolderOpener: @Sendable (URL) -> Void
     private let promptEditRunner: PromptEditRunner
+    private let pasteboardWriter: @Sendable (String) -> Void
     private let openBirdCLIResolver: (@Sendable () -> String?)?
     /// Status-path probe for a long-lived external `openbird capture --loop` daemon.
     /// Defaults to the real `pgrep`-based body; injectable so `isCaptureRunning()` (and
@@ -620,6 +621,10 @@ final class OpenBirdService: @unchecked Sendable {
             NSWorkspace.shared.open(url)
         },
         promptEditRunner: PromptEditRunner? = nil,
+        pasteboardWriter: @escaping @Sendable (String) -> Void = { text in
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        },
         openBirdCLIResolver: (@Sendable () -> String?)? = nil,
         externalLoopDaemonProbe: @escaping @Sendable () -> Bool = {
             OpenBirdService.realExternalLoopDaemonRunning()
@@ -647,6 +652,7 @@ final class OpenBirdService: @unchecked Sendable {
         self.promptEditRunner = promptEditRunner ?? { path, arguments, environment in
             OpenBirdService.run(path, arguments: arguments, timeout: 30, environment: environment)
         }
+        self.pasteboardWriter = pasteboardWriter
         self.openBirdCLIResolver = openBirdCLIResolver
         self.externalLoopDaemonProbe = externalLoopDaemonProbe
         self.captureHelperRunningProbe = captureHelperRunningProbe
@@ -1136,6 +1142,10 @@ final class OpenBirdService: @unchecked Sendable {
             attributes: [.posixPermissions: 0o700]
         )
         NSWorkspace.shared.open(dataDirectory)
+    }
+
+    func copyToPasteboard(_ text: String) {
+        pasteboardWriter(text)
     }
 
     var promptDirectoryPath: String {

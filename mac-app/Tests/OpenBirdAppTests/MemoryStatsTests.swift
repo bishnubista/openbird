@@ -176,6 +176,36 @@ final class MemoryStatsTests: XCTestCase {
         assertNoAbsoluteDeviceClaim(model.deepBrainStatusSummary)
     }
 
+    func testDataDeletionSummaryNamesConfirmationCascadeAndVacuum() {
+        let model = AppModel(service: OpenBirdService(), initialReport: PreflightReport())
+
+        XCTAssertTrue(model.dataDeletionSummary.contains("ask for confirmation"))
+        XCTAssertTrue(model.dataDeletionSummary.contains("cascade-deletes"))
+        XCTAssertTrue(model.dataDeletionSummary.contains("blobs/chunks/FTS/vector"))
+        XCTAssertTrue(model.dataDeletionSummary.contains("vacuum"))
+        XCTAssertTrue(model.dataDeletionSummary.contains(AppModel.dataPurgeAllCommand))
+        XCTAssertFalse(model.dataDeletionSummary.contains("--yes"))
+        assertNoAbsoluteDeviceClaim(model.dataDeletionSummary)
+    }
+
+    func testCopyDataPruneCommandUsesInjectedPasteboardAndKeepsConfirmationGate() {
+        final class Recorder: @unchecked Sendable {
+            var copied: [String] = []
+        }
+        let recorder = Recorder()
+        let service = OpenBirdService(pasteboardWriter: { recorder.copied.append($0) })
+        let model = AppModel(service: service, initialReport: PreflightReport())
+
+        model.copyDataPruneCommand()
+
+        XCTAssertEqual(recorder.copied, [AppModel.dataPruneCommand])
+        XCTAssertTrue(AppModel.dataPruneCommand.contains("data prune"))
+        XCTAssertTrue(AppModel.dataPruneCommand.contains("--older-than 90d"))
+        XCTAssertFalse(AppModel.dataPruneCommand.contains("purge --all"))
+        XCTAssertFalse(AppModel.dataPruneCommand.contains("--yes"))
+        XCTAssertEqual(model.lastActionMessage, "Copied confirmation-gated prune command.")
+    }
+
     func testParsePreflightDecodesLocalModelRoute() {
         let report = OpenBirdService.parsePreflight("""
         {

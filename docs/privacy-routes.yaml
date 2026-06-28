@@ -52,6 +52,7 @@ routes:
         - vector_rows
     truth_surface:
       - app.capture_state
+      - app.dataDeletionCommandRow
       - preflight.privacy
 
   - id: capture.pause
