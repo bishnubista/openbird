@@ -187,6 +187,20 @@ routes:
     truth_surface:
       - cli.deep_brain_preview
 
+  - id: deep_brain.status
+    class: local
+    source: Deep Brain opt-in and exclusion settings
+    captured_fields:
+      - opt_in_gate_status
+      - exclusion_metadata
+      - configured_exclusion_counts
+    storage: []
+    egress:
+      default: none
+      note: local settings read only; no provider, store, or packet is constructed
+    truth_surface:
+      - cli.deep_brain_status
+
   - id: deep_brain.ask
     class: unknown
     source: user question plus exclusion-filtered day/week memory packet

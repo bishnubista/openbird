@@ -391,6 +391,59 @@ def _has_cli_cloud_exclusions(
     return bool(exclude_app or exclude_source or exclude_observation_id)
 
 
+def _deep_brain_status_payload(settings) -> dict[str, Any]:
+    """Build a local-only Deep Brain consent/status payload from settings.
+
+    Privacy: this is settings-only. It must not open the memory DB, construct a
+    provider, or probe the network. ``deep_brain_ask_blocked_reasons`` currently
+    classifies model routes by configured strings/loopback host only; if that ever
+    changes, this status route must stay no-egress.
+    """
+    from openbird.deep_brain import (
+        deep_brain_ask_blocked_reasons,
+        deep_brain_blocked_reasons,
+    )
+
+    cloud_blocked_reasons = deep_brain_blocked_reasons(settings)
+    ask_blocked_reasons = deep_brain_ask_blocked_reasons(settings)
+    cloud_gates_enabled = not cloud_blocked_reasons
+    ask_available = not ask_blocked_reasons
+    if not settings.deep_brain_enabled:
+        route_label = "Deep Brain off"
+    elif cloud_gates_enabled:
+        route_label = "Cloud reasoning gates enabled"
+    elif ask_available:
+        route_label = "Deep Brain local ask available · no cloud"
+    else:
+        route_label = "Deep Brain blocked"
+
+    return {
+        "route": "deep_brain.status",
+        "egress": "none",
+        "route_label": route_label,
+        "deep_brain_enabled": bool(settings.deep_brain_enabled),
+        "cloud_opt_in": bool(settings.allow_cloud),
+        "cloud_gates_enabled": cloud_gates_enabled,
+        "cloud_blocked_reasons": cloud_blocked_reasons,
+        "ask_available": ask_available,
+        "ask_blocked_reasons": ask_blocked_reasons,
+        "exclusions": {
+            "excluded_apps_configured": list(settings.deep_brain_excluded_apps),
+            "excluded_sources_configured": list(settings.deep_brain_excluded_sources),
+            "excluded_observation_ids_configured": len(
+                settings.deep_brain_excluded_observation_ids
+            ),
+        },
+        "env_vars": {
+            "deep_brain_enabled": "OPENBIRD_DEEP_BRAIN_ENABLED",
+            "cloud_opt_in": "OPENBIRD_ALLOW_CLOUD",
+            "excluded_apps": "OPENBIRD_DEEP_BRAIN_EXCLUDED_APPS",
+            "excluded_sources": "OPENBIRD_DEEP_BRAIN_EXCLUDED_SOURCES",
+            "excluded_observation_ids": "OPENBIRD_DEEP_BRAIN_EXCLUDED_OBSERVATION_IDS",
+        },
+    }
+
+
 def _packet_audit_from_deep_brain_packet(packet: dict[str, Any]) -> dict[str, Any]:
     from openbird.deep_brain import packet_json_for_model
     from openbird.reasoning_ledger import packet_payload_audit
@@ -972,6 +1025,48 @@ def _briefing_signals(day: int, start: float, end: float, *, as_json: bool) -> N
 # --------------------------------------------------------------------------- #
 # Deep Brain preview                                                          #
 # --------------------------------------------------------------------------- #
+
+
+@deep_brain_app.command("status")
+def deep_brain_status(
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show Deep Brain opt-in and exclusion status without reading memory."""
+    payload = _deep_brain_status_payload(get_settings())
+    if as_json:
+        _console.print_json(json.dumps(payload))
+        return
+
+    exclusions = payload["exclusions"]
+    _console.print(f"Deep Brain: {payload['route_label']}")
+    _console.print(
+        f"Feature gate: {'on' if payload['deep_brain_enabled'] else 'off'} "
+        f"({payload['env_vars']['deep_brain_enabled']})"
+    )
+    _console.print(
+        f"Cloud opt-in: {'on' if payload['cloud_opt_in'] else 'off'} "
+        f"({payload['env_vars']['cloud_opt_in']})"
+    )
+    if payload["cloud_blocked_reasons"]:
+        _console.print("Cloud gates missing:")
+        for reason in payload["cloud_blocked_reasons"]:
+            _console.print(f"- {reason}")
+    if payload["ask_blocked_reasons"]:
+        _console.print("Ask gates missing:")
+        for reason in payload["ask_blocked_reasons"]:
+            _console.print(f"- {reason}")
+    apps = exclusions["excluded_apps_configured"]
+    sources = exclusions["excluded_sources_configured"]
+    _console.print(
+        "Exclusions: "
+        f"{len(apps)} app(s), {len(sources)} source(s), "
+        f"{exclusions['excluded_observation_ids_configured']} observation id(s)"
+    )
+    if apps:
+        _console.print(f"Excluded apps: {', '.join(apps)}")
+    if sources:
+        _console.print(f"Excluded sources: {', '.join(sources)}")
+    _console.print("No data was sent.")
 
 
 @deep_brain_app.command("preview")
