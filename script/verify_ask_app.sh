@@ -2,15 +2,21 @@
 # =============================================================================
 # verify_ask_app.sh — autonomous GUI-app verification of "Ask OpenBird".
 # =============================================================================
-# Validates the REAL app's ask pipeline end-to-end with NO human and NO permission
-# prompts. It launches the dist bundle in self-test mode (OPENBIRD_SELFTEST_ASK),
-# which runs the query through the SAME OpenBirdService.askChat seam the Ask panel
-# uses — spawning the real `openbird chat` engine — then prints a deterministic
-# outcome and exits. We assert on that line.
+# Validates the REAL app's ask pipeline end-to-end. It launches the dist bundle
+# in self-test mode (OPENBIRD_SELFTEST_ASK), which runs the query through the SAME
+# OpenBirdService.askChat seam the Ask panel uses — spawning the real `openbird
+# chat` engine — then prints a deterministic outcome and exits. We assert on that
+# line.
 #
 # Why not drive the panel with keystrokes? System Events automation triggers an
 # Accessibility/Automation permission prompt — a human gate that defeats unattended
 # self-testing. Self-test mode runs the same code path headlessly, prompt-free.
+#
+# Default mode is for beta rehearsal against the encrypted real store: the app
+# resolves its own DB key before spawning the CLI child. On a fresh or unsigned
+# bundle that may require a Keychain ACL prompt; the outer timeout maps that to
+# BLOCKED, never PASS. Use --plaintext-dev for the old prompt-free path against an
+# explicitly plaintext dev DB.
 #
 # Scope: this exercises the app's ask PIPELINE (service → CLI → grounding/citation
 # validation), not the SwiftUI rendering of the answer bubble. That's where the
@@ -19,7 +25,7 @@
 # Exit: 0 = PASS (grounded, >=1 display source) · 1 = FAIL (ran, ungrounded)
 #       2 = BLOCKED (no outcome line — build/launch/CLI problem, not a fix verdict)
 #
-# Usage: script/verify_ask_app.sh ["Summarize my day"] [--build]
+# Usage: script/verify_ask_app.sh ["Summarize my day"] [--build] [--plaintext-dev]
 # =============================================================================
 set -uo pipefail
 
@@ -28,11 +34,13 @@ APP_BIN="$ROOT_DIR/dist/OpenBird.app/Contents/MacOS/OpenBird"
 OUT_DIR="${OPENBIRD_VERIFY_OUT:-$ROOT_DIR/.verify-out}"
 QUERY="Summarize my day"
 DO_BUILD=0
+PLAINTEXT_DEV=0
 WAIT_SECONDS="${OPENBIRD_VERIFY_WAIT:-120}"
 
 for arg in "$@"; do
   case "$arg" in
     --build) DO_BUILD=1 ;;
+    --plaintext-dev) PLAINTEXT_DEV=1 ;;
     --*) echo "unknown flag: $arg" >&2; exit 2 ;;
     *) QUERY="$arg" ;;
   esac
@@ -52,17 +60,24 @@ fi
 
 pkill -f "dist/OpenBird.app/Contents/MacOS/OpenBird" 2>/dev/null && sleep 1
 
-# Headless self-test: query via env, unencrypted DB (no Keychain prompt). The app
-# runs the ask and exits on its own; `timeout` bounds a hung model/CLI. The query
-# is NOT echoed to output — it could be a content-bearing question; keep this tool
-# to counts/booleans like the app's own signpost.
-log "running self-test ask (headless, no permission prompts)…"
+# Headless self-test: query via env. The app runs the ask and exits on its own;
+# `timeout` bounds a hung Keychain/model/CLI path. The query is NOT echoed to
+# output — it could be a content-bearing question; keep this tool to counts,
+# booleans, and safe reason codes like the app's own signpost.
+log "running self-test ask (headless, no UI automation)…"
 RUN_LOG="$OUT_DIR/selftest_run.log"
-OPENBIRD_SELFTEST_ASK="$QUERY" OPENBIRD_DISABLE_KEYRING=1 \
-  gtimeout --signal=KILL "$WAIT_SECONDS" "$APP_BIN" > "$RUN_LOG" 2>&1
+if [ "$PLAINTEXT_DEV" -eq 1 ]; then
+  log "mode: plaintext dev DB (OPENBIRD_DISABLE_KEYRING=1)"
+  OPENBIRD_SELFTEST_ASK="$QUERY" OPENBIRD_DISABLE_KEYRING=1 \
+    gtimeout --signal=KILL "$WAIT_SECONDS" "$APP_BIN" > "$RUN_LOG" 2>&1
+else
+  log "mode: encrypted real store (app-owned DB key)"
+  OPENBIRD_SELFTEST_ASK="$QUERY" \
+    gtimeout --signal=KILL "$WAIT_SECONDS" "$APP_BIN" > "$RUN_LOG" 2>&1
+fi
 RC=$?
 
-OUTCOME="$(grep -oE 'SELFTEST ask\.outcome [a-z0-9= ]+' "$RUN_LOG" | tail -1)"
+OUTCOME="$(grep -oE 'SELFTEST ask\.outcome [a-z0-9=_ ]+' "$RUN_LOG" | tail -1)"
 if [ -z "$OUTCOME" ]; then
   log "BLOCKED: no SELFTEST outcome (exit $RC). Tail of run log:"
   tail -5 "$RUN_LOG" >&2
@@ -74,7 +89,15 @@ log "signal: $OUTCOME"
 # `error=1` and exits 2. Map it to BLOCKED, not FAIL (which is reserved for a real
 # ungrounded answer), matching this script's documented exit contract.
 if printf '%s' "$OUTCOME" | grep -q 'error=1'; then
-  log "BLOCKED: self-test ask errored (engine/CLI problem, exit $RC) — not a fix verdict"
+  KIND="$(printf '%s' "$OUTCOME" | grep -oE 'kind=[a-z0-9_]+' | cut -d= -f2)"
+  case "${KIND:-unknown}" in
+    db_key_unavailable)
+      log "BLOCKED: DB key unavailable (encrypted store unverifiable, or plaintext store — use --plaintext-dev)"
+      ;;
+    *)
+      log "BLOCKED: self-test ask errored (kind=${KIND:-unknown}, exit $RC) — not a fix verdict"
+      ;;
+  esac
   echo "VERDICT: BLOCKED"; exit 2
 fi
 GROUNDED="$(printf '%s' "$OUTCOME" | grep -oE 'grounded=[0-9]+' | cut -d= -f2)"

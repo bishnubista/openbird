@@ -56,6 +56,58 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(strict["OPENBIRD_REQUIRE_ENCRYPTION"], "1")
     }
 
+    func testKeyringDisabledTruthHelperMatchesChildEnvironmentOptOut() {
+        for raw in ["1", "true", "YES", " On "] {
+            XCTAssertTrue(
+                OpenBirdService.isKeyringExplicitlyDisabled(
+                    environment: ["OPENBIRD_DISABLE_KEYRING": raw]
+                ),
+                "expected keyring opt-out for \(raw)"
+            )
+        }
+        for raw in ["", "0", "false", "off", "no"] {
+            XCTAssertFalse(
+                OpenBirdService.isKeyringExplicitlyDisabled(
+                    environment: ["OPENBIRD_DISABLE_KEYRING": raw]
+                ),
+                "did not expect keyring opt-out for \(raw)"
+            )
+        }
+    }
+
+    func testSelfTestBootstrapsKeyUnlessPlaintextDevOptOutIsExplicit() {
+        XCTAssertFalse(
+            AppDelegate.shouldBootstrapDBKeyForSelfTest(
+                environment: ["OPENBIRD_DISABLE_KEYRING": "1"]
+            )
+        )
+        XCTAssertFalse(
+            AppDelegate.shouldBootstrapDBKeyForSelfTest(
+                environment: ["OPENBIRD_DISABLE_KEYRING": "true"]
+            )
+        )
+        XCTAssertTrue(
+            AppDelegate.shouldBootstrapDBKeyForSelfTest(environment: [:])
+        )
+        XCTAssertTrue(
+            AppDelegate.shouldBootstrapDBKeyForSelfTest(
+                environment: ["OPENBIRD_DISABLE_KEYRING": "0"]
+            )
+        )
+    }
+
+    func testSelfTestErrorSignalUsesReasonCodesOnly() {
+        XCTAssertEqual(AppDelegate.selfTestErrorSignal(ChatError.cliMissing), "cli_missing")
+        XCTAssertEqual(
+            AppDelegate.selfTestErrorSignal(
+                ChatError.failed("raw provider stderr must not be emitted")
+            ),
+            "chat_failed"
+        )
+        XCTAssertEqual(AppDelegate.selfTestErrorSignal(ChatError.decode), "decode")
+        XCTAssertEqual(AppDelegate.selfTestErrorSignal(NSError(domain: "x", code: 1)), "unknown")
+    }
+
     func testParseMemoryStatsDecodesCliJson() {
         let stats = OpenBirdService.parseMemoryStats("""
         {

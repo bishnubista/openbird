@@ -779,14 +779,24 @@ final class OpenBirdService: @unchecked Sendable {
     /// Resolve the app-owned DB key and make it available to all CLI children.
     /// Idempotent; call once at launch (applicationDidFinishLaunching) BEFORE any
     /// child process is spawned.
-    static func bootstrapDBKey() {
+    @discardableResult
+    static func bootstrapDBKey() -> Bool {
         let dbPath = databaseURL().path
         let (key, _) = KeychainKeyProvider.resolveKey(dbPath: dbPath)  // outcome logged by provider
-        guard let key else { return }
+        guard let key else { return false }
         injectedDBKey = key
         // Belt-and-suspenders: also export into our own environment so a child
         // that inherits env without an explicit overlay still receives the key.
         setenv("OPENBIRD_DB_KEY", key, 1)
+        return true
+    }
+
+    static func isKeyringExplicitlyDisabled(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        let disableRaw = environment["OPENBIRD_DISABLE_KEYRING"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return ["1", "true", "yes", "on"].contains(disableRaw)
     }
 
     /// Base environment for a CLI child with OPENBIRD_DB_KEY explicitly overlaid
@@ -814,10 +824,7 @@ final class OpenBirdService: @unchecked Sendable {
             // has consciously opted into plaintext, so don't override that choice.
             // Recognize the SAME truthy set the Python keyring parser uses
             // (storage/crypto.py: {1,true,yes,on}), so `=true` works too — not just `=1`.
-            let disableRaw = base["OPENBIRD_DISABLE_KEYRING"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-            let keyringExplicitlyDisabled = ["1", "true", "yes", "on"].contains(disableRaw)
-            if !keyringExplicitlyDisabled {
+            if !isKeyringExplicitlyDisabled(environment: base) {
                 env["OPENBIRD_REQUIRE_ENCRYPTION"] = "1"
             }
         }

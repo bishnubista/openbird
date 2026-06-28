@@ -17,8 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // never the query/answer/citation text), and exit. No window, no global
         // hotkey, no keystroke automation — so an automated verifier can validate the
         // real app's ask pipeline with NO Accessibility/Automation permission prompt
-        // (the human bottleneck for self-testing). Pair with OPENBIRD_DISABLE_KEYRING=1
-        // for a Keychain-prompt-free run against an unencrypted dev DB.
+        // (the human bottleneck for self-testing). By default it resolves the
+        // app-owned DB key so beta rehearsal exercises the encrypted real store.
+        // Set OPENBIRD_DISABLE_KEYRING=1 only for prompt-free plaintext-dev DB runs.
         if let query = ProcessInfo.processInfo.environment["OPENBIRD_SELFTEST_ASK"],
            !query.isEmpty {
             // Stay fully headless: no dock icon / window, so the SwiftUI scene's
@@ -26,6 +27,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `.task` ALSO guards on this env var as belt-and-suspenders, since the
             // ask runs off-thread and the scene could otherwise mount before exit.
             NSApp.setActivationPolicy(.prohibited)
+            if Self.shouldBootstrapDBKeyForSelfTest(),
+               !OpenBirdService.bootstrapDBKey() {
+                Self.emitSelfTestOutcomeAndExit(
+                    "SELFTEST ask.outcome error=1 kind=db_key_unavailable",
+                    code: 2
+                )
+                return
+            }
             Self.runSelfTestAndExit(query: query)
             return  // runSelfTestAndExit exits the process when the ask completes
         }
@@ -58,10 +67,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         watchdog.start()
     }
 
+    static func shouldBootstrapDBKeyForSelfTest(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        !OpenBirdService.isKeyringExplicitlyDisabled(environment: environment)
+    }
+
+    static func selfTestErrorSignal(_ error: Error) -> String {
+        switch error {
+        case ChatError.cliMissing:
+            return "cli_missing"
+        case ChatError.failed:
+            return "chat_failed"
+        case ChatError.decode:
+            return "decode"
+        default:
+            return "unknown"
+        }
+    }
+
+    private static func emitSelfTestOutcomeAndExit(_ line: String, code: Int32) {
+        if code == 0 {
+            log.info("\(line, privacy: .public)")
+        } else {
+            log.error("\(line, privacy: .public)")
+        }
+        FileHandle.standardOutput.write(Data((line + "\n").utf8))
+        exit(code)
+    }
+
     /// Run one ask through the real service off the main thread, print a parseable
     /// outcome line to stdout, and exit (0=grounded, 1=ungrounded, 2=error). Stays
-    /// headless: never resolves the Keychain DB key or activates a window, so it
-    /// cannot raise a permission/password prompt.
+    /// headless: no dock icon / window / Accessibility automation. The default
+    /// self-test resolves the app-owned DB key for encrypted real-store evidence;
+    /// OPENBIRD_DISABLE_KEYRING=1 remains the explicit plaintext-dev path.
     private static func runSelfTestAndExit(query: String) {
         let service = OpenBirdService()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -72,14 +111,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let grounded = r.grounded && r.hasDisplaySources
                 line = "SELFTEST ask.outcome grounded=\(grounded ? 1 : 0) citations=\(r.citations.count) derived=\(r.derivedCitations.count) sources=\(r.sourceCount)"
                 code = grounded ? 0 : 1
-                log.info("\(line, privacy: .public)")
             } catch {
-                line = "SELFTEST ask.outcome error=1"
+                line = "SELFTEST ask.outcome error=1 kind=\(Self.selfTestErrorSignal(error))"
                 code = 2
-                log.error("\(line, privacy: .public)")
             }
-            FileHandle.standardOutput.write(Data((line + "\n").utf8))
-            exit(code)
+            Self.emitSelfTestOutcomeAndExit(line, code: code)
         }
     }
 }
