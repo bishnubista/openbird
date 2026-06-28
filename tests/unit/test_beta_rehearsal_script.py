@@ -25,6 +25,8 @@ def _make_repo(
     bad_exclusion_accounting: bool = False,
     bad_preflight: bool = False,
     plaintext_preflight: bool = False,
+    bad_model_probe: bool = False,
+    skipped_model_probe: bool = False,
 ) -> tuple[Path, Path, Path]:
     repo = tmp_path / "repo"
     (repo / "script").mkdir(parents=True)
@@ -62,8 +64,13 @@ no_capture_exclusion="{int(no_capture_exclusion)}"
 bad_exclusion_accounting="{int(bad_exclusion_accounting)}"
 bad_preflight="{int(bad_preflight)}"
 plaintext_preflight="{int(plaintext_preflight)}"
+bad_model_probe="{int(bad_model_probe)}"
+skipped_model_probe="{int(skipped_model_probe)}"
 case "${{1:-}}" in
   preflight)
+    if [ "${{2:-}}" != "--json" ] || [ "${{3:-}}" != "--probe-embedding" ]; then
+      exit 2
+    fi
     if [ "$bad_preflight" = "1" ]; then
       cat <<'JSON'
 {{"runtime_ok":false,"release_gate_ok":true,
@@ -72,7 +79,9 @@ case "${{1:-}}" in
  "cloud":{{"active":false,"remote_models":{{"SECRET_REMOTE_MODEL":true}}}},
  "privacy":{{"allowlist":["SECRET_ALLOW_APP"],"blocklist":["SECRET_BLOCK_APP"]}},
  "macos":{{"all_passed":true}},
- "ollama":{{"missing_models":["SECRET_MISSING_MODEL"]}}}}
+ "ollama":{{"missing_models":["SECRET_MISSING_MODEL"]}},
+ "embedding":{{"model":"SECRET_EMBED_MODEL","probed":true,"probed_dim":768,"dim_ok":true}},
+ "completion":{{"model":"SECRET_CHAT_MODEL","probed":true,"ok":true}}}}
 JSON
       exit 1
     fi
@@ -84,7 +93,37 @@ JSON
  "cloud":{{"active":false,"remote_models":{{"SECRET_REMOTE_MODEL":true}}}},
  "privacy":{{"allowlist":["SECRET_ALLOW_APP"],"blocklist":["SECRET_BLOCK_APP"]}},
  "macos":{{"all_passed":true}},
- "ollama":{{"missing_models":[]}}}}
+ "ollama":{{"missing_models":[]}},
+ "embedding":{{"model":"SECRET_EMBED_MODEL","probed":true,"probed_dim":768,"dim_ok":true}},
+ "completion":{{"model":"SECRET_CHAT_MODEL","probed":true,"ok":true}}}}
+JSON
+      exit 0
+    fi
+    if [ "$bad_model_probe" = "1" ]; then
+      cat <<'JSON'
+{{"runtime_ok":true,"release_gate_ok":true,
+ "sqlite":{{"vec_available":true,"fts5_available":true}},
+ "encryption":{{"status":"encrypted","backend":"sqlcipher","verified":true}},
+ "cloud":{{"active":false,"remote_models":{{"SECRET_REMOTE_MODEL":true}}}},
+ "privacy":{{"allowlist":["SECRET_ALLOW_APP"],"blocklist":["SECRET_BLOCK_APP"]}},
+ "macos":{{"all_passed":true}},
+ "ollama":{{"missing_models":[]}},
+ "embedding":{{"model":"SECRET_EMBED_MODEL","probed":true,"probed_dim":384,"dim_ok":false}},
+ "completion":{{"model":"SECRET_CHAT_MODEL","probed":true,"ok":false}}}}
+JSON
+      exit 0
+    fi
+    if [ "$skipped_model_probe" = "1" ]; then
+      cat <<'JSON'
+{{"runtime_ok":true,"release_gate_ok":true,
+ "sqlite":{{"vec_available":true,"fts5_available":true}},
+ "encryption":{{"status":"encrypted","backend":"sqlcipher","verified":true}},
+ "cloud":{{"active":false,"remote_models":{{"SECRET_REMOTE_MODEL":true}}}},
+ "privacy":{{"allowlist":["SECRET_ALLOW_APP"],"blocklist":["SECRET_BLOCK_APP"]}},
+ "macos":{{"all_passed":true}},
+ "ollama":{{"missing_models":[]}},
+ "embedding":{{"model":"SECRET_EMBED_MODEL","probed":false,"probed_dim":null,"dim_ok":null,"error":"SECRET_EMBED_ERROR"}},
+ "completion":{{"model":"SECRET_CHAT_MODEL","probed":false,"ok":null,"error":"SECRET_CHAT_ERROR"}}}}
 JSON
       exit 0
     fi
@@ -95,7 +134,9 @@ JSON
  "cloud":{{"active":false,"remote_models":{{"SECRET_REMOTE_MODEL":true}}}},
  "privacy":{{"allowlist":["SECRET_ALLOW_APP"],"blocklist":["SECRET_BLOCK_APP"]}},
  "macos":{{"all_passed":true}},
- "ollama":{{"missing_models":[]}}}}
+ "ollama":{{"missing_models":[]}},
+ "embedding":{{"model":"SECRET_EMBED_MODEL","probed":true,"probed_dim":768,"dim_ok":true}},
+ "completion":{{"model":"SECRET_CHAT_MODEL","probed":true,"ok":true}}}}
 JSON
     ;;
   data)
@@ -261,6 +302,8 @@ def test_beta_rehearsal_outputs_counts_without_content_and_cleans_export(tmp_pat
     assert "PASS    preflight:" in out
     assert "allowlist_count=1" in out
     assert "blocklist_count=1" in out
+    assert "embedding_dim_ok=true" in out
+    assert "completion_ok=true" in out
     assert "observations=2" in out
     assert "session_count=1" in out
     assert "text_chars=" in out
@@ -306,6 +349,33 @@ def test_beta_rehearsal_blocks_preflight_release_gate_without_leaking_raw_json(t
     assert "runtime_ok=true" in result.stdout
     assert "release_gate_ok=false" in result.stdout
     assert "encryption_status=plaintext-0600" in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert "SECRET_" not in result.stderr
+
+
+def test_beta_rehearsal_blocks_failed_model_probe_without_leaking_raw_json(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, bad_model_probe=True)
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 2
+    assert "BLOCKED preflight:" in result.stdout
+    assert "embedding_dim_ok=false" in result.stdout
+    assert "embedding_probed_dim=384" in result.stdout
+    assert "completion_ok=false" in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert "SECRET_" not in result.stderr
+
+
+def test_beta_rehearsal_blocks_skipped_model_probe_without_leaking_raw_json(tmp_path: Path) -> None:
+    repo, app, _export_log = _make_repo(tmp_path, skipped_model_probe=True)
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 2
+    assert "BLOCKED preflight:" in result.stdout
+    assert "embedding_probed=false" in result.stdout
+    assert "completion_probed=false" in result.stdout
     assert "SECRET_" not in result.stdout
     assert "SECRET_" not in result.stderr
 

@@ -145,7 +145,7 @@ def _summarize_integrity(cli: list[str], timeout: float) -> Row:
 
 def _summarize_preflight(cli: list[str], timeout: float) -> Row:
     # preflight emits useful diagnostic JSON even when it exits non-zero.
-    result = _run(cli + ["preflight", "--json"], timeout=timeout)
+    result = _run(cli + ["preflight", "--json", "--probe-embedding"], timeout=timeout)
     if isinstance(result, TimeoutError):
         return Row("BLOCKED", "preflight", "timeout")
     try:
@@ -161,6 +161,8 @@ def _summarize_preflight(cli: list[str], timeout: float) -> Row:
         privacy = _need_dict(payload, "privacy")
         macos = _need_dict(payload, "macos")
         ollama = _need_dict(payload, "ollama")
+        embedding = _need_dict(payload, "embedding")
+        completion = _need_dict(payload, "completion")
         runtime_ok = _need(payload, "runtime_ok")
         release_gate_ok = _need(payload, "release_gate_ok")
         sqlite_vec = _need(sqlite, "vec_available")
@@ -179,7 +181,12 @@ def _summarize_preflight(cli: list[str], timeout: float) -> Row:
             f"allowlist_count={len(_need_list(privacy, 'allowlist'))} "
             f"blocklist_count={len(_need_list(privacy, 'blocklist'))} "
             f"macos_all_passed={_scalar(macos_all_passed)} "
-            f"missing_model_count={len(_need_list(ollama, 'missing_models'))}"
+            f"missing_model_count={len(_need_list(ollama, 'missing_models'))} "
+            f"embedding_probed={_scalar(_need(embedding, 'probed'))} "
+            f"embedding_dim_ok={_scalar(_need(embedding, 'dim_ok'))} "
+            f"embedding_probed_dim={_scalar(_need(embedding, 'probed_dim'))} "
+            f"completion_probed={_scalar(_need(completion, 'probed'))} "
+            f"completion_ok={_scalar(_need(completion, 'ok'))}"
         )
         ready = (
             result.returncode == 0
@@ -190,6 +197,10 @@ def _summarize_preflight(cli: list[str], timeout: float) -> Row:
             and encryption_status == "encrypted"
             and encryption_verified is True
             and macos_all_passed is True
+            and _need(embedding, "probed") is True
+            and _need(embedding, "dim_ok") is True
+            and _need(completion, "probed") is True
+            and _need(completion, "ok") is True
         )
         return Row("PASS" if ready else "BLOCKED", "preflight", detail)
     except ParseError as exc:
