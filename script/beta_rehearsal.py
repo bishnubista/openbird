@@ -374,6 +374,66 @@ def _temp_stats(cli: list[str], env: dict[str, str], timeout: float) -> int | No
         return None
 
 
+def _real_stats(cli: list[str], timeout: float) -> int | None:
+    payload, _error = _json_cmd(cli, ["data", "stats"], timeout=timeout)
+    if payload is None:
+        return None
+    try:
+        return int(_need(payload, "observations"))
+    except (ParseError, TypeError, ValueError):
+        return None
+
+
+def _real_export_check(cli: list[str], timeout: float) -> Row:
+    tempdir = tempfile.mkdtemp(prefix="openbird-beta-real-export-")
+    export_path = Path(tempdir) / "real-export.jsonl"
+    try:
+        obs_before = _real_stats(cli, timeout)
+        if obs_before is None:
+            return Row("BLOCKED", "real export explicit", "stats unavailable")
+        if obs_before == 0:
+            return Row("BLOCKED", "real export explicit", "empty real store")
+
+        # This briefly materializes real captured content in a 0700 temp dir.
+        # The export file is checked by mode/count only and deleted in finally;
+        # a SIGKILL could leave a same-user 0600 temp export behind.
+        result = _run(
+            cli + ["data", "export", "--output", str(export_path), "--yes"],
+            timeout=timeout,
+        )
+        if isinstance(result, TimeoutError):
+            return Row("BLOCKED", "real export explicit", "timeout")
+        obs_after = _real_stats(cli, timeout)
+        if obs_after is None:
+            return Row("BLOCKED", "real export explicit", "stats unavailable")
+        if obs_after < obs_before:
+            return Row(
+                "BLOCKED",
+                "real export explicit",
+                f"store changed non-monotonically stats_before={obs_before} stats_after={obs_after}",
+            )
+        if result.returncode != 0 or not export_path.exists():
+            return Row(
+                "FAIL",
+                "real export explicit",
+                f"rc={result.returncode} file_exists={int(export_path.exists())}",
+            )
+        try:
+            mode = stat.S_IMODE(export_path.stat().st_mode)
+            line_count = sum(1 for _ in export_path.open("r", encoding="utf-8"))
+        except Exception:
+            return Row("BLOCKED", "real export explicit", "read error")
+        status = "PASS" if mode == 0o600 and obs_before <= line_count <= obs_after else "FAIL"
+        return Row(
+            status,
+            "real export explicit",
+            f"mode={mode:o} lines={line_count} stats_before={obs_before} stats_after={obs_after}",
+        )
+    finally:
+        export_path.unlink(missing_ok=True)
+        shutil.rmtree(tempdir, ignore_errors=True)
+
+
 def _consent_checks(cli: list[str], timeout: float) -> list[Row]:
     rows: list[Row] = []
     tempdir = tempfile.mkdtemp(prefix="openbird-beta-rehearsal-")
@@ -533,6 +593,7 @@ def main(argv: list[str] | None = None) -> int:
     stats_row, _observations = _summarize_stats(cli, args.timeout)
     rows.append(stats_row)
     rows.append(_summarize_integrity(cli, args.timeout))
+    rows.append(_real_export_check(cli, args.timeout))
     rows.append(_summarize_timeline(cli, 0, args.timeout))
     rows.append(_summarize_timeline(cli, args.day, args.timeout))
     rows.append(_summarize_briefing(cli, args.day, args.timeout))

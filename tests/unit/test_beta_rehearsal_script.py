@@ -27,6 +27,8 @@ def _make_repo(
     plaintext_preflight: bool = False,
     bad_model_probe: bool = False,
     skipped_model_probe: bool = False,
+    real_export_race: bool = False,
+    bad_real_export: bool = False,
 ) -> tuple[Path, Path, Path]:
     repo = tmp_path / "repo"
     (repo / "script").mkdir(parents=True)
@@ -54,6 +56,7 @@ exit 0
     app = tmp_path / "Applications" / "OpenBird.app"
     cli = app / "Contents" / "MacOS" / "openbird-cli"
     export_log = tmp_path / "exports.log"
+    stats_counter = tmp_path / "real_stats_count"
     _write_executable(
         cli,
         f"""#!/usr/bin/env bash
@@ -66,6 +69,9 @@ bad_preflight="{int(bad_preflight)}"
 plaintext_preflight="{int(plaintext_preflight)}"
 bad_model_probe="{int(bad_model_probe)}"
 skipped_model_probe="{int(skipped_model_probe)}"
+real_export_race="{int(real_export_race)}"
+bad_real_export="{int(bad_real_export)}"
+stats_counter="{stats_counter}"
 case "${{1:-}}" in
   preflight)
     if [ "${{2:-}}" != "--json" ] || [ "${{3:-}}" != "--probe-embedding" ]; then
@@ -145,6 +151,20 @@ JSON
         if [ "$slow_stats" = "1" ]; then
           sleep 2
         fi
+        if [ -z "${{OPENBIRD_DATA_DIR:-}}" ] && [ "$real_export_race" = "1" ]; then
+          n=0
+          if [ -f "$stats_counter" ]; then
+            n="$(cat "$stats_counter")"
+          fi
+          n=$((n + 1))
+          printf '%s' "$n" > "$stats_counter"
+          if [ "$n" -ge 3 ]; then
+            cat <<'JSON'
+{{"observations":3,"blobs":1,"chunks":2,"vectors":2,"day_memories":1,"encryption_enabled":true}}
+JSON
+            exit 0
+          fi
+        fi
         cat <<'JSON'
 {{"observations":2,"blobs":1,"chunks":2,"vectors":2,"day_memories":1,"encryption_enabled":true}}
 JSON
@@ -166,7 +186,13 @@ JSON
           exit 1
         fi
         printf '%s\\n' "$out" >> "{export_log}"
-        printf '{{"text":"SECRET_EXPORT_TEXT"}}\\n{{"text":"SECRET_EXPORT_TEXT_2"}}\\n' > "$out"
+        if [ -z "${{OPENBIRD_DATA_DIR:-}}" ] && [ "$real_export_race" = "1" ]; then
+          printf '{{"text":"SECRET_EXPORT_TEXT"}}\\n{{"text":"SECRET_EXPORT_TEXT_2"}}\\n{{"text":"SECRET_EXPORT_TEXT_3"}}\\n' > "$out"
+        elif [ -z "${{OPENBIRD_DATA_DIR:-}}" ] && [ "$bad_real_export" = "1" ]; then
+          printf '{{"text":"SECRET_EXPORT_TEXT"}}\\n' > "$out"
+        else
+          printf '{{"text":"SECRET_EXPORT_TEXT"}}\\n{{"text":"SECRET_EXPORT_TEXT_2"}}\\n' > "$out"
+        fi
         chmod 600 "$out"
         ;;
       prune)
@@ -304,6 +330,7 @@ def test_beta_rehearsal_outputs_counts_without_content_and_cleans_export(tmp_pat
     assert "blocklist_count=1" in out
     assert "embedding_dim_ok=true" in out
     assert "completion_ok=true" in out
+    assert "real export explicit: mode=600 lines=2 stats_before=2 stats_after=2" in out
     assert "observations=2" in out
     assert "session_count=1" in out
     assert "text_chars=" in out
@@ -378,6 +405,32 @@ def test_beta_rehearsal_blocks_skipped_model_probe_without_leaking_raw_json(tmp_
     assert "completion_probed=false" in result.stdout
     assert "SECRET_" not in result.stdout
     assert "SECRET_" not in result.stderr
+
+
+def test_beta_rehearsal_real_export_tolerates_concurrent_capture_growth(tmp_path: Path) -> None:
+    repo, app, export_log = _make_repo(tmp_path, real_export_race=True)
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "real export explicit: mode=600 lines=3 stats_before=2 stats_after=3" in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert "SECRET_" not in result.stderr
+    for line in export_log.read_text(encoding="utf-8").splitlines():
+        assert not Path(line).exists()
+
+
+def test_beta_rehearsal_real_export_bad_count_is_failed_without_leaking(tmp_path: Path) -> None:
+    repo, app, export_log = _make_repo(tmp_path, bad_real_export=True)
+
+    result = _run_rehearsal(repo, app)
+
+    assert result.returncode == 1
+    assert "FAIL    real export explicit: mode=600 lines=1 stats_before=2 stats_after=2" in result.stdout
+    assert "SECRET_" not in result.stdout
+    assert "SECRET_" not in result.stderr
+    for line in export_log.read_text(encoding="utf-8").splitlines():
+        assert not Path(line).exists()
 
 
 def test_fake_export_fixture_writes_private_mode_before_harness_deletes(tmp_path: Path) -> None:
