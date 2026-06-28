@@ -27,13 +27,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `.task` ALSO guards on this env var as belt-and-suspenders, since the
             // ask runs off-thread and the scene could otherwise mount before exit.
             NSApp.setActivationPolicy(.prohibited)
-            if Self.shouldBootstrapDBKeyForSelfTest(),
-               !OpenBirdService.bootstrapDBKey() {
-                Self.emitSelfTestOutcomeAndExit(
-                    "SELFTEST ask.outcome error=1 kind=db_key_unavailable",
-                    code: 2
-                )
-                return
+            if Self.shouldBootstrapDBKeyForSelfTest() {
+                Self.emitSelfTestSignal("SELFTEST db_key.bootstrap start")
+                let ok = OpenBirdService.bootstrapDBKey(timeout: Self.selfTestDBKeyTimeout())
+                Self.emitSelfTestSignal("SELFTEST db_key.bootstrap done ok=\(ok ? 1 : 0)")
+                if !ok {
+                    Self.emitSelfTestOutcomeAndExit(
+                        "SELFTEST ask.outcome error=1 kind=db_key_unavailable",
+                        code: 2
+                    )
+                    return
+                }
             }
             Self.runSelfTestAndExit(query: query)
             return  // runSelfTestAndExit exits the process when the ask completes
@@ -73,6 +77,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         !OpenBirdService.isKeyringExplicitlyDisabled(environment: environment)
     }
 
+    static func selfTestDBKeyTimeout(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> TimeInterval {
+        let fallback: TimeInterval = 15
+        guard let raw = environment["OPENBIRD_SELFTEST_DB_KEY_TIMEOUT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              let value = TimeInterval(raw),
+              value > 0
+        else {
+            return fallback
+        }
+        return value
+    }
+
     static func selfTestErrorSignal(_ error: Error) -> String {
         switch error {
         case ChatError.cliMissing:
@@ -94,6 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         FileHandle.standardOutput.write(Data((line + "\n").utf8))
         exit(code)
+    }
+
+    private static func emitSelfTestSignal(_ line: String) {
+        log.info("\(line, privacy: .public)")
+        FileHandle.standardOutput.write(Data((line + "\n").utf8))
     }
 
     /// Run one ask through the real service off the main thread, print a parseable

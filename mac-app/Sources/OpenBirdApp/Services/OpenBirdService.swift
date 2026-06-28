@@ -775,14 +775,43 @@ final class OpenBirdService: @unchecked Sendable {
 
     /// Resolved once at launch; nil when no key could be safely provided.
     private static var injectedDBKey: String?
+    typealias DBKeyResolver = @Sendable (String) -> (key: String?, outcome: KeychainKeyProvider.Outcome)
 
     /// Resolve the app-owned DB key and make it available to all CLI children.
     /// Idempotent; call once at launch (applicationDidFinishLaunching) BEFORE any
     /// child process is spawned.
     @discardableResult
-    static func bootstrapDBKey() -> Bool {
+    static func bootstrapDBKey(
+        timeout: TimeInterval? = nil,
+        resolver: @escaping DBKeyResolver = { dbPath in
+            KeychainKeyProvider.resolveKey(dbPath: dbPath)
+        }
+    ) -> Bool {
         let dbPath = databaseURL().path
-        let (key, _) = KeychainKeyProvider.resolveKey(dbPath: dbPath)  // outcome logged by provider
+        let key: String?
+        if let timeout {
+            guard timeout > 0 else { return false }
+            let semaphore = DispatchSemaphore(value: 0)
+            let lock = NSLock()
+            var resolved: (key: String?, outcome: KeychainKeyProvider.Outcome)?
+            DispatchQueue.global(qos: .userInitiated).async {
+                let value = resolver(dbPath)
+                lock.lock()
+                resolved = value
+                lock.unlock()
+                semaphore.signal()
+            }
+            guard semaphore.wait(timeout: .now() + timeout) == .success else {
+                return false
+            }
+            lock.lock()
+            let value = resolved
+            lock.unlock()
+            key = value?.key
+        } else {
+            let resolved = resolver(dbPath)  // outcome logged by provider
+            key = resolved.key
+        }
         guard let key else { return false }
         injectedDBKey = key
         // Belt-and-suspenders: also export into our own environment so a child
@@ -790,6 +819,13 @@ final class OpenBirdService: @unchecked Sendable {
         setenv("OPENBIRD_DB_KEY", key, 1)
         return true
     }
+
+    #if DEBUG
+    static func resetInjectedDBKeyForTests() {
+        injectedDBKey = nil
+        unsetenv("OPENBIRD_DB_KEY")
+    }
+    #endif
 
     static func isKeyringExplicitlyDisabled(
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -1638,7 +1674,12 @@ final class OpenBirdService: @unchecked Sendable {
             while process.isRunning && Date() < grace { Thread.sleep(forTimeInterval: 0.05) }
             if process.isRunning { kill(process.processIdentifier, SIGKILL) }
             process.waitUntilExit()
-            group.wait()
+            // A surviving grandchild can inherit stdout/stderr and keep the pipe
+            // write ends open after the direct CLI child dies. In that case the
+            // reader threads stay blocked in readDataToEndOfFile(); do not let
+            // cleanup hide the timeout from the UI/self-test. Process-group
+            // reaping would be the fuller fix for the residual reader/thread leak.
+            _ = group.wait(timeout: .now() + 0.5)
             throw ChatError.failed("Chat timed out while waiting for the local model.")
         }
 

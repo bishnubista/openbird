@@ -239,3 +239,65 @@ final class OpenBirdServiceChatArgumentsTests: XCTestCase {
         )
     }
 }
+
+final class OpenBirdServiceAskChatTimeoutTests: XCTestCase {
+    func testTimeoutReturnsWhenGrandchildKeepsPipeOpen() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("openbird-ask-timeout-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let holder = dir.appendingPathComponent("pipe-holder.sh")
+        let pidfile = dir.appendingPathComponent("pipe-holder.pid")
+        let cli = dir.appendingPathComponent("fake-openbird")
+        try """
+        #!/usr/bin/env bash
+        sleep 30
+        """.write(to: holder, atomically: true, encoding: .utf8)
+        try """
+        #!/usr/bin/env bash
+        "\(holder.path)" &
+        echo "$!" > "\(pidfile.path)"
+        sleep 30
+        """.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: holder.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+
+        let service = OpenBirdService(openBirdCLIResolver: { cli.path })
+        let done = expectation(description: "askChat returns a timeout error")
+        let lock = NSLock()
+        var capturedError: Error?
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                _ = try service.askChat("timeout check", timeout: 0.1)
+                XCTFail("askChat should time out")
+            } catch {
+                lock.lock()
+                capturedError = error
+                lock.unlock()
+            }
+            done.fulfill()
+        }
+
+        let result = XCTWaiter.wait(for: [done], timeout: 3)
+        cleanupPID(in: pidfile)
+        XCTAssertEqual(result, .completed, "askChat must not wait for inherited pipe EOF")
+
+        lock.lock()
+        let error = capturedError
+        lock.unlock()
+        guard case ChatError.failed(let message)? = error else {
+            return XCTFail("expected ChatError.failed timeout, got \(String(describing: error))")
+        }
+        XCTAssertEqual(message, "Chat timed out while waiting for the local model.")
+    }
+
+    private func cleanupPID(in pidfile: URL) {
+        guard
+            let text = try? String(contentsOf: pidfile, encoding: .utf8),
+            let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+            pid > 0
+        else { return }
+        kill(pid, SIGKILL)
+    }
+}
