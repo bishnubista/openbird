@@ -18,6 +18,7 @@ from openbird.day_memory import (
     classify_observation,
     productivity_exclusions_block,
     productivity_coach_packet_json_for_model,
+    saved_day_memory_with_day_offset,
 )
 from openbird.memory.store import MemoryStore
 from openbird.types import Observation
@@ -1296,6 +1297,59 @@ class _DayMemoryStoreStub:
         pass
 
 
+class _ReusedStaleOffsetDayMemoryStoreStub(_DayMemoryStoreStub):
+    def __init__(self, rows, *, stale_day_offset: int):
+        super().__init__(rows)
+        self.stale_day_offset = stale_day_offset
+
+    def ensure_day_memory(self, **kwargs):
+        from openbird.day_memory import EXTRACTOR_VERSION, build_day_memory
+
+        rows = self.time_range_text(
+            kwargs["start_ts"], kwargs["end_ts"], source=kwargs.get("source_scope")
+        )
+        built = build_day_memory(
+            rows,
+            start_ts=kwargs["start_ts"],
+            end_ts=kwargs["end_ts"],
+            day_offset=self.stale_day_offset,
+            source_scope=kwargs.get("source_scope", "capture"),
+        )
+        return self.save_day_memory(
+            local_date=kwargs["local_date"],
+            source_scope=kwargs.get("source_scope", "capture"),
+            extractor_version=EXTRACTOR_VERSION,
+            payload=built.payload,
+            source_ids=built.source_ids,
+        )
+
+
+def test_productivity_report_day_offset_override_does_not_mutate_saved_payload():
+    start = _ts(2026, 6, 12, 9)
+    built = build_day_memory(
+        [(_obs("o1", ts=start, app="com.mitchellh.ghostty"), "coding")],
+        start_ts=start,
+        end_ts=start + 60,
+        day_offset=0,
+    )
+    saved = {
+        "payload": built.payload,
+        "local_date": built.payload["local_date"],
+        "source_scope": "capture",
+        "source_count": len(built.source_ids),
+        "source_ids": built.source_ids,
+        "generated_at": start + 120,
+        "extractor_version": EXTRACTOR_VERSION,
+    }
+
+    display_saved = saved_day_memory_with_day_offset(saved, 1)
+    report = build_productivity_report(saved, day_offset=1)
+
+    assert saved["payload"]["day_offset"] == 0
+    assert display_saved["payload"]["day_offset"] == 1
+    assert report["day_offset"] == 1
+
+
 def test_day_memory_build_cli_is_no_model_and_json(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
@@ -1345,6 +1399,31 @@ def test_day_memory_show_json_ensures_empty_day(monkeypatch, tmp_path):
     assert payload["day_memory"]["payload"]["coverage"]["observations"] == 0
 
 
+def test_day_memory_show_json_projects_requested_day_offset(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    yesterday = (
+        dt.datetime.now()
+        .replace(hour=9, minute=0, second=0, microsecond=0)
+        - dt.timedelta(days=1)
+    ).timestamp()
+    rows = [
+        (_obs("o1", ts=yesterday, app="com.mitchellh.ghostty", window="openbird"), "coding")
+    ]
+    stub = _ReusedStaleOffsetDayMemoryStoreStub(rows, stale_day_offset=0)
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
+
+    try:
+        res = CliRunner().invoke(cli.app, ["day-memory", "show", "--day", "1", "--json"])
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["day_memory"]["payload"]["day_offset"] == 1
+    assert stub.saved["payload"]["day_offset"] == 0
+
+
 def test_productivity_cli_json_uses_local_route(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
     reset_settings_cache()
@@ -1390,6 +1469,38 @@ def test_productivity_cli_json_uses_local_route(monkeypatch, tmp_path):
         payload["productivity"]["coach_ready_packet"],
         sort_keys=True,
     )
+
+
+def test_productivity_cli_json_projects_requested_day_offset(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    yesterday = (
+        dt.datetime.now()
+        .replace(hour=9, minute=0, second=0, microsecond=0)
+        - dt.timedelta(days=1)
+    ).timestamp()
+    rows = [
+        (_obs("o1", ts=yesterday, app="com.mitchellh.ghostty", window="openbird"), "coding")
+    ]
+    stub = _ReusedStaleOffsetDayMemoryStoreStub(rows, stale_day_offset=0)
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
+    monkeypatch.setattr(
+        cli,
+        "_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("productivity must not build provider")),
+    )
+
+    try:
+        res = CliRunner().invoke(cli.app, ["productivity", "--day", "1", "--json"])
+    finally:
+        reset_settings_cache()
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["route"] == "productivity.local_facts"
+    assert payload["egress"] == "none"
+    assert payload["day_offset"] == 1
+    assert stub.saved["payload"]["day_offset"] == 0
 
 
 def test_productivity_coach_cli_refuses_before_provider_without_feature_gate(

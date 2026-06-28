@@ -180,9 +180,28 @@ def build_day_memory(
     return DayMemoryBuild(payload=payload, source_ids=source_ids)
 
 
-def build_productivity_report(saved: dict, *, exclusions: dict | None = None) -> dict:
+def saved_day_memory_with_day_offset(saved: dict, day_offset: int) -> dict:
+    """Return a display copy of ``saved`` with a request-relative day offset.
+
+    Persisted day-memory rows are keyed by absolute local date, while day offsets
+    are relative to the time of the request. Never mutate the cached payload to
+    update this display-only coordinate.
+    """
+    return {
+        **saved,
+        "payload": {**(saved.get("payload") or {}), "day_offset": day_offset},
+    }
+
+
+def build_productivity_report(
+    saved: dict,
+    *,
+    day_offset: int | None = None,
+    exclusions: dict | None = None,
+) -> dict:
     """Build a local-only productivity facts report from a saved day memory."""
     payload = saved.get("payload", {})
+    report_day_offset = day_offset if day_offset is not None else payload.get("day_offset")
     metrics = payload.get("metrics", {})
     session_refs_by_source = _session_refs_by_source(payload.get("sessions") or [])
     focus_blocks = [
@@ -227,7 +246,7 @@ def build_productivity_report(saved: dict, *, exclusions: dict | None = None) ->
         "egress": "none",
         "productivity_status": "local_facts_only",
         "local_date": payload.get("local_date") or saved.get("local_date"),
-        "day_offset": payload.get("day_offset"),
+        "day_offset": report_day_offset,
         "source_scope": payload.get("source_scope") or saved.get("source_scope"),
         "generated_at": saved.get("generated_at"),
         "memory_context": day_memory_context(saved),
