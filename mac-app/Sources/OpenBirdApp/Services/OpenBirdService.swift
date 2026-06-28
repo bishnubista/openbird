@@ -524,6 +524,51 @@ struct DeepBrainStatus: Codable, Equatable {
     }
 }
 
+/// Minimal, UI-safe count surface decoded from `openbird deep-brain preview --json`.
+/// The CLI packet is content-bearing; this type intentionally omits selected source
+/// snippets, observation ids, window/url metadata, and the raw packet body.
+struct DeepBrainPreview: Codable, Equatable {
+    struct Exclusions: Codable, Equatable {
+        let inputObservations: Int
+        let keptObservations: Int
+        let excludedObservations: Int
+        let excludedBy: [String: Int]
+        let unknownAppKept: Int
+        let excludedAppsConfigured: [String]
+        let excludedSourcesConfigured: [String]
+        let excludedObservationIdsConfigured: Int
+
+        enum CodingKeys: String, CodingKey {
+            case inputObservations = "input_observations"
+            case keptObservations = "kept_observations"
+            case excludedObservations = "excluded_observations"
+            case excludedBy = "excluded_by"
+            case unknownAppKept = "unknown_app_kept"
+            case excludedAppsConfigured = "excluded_apps_configured"
+            case excludedSourcesConfigured = "excluded_sources_configured"
+            case excludedObservationIdsConfigured = "excluded_observation_ids_configured"
+        }
+    }
+
+    let route: String
+    let egress: String
+    let cloudReady: Bool
+    let localDate: String
+    let dayOffset: Int
+    let sourceScope: String
+    let sourcesTotal: Int
+    let exclusions: Exclusions
+
+    enum CodingKeys: String, CodingKey {
+        case route, egress, exclusions
+        case cloudReady = "cloud_ready"
+        case localDate = "local_date"
+        case dayOffset = "day_offset"
+        case sourceScope = "source_scope"
+        case sourcesTotal = "sources_total"
+    }
+}
+
 /// One capture session in a day (decoded from `openbird timeline --json`).
 struct TimelineSession: Codable, Identifiable, Equatable {
     let sessionId: String?
@@ -1419,6 +1464,25 @@ final class OpenBirdService: @unchecked Sendable {
     static func parseDeepBrainStatus(_ output: String) -> DeepBrainStatus? {
         guard let data = output.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(DeepBrainStatus.self, from: data)
+    }
+
+    /// Build the local-only Deep Brain packet preview and decode only its count
+    /// surface. Raw CLI stdout is intentionally never logged because the packet JSON
+    /// includes selected-source snippets and ids that the app row must not expose.
+    func deepBrainPreview(dayOffset: Int = 0, timeout: TimeInterval = 60) async -> DeepBrainPreview? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
+        let result = await runAsync(
+            cli,
+            arguments: ["deep-brain", "preview", "--day", String(dayOffset), "--json"],
+            timeout: timeout
+        )
+        guard result.exitCode == 0 else { return nil }
+        return Self.parseDeepBrainPreview(result.stdout)
+    }
+
+    static func parseDeepBrainPreview(_ output: String) -> DeepBrainPreview? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(DeepBrainPreview.self, from: data)
     }
 
     /// Load a day's capture timeline (sessions + stat numbers). Pure local read;
