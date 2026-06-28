@@ -37,6 +37,8 @@ QUERY="Summarize my day"
 DO_BUILD=0
 PLAINTEXT_DEV=0
 WAIT_SECONDS="${OPENBIRD_VERIFY_WAIT:-120}"
+KEY_PROBE_TIMEOUT_SECONDS="${OPENBIRD_VERIFY_KEYRING_PROBE_TIMEOUT:-2}"
+KEY_PROBE_WAIT_SECONDS="${OPENBIRD_VERIFY_KEYRING_PROBE_WAIT:-10}"
 APP_WAS_OVERRIDDEN=0
 
 if [ -n "${OPENBIRD_VERIFY_APP_PATH:-}" ]; then
@@ -74,6 +76,62 @@ done
 
 log() { printf '[verify-ask] %s\n' "$1" >&2; }
 mkdir -p "$OUT_DIR"
+
+probe_bundled_cli_key_access() {
+  local cli_bin="$APP_BUNDLE/Contents/MacOS/openbird-cli"
+  local probe_out probe_rc parsed encrypted observations day_memories
+
+  if [ ! -x "$cli_bin" ]; then
+    log "BLOCKED: DB key unavailable; bundled CLI key probe unavailable (reason=missing_cli)"
+    return
+  fi
+
+  # Differential diagnosis only: do not persist or print the raw stats JSON.
+  # REQUIRE_ENCRYPTION makes a zero exit prove the CLI opened an encrypted store;
+  # counts are safe metadata and may be zero on a fresh-but-encrypted install.
+  probe_out="$(
+    env -u OPENBIRD_DISABLE_KEYRING \
+      NO_COLOR=1 \
+      OPENBIRD_KEYRING_TIMEOUT_SECONDS="$KEY_PROBE_TIMEOUT_SECONDS" \
+      OPENBIRD_REQUIRE_ENCRYPTION=1 \
+      gtimeout --signal=KILL "$KEY_PROBE_WAIT_SECONDS" "$cli_bin" data stats 2>/dev/null
+  )"
+  probe_rc=$?
+
+  if [ "$probe_rc" -ne 0 ]; then
+    log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=cli_key_probe_failed rc=$probe_rc)"
+    return
+  fi
+
+  parsed="$(printf '%s' "$probe_out" | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+    encrypted = payload.get("encryption_enabled")
+    observations = payload.get("observations")
+    day_memories = payload.get("day_memories")
+    if not isinstance(encrypted, bool) or not isinstance(observations, int) or not isinstance(day_memories, int):
+        raise ValueError("unexpected stats shape")
+except Exception:
+    sys.exit(1)
+print(f"{int(encrypted)} {observations} {day_memories}")
+' 2>/dev/null)"
+  probe_rc=$?
+
+  if [ "$probe_rc" -ne 0 ]; then
+    log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=cli_key_probe_unparseable)"
+    return
+  fi
+
+  read -r encrypted observations day_memories <<< "$parsed"
+  if [ "$encrypted" = "1" ]; then
+    log "BLOCKED: app-owned DB key unavailable, but bundled CLI decrypted encrypted store (observations=$observations day_memories=$day_memories); likely signed-app Keychain ACL/app identity issue"
+  else
+    log "BLOCKED: DB key unavailable; bundled CLI key probe failed (reason=cli_key_probe_not_encrypted)"
+  fi
+}
 
 if [ "$DO_BUILD" -eq 1 ] && [ "$APP_WAS_OVERRIDDEN" -eq 1 ]; then
   log "BLOCKED: --build only applies to the default dist app target"
@@ -129,7 +187,7 @@ if printf '%s' "$OUTCOME" | grep -q 'error=1'; then
   KIND="$(printf '%s' "$OUTCOME" | grep -oE 'kind=[a-z0-9_]+' | cut -d= -f2)"
   case "${KIND:-unknown}" in
     db_key_unavailable)
-      log "BLOCKED: DB key unavailable (encrypted store unverifiable, or plaintext store — use --plaintext-dev)"
+      probe_bundled_cli_key_access
       ;;
     *)
       log "BLOCKED: self-test ask errored (kind=${KIND:-unknown}, exit $RC) — not a fix verdict"
