@@ -1190,6 +1190,61 @@ def test_ensure_day_memory_rebuilds_v2_payload_for_productivity(
         store.close()
 
 
+def test_ensure_day_memory_rebuilds_stale_v5_active_time(
+    mem_settings, fake_provider
+):
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = _ts(2026, 6, 12, 9)
+        obs = store.add_observation(
+            "coding",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            session_id="s1",
+            ts=start,
+        )
+        obs2 = store.add_observation(
+            "coding continued",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            session_id="s1",
+            ts=start + 60,
+        )
+        rows = store.time_range_text(start, start + 3600, source="capture")
+        fingerprint = store.day_memory_source_fingerprint_from_rows(rows)
+        store.save_day_memory(
+            local_date="2026-06-12",
+            source_scope="capture",
+            extractor_version="day-memory-v5",
+            payload={
+                "local_date": "2026-06-12",
+                "source_scope": "capture",
+                "source_fingerprint": fingerprint,
+                "coverage": {
+                    "observations": 2,
+                    "source_ids": [obs.id, obs2.id],
+                },
+                "metrics": {"active_seconds": 9999},
+            },
+            source_ids=[obs.id, obs2.id],
+            generated_at=start,
+        )
+
+        saved = store.ensure_day_memory(
+            local_date="2026-06-12",
+            start_ts=start,
+            end_ts=start + 3600,
+            day_offset=0,
+            source_scope="capture",
+            force=False,
+        )
+
+        assert saved["extractor_version"] == EXTRACTOR_VERSION
+        assert saved["payload"]["metrics"]["active_seconds"] == 60
+    finally:
+        store.close()
+
+
 class _DayMemoryStoreStub:
     def __init__(self, rows):
         self.rows = rows

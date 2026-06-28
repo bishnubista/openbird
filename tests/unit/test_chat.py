@@ -812,7 +812,9 @@ def test_day_fact_longest_focus_block_is_local(mem_settings, fake_provider):
         store.close()
 
 
-def test_day_fact_advice_query_stays_on_occurrence_rag(mem_settings, fake_provider):
+def test_productivity_review_with_advice_shape_stays_local_and_gated(
+    mem_settings, fake_provider
+):
     import datetime as dt
 
     store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
@@ -820,7 +822,55 @@ def test_day_fact_advice_query_stays_on_occurrence_rag(mem_settings, fake_provid
         start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
         end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
         store.add_observation(
-            "Productivity retro notes mention batching notifications.",
+            "SECRET_STRATEGY_TEXT: implementation work",
+            source="capture",
+            app="com.secret.ProductRoadmap",
+            window="SECRET_WINDOW_TITLE",
+            url="https://secret.example.com/private-plan",
+            ts=start + 9 * 3600,
+        )
+        store.add_observation(
+            "SECRET_STRATEGY_TEXT: more implementation work",
+            source="capture",
+            app="com.secret.ProductRoadmap",
+            window="SECRET_WINDOW_TITLE",
+            url="https://secret.example.com/private-plan",
+            ts=start + 9 * 3600 + 600,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+        result = chatter.answer(
+            "How productive was I today? Where could I improve?", window=(start, end)
+        )
+
+        assert llm.calls == 0
+        assert result.reasoning_route == "local_deterministic"
+        assert result.grounding == "derived"
+        assert "recorded active minute" in result.answer
+        assert "Improvement recommendations require" in result.answer
+        assert "you should" not in result.answer.lower()
+        serialized = json.dumps(result.to_public_dict(), sort_keys=True)
+        assert "SECRET_STRATEGY_TEXT" not in serialized
+        assert "SECRET_WINDOW_TITLE" not in serialized
+        assert "secret.example.com/private-plan" not in serialized
+        assert "com.secret.ProductRoadmap" not in serialized
+    finally:
+        store.close()
+
+
+def test_productivity_content_improvement_stays_on_occurrence_rag(
+    mem_settings, fake_provider
+):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        obs = store.add_observation(
+            "Code review notes mention a simpler parser.",
             source="capture",
             app="Notes",
             ts=start + 3600,
@@ -828,13 +878,192 @@ def test_day_fact_advice_query_stays_on_occurrence_rag(mem_settings, fake_provid
         llm = EchoCiteAllLLM()
         chatter = RAG(store, llm)
 
+        result = chatter.answer("How could I improve the code today?", window=(start, end))
+
+        assert llm.last_messages is not None
+        assert result.grounding == "occurrence"
+        assert result.derived_citations == []
+        assert result.citations[0].observation_id == obs.id
+    finally:
+        store.close()
+
+
+def test_productivity_review_empty_day_is_local_empty(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+
+        result = chatter.answer("How productive was I today?", window=(start, end))
+
+        assert llm.calls == 0
+        assert result.reasoning_route == "local_deterministic"
+        assert result.grounding == "empty"
+        assert "do not have enough local day-memory facts" in result.answer
+    finally:
+        store.close()
+
+
+def test_web_media_day_query_uses_minimized_local_facts(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        store.add_observation(
+            "SECRET_PAGE_TEXT openbird pull request",
+            source="capture",
+            app="com.google.Chrome",
+            window="SECRET_GITHUB_WINDOW",
+            url="https://github.com/bishnubista/openbird/pull/180",
+            session_id="s1",
+            ts=start + 9 * 3600,
+        )
+        store.add_observation(
+            "SECRET_VIDEO_TRANSCRIPT swiftui",
+            source="capture",
+            app="com.google.Chrome",
+            window="SECRET_YOUTUBE_TITLE",
+            url="https://youtube.com/watch?v=secret",
+            session_id="s2",
+            ts=start + 9 * 3600 + 60,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
         result = chatter.answer(
-            "how could I improve my productivity today?", window=(start, end)
+            "What YouTube or web pages did I look at today?", window=(start, end)
+        )
+
+        assert llm.calls == 0
+        assert result.reasoning_route == "local_deterministic"
+        assert result.grounding == "derived"
+        assert "github.com" in result.answer
+        assert "youtube.com" in result.answer
+        serialized = json.dumps(result.to_public_dict(), sort_keys=True)
+        assert "SECRET_PAGE_TEXT" not in serialized
+        assert "SECRET_VIDEO_TRANSCRIPT" not in serialized
+        assert "SECRET_GITHUB_WINDOW" not in serialized
+        assert "SECRET_YOUTUBE_TITLE" not in serialized
+        assert "watch?v=secret" not in serialized
+    finally:
+        store.close()
+
+
+def test_web_media_empty_day_is_local_empty(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+
+        result = chatter.answer("What web pages did I look at today?", window=(start, end))
+
+        assert llm.calls == 0
+        assert result.reasoning_route == "local_deterministic"
+        assert result.grounding == "empty"
+        assert "minimized local web/media facts" in result.answer
+    finally:
+        store.close()
+
+
+def test_web_media_topic_query_stays_on_occurrence_rag(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        obs = store.add_observation(
+            "The YouTube video explained SwiftUI layout invalidation.",
+            source="capture",
+            app="com.google.Chrome",
+            url="https://youtube.com/watch?v=swiftui",
+            ts=start + 3600,
+        )
+        llm = EchoCiteAllLLM()
+        chatter = RAG(store, llm)
+
+        result = chatter.answer(
+            "What did I watch on YouTube about SwiftUI today?", window=(start, end)
         )
 
         assert llm.last_messages is not None
         assert result.grounding == "occurrence"
         assert result.derived_citations == []
+        assert result.citations[0].observation_id == obs.id
+    finally:
+        store.close()
+
+
+def test_web_page_say_about_query_stays_on_occurrence_rag(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        obs = store.add_observation(
+            "The pricing page said the plan includes local capture.",
+            source="capture",
+            app="com.google.Chrome",
+            url="https://example.com/pricing",
+            ts=start + 3600,
+        )
+        llm = EchoCiteAllLLM()
+        chatter = RAG(store, llm)
+
+        result = chatter.answer(
+            "What did the website say about pricing today?", window=(start, end)
+        )
+
+        assert llm.last_messages is not None
+        assert result.grounding == "occurrence"
+        assert result.derived_citations == []
+        assert result.citations[0].observation_id == obs.id
+    finally:
+        store.close()
+
+
+def test_synthesis_focus_query_stays_day_memory(mem_settings, fake_provider):
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    try:
+        start = dt.datetime(2026, 6, 12, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 12, 23, 59, 59).timestamp()
+        store.add_observation(
+            "Worked on OpenBird local memory.",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            ts=start + 9 * 3600,
+        )
+        store.add_observation(
+            "Reviewed OpenBird issue cues.",
+            source="capture",
+            app="com.google.Chrome",
+            url="https://github.com/bishnubista/openbird/issues/42",
+            ts=start + 9 * 3600 + 60,
+        )
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: dt.datetime(2026, 6, 13, 12, 0, 0).timestamp()
+
+        result = chatter.answer("what should I focus on today?", window=(start, end))
+
+        assert llm.calls == 0
+        assert result.reasoning_route == "local_deterministic"
+        assert result.grounding == "derived"
+        assert "Main detected workstreams" in result.answer
     finally:
         store.close()
 

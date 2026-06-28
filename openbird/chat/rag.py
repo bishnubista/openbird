@@ -176,6 +176,39 @@ _FACT_ADVICE_RE = re.compile(
     r"recommend|suggest|should\s+i|could\s+i|where\s+could\s+i)\b",
     re.IGNORECASE,
 )
+_PRODUCTIVITY_REVIEW_RE = re.compile(
+    r"\b("
+    r"how\s+productive\s+was\s+i|"
+    r"how\s+did\s+i\s+do|"
+    r"how\s+was\s+my\s+focus|"
+    r"how\s+scattered\s+was\s+my\s+work|"
+    r"where\s+could\s+i\s+improve\s+my\s+(productivity|focus)|"
+    r"how\s+could\s+i\s+improve\s+my\s+(productivity|focus)"
+    r")\b",
+    re.IGNORECASE,
+)
+_CONTENT_IMPROVEMENT_RE = re.compile(
+    r"\b(improve|better|optimi[sz]e|fix)\s+"
+    r"(the\s+|this\s+|that\s+|my\s+|our\s+)?"
+    r"(code|file|repo|repository|function|pr|pull\s+request|issue|bug|"
+    r"website|page|doc|document|design|prompt|test|implementation)\b",
+    re.IGNORECASE,
+)
+_WEB_MEDIA_NOUN_RE = re.compile(
+    r"\b(web\s+pages?|websites?|sites?|pages?|tabs?|browser|chrome|safari|"
+    r"youtube|videos?|media)\b",
+    re.IGNORECASE,
+)
+_WEB_MEDIA_ACTIVITY_RE = re.compile(
+    r"\b(look(?:ed)?\s+at|visit(?:ed)?|brows(?:e|ed)|open(?:ed)?|"
+    r"watch(?:ed)?|read|saw|see)\b",
+    re.IGNORECASE,
+)
+_WEB_MEDIA_TOPIC_RE = re.compile(
+    r"\b(about|regarding|mention(?:ed)?|said|say|explain(?:ed)?|taught|"
+    r"recommend(?:ed)?|tell\s+me\s+about)\b",
+    re.IGNORECASE,
+)
 _FACT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "context_switches",
@@ -921,11 +954,32 @@ class RAG:
             )
             return self._day_memory_uncitable(local_date, memory_context)
 
+        if self._is_web_media_activity_query(query):
+            return self._answer_day_web_media(query, window)
+
+        if self._is_productivity_review_query(query):
+            return self._answer_day_productivity_review(query, window)
+
         fact_kind = self._day_fact_kind(query)
         if fact_kind is not None:
             return self._answer_day_memory_fact(query, window, fact_kind)
 
         return None
+
+    @staticmethod
+    def _is_productivity_review_query(query: str) -> bool:
+        if _CONTENT_IMPROVEMENT_RE.search(query):
+            return False
+        return bool(_PRODUCTIVITY_REVIEW_RE.search(query))
+
+    @staticmethod
+    def _is_web_media_activity_query(query: str) -> bool:
+        if _WEB_MEDIA_TOPIC_RE.search(query):
+            return False
+        return bool(
+            _WEB_MEDIA_NOUN_RE.search(query)
+            and _WEB_MEDIA_ACTIVITY_RE.search(query)
+        )
 
     def _answer_day_memory(
         self, query: str, window: tuple[float, float]
@@ -1022,6 +1076,296 @@ class RAG:
             memory_context=memory_context,
             reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
         )
+
+    def _answer_day_productivity_review(
+        self, query: str, window: tuple[float, float]
+    ) -> AnswerResult:
+        from openbird.day_memory import build_productivity_report
+
+        saved = self._ensure_day_memory_for_window(window)
+        payload = saved.get("payload", {})
+        memory_context = self._day_memory_context(saved)
+        local_date = str(
+            payload.get("local_date") or saved.get("local_date") or "that day"
+        )
+        coverage = payload.get("coverage", {})
+        source_ids = list(coverage.get("source_ids") or [])
+        if int(coverage.get("observations") or 0) <= 0:
+            return self._day_fact_unavailable(local_date, memory_context)
+
+        report = build_productivity_report(saved)
+        facts = (report.get("productivity") or {}).get("facts") or {}
+        parts: list[str] = []
+        citations: list[DerivedCitation] = []
+
+        active_seconds = facts.get("active_seconds")
+        if active_seconds is not None and source_ids:
+            minutes = _minutes(active_seconds)
+            parts.append(
+                f"For {local_date}, local facts show about {minutes} recorded "
+                "active minute(s)."
+            )
+            citations.append(
+                self._day_review_citation(
+                    local_date,
+                    "Daily productivity facts",
+                    f"Active time: {minutes} recorded active minute(s)",
+                    source_ids,
+                    len(source_ids),
+                )
+            )
+
+        top_category = facts.get("top_category")
+        if isinstance(top_category, dict) and top_category.get("category"):
+            ids = list(top_category.get("source_ids") or [])
+            if ids:
+                category = str(top_category.get("category"))
+                minutes = _minutes(top_category.get("seconds"))
+                parts.append(
+                    f"The top recorded activity category was {category}, "
+                    f"at about {minutes} active minute(s)."
+                )
+                citations.append(
+                    self._day_review_citation(
+                        local_date,
+                        "Top activity category",
+                        f"{category}: {minutes} active minute(s)",
+                        ids,
+                        int(top_category.get("source_count") or len(ids)),
+                    )
+                )
+
+        longest = facts.get("longest_focus_block")
+        if isinstance(longest, dict) and longest.get("category"):
+            ids = list(longest.get("source_ids") or [])
+            if ids:
+                category = str(longest.get("category"))
+                minutes = _minutes(longest.get("seconds"))
+                parts.append(
+                    "The longest same-category block was "
+                    f"{category} for about {minutes} minute(s)."
+                )
+                citations.append(
+                    self._day_review_citation(
+                        local_date,
+                        "Longest focus block",
+                        f"{category}: {minutes} minute(s)",
+                        ids,
+                        len(ids),
+                    )
+                )
+
+        top_hour = facts.get("top_hour")
+        if isinstance(top_hour, dict) and top_hour.get("hour"):
+            ids = list(top_hour.get("source_ids") or [])
+            if ids:
+                hour = str(top_hour.get("hour"))
+                minutes = _minutes(top_hour.get("seconds"))
+                parts.append(
+                    f"The most active hour was {hour}, with about {minutes} "
+                    "recorded active minute(s)."
+                )
+                citations.append(
+                    self._day_review_citation(
+                        local_date,
+                        "Most active hour",
+                        f"{hour}: {minutes} active minute(s)",
+                        ids,
+                        int(top_hour.get("source_count") or len(ids)),
+                    )
+                )
+
+        switches = facts.get("context_switch_count")
+        if switches is not None and source_ids:
+            count = int(switches or 0)
+            parts.append(f"I counted {count} recorded context switch(es).")
+
+        if not parts or not citations:
+            return self._day_fact_unavailable(local_date, memory_context)
+
+        if _FACT_ADVICE_RE.search(query):
+            parts.append(
+                "Improvement recommendations require the gated productivity "
+                "coach/Deep Brain opt-in; this answer is limited to local "
+                "descriptive facts."
+            )
+
+        citations = self._renumber_derived_citations(citations)
+        return AnswerResult(
+            answer=" ".join(parts),
+            citations=[],
+            derived_citations=citations,
+            grounding="derived",
+            memory_context=memory_context,
+            reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+        )
+
+    def _answer_day_web_media(
+        self, query: str, window: tuple[float, float]
+    ) -> AnswerResult:
+        del query
+        saved, payload, memory_context = self._day_memory_parts(window)
+        local_date = str(
+            payload.get("local_date") or saved.get("local_date") or "that day"
+        )
+        coverage = payload.get("coverage", {})
+        if int(coverage.get("observations") or 0) <= 0:
+            return self._web_media_unavailable(local_date, memory_context)
+
+        items = self._web_media_items(payload)
+        if not items:
+            return self._web_media_unavailable(local_date, memory_context)
+
+        phrases = [item["phrase"] for item in items[:5]]
+        if len(phrases) == 1:
+            seen = phrases[0]
+        else:
+            seen = "; ".join(phrases[:-1]) + f"; and {phrases[-1]}"
+        answer = (
+            f"For {local_date}, the minimized local web/media cues I found were: "
+            f"{seen}. I only have minimized domains, repos, categories, and cue "
+            "labels here, not full page contents or transcripts."
+        )
+        citations = [
+            self._day_review_citation(
+                local_date,
+                item["label"],
+                item["snippet"],
+                item["source_ids"],
+                item["total"],
+            )
+            for item in items[:5]
+            if item["source_ids"]
+        ]
+        if not citations:
+            return self._web_media_unavailable(local_date, memory_context)
+        return AnswerResult(
+            answer=answer,
+            citations=[],
+            derived_citations=self._renumber_derived_citations(citations),
+            grounding="derived",
+            memory_context=memory_context,
+            reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+        )
+
+    @staticmethod
+    def _web_media_unavailable(local_date: str, memory_context: dict) -> AnswerResult:
+        return AnswerResult(
+            answer=(
+                f"I do not have enough minimized local web/media facts to answer "
+                f"that for {local_date}."
+            ),
+            citations=[],
+            derived_citations=[],
+            grounding="empty",
+            memory_context=memory_context,
+            reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+        )
+
+    @staticmethod
+    def _day_review_citation(
+        local_date: str,
+        label: str,
+        snippet: str,
+        source_ids: list[str],
+        total: int,
+    ) -> DerivedCitation:
+        unique = sorted(set(source_ids))
+        return DerivedCitation(
+            index=1,
+            source_id=f"D{local_date.replace('-', '')}-review-1",
+            label=label,
+            snippet=snippet,
+            derived_from=unique[:12],
+            derived_from_total=total or len(unique),
+        )
+
+    @staticmethod
+    def _renumber_derived_citations(
+        citations: list[DerivedCitation],
+    ) -> list[DerivedCitation]:
+        out: list[DerivedCitation] = []
+        for index, citation in enumerate(citations, start=1):
+            out.append(
+                citation.model_copy(
+                    update={
+                        "index": index,
+                        "source_id": re.sub(r"-review-\d+$", f"-review-{index}", citation.source_id),
+                    }
+                )
+            )
+        return out
+
+    @staticmethod
+    def _web_media_items(payload: dict) -> list[dict]:
+        items: list[dict] = []
+
+        def add(kind: str, value: str, source_ids: list[str], total: int) -> None:
+            if not value or not source_ids:
+                return
+            if kind == "domain":
+                phrase = f"domain {value} ({total} cue(s))"
+                label = f"Web domain: {value}"
+                snippet = f"Minimized domain cue: {value}"
+            elif kind == "repo":
+                phrase = f"repo {value} ({total} cue(s))"
+                label = f"Repo cue: {value}"
+                snippet = f"Minimized repo cue: {value}"
+            elif kind == "open_loop":
+                phrase = f"open-loop cue {value} ({total} cue(s))"
+                label = f"Open-loop cue: {value}"
+                snippet = f"Minimized open-loop cue: {value}"
+            else:
+                phrase = f"{value} activity ({total} source(s))"
+                label = f"Activity category: {value}"
+                snippet = f"Minimized activity category: {value}"
+            items.append(
+                {
+                    "phrase": phrase,
+                    "label": label,
+                    "snippet": snippet,
+                    "source_ids": list(source_ids),
+                    "total": total,
+                }
+            )
+
+        entities = payload.get("entities") or {}
+        for domain in list(entities.get("domains") or [])[:4]:
+            add(
+                "domain",
+                str(domain.get("value") or ""),
+                list(domain.get("source_ids") or []),
+                int(domain.get("count") or 0),
+            )
+        for repo in list(entities.get("repos") or [])[:4]:
+            add(
+                "repo",
+                str(repo.get("value") or ""),
+                list(repo.get("source_ids") or []),
+                int(repo.get("count") or 0),
+            )
+        for loop in list(payload.get("open_loops") or [])[:4]:
+            add(
+                "open_loop",
+                str(loop.get("cue") or ""),
+                list(loop.get("source_ids") or []),
+                int(loop.get("source_count") or 0),
+            )
+
+        if items:
+            return items
+
+        session_sources: dict[str, set[str]] = {}
+        for session in payload.get("sessions") or []:
+            category = str(session.get("category") or "")
+            if category not in {"browser_media", "browser_research"}:
+                continue
+            session_sources.setdefault(category, set()).update(
+                str(source_id) for source_id in session.get("source_ids") or []
+            )
+        for category, ids in sorted(session_sources.items()):
+            add("category", category, sorted(ids), len(ids))
+        return items
 
     @staticmethod
     def _day_fact_unavailable(local_date: str, memory_context: dict) -> AnswerResult:
