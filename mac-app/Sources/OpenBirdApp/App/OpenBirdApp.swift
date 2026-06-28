@@ -30,7 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if Self.shouldBootstrapDBKeyForSelfTest() {
                 Self.emitSelfTestSignal("SELFTEST db_key.bootstrap start")
                 let report = OpenBirdService.bootstrapDBKeyReport(
-                    timeout: Self.selfTestDBKeyTimeout()
+                    timeout: Self.selfTestDBKeyTimeout(),
+                    allowInteraction: false
                 )
                 Self.emitSelfTestSignal("SELFTEST db_key.bootstrap done ok=\(report.ok ? 1 : 0) outcome=\(report.outcome)")
                 if !report.ok {
