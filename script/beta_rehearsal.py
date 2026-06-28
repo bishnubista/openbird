@@ -45,6 +45,7 @@ def _run(
     env: dict[str, str] | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     stdin_devnull: bool = True,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str] | TimeoutError:
     try:
         return subprocess.run(
@@ -53,7 +54,8 @@ def _run(
             env=env,
             text=True,
             capture_output=True,
-            stdin=subprocess.DEVNULL if stdin_devnull else None,
+            input=input_text,
+            stdin=subprocess.DEVNULL if stdin_devnull and input_text is None else None,
             timeout=timeout,
             check=False,
         )
@@ -267,6 +269,78 @@ def _summarize_productivity(cli: list[str], day: int, timeout: float) -> Row:
         return Row("PASS", name, detail)
     except ParseError as exc:
         return _row_from_parse(name, exc)
+
+
+def _summarize_productivity_coach_gate(cli: list[str], day: int, timeout: float) -> Row:
+    result = _run(
+        cli + ["productivity-coach", "--day", str(day), "--json", "--stdin"],
+        timeout=timeout,
+        input_text="Where could I improve focus?",
+    )
+    name = f"productivity coach gate day {day}"
+    if isinstance(result, TimeoutError):
+        return Row("BLOCKED", name, "timeout")
+    try:
+        payload = json.loads(result.stdout)
+    except Exception:
+        return Row("BLOCKED", name, f"rc={result.returncode} unparseable json")
+    if not isinstance(payload, dict):
+        return Row("BLOCKED", name, f"rc={result.returncode} unparseable json")
+    try:
+        ok = _need(payload, "ok")
+        route = _need(payload, "reasoning_route")
+        egress = _need(payload, "egress")
+        packet_route = _need(payload, "packet_route")
+        detail = (
+            f"rc={result.returncode} ok={_scalar(ok)} "
+            f"reasoning_route={_scalar(route)} egress={_scalar(egress)} "
+            f"packet_route={_scalar(packet_route)}"
+        )
+        if result.returncode == 2 and ok is False:
+            packet = _need_dict(payload, "packet")
+            exclusions = _need_dict(packet, "exclusions")
+            citation_count = int(_need(packet, "citation_count"))
+            blocked_count = len(_need_list(payload, "blocked_reasons"))
+            detail = (
+                f"{detail} blocked_reason_count={blocked_count} "
+                f"citation_count={citation_count} "
+                f"input_observations={_scalar(_need(exclusions, 'input_observations'))} "
+                f"kept_observations={_scalar(_need(exclusions, 'kept_observations'))} "
+                f"excluded_observations={_scalar(_need(exclusions, 'excluded_observations'))} "
+                f"excluded_by_keys={len(_need_dict(exclusions, 'excluded_by'))}"
+            )
+            if (
+                route == "blocked"
+                and egress == "none"
+                and packet_route == "productivity.coach_packet"
+                and blocked_count > 0
+                and citation_count > 0
+            ):
+                return Row("PASS", name, detail)
+            return Row("BLOCKED", name, detail)
+
+        citations = _need_list(payload, "citations")
+        answer = _need(payload, "answer")
+        grounded = _need(payload, "grounded")
+        if not isinstance(answer, str):
+            raise ParseError("answer")
+        detail = (
+            f"{detail} grounded={_scalar(grounded)} "
+            f"citation_count={len(citations)} answer_chars={len(answer)}"
+        )
+        if (
+            result.returncode == 0
+            and ok is True
+            and egress in {"none", "model_packet_only"}
+            and grounded is True
+            and len(citations) > 0
+        ):
+            return Row("PASS", name, detail)
+        return Row("BLOCKED", name, detail)
+    except (ParseError, TypeError, ValueError) as exc:
+        if isinstance(exc, ParseError):
+            return _row_from_parse(name, exc)
+        return Row("BLOCKED", name, "unparseable productivity coach")
 
 
 def _summarize_day_memory(cli: list[str], day: int, timeout: float) -> Row:
@@ -598,6 +672,7 @@ def main(argv: list[str] | None = None) -> int:
     rows.append(_summarize_timeline(cli, args.day, args.timeout))
     rows.append(_summarize_briefing(cli, args.day, args.timeout))
     rows.append(_summarize_productivity(cli, args.day, args.timeout))
+    rows.append(_summarize_productivity_coach_gate(cli, args.day, args.timeout))
     rows.append(_summarize_day_memory(cli, args.day, args.timeout))
     rows.append(_summarize_deep_brain_status(cli, args.timeout))
     rows.append(_summarize_deep_brain_preview(cli, args.day, args.timeout))
