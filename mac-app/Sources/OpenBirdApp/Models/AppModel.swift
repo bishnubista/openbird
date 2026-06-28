@@ -432,6 +432,7 @@ final class AppModel: ObservableObject {
 
     static let dataPruneCommand = "openbird data prune --older-than 90d"
     static let dataPurgeAllCommand = "openbird data purge --all"
+    static let dataExportCommand = "openbird data export --output ~/openbird-memory-export.jsonl"
     static let deepBrainAskCommand = "OPENBIRD_DEEP_BRAIN_ENABLED=1 openbird deep-brain ask --day 0 --stdin"
     static let productivityCoachCommand = "OPENBIRD_DEEP_BRAIN_ENABLED=1 openbird productivity-coach --day 0 --stdin"
 
@@ -439,9 +440,18 @@ final class AppModel: ObservableObject {
         "Terminal deletion commands ask for confirmation by default. `openbird data prune --older-than 90d` cascade-deletes old observations plus orphaned blobs/chunks/FTS/vector rows; `openbird data vacuum` reclaims disk space after deletion. Total wipe is available as `openbird data purge --all`."
     }
 
+    var dataExportSummary: String {
+        "Copy a Terminal export command with a suggested local-only path for decrypted JSONL memory, including captured text in plaintext. Edit the path before running if you prefer elsewhere; iCloud, Dropbox, or other synced folders may upload the file outside OpenBird's control, and later purge/prune will not delete exported copies. The command asks for confirmation by default."
+    }
+
     func copyDataPruneCommand() {
         service.copyToPasteboard(Self.dataPruneCommand)
         lastActionMessage = "Copied confirmation-gated prune command."
+    }
+
+    func copyDataExportCommand() {
+        service.copyToPasteboard(Self.dataExportCommand)
+        lastActionMessage = "Copied confirmation-gated export command."
     }
 
     var deepBrainAskCommandSummary: String {
