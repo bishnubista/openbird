@@ -1291,7 +1291,7 @@ def day_memory_show(
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
 
-    from openbird.day_memory import local_date_for_window
+    from openbird.day_memory import local_date_for_window, saved_day_memory_with_day_offset
 
     start, _end = _day_window(day)
     local_date = local_date_for_window(start)
@@ -1324,12 +1324,13 @@ def day_memory_show(
             )
         raise typer.Exit(code=1)
 
-    payload = {"built": True, "day_memory": saved}
+    display_saved = saved_day_memory_with_day_offset(saved, day)
+    payload = {"built": True, "day_memory": display_saved}
     if as_json:
         _console.print_json(data=payload)
         return
-    metrics = saved["payload"]["metrics"]
-    _console.print(f"[bold]{local_date}[/] · {saved['source_count']} source(s)")
+    metrics = display_saved["payload"]["metrics"]
+    _console.print(f"[bold]{local_date}[/] · {display_saved['source_count']} source(s)")
     _console.print_json(data=metrics)
 
 
@@ -1372,7 +1373,7 @@ def productivity(
     finally:
         store.close()
 
-    report = build_productivity_report(saved)
+    report = build_productivity_report(saved, day_offset=day)
     if as_json:
         _console.print_json(data=report)
         return
