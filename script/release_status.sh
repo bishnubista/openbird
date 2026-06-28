@@ -239,18 +239,107 @@ brew_version() {
 }
 
 beta_blocker=0
+beta_blocker_reason=""
+
+add_beta_blocker() {
+  local reason="$1"
+  beta_blocker=1
+  if [ -n "$beta_blocker_reason" ]; then
+    beta_blocker_reason="$beta_blocker_reason; $reason"
+  else
+    beta_blocker_reason="$reason"
+  fi
+}
+
+bundle_signing_metadata() {
+  local bundle="$1" out rc stapler_rc team signature notarization reason
+  rc=0
+  team="unknown"
+  signature="unknown"
+  notarization="unknown"
+  reason="unknown signing status"
+
+  if [ ! -d "$bundle" ]; then
+    echo "missing|not-set|unknown|missing app bundle"
+    return
+  fi
+  if ! command -v codesign >/dev/null 2>&1; then
+    echo "unknown|unknown|unknown|codesign unavailable"
+    return
+  fi
+
+  out="$(codesign -dv --verbose=4 "$bundle" 2>&1)" || rc=$?
+  team="$(printf '%s\n' "$out" | awk -F= '/^TeamIdentifier=/ {print $2; exit}')"
+  [ -n "$team" ] || team="not-set"
+
+  if [ "$rc" -ne 0 ]; then
+    if printf '%s\n' "$out" | grep -qi 'not signed'; then
+      signature="unsigned"
+      reason="unsigned app bundle"
+    else
+      signature="unknown"
+      reason="codesign failed"
+    fi
+  elif printf '%s\n' "$out" | grep -q '^Signature=adhoc'; then
+    signature="adhoc"
+    reason="adhoc identity"
+  elif printf '%s\n' "$out" | grep -q '^Authority=Developer ID Application'; then
+    signature="developer_id"
+    reason="ok"
+  elif printf '%s\n' "$out" | grep -q '^Authority='; then
+    signature="other_signed"
+    reason="non-Developer ID signature"
+  else
+    signature="unknown"
+    reason="no signing authority"
+  fi
+
+  if [ "$signature" = "developer_id" ]; then
+    if command -v xcrun >/dev/null 2>&1; then
+      stapler_rc=0
+      xcrun stapler validate "$bundle" >/dev/null 2>&1 || stapler_rc=$?
+      if [ "$stapler_rc" -eq 0 ]; then
+        notarization="stapled"
+      else
+        notarization="absent"
+        reason="notarization not stapled"
+      fi
+    else
+      notarization="unknown"
+      reason="stapler unavailable"
+    fi
+  fi
+
+  echo "$signature|$team|$notarization|$reason"
+}
+
 if [ "$beta_rehearsal" -eq 1 ]; then
   dmg_http_code="$(http_status_code "$dmg_url")"
   src_http_code="$(http_status_code "$src_url")"
   dmg_public_status="$(public_download_status "$dmg_published" "$dmg_http_code")"
   src_public_status="$(public_download_status "$src_published" "$src_http_code")"
-  case "$dmg_public_status" in blocked*) beta_blocker=1 ;; esac
-  case "$src_public_status" in blocked*) beta_blocker=1 ;; esac
+  case "$dmg_public_status" in blocked*) add_beta_blocker "DMG public download $dmg_public_status" ;; esac
+  case "$src_public_status" in blocked*) add_beta_blocker "source public download $src_public_status" ;; esac
 
   beta_app_bundle="${OPENBIRD_RELEASE_STATUS_APP_BUNDLE:-/Applications/OpenBird.app}"
   installed_app_v="missing"
   if [ -f "$beta_app_bundle/Contents/Info.plist" ]; then
     installed_app_v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$beta_app_bundle/Contents/Info.plist" 2>/dev/null || echo "unknown")"
+  fi
+  signing_metadata="$(bundle_signing_metadata "$beta_app_bundle")"
+  app_signature="${signing_metadata%%|*}"
+  signing_metadata_rest="${signing_metadata#*|}"
+  app_team_id="${signing_metadata_rest%%|*}"
+  signing_metadata_rest="${signing_metadata_rest#*|}"
+  app_notarization="${signing_metadata_rest%%|*}"
+  app_signing_reason="${signing_metadata_rest#*|}"
+  if [ "$app_signature" != "developer_id" ]; then
+    add_beta_blocker "installed app signing blocker: $beta_app_bundle uses $app_signature ($app_signing_reason)"
+  elif [ "$app_notarization" != "stapled" ]; then
+    add_beta_blocker "installed app signing blocker: $beta_app_bundle uses $app_signature ($app_signing_reason)"
+  fi
+  if [ "$installed_app_v" != "missing" ] && [ "$installed_app_v" != "$pyproject_v" ] && [ "$dmg_published" = "yes" ]; then
+    add_beta_blocker "installed app version blocker: $beta_app_bundle is $installed_app_v but published target is $pyproject_v"
   fi
   brew_cask_v="$(brew_version cask || true)"
   [ -n "$brew_cask_v" ] || brew_cask_v="not-installed"
@@ -296,8 +385,11 @@ if [ "$beta_rehearsal" -eq 1 ]; then
   printf '  %-26s %s\n' "Homebrew GitHub token" "$homebrew_token_status"
   printf '  %-26s %s\n' "DMG public download" "$dmg_public_status"
   printf '  %-26s %s\n' "source public download" "$src_public_status"
-  printf '\nBeta rehearsal local install checks (advisory; this machine only)\n\n'
+  printf '\nBeta rehearsal local install checks (blocking where marked; this machine only)\n\n'
   printf '  %-26s %s\n' "installed app" "$installed_app_v ($beta_app_bundle)"
+  printf '  %-26s %s\n' "app signature" "$app_signature ($app_signing_reason)"
+  printf '  %-26s %s\n' "app team id" "$app_team_id"
+  printf '  %-26s %s\n' "app notarization" "$app_notarization"
   printf '  %-26s %s\n' "brew cask receipt" "$brew_cask_v"
   printf '  %-26s %s\n' "brew formula receipt" "$brew_formula_v"
   printf '  %-26s %s\n' "PATH openbird" "$path_openbird"
@@ -312,6 +404,11 @@ if [ "$drift" -eq 1 ]; then
   echo "   point at the published $pyproject_v artifacts."
   exit 1
 fi
+if [ "$beta_rehearsal" -eq 1 ] && [ "$beta_blocker" -eq 1 ]; then
+  echo "=> beta blocker: $beta_blocker_reason"
+  echo "   Fix the release/install evidence before treating this as public-beta ready."
+  exit 1
+fi
 if [ "$pending" -eq 1 ]; then
   echo "=> in progress: pyproject is ahead, but the lagging artifact is not published yet."
   echo "   This is the expected mid-release state; no drift."
@@ -322,11 +419,6 @@ if [ "$unverified" -eq 1 ]; then
   echo "   whether the $pyproject_v release was published (drift) or not (pending) is unknown."
   echo "   Re-run with an authenticated gh to resolve. NOT asserting aligned."
   exit 0
-fi
-if [ "$beta_rehearsal" -eq 1 ] && [ "$beta_blocker" -eq 1 ]; then
-  echo "=> beta blocker: a public release asset exists but its public download URL failed."
-  echo "   Fix the release asset URL/visibility before treating this as public-beta ready."
-  exit 1
 fi
 echo "=> aligned: every channel is on $pyproject_v."
 exit 0
