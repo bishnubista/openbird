@@ -925,6 +925,8 @@ final class AppModel: ObservableObject {
     }
 
     func refreshCaptureHealth() async {
+        capturePaused = service.isCapturePaused()
+        captureRunning = service.isCaptureRunning()
         if let health = await service.captureHealth() {
             captureHealthState = .loaded(health)
         } else {
@@ -1222,6 +1224,7 @@ final class AppModel: ObservableObject {
     func removeFromAllowlist(_ bundleID: String) {
         service.setAllowlist(allowlist.filter { $0 != bundleID })
         allowlist = service.allowlist()
+        lastActionMessage = "Removed \(bundleID) from capture allowlist."
         Task { await refreshCaptureHealth() }
     }
 

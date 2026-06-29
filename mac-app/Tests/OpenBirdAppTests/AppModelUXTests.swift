@@ -5,6 +5,14 @@ import XCTest
 final class AppModelUXTests: XCTestCase {
     private let allowlistKey = "openbird.captureAllowlist"
 
+    private final class BoolProbe: @unchecked Sendable {
+        var value: Bool
+
+        init(_ value: Bool) {
+            self.value = value
+        }
+    }
+
     private func withRestoredAllowlist<T>(_ body: () throws -> T) rethrows -> T {
         let defaults = UserDefaults.standard
         let old = defaults.stringArray(forKey: allowlistKey)
@@ -17,6 +25,20 @@ final class AppModelUXTests: XCTestCase {
         }
         defaults.removeObject(forKey: allowlistKey)
         return try body()
+    }
+
+    private func withRestoredAllowlist<T>(_ body: () async throws -> T) async rethrows -> T {
+        let defaults = UserDefaults.standard
+        let old = defaults.stringArray(forKey: allowlistKey)
+        defer {
+            if let old {
+                defaults.set(old, forKey: allowlistKey)
+            } else {
+                defaults.removeObject(forKey: allowlistKey)
+            }
+        }
+        defaults.removeObject(forKey: allowlistKey)
+        return try await body()
     }
 
     /// Build an `OpenBirdService` whose external-capture detection is stubbed to
@@ -190,6 +212,39 @@ final class AppModelUXTests: XCTestCase {
 
             XCTAssertEqual(model.effectiveCaptureAllowedCount, 2)
             XCTAssertEqual(model.captureAllowedSummary, "2 apps allowed")
+        }
+    }
+
+    func testRefreshCaptureHealthSynchronizesRuntimeFlags() async {
+        await withRestoredAllowlist {
+            let running = BoolProbe(false)
+            let service = OpenBirdService(
+                accessibilityProbe: { true },
+                openBirdCLIResolver: { nil },
+                externalLoopDaemonProbe: { running.value },
+                captureHelperRunningProbe: { false }
+            )
+            service.setAllowlist(["com.example.editor"])
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(allowlist: ["com.example.editor"], captureRunning: false)
+
+            running.value = true
+            await model.refreshCaptureHealth()
+
+            XCTAssertEqual(model.menuBarSymbol, "bird.fill")
+            XCTAssertFalse(model.canStartCaptureNow)
+        }
+    }
+
+    func testRemoveFromAllowlistUpdatesLastActionMessage() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            service.setAllowlist(["com.example.editor"])
+            let model = AppModel(service: service, initialReport: readyReport())
+
+            model.removeFromAllowlist("com.example.editor")
+
+            XCTAssertEqual(model.lastActionMessage, "Removed com.example.editor from capture allowlist.")
         }
     }
 

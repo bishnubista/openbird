@@ -211,8 +211,26 @@ def test_capture_health_cli_json_is_metadata_only(tmp_path, fake_provider, monke
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
+    assert set(payload) == {
+        "generated_at",
+        "recent_window_seconds",
+        "paused",
+        "allowlist_count",
+        "blocklist_count",
+        "apps",
+    }
     assert payload["allowlist_count"] == 1
     row = payload["apps"][0]
+    assert set(row) == {
+        "bundle_id",
+        "policy",
+        "effective_state",
+        "quality",
+        "coverage",
+        "total_observations",
+        "recent_observations",
+        "last_captured_ts",
+    }
     assert row["bundle_id"] == "com.example.Editor"
     assert row["policy"] == {"capture": True, "reason": "allowlisted"}
     rendered = json.dumps(payload)
