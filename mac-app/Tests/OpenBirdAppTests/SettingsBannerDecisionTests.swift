@@ -44,7 +44,7 @@ final class SettingsBannerDecisionTests: XCTestCase {
 
         XCTAssertEqual(decision.tone, .green)
         XCTAssertEqual(decision.title, "Capturing · memory ready")
-        XCTAssertEqual(decision.subtitle, "2 apps allowed · encrypted · on-device")
+        XCTAssertEqual(decision.subtitle, "2 apps effectively allowed · encrypted · on-device")
         XCTAssertNil(decision.buttonLabel)
         XCTAssertEqual(decision.actionKind, .none)
     }
@@ -117,7 +117,7 @@ final class SettingsBannerDecisionTests: XCTestCase {
             memoryStatsState: statsState,
             isRefreshing: isRefreshing,
             nextStepSummary: nextStepSummary,
-            allGoodSubtitle: "2 apps allowed · encrypted · on-device"
+            allGoodSubtitle: "2 apps effectively allowed · encrypted · on-device"
         )
     }
 }

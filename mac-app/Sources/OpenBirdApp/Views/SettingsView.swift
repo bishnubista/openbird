@@ -116,12 +116,10 @@ struct SettingsView: View {
     }
 
     private var allGoodSubtitle: String {
-        let n = model.allowlist.count
-        let apps = "\(n) app\(n == 1 ? "" : "s") allowed"
         let enc = model.encryptionState == .ok ? "encrypted" : "plaintext"
         // `modelRouteFooterLabel` already reads as a phrase ("on-device" / "remote model"),
         // so don't prefix "running on" — that would render "running on on-device".
-        return "\(apps) · \(enc) · \(model.modelRouteFooterLabel)"
+        return "\(model.captureAllowedSummary) · \(enc) · \(model.modelRouteFooterLabel)"
     }
 
     // MARK: Permissions & route
@@ -208,9 +206,11 @@ struct SettingsView: View {
                     .padding(.horizontal, 8).padding(.vertical, 1)
                     .background(OB.accent.opacity(0.13), in: Capsule())
                 Spacer()
-                Text("Text is captured only from these apps. Nothing else is read.")
+                Text("Active-window text is captured only from effectively allowed apps; safety blocks can override this list.")
                     .font(.system(size: 11.5))
                     .foregroundStyle(OB.textSecondary(scheme))
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 16).padding(.top, 13).padding(.bottom, 11)
 
@@ -235,6 +235,7 @@ struct SettingsView: View {
 
     private func allowlistRow(_ bundleID: String) -> some View {
         let id = AppIdentity.forBundleID(bundleID)
+        let status = model.captureRowStatus(for: bundleID)
         return HStack(spacing: 12) {
             appIconTile(id)
             VStack(alignment: .leading, spacing: 1) {
@@ -244,8 +245,15 @@ struct SettingsView: View {
                 Text(bundleID)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(OB.textTertiary(scheme))
+                    .lineLimit(1)
+                Text(status.detail)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(OB.textSecondary(scheme))
+                    .lineLimit(2)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer()
+            captureStatusPill(status)
             Button { model.removeFromAllowlist(bundleID) } label: {
                 Image(systemName: "minus")
                     .font(.system(size: 12, weight: .semibold))
@@ -255,6 +263,31 @@ struct SettingsView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 16).padding(.vertical, 9)
+    }
+
+    private func captureStatusPill(_ status: CaptureRowStatus) -> some View {
+        let colors = captureStatusColors(status.tone)
+        return Text(status.label)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(colors.foreground)
+            .lineLimit(1)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(colors.background, in: Capsule())
+            .overlay(Capsule().strokeBorder(colors.border, lineWidth: 0.5))
+            .fixedSize()
+    }
+
+    private func captureStatusColors(_ tone: CaptureRowTone) -> (foreground: Color, background: Color, border: Color) {
+        switch tone {
+        case .ok:
+            let green = OB.ok(scheme)
+            return (green, green.opacity(0.13), green.opacity(0.28))
+        case .attention:
+            return (OB.amber, OB.amber.opacity(0.13), OB.amber.opacity(0.3))
+        case .neutral:
+            return (OB.textSecondary(scheme), OB.fieldFill(scheme), OB.separator(scheme))
+        }
     }
 
     private func appIconTile(_ id: AppIdentity.Identity) -> some View {

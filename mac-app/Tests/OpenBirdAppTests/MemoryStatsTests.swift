@@ -234,6 +234,48 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertNil(OpenBirdService.parseMemoryStats("not json"))
     }
 
+    func testParseCaptureHealthDecodesCliJson() {
+        let report = OpenBirdService.parseCaptureHealth("""
+        {
+          "generated_at": 200.0,
+          "recent_window_seconds": 86400.0,
+          "paused": false,
+          "allowlist_count": 2,
+          "blocklist_count": 1,
+          "apps": [
+            {
+              "bundle_id": "com.example.Editor",
+              "policy": {"capture": true, "reason": "allowlisted"},
+              "effective_state": "allowed_recent",
+              "quality": "good",
+              "coverage": "unknown",
+              "total_observations": 4,
+              "recent_observations": 2,
+              "last_captured_ts": 123.0
+            },
+            {
+              "bundle_id": "com.apple.Terminal",
+              "policy": {"capture": false, "reason": "blocklisted"},
+              "effective_state": "blocked",
+              "quality": "blocked",
+              "coverage": "degraded",
+              "total_observations": 0,
+              "recent_observations": 0,
+              "last_captured_ts": null
+            }
+          ]
+        }
+        """)
+
+        XCTAssertEqual(report?.allowlistCount, 2)
+        XCTAssertEqual(report?.blocklistCount, 1)
+        XCTAssertEqual(report?.apps.count, 2)
+        XCTAssertEqual(report?.apps.first?.bundleID, "com.example.Editor")
+        XCTAssertEqual(report?.apps.first?.policy.capture, true)
+        XCTAssertEqual(report?.apps.first?.recentObservations, 2)
+        XCTAssertNil(report?.apps.last?.lastCapturedTS)
+    }
+
     func testParseDeepBrainStatusDecodesRouteAndCountsObservationIdExclusions() {
         let status = OpenBirdService.parseDeepBrainStatus("""
         {

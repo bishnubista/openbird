@@ -5,6 +5,14 @@ import XCTest
 final class AppModelUXTests: XCTestCase {
     private let allowlistKey = "openbird.captureAllowlist"
 
+    private final class BoolProbe: @unchecked Sendable {
+        var value: Bool
+
+        init(_ value: Bool) {
+            self.value = value
+        }
+    }
+
     private func withRestoredAllowlist<T>(_ body: () throws -> T) rethrows -> T {
         let defaults = UserDefaults.standard
         let old = defaults.stringArray(forKey: allowlistKey)
@@ -17,6 +25,20 @@ final class AppModelUXTests: XCTestCase {
         }
         defaults.removeObject(forKey: allowlistKey)
         return try body()
+    }
+
+    private func withRestoredAllowlist<T>(_ body: () async throws -> T) async rethrows -> T {
+        let defaults = UserDefaults.standard
+        let old = defaults.stringArray(forKey: allowlistKey)
+        defer {
+            if let old {
+                defaults.set(old, forKey: allowlistKey)
+            } else {
+                defaults.removeObject(forKey: allowlistKey)
+            }
+        }
+        defaults.removeObject(forKey: allowlistKey)
+        return try await body()
     }
 
     /// Build an `OpenBirdService` whose external-capture detection is stubbed to
@@ -123,6 +145,170 @@ final class AppModelUXTests: XCTestCase {
             noCLI.setAllowlist(["com.example.editor"])
             let noCLIModel = AppModel(service: noCLI, initialReport: readyReport())
             XCTAssertFalse(noCLIModel.canStartCaptureNow)
+        }
+    }
+
+    func testCaptureRowStatusUsesEffectivePolicyAndRecentCounts() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(
+                allowlist: ["com.example.Editor", "com.apple.Terminal"],
+                captureRunning: true
+            )
+            model.setCaptureHealthStateForTesting(.loaded(CaptureHealthReport(
+                generatedAt: 200,
+                recentWindowSeconds: 86_400,
+                paused: false,
+                allowlistCount: 2,
+                blocklistCount: 1,
+                apps: [
+                    CaptureHealthApp(
+                        bundleID: "com.example.Editor",
+                        policy: CaptureHealthPolicy(capture: true, reason: "allowlisted"),
+                        effectiveState: "allowed_recent",
+                        quality: "good",
+                        coverage: "unknown",
+                        totalObservations: 4,
+                        recentObservations: 2,
+                        lastCapturedTS: 123
+                    ),
+                    CaptureHealthApp(
+                        bundleID: "com.apple.Terminal",
+                        policy: CaptureHealthPolicy(capture: false, reason: "blocklisted"),
+                        effectiveState: "blocked",
+                        quality: "blocked",
+                        coverage: "degraded",
+                        totalObservations: 0,
+                        recentObservations: 0,
+                        lastCapturedTS: nil
+                    )
+                ]
+            )))
+
+            let capturing = model.captureRowStatus(for: "com.example.Editor")
+            XCTAssertEqual(capturing.label, "Capturing")
+            XCTAssertEqual(capturing.tone, .ok)
+            XCTAssertTrue(capturing.detail.contains("Good signal"))
+
+            let blocked = model.captureRowStatus(for: "com.apple.Terminal")
+            XCTAssertEqual(blocked.label, "Blocked by safety")
+            XCTAssertEqual(blocked.tone, .attention)
+            XCTAssertTrue(blocked.detail.contains("overrides"))
+            XCTAssertEqual(model.effectiveCaptureAllowedCount, 1)
+            XCTAssertEqual(model.captureAllowedSummary, "1 app effectively allowed")
+        }
+    }
+
+    func testCaptureAllowedSummaryFallsBackToNominalCopyWhenHealthUnavailable() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(
+                allowlist: ["com.example.Editor", "com.apple.Terminal"],
+                captureRunning: false
+            )
+            model.setCaptureHealthStateForTesting(.failed)
+
+            XCTAssertEqual(model.effectiveCaptureAllowedCount, 2)
+            XCTAssertEqual(model.captureAllowedSummary, "2 apps allowed")
+        }
+    }
+
+    func testRefreshCaptureHealthSynchronizesRuntimeFlags() async {
+        await withRestoredAllowlist {
+            let running = BoolProbe(false)
+            let service = OpenBirdService(
+                accessibilityProbe: { true },
+                openBirdCLIResolver: { nil },
+                externalLoopDaemonProbe: { running.value },
+                captureHelperRunningProbe: { false }
+            )
+            service.setAllowlist(["com.example.editor"])
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(allowlist: ["com.example.editor"], captureRunning: false)
+
+            running.value = true
+            await model.refreshCaptureHealth()
+
+            XCTAssertTrue(model.captureRunning)
+            XCTAssertEqual(model.menuBarSymbol, "bird.fill")
+        }
+    }
+
+    func testRemoveFromAllowlistUpdatesLastActionMessage() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            service.setAllowlist(["com.example.editor"])
+            let model = AppModel(service: service, initialReport: readyReport())
+
+            model.removeFromAllowlist("com.example.editor")
+
+            XCTAssertEqual(model.lastActionMessage, "Removed com.example.editor from capture allowlist.")
+        }
+    }
+
+    func testCaptureRowStatusShowsAllowedButNoRecentSignal() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(allowlist: ["com.example.Editor"], captureRunning: true)
+            model.setCaptureHealthStateForTesting(.loaded(CaptureHealthReport(
+                generatedAt: 200,
+                recentWindowSeconds: 86_400,
+                paused: false,
+                allowlistCount: 1,
+                blocklistCount: 0,
+                apps: [
+                    CaptureHealthApp(
+                        bundleID: "com.example.Editor",
+                        policy: CaptureHealthPolicy(capture: true, reason: "allowlisted"),
+                        effectiveState: "allowed_no_recent",
+                        quality: "no_recent",
+                        coverage: "unknown",
+                        totalObservations: 0,
+                        recentObservations: 0,
+                        lastCapturedTS: nil
+                    )
+                ]
+            )))
+
+            let status = model.captureRowStatus(for: "com.example.Editor")
+            XCTAssertEqual(status.label, "No recent captures")
+            XCTAssertEqual(status.tone, .attention)
+            XCTAssertTrue(status.detail.contains("No recent signal"))
+        }
+    }
+
+    func testCaptureRowStatusSurfacesLowSignalCapture() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(allowlist: ["us.zoom.xos"], captureRunning: true)
+            model.setCaptureHealthStateForTesting(.loaded(CaptureHealthReport(
+                generatedAt: 200,
+                recentWindowSeconds: 86_400,
+                paused: false,
+                allowlistCount: 1,
+                blocklistCount: 0,
+                apps: [
+                    CaptureHealthApp(
+                        bundleID: "us.zoom.xos",
+                        policy: CaptureHealthPolicy(capture: true, reason: "allowlisted"),
+                        effectiveState: "allowed_recent",
+                        quality: "low_signal",
+                        coverage: "degraded",
+                        totalObservations: 3,
+                        recentObservations: 1,
+                        lastCapturedTS: 190
+                    )
+                ]
+            )))
+
+            let status = model.captureRowStatus(for: "us.zoom.xos")
+            XCTAssertEqual(status.label, "Low signal")
+            XCTAssertEqual(status.tone, .attention)
+            XCTAssertTrue(status.detail.contains("Low signal"))
         }
     }
 
