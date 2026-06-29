@@ -126,6 +126,137 @@ final class AppModelUXTests: XCTestCase {
         }
     }
 
+    func testCaptureRowStatusUsesEffectivePolicyAndRecentCounts() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(
+                allowlist: ["com.example.Editor", "com.apple.Terminal"],
+                captureRunning: true
+            )
+            model.setCaptureHealthStateForTesting(.loaded(CaptureHealthReport(
+                generatedAt: 200,
+                recentWindowSeconds: 86_400,
+                paused: false,
+                allowlistCount: 2,
+                blocklistCount: 1,
+                apps: [
+                    CaptureHealthApp(
+                        bundleID: "com.example.Editor",
+                        policy: CaptureHealthPolicy(capture: true, reason: "allowlisted"),
+                        effectiveState: "allowed_recent",
+                        quality: "good",
+                        coverage: "unknown",
+                        totalObservations: 4,
+                        recentObservations: 2,
+                        lastCapturedTS: 123
+                    ),
+                    CaptureHealthApp(
+                        bundleID: "com.apple.Terminal",
+                        policy: CaptureHealthPolicy(capture: false, reason: "blocklisted"),
+                        effectiveState: "blocked",
+                        quality: "blocked",
+                        coverage: "degraded",
+                        totalObservations: 0,
+                        recentObservations: 0,
+                        lastCapturedTS: nil
+                    )
+                ]
+            )))
+
+            let capturing = model.captureRowStatus(for: "com.example.Editor")
+            XCTAssertEqual(capturing.label, "Capturing")
+            XCTAssertEqual(capturing.tone, .ok)
+            XCTAssertTrue(capturing.detail.contains("Good signal"))
+
+            let blocked = model.captureRowStatus(for: "com.apple.Terminal")
+            XCTAssertEqual(blocked.label, "Blocked by safety")
+            XCTAssertEqual(blocked.tone, .attention)
+            XCTAssertTrue(blocked.detail.contains("overrides"))
+            XCTAssertEqual(model.effectiveCaptureAllowedCount, 1)
+            XCTAssertEqual(model.captureAllowedSummary, "1 app effectively allowed")
+        }
+    }
+
+    func testCaptureAllowedSummaryFallsBackToNominalCopyWhenHealthUnavailable() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(
+                allowlist: ["com.example.Editor", "com.apple.Terminal"],
+                captureRunning: false
+            )
+            model.setCaptureHealthStateForTesting(.failed)
+
+            XCTAssertEqual(model.effectiveCaptureAllowedCount, 2)
+            XCTAssertEqual(model.captureAllowedSummary, "2 apps allowed")
+        }
+    }
+
+    func testCaptureRowStatusShowsAllowedButNoRecentSignal() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(allowlist: ["com.example.Editor"], captureRunning: true)
+            model.setCaptureHealthStateForTesting(.loaded(CaptureHealthReport(
+                generatedAt: 200,
+                recentWindowSeconds: 86_400,
+                paused: false,
+                allowlistCount: 1,
+                blocklistCount: 0,
+                apps: [
+                    CaptureHealthApp(
+                        bundleID: "com.example.Editor",
+                        policy: CaptureHealthPolicy(capture: true, reason: "allowlisted"),
+                        effectiveState: "allowed_no_recent",
+                        quality: "no_recent",
+                        coverage: "unknown",
+                        totalObservations: 0,
+                        recentObservations: 0,
+                        lastCapturedTS: nil
+                    )
+                ]
+            )))
+
+            let status = model.captureRowStatus(for: "com.example.Editor")
+            XCTAssertEqual(status.label, "No recent captures")
+            XCTAssertEqual(status.tone, .attention)
+            XCTAssertTrue(status.detail.contains("No recent signal"))
+        }
+    }
+
+    func testCaptureRowStatusSurfacesLowSignalCapture() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            let model = AppModel(service: service, initialReport: readyReport())
+            model.setReadinessStateForTesting(allowlist: ["us.zoom.xos"], captureRunning: true)
+            model.setCaptureHealthStateForTesting(.loaded(CaptureHealthReport(
+                generatedAt: 200,
+                recentWindowSeconds: 86_400,
+                paused: false,
+                allowlistCount: 1,
+                blocklistCount: 0,
+                apps: [
+                    CaptureHealthApp(
+                        bundleID: "us.zoom.xos",
+                        policy: CaptureHealthPolicy(capture: true, reason: "allowlisted"),
+                        effectiveState: "allowed_recent",
+                        quality: "low_signal",
+                        coverage: "degraded",
+                        totalObservations: 3,
+                        recentObservations: 1,
+                        lastCapturedTS: 190
+                    )
+                ]
+            )))
+
+            let status = model.captureRowStatus(for: "us.zoom.xos")
+            XCTAssertEqual(status.label, "Low signal")
+            XCTAssertEqual(status.tone, .attention)
+            XCTAssertTrue(status.detail.contains("Low signal"))
+        }
+    }
+
     func testOnboardingPrimaryActionStartsOnlyWhenReady() {
         withRestoredAllowlist {
             let model = onboardingModel()

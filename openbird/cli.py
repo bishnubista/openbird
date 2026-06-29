@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
@@ -2533,6 +2534,54 @@ def data_stats() -> None:
     finally:
         store.close()
     _console.print_json(json.dumps(stats))
+
+
+@data_app.command("capture-health")
+def data_capture_health(
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    recent_window_seconds: float = typer.Option(
+        24 * 60 * 60,
+        "--recent-window-seconds",
+        min=0,
+        help="Window for recent per-app capture counts.",
+    ),
+) -> None:
+    """Print metadata-only effective capture state and per-app health."""
+    from openbird.capture.health import build_capture_health
+
+    settings = get_settings()
+    now = time.time()
+    recent_since = now - recent_window_seconds
+    store = _store_maintenance()
+    try:
+        activity = store.capture_app_activity(recent_since_ts=recent_since)
+    finally:
+        store.close()
+    payload = build_capture_health(
+        settings=settings,
+        activity_by_app=activity,
+        generated_at=now,
+        recent_window_seconds=recent_window_seconds,
+    )
+    if as_json:
+        _console.print_json(json.dumps(payload))
+        return
+
+    table = Table(title="Capture health", show_header=True, header_style="bold")
+    table.add_column("App")
+    table.add_column("State")
+    table.add_column("Quality")
+    table.add_column("Recent", justify="right")
+    table.add_column("Total", justify="right")
+    for row in payload["apps"]:
+        table.add_row(
+            row["bundle_id"],
+            row["effective_state"],
+            row["quality"],
+            str(row["recent_observations"]),
+            str(row["total_observations"]),
+        )
+    _console.print(table)
 
 
 @data_app.command("reasoning-ledger")

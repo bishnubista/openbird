@@ -1287,6 +1287,39 @@ class MemoryStore:
             "encryption_enabled": self.settings.encryption_enabled,
         }
 
+    def capture_app_activity(
+        self, *, recent_since_ts: float | None = None, source: str = "capture"
+    ) -> dict[str, dict[str, float | int | None]]:
+        """Return per-app capture activity using metadata only.
+
+        This intentionally reads only ``observations.app`` and timestamp/count
+        metadata. It never joins ``content_blobs`` and never reads captured text,
+        window titles, or URLs, so Settings can display capture health without
+        widening the privacy surface.
+        """
+        recent_cutoff = float("-inf") if recent_since_ts is None else float(recent_since_ts)
+        rows = self.conn.execute(
+            """
+            SELECT
+                app,
+                COUNT(*) AS total_observations,
+                SUM(CASE WHEN ts >= ? THEN 1 ELSE 0 END) AS recent_observations,
+                MAX(ts) AS last_captured_ts
+            FROM observations
+            WHERE source = ? AND app IS NOT NULL AND app != ''
+            GROUP BY app
+            """,
+            (recent_cutoff, source),
+        ).fetchall()
+        return {
+            row["app"]: {
+                "total_observations": int(row["total_observations"] or 0),
+                "recent_observations": int(row["recent_observations"] or 0),
+                "last_captured_ts": row["last_captured_ts"],
+            }
+            for row in rows
+        }
+
     def integrity_check(self, *, quick: bool = False) -> dict:
         """Verify the database is not corrupt via SQLite's integrity check.
 

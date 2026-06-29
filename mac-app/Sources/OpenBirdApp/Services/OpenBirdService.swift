@@ -491,6 +491,52 @@ struct MemoryStats: Codable, Equatable {
     static let empty = MemoryStats(observations: 0, blobs: 0, chunks: 0, vectors: 0)
 }
 
+struct CaptureHealthPolicy: Codable, Equatable {
+    let capture: Bool
+    let reason: String
+}
+
+struct CaptureHealthApp: Codable, Equatable, Identifiable {
+    let bundleID: String
+    let policy: CaptureHealthPolicy
+    let effectiveState: String
+    let quality: String
+    let coverage: String
+    let totalObservations: Int
+    let recentObservations: Int
+    let lastCapturedTS: Double?
+
+    var id: String { bundleID }
+
+    enum CodingKeys: String, CodingKey {
+        case bundleID = "bundle_id"
+        case policy
+        case effectiveState = "effective_state"
+        case quality, coverage
+        case totalObservations = "total_observations"
+        case recentObservations = "recent_observations"
+        case lastCapturedTS = "last_captured_ts"
+    }
+}
+
+struct CaptureHealthReport: Codable, Equatable {
+    let generatedAt: Double
+    let recentWindowSeconds: Double
+    let paused: Bool
+    let allowlistCount: Int
+    let blocklistCount: Int
+    let apps: [CaptureHealthApp]
+
+    enum CodingKeys: String, CodingKey {
+        case generatedAt = "generated_at"
+        case recentWindowSeconds = "recent_window_seconds"
+        case paused
+        case allowlistCount = "allowlist_count"
+        case blocklistCount = "blocklist_count"
+        case apps
+    }
+}
+
 /// Local-only Deep Brain consent/status payload decoded from
 /// `openbird deep-brain status --json`.
 struct DeepBrainStatus: Codable, Equatable {
@@ -1516,6 +1562,22 @@ final class OpenBirdService: @unchecked Sendable {
     static func parseMemoryStats(_ output: String) -> MemoryStats? {
         guard let data = output.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(MemoryStats.self, from: data)
+    }
+
+    func captureHealth() async -> CaptureHealthReport? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
+        let result = await runAsync(
+            cli,
+            arguments: ["data", "capture-health", "--json"],
+            timeout: 10
+        )
+        guard result.exitCode == 0 else { return nil }
+        return Self.parseCaptureHealth(result.stdout)
+    }
+
+    static func parseCaptureHealth(_ output: String) -> CaptureHealthReport? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(CaptureHealthReport.self, from: data)
     }
 
     /// Load the settings-only Deep Brain status. The CLI route is local/no-egress:

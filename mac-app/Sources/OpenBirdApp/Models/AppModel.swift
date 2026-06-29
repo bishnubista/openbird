@@ -35,6 +35,24 @@ enum DeepBrainPreviewState: Equatable {
     case failed
 }
 
+enum CaptureHealthState: Equatable {
+    case unknown
+    case loaded(CaptureHealthReport)
+    case failed
+}
+
+enum CaptureRowTone: Equatable {
+    case ok
+    case attention
+    case neutral
+}
+
+struct CaptureRowStatus: Equatable {
+    let label: String
+    let detail: String
+    let tone: CaptureRowTone
+}
+
 enum ModelRouteProvisioningState: Equatable {
     case unknown
     case remoteRoute
@@ -127,6 +145,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var microphoneGranted = false
     @Published private(set) var memoryStats = MemoryStats.empty
     @Published private(set) var memoryStatsState = MemoryStatsState.unknown
+    @Published private(set) var captureHealthState = CaptureHealthState.unknown
     @Published private(set) var deepBrainStatusState = DeepBrainStatusState.unknown
     @Published private(set) var deepBrainPreviewState = DeepBrainPreviewState.unknown
     @Published private(set) var lastMemoryRefresh: Date?
@@ -888,6 +907,7 @@ final class AppModel: ObservableObject {
         refreshPermissionStates()
         report = await service.preflightReport()
         await refreshMemoryStats()
+        await refreshCaptureHealth()
         await refreshDeepBrainStatus()
         lastRefresh = Date()
     }
@@ -902,6 +922,14 @@ final class AppModel: ObservableObject {
             memoryStatsState = .failed
         }
         lastMemoryRefresh = Date()
+    }
+
+    func refreshCaptureHealth() async {
+        if let health = await service.captureHealth() {
+            captureHealthState = .loaded(health)
+        } else {
+            captureHealthState = .failed
+        }
     }
 
     func refreshDeepBrainStatus() async {
@@ -1000,6 +1028,10 @@ final class AppModel: ObservableObject {
 
     func setDeepBrainPreviewForTesting(_ state: DeepBrainPreviewState) {
         self.deepBrainPreviewState = state
+    }
+
+    func setCaptureHealthStateForTesting(_ state: CaptureHealthState) {
+        self.captureHealthState = state
     }
     #endif
 
@@ -1184,16 +1216,146 @@ final class AppModel: ObservableObject {
         service.setAllowlist(updated)
         allowlist = service.allowlist()
         lastActionMessage = "Added \(trimmed) to capture allowlist."
+        Task { await refreshCaptureHealth() }
     }
 
     func removeFromAllowlist(_ bundleID: String) {
         service.setAllowlist(allowlist.filter { $0 != bundleID })
         allowlist = service.allowlist()
+        Task { await refreshCaptureHealth() }
     }
 
     func runningAppSuggestions() -> [String] {
         let current = Set(allowlist)
         return service.runningAppBundleIDs().filter { !current.contains($0) }
+    }
+
+    func captureHealthApp(for bundleID: String) -> CaptureHealthApp? {
+        guard case let .loaded(report) = captureHealthState else { return nil }
+        return report.apps.first { $0.bundleID == bundleID }
+    }
+
+    var effectiveCaptureAllowedCount: Int {
+        guard case let .loaded(report) = captureHealthState else { return allowlist.count }
+        return report.apps.filter { $0.policy.capture }.count
+    }
+
+    var captureAllowedSummary: String {
+        let loaded: Bool
+        let count: Int
+        if case let .loaded(report) = captureHealthState {
+            loaded = true
+            count = report.apps.filter { $0.policy.capture }.count
+        } else {
+            loaded = false
+            count = allowlist.count
+        }
+        let noun = count == 1 ? "app" : "apps"
+        return loaded ? "\(count) \(noun) effectively allowed" : "\(count) \(noun) allowed"
+    }
+
+    func captureRowStatus(for bundleID: String) -> CaptureRowStatus {
+        guard accessibilityEffectivelyGranted else {
+            return CaptureRowStatus(
+                label: "Needs permission",
+                detail: "Accessibility is required before OpenBird can read active-window text.",
+                tone: .attention
+            )
+        }
+        if capturePaused {
+            return CaptureRowStatus(
+                label: "Paused",
+                detail: "Capture is paused; no apps are currently read.",
+                tone: .attention
+            )
+        }
+        guard let health = captureHealthApp(for: bundleID) else {
+            return CaptureRowStatus(
+                label: "Checking",
+                detail: "Re-check setup to verify effective capture state.",
+                tone: .neutral
+            )
+        }
+        if !health.policy.capture {
+            return CaptureRowStatus(
+                label: blockedStatusLabel(reason: health.policy.reason),
+                detail: blockedStatusDetail(reason: health.policy.reason),
+                tone: .attention
+            )
+        }
+        if !captureRunning {
+            return CaptureRowStatus(
+                label: "Ready",
+                detail: captureHealthDetail(health),
+                tone: .neutral
+            )
+        }
+        if health.recentObservations > 0 && health.quality == "low_signal" {
+            return CaptureRowStatus(
+                label: "Low signal",
+                detail: captureHealthDetail(health),
+                tone: .attention
+            )
+        }
+        if health.recentObservations > 0 {
+            return CaptureRowStatus(
+                label: "Capturing",
+                detail: captureHealthDetail(health),
+                tone: .ok
+            )
+        }
+        return CaptureRowStatus(
+            label: "No recent captures",
+            detail: captureHealthDetail(health),
+            tone: .attention
+        )
+    }
+
+    private func captureHealthDetail(_ health: CaptureHealthApp) -> String {
+        let quality = Self.captureQualityLabel(health.quality)
+        let counts = "\(health.recentObservations) recent · \(health.totalObservations) total"
+        if let ts = health.lastCapturedTS {
+            let date = Date(timeIntervalSince1970: ts)
+            return "\(quality) signal · \(counts) · last \(date.formatted(date: .omitted, time: .shortened))"
+        }
+        return "\(quality) signal · \(counts)"
+    }
+
+    static func captureQualityLabel(_ quality: String) -> String {
+        switch quality {
+        case "good": return "Good"
+        case "partial": return "Partial"
+        case "low_signal": return "Low"
+        case "blocked": return "Blocked"
+        case "no_recent": return "No recent"
+        default: return "Unknown"
+        }
+    }
+
+    private func blockedStatusLabel(reason: String) -> String {
+        switch reason {
+        case "blocklisted", "dangerous_app", "self_capture":
+            return "Blocked by safety"
+        case "not_allowlisted":
+            return "Not allowed"
+        default:
+            return "Blocked"
+        }
+    }
+
+    private func blockedStatusDetail(reason: String) -> String {
+        switch reason {
+        case "blocklisted":
+            return "Safety blocklist overrides this allowlist entry."
+        case "dangerous_app":
+            return "Password managers and vault-like apps are never captured."
+        case "self_capture":
+            return "OpenBird does not capture its own UI."
+        case "not_allowlisted":
+            return "This app is not effectively allowed by the capture policy."
+        default:
+            return "Capture policy rejected this app (\(reason))."
+        }
     }
 
     var promptDirectoryPath: String { service.promptDirectoryPath }

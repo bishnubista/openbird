@@ -96,15 +96,13 @@ struct AppSidebar: View {
     /// encryption state. Words are derived from state, not hardcoded, so the footer never
     /// claims local-only behavior for a remote route.
     private var footerDetail: String {
-        let n = appModel.allowlist.count
-        let apps = "\(n) app\(n == 1 ? "" : "s") allowed"
         let encryption: String
         switch appModel.encryptionState {
         case .ok: encryption = "encrypted"
         case .attention: encryption = "encryption off"
         default: encryption = "encryption unknown"
         }
-        return "\(apps) · \(appModel.modelRouteFooterLabel) · \(encryption)"
+        return "\(appModel.captureAllowedSummary) · \(appModel.modelRouteFooterLabel) · \(encryption)"
     }
 
     private var sidebarFill: Color {
