@@ -231,8 +231,8 @@ final class AppModelUXTests: XCTestCase {
             running.value = true
             await model.refreshCaptureHealth()
 
+            XCTAssertTrue(model.captureRunning)
             XCTAssertEqual(model.menuBarSymbol, "bird.fill")
-            XCTAssertFalse(model.canStartCaptureNow)
         }
     }
 
