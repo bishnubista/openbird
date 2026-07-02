@@ -75,6 +75,8 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "chat.day_memory_cached_summary",
         "chat.week_memory_cached_summary",
         "chat.summary_grounded",
+        "entities.aggregation",
+        "chat.entity_ledger",
     }.issubset(routes)
 
 
@@ -697,3 +699,33 @@ def test_chat_summary_grounded_route_documents_summary_prose_egress() -> None:
     assert "stored_block_summary_prose_fenced" in route["captured_fields"]
     assert "stored_week_digest_prose_fenced" in route["captured_fields"]
     assert "cli.CLOUD_ACTIVE" in route["truth_surface"]
+
+
+def test_privacy_route_entities_aggregation_is_local_and_structurally_modelless() -> None:
+    route = _routes()["entities.aggregation"]
+    assert route["class"] == "local"
+    assert route["egress"]["default"] == "none"
+    assert set(route["storage"]) == {"sqlite.entities", "sqlite.entity_evidence"}
+    forbidden = set(route["forbidden_fields"])
+    assert "entity_names_in_logs" in forbidden
+    assert "entity_names_in_routine_output" in forbidden
+    # Code-vs-manifest: the "structurally no model" claim is checkable — the
+    # aggregation entrypoint accepts NO provider argument, so no completion or
+    # embedding request can be issued from this route.
+    import inspect
+
+    from openbird.entities import run_entity_aggregation
+
+    assert "provider" not in inspect.signature(run_entity_aggregation).parameters
+
+
+def test_privacy_route_chat_entity_ledger_is_local_deterministic() -> None:
+    route = _routes()["chat.entity_ledger"]
+    assert route["class"] == "local"
+    assert route["egress"]["default"] == "none"
+    assert route["derives_from"] == ["entities.aggregation"]
+    forbidden = set(route["forbidden_fields"])
+    assert {"captured_text", "raw_window_title", "raw_url"} <= forbidden
+    # Deletion lineage: the answer path stores nothing of its own — both
+    # storage tables belong to the aggregation route's deletion contract.
+    assert set(route["storage"]) == {"sqlite.entities", "sqlite.entity_evidence"}

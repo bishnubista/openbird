@@ -318,6 +318,64 @@ routes:
       - cli.summaries_list
       - routine_run_output
 
+  - id: entities.aggregation
+    class: local
+    source: deterministic idle-time aggregation mining the entity ledger from stored observations, spans, block summaries, and day-memory open-loop payloads (regex only, structurally no model)
+    derives_from:
+      - capture.active_window
+      - summaries.block
+    captured_fields:
+      - entity_names_and_aliases
+      - completion_evidence_details
+      - typed_source_refs
+      - aggregation_watermarks
+    forbidden_fields:
+      - entity_names_in_logs
+      - entity_names_in_routine_output
+      - evidence_details_in_logs
+      - evidence_details_in_routine_output
+    storage:
+      - sqlite.entities
+      - sqlite.entity_evidence
+    egress:
+      default: none
+      note: STRUCTURALLY no model — run_entity_aggregation takes no provider argument, so no completion or embedding request can be issued; every evidence row is a regex match over a stored, citable source. Runs only under the routines battery/idle/meeting gate (or explicit `openbird summaries build`). Logs and routine output carry counts + reason codes only.
+    deletion:
+      command: openbird data purge/prune
+      must_remove:
+        - entity_evidence_citing_deleted_sources
+        - evidence_less_entities_marked_dormant_in_same_transaction
+        - entities_and_evidence_on_full_purge
+        - entity_aggregation_watermarks_on_full_purge
+    truth_surface:
+      - cli.entities_list
+      - routine_run_output
+
+  - id: chat.entity_ledger
+    class: local
+    source: deterministic completion answer ("did I finish X") composed from stored entity-ledger evidence rows; zero entity matches fall through to the normal chat routes
+    derives_from:
+      - entities.aggregation
+    captured_fields:
+      - user_question_for_classification_only
+      - entity_name_and_aliases
+      - completion_evidence_lines
+      - entity_evidence_derived_citations
+      - typed_last_seen_ref
+    forbidden_fields:
+      - captured_text
+      - raw_window_title
+      - raw_url
+    storage:
+      - sqlite.entities
+      - sqlite.entity_evidence
+    egress:
+      default: none
+      note: terminal deterministic branch — zero provider calls (reasoning_route local_deterministic); ambiguity returns a candidate list, never a guess. A windowed question filters evidence and last-activity to the window. Queries with no ledger match fall through to routes that report their own egress.
+    truth_surface:
+      - cli.chat_json.reasoning_route
+      - app.ChatResult.routeLabel
+
   - id: deep_brain.preview
     class: local
     source: exclusion-filtered day/week memory plus selected cited snippets

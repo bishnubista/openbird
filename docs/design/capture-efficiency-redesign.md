@@ -625,6 +625,90 @@ entity_evidence(entity_id, ts, kind, source_kind, source_id)
 - Later (out of scope here): user affordance to mark an entity done, which also makes
   the ledger a lightweight review surface ("dormant projects with unresolved loops").
 
+#### Phase E2 — decisions as implemented (v7 schema, entity ledger + completion evidence)
+
+Recording the adversarially-reviewed decisions so later phases build on what
+actually shipped, not the sketch above:
+
+- **Schema v7, additive-only** (`SCHEMA_VERSION = 7`, no rebuilds): `entities`
+  with a deterministic `sha256("kind:casefold(name)")` id (idempotent upserts;
+  identity is EXACT casefolded name — no fuzzy merging), `UNIQUE(kind, name)`,
+  a status CHECK including `user_marked_done` (schema-ready; NO mark-done UI in
+  E2 — the aggregation and dormancy passes never touch that status), and a
+  TYPED `last_seen_source_kind`/`last_seen_source_id` pair (span-derived domain
+  entities have no observation to cite) validated by BEFORE INSERT/UPDATE
+  triggers and NULLed by per-kind BEFORE DELETE triggers when the source dies.
+  `entity_evidence` has its own id PK plus a `detail` column (`NOT NULL
+  DEFAULT ''` so the UNIQUE five-tuple dedupes re-runs — `detail` is
+  load-bearing: open-loop → resolution matching needs the normalized item key,
+  and the honest answer needs the matched cue). Per-kind BEFORE INSERT
+  existence triggers and BEFORE DELETE cascade triggers mirror the
+  day-memory/block-summary pairs; the recursive span → block-summary →
+  evidence chain rides the verified `recursive_triggers` pragma. **NO fts/vec
+  indexing of entities or evidence** — the ledger is answered
+  deterministically by exact casefolded match; indexing would extend the
+  API-enforced sweep contract for zero recall benefit and risk the
+  double-counting E1 rejected. Consequence: `delete()`/`prune()` need no new
+  pre-select sweep — plain-table triggers fully cover evidence.
+- **Aggregation is STRUCTURALLY LLM-free**: `run_entity_aggregation(store, *,
+  now, settings)` takes no provider argument at all — every evidence row is a
+  regex match over a stored, citable source (an LLM judge cannot be re-verified
+  against the citation; E3+ territory if ever). Runs in the SAME gated
+  routines pass, right after summary indexing. Kinds populated: `repo` and
+  `domain` only (`document`/`topic` are the fuzzy-noise failure mode; the
+  CHECK admits them, no code mints them). `identity_key` stays reserved —
+  lighting it up at capture time would change span merge identity, and spans
+  lack URL paths anyway.
+- **Per-source-class cursors** in the `embedding_meta` KV
+  (`entity_aggregation.*`; wiped on full purge): observations advance a
+  composite `(ts, id)` activity cursor through the last actually-processed row
+  via the row-capped `observations_text_page` (`ORDER BY ts, id LIMIT` — the
+  REAL batching bound; `time_range_text`'s max_chars caps text per row, not
+  row count). The 48h overlap is a SEPARATE, equally-capped idempotent re-scan
+  that never moves the cursor (no livelock when the overlap window outgrows
+  the cap). Summaries are mined by a `(generated_at, id)` cursor because
+  regeneration replaces a historical row in place with a fresh `generated_at`
+  — a regenerated old block is always re-mined (regression-tested).
+- **Mining is item-anchored, never blob-global**: URL-is-item allows the
+  status word anywhere in window+text; otherwise the word must sit within
+  ±120 chars of THAT `_GITHUB_ITEM_RE` match (mixed-list pages mint evidence
+  only for the merged item). Linear/Jira is a host+key+word conjunction on a
+  domain entity. `shipped_language` scans block-summary prose for an entity
+  name/alias within ±160 chars, citing the summary id. The day-memory
+  extractors are EXPORTED (`REPO_RE`, `GITHUB_ITEM_RE`, `domain_from_url`),
+  never duplicated. Aliasing is conservative: the bare repo name only while
+  globally unique, removed on collision.
+- **Open loops are REHYDRATED, never payload-trusted**: promotion re-reads the
+  loop's cited observations (payload `source_ids` are sorted/capped — never
+  chronological), requires a single stable item id across the rows, and cites
+  the true earliest row; generic `cue` loops stay day-scoped. Resolution is
+  the exact rule: same entity + identical `detail` key + later ts, inserting
+  `open_loop_resolved` citing the resolving source. Dormancy runs at
+  aggregation time AND synchronously inside the `delete()`/`prune()`
+  transaction (evidence-less actives flip dormant; `user_marked_done` immune
+  on every path).
+- **Answering (`chat.entity_ledger`)**: the completion intent is checked AFTER
+  window resolution; windowed questions filter evidence + last-activity to the
+  window with window-scoped honest wording and never cite out-of-window rows;
+  zero entity matches always FALL THROUGH (the ledger never eats content
+  queries); ambiguity returns a deterministic candidate list, never a guess.
+  The terminal answer is provider-free (route `local_deterministic`, grounding
+  `derived`): evidence lines newest-first with `[n]` markers
+  (`DerivedCitation` type `entity_evidence`, construction-side validated),
+  unresolved open loops, and a last-activity line citing the TYPED last-seen
+  ref — degrading to "the underlying event was deleted" when the trigger
+  NULLed the pair.
+- **Privacy/surfacing**: names/aliases/details are DERIVED SENSITIVE
+  (encrypted DB only; logs and routine output carry counts + reason codes —
+  `format_counts_line` gains `entities= evidence= loops_promoted=
+  loops_resolved=`). `docs/privacy-routes.yaml` gains `entities.aggregation`
+  and `chat.entity_ledger` (both class local, egress none). `openbird
+  entities list/show` prints derived-sensitive bodies on an interactive
+  terminal only (the `summaries list` guard); `stats()` gains
+  `entities`/`entity_evidence`; `openbird data integrity` gains the
+  entity-evidence orphan probe (belt-and-braces — triggers should keep it at
+  zero always).
+
 ## 5. Suggested sequencing
 
 1. **A** (persistent event-driven helper + idle detection) — pure efficiency, no schema

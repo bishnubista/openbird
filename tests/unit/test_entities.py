@@ -505,3 +505,103 @@ def test_dormancy_at_aggregation_time(store, tmp_path):
     assert counts["dormant"] == 1
     assert store.get_entity(stale["id"])["status"] == "dormant"
     assert store.get_entity(done["id"])["status"] == "user_marked_done"
+
+
+# -- CLI surfacing (Phase E2) -----------------------------------------------------
+
+
+def _cli_store(tmp_path):
+    s = MemoryStore(
+        db_path=str(tmp_path / "cli-entities.db"),
+        settings=Settings(data_dir=tmp_path, embed_dim=64),
+        provider=FakeProvider(embed_dim=64),
+    )
+    obs = s.add_observation(
+        "This pull request was merged", source="capture", ts=NOW - DAY,
+        window="Merge PR #12 · bbista/openbird",
+        url="https://github.com/bbista/openbird/pull/12",
+    )
+    entity = s.upsert_entity(
+        "repo", "bbista/openbird", seen_ts=NOW - DAY,
+        source_kind="observation", source_id=obs.id,
+    )
+    s.add_entity_evidence(
+        entity["id"], ts=NOW - DAY, kind="pr_merged",
+        source_kind="observation", source_id=obs.id,
+        detail="github:bbista/openbird#12",
+    )
+    return s
+
+
+def test_cli_entities_list_withholds_names_non_interactive(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    store = _cli_store(tmp_path)
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: store)
+    res = CliRunner().invoke(cli.app, ["entities", "list"])
+    assert res.exit_code == 0, res.output
+    # Metadata yes; DERIVED SENSITIVE name no (CliRunner output is not a TTY).
+    assert "kind=repo" in res.output
+    assert "evidence=1" in res.output
+    assert "bbista/openbird" not in res.output
+    assert "withheld (non-interactive output)" in res.output
+
+
+def test_cli_entities_list_json_non_interactive_omits_names(tmp_path, monkeypatch):
+    import json as _json
+
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    store = _cli_store(tmp_path)
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: store)
+    res = CliRunner().invoke(cli.app, ["entities", "list", "--json"])
+    assert res.exit_code == 0, res.output
+    assert "bbista/openbird" not in res.output
+    payload = _json.loads(res.output[: res.output.rindex("}") + 1])
+    assert payload["entities"][0]["kind"] == "repo"
+    assert "name" not in payload["entities"][0]
+
+
+def test_cli_entities_show_withholds_bodies_non_interactive(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    store = _cli_store(tmp_path)
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: store)
+    res = CliRunner().invoke(cli.app, ["entities", "show", "openbird"])
+    assert res.exit_code == 0, res.output
+    assert "kind=repo" in res.output
+    assert "github:bbista/openbird#12" not in res.output  # detail withheld
+    assert "evidence rows withheld" in res.output
+
+
+def test_cli_entities_show_unknown_name_exits_nonzero(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    store = _cli_store(tmp_path)
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: store)
+    res = CliRunner().invoke(cli.app, ["entities", "show", "no-such-entity"])
+    assert res.exit_code == 1
+
+
+def test_cli_data_integrity_includes_entity_probe(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from openbird import cli
+    from openbird.config import Settings as _Settings
+
+    store = _cli_store(tmp_path)
+    db_path = str(tmp_path / "cli-entities.db")
+    store.close()
+    settings = _Settings(data_dir=tmp_path, db_path=db_path, embed_dim=64)
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    res = CliRunner().invoke(cli.app, ["data", "integrity"])
+    assert res.exit_code == 0, res.output
+    assert "entity ledger: ok" in res.output

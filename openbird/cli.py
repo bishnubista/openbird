@@ -63,8 +63,13 @@ deep_brain_app = typer.Typer(
     help="Preview the local packet for opt-in Deep Brain reasoning.",
     no_args_is_help=True,
 )
+entities_app = typer.Typer(
+    help="Inspect the derived entity ledger (projects, domains, completion evidence).",
+    no_args_is_help=True,
+)
 app.add_typer(routine_app, name="routine")
 app.add_typer(summaries_app, name="summaries")
+app.add_typer(entities_app, name="entities")
 app.add_typer(eval_app, name="eval")
 app.add_typer(day_memory_app, name="day-memory")
 app.add_typer(deep_brain_app, name="deep-brain")
@@ -2533,6 +2538,163 @@ def _summaries_list_weeks() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# entities (Phase E2)                                                         #
+# --------------------------------------------------------------------------- #
+
+
+def _entity_evidence_counts(store) -> dict[str, int]:
+    """Per-entity evidence row counts (metadata only)."""
+    rows = store.conn.execute(
+        "SELECT entity_id, COUNT(*) AS c FROM entity_evidence GROUP BY entity_id"
+    ).fetchall()
+    return {r["entity_id"]: int(r["c"]) for r in rows}
+
+
+@entities_app.command("list")
+def entities_list(
+    kind: Optional[str] = typer.Option(
+        None, "--kind", help="Filter by kind: repo|domain|document|topic."
+    ),
+    status: Optional[str] = typer.Option(
+        None, "--status", help="Filter by status: active|dormant|user_marked_done."
+    ),
+    as_json: bool = typer.Option(
+        False, "--json",
+        help="Machine-readable output (names included on an interactive "
+        "terminal only).",
+    ),
+) -> None:
+    """List ledger entities (kind, status, activity extent, evidence count).
+
+    Entity names and aliases are DERIVED SENSITIVE (distilled from captured
+    content): they are printed ONLY on an interactive terminal — a piped or
+    captured invocation gets counts and metadata so names never land in logs
+    or scrollback files (the `summaries list` body-guard rule).
+    """
+    store = _store_maintenance()
+    try:
+        rows = store.list_entities(kind=kind, status=status)
+        evidence_counts = _entity_evidence_counts(store)
+    finally:
+        store.close()
+    if not rows:
+        _console.print("[yellow]No ledger entities stored yet.[/]")
+        return
+    interactive = sys.stdout.isatty()
+    if as_json:
+        items = []
+        for row in rows:
+            item = {
+                "id": row["id"],
+                "kind": row["kind"],
+                "status": row["status"],
+                "first_ts": row["first_ts"],
+                "last_ts": row["last_ts"],
+                "evidence_count": evidence_counts.get(row["id"], 0),
+            }
+            if interactive:  # derived-sensitive bodies: interactive only
+                item["name"] = row["name"]
+                item["aliases"] = row["aliases"]
+            items.append(item)
+        _console.print_json(json.dumps({"entities": items}))
+        if not interactive:
+            _err_console.print(
+                f"[dim]{len(rows)} entity names withheld (non-interactive "
+                "output).[/]"
+            )
+        return
+    for row in rows:
+        meta = (
+            f"kind={row['kind']} status={row['status']} "
+            f"first={_fmt_ts(row['first_ts'])} last={_fmt_ts(row['last_ts'])} "
+            f"evidence={evidence_counts.get(row['id'], 0)}"
+        )
+        if interactive:
+            aliases = ", ".join(row["aliases"]) if row["aliases"] else "-"
+            _console.print(
+                f"[bold]{escape(str(row['name']))}[/] "
+                f"(aliases: {escape(aliases)}) {escape(meta)}"
+            )
+        else:
+            _console.print(escape(meta))
+    if not interactive:
+        _console.print(
+            f"[dim]{len(rows)} entity names withheld (non-interactive output).[/]"
+        )
+
+
+@entities_app.command("show")
+def entities_show(
+    name: str = typer.Argument(
+        ..., help="Entity name or alias (casefolded; exact match preferred)."
+    ),
+) -> None:
+    """Show one entity's evidence rows (kind, date, detail, source refs).
+
+    Names and evidence details are DERIVED SENSITIVE — bodies print to an
+    interactive terminal only; a piped invocation gets counts.
+    """
+    store = _store_maintenance()
+    try:
+        candidates = store.entities_matching(name)
+        needle = name.casefold()
+        exact = [
+            e for e in candidates
+            if str(e["name"]).casefold() == needle
+            or needle in [str(a).casefold() for a in e["aliases"]]
+        ]
+        pool = exact or candidates
+        if not pool:
+            _console.print("[yellow]No ledger entity matches that name.[/]")
+            raise typer.Exit(code=1)
+        if len(pool) > 1:
+            interactive = sys.stdout.isatty()
+            if interactive:
+                names = ", ".join(sorted(str(e["name"]) for e in pool))
+                _err_console.print(
+                    f"[red]Ambiguous:[/] matches {len(pool)} entities: "
+                    f"{escape(names)}."
+                )
+            else:
+                _err_console.print(
+                    f"[red]Ambiguous:[/] matches {len(pool)} entities "
+                    "(names withheld: non-interactive output)."
+                )
+            raise typer.Exit(code=2)
+        entity = pool[0]
+        evidence = store.entity_evidence_for(entity["id"], limit=50)
+    finally:
+        store.close()
+    interactive = sys.stdout.isatty()
+    header = (
+        f"kind={entity['kind']} status={entity['status']} "
+        f"first={_fmt_ts(entity['first_ts'])} last={_fmt_ts(entity['last_ts'])} "
+        f"evidence={len(evidence)}"
+    )
+    if interactive:
+        aliases = ", ".join(entity["aliases"]) if entity["aliases"] else "-"
+        _console.print(
+            f"[bold]{escape(str(entity['name']))}[/] (aliases: {escape(aliases)})"
+        )
+    _console.print(escape(header))
+    for row in evidence:
+        line = (
+            f"{_fmt_ts(row['ts'])} {row['kind']} "
+            f"source={row['source_kind']}:{row['source_id']}"
+        )
+        if interactive:
+            detail = str(row.get("detail") or "")
+            if detail:
+                line += f" detail={detail}"
+            _console.print(f"  {escape(line)}")
+    if not interactive:
+        _console.print(
+            f"[dim]{len(evidence)} evidence rows withheld "
+            "(non-interactive output).[/]"
+        )
+
+
+# --------------------------------------------------------------------------- #
 # meeting (stub)                                                              #
 # --------------------------------------------------------------------------- #
 
@@ -3029,21 +3191,23 @@ def data_integrity(
 ) -> None:
     """Verify the on-disk database is not corrupt (SQLite integrity check).
 
-    Also probes the summary-index deletion contract (Phase E1): counts of
-    fts/vec rows without a ``summary_index_entries`` row and entries without a
-    live summary. Non-zero counts mean a code path bypassed the sweep APIs.
+    Also probes the summary-index deletion contract (Phase E1) and the
+    entity-evidence trigger contract (Phase E2): non-zero orphan counts mean a
+    code path bypassed the sweep APIs / deletion triggers.
     """
     # Open the DB raw (not via MemoryStore) so a corrupt DB — exactly what this
     # command diagnoses — is reported rather than crashing in schema/migrations.
     from openbird.memory.store import (
         check_database_integrity,
+        check_entity_evidence_orphans,
         check_summary_index_orphans,
     )
 
     settings = get_settings()
     result = check_database_integrity(settings.db_path, settings=settings, quick=quick)
     orphans = check_summary_index_orphans(settings.db_path, settings=settings)
-    ok = result["ok"] and orphans["ok"]
+    entity_orphans = check_entity_evidence_orphans(settings.db_path, settings=settings)
+    ok = result["ok"] and orphans["ok"] and entity_orphans["ok"]
     if ok:
         _console.print("[green]integrity: ok[/]")
         counts = orphans.get("counts")
@@ -3052,9 +3216,16 @@ def data_integrity(
                 "[green]summary index: ok[/] "
                 f"(fts_orphans=0 vec_orphans=0 entry_orphans=0)"
             )
+        if entity_orphans.get("counts") is not None:
+            _console.print(
+                "[green]entity ledger: ok[/] "
+                "(observation_orphans=0 span_orphans=0 summary_orphans=0)"
+            )
     else:
         _console.print("[red]integrity: PROBLEMS DETECTED[/]")
-        for problem in result["problems"] + orphans["problems"]:
+        for problem in (
+            result["problems"] + orphans["problems"] + entity_orphans["problems"]
+        ):
             _console.print(f"  - {problem}")
     raise typer.Exit(code=0 if ok else 1)
 
