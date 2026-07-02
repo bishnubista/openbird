@@ -96,6 +96,13 @@ _STOP_TOKENS = {
     "http", "https", "www", "com",
 }
 
+# Public aliases (Phase E2): the entity-ledger aggregation pass reuses these
+# EXACT extractors — exported here rather than duplicated so the day-memory
+# payloads and the durable entity ledger can never drift on what counts as a
+# repo / GitHub item / domain.
+REPO_RE = _REPO_RE
+GITHUB_ITEM_RE = _GITHUB_ITEM_RE
+
 
 @dataclass(frozen=True)
 class DayMemoryBuild:
@@ -1616,6 +1623,11 @@ def _domain(value: str) -> str | None:
     if host.startswith("www."):
         host = host[4:]
     return host or None
+
+
+# Public alias (Phase E2): the entity aggregation pass derives domain entities
+# with the SAME host extraction the day-memory payloads use (see REPO_RE above).
+domain_from_url = _domain
 
 
 def _rank_entity_map(items: dict[str, set[str]]) -> list[dict]:

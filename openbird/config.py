@@ -301,6 +301,20 @@ class Settings:
     # index per runner invocation. Env: OPENBIRD_SUMMARY_INDEX_BATCH_LIMIT.
     summary_index_batch_limit: int = 32
 
+    # Entity ledger aggregation (Phase E2). A DETERMINISTIC (no-LLM) pass run
+    # by the SAME gated routines invocation as block summaries; it mines repo/
+    # domain entities and completion evidence from stored sources. Env:
+    # OPENBIRD_ENTITY_*.
+    entity_ledger_enabled: bool = True
+    # First-run scan bound: days of history mined when no watermark exists yet.
+    entity_aggregation_lookback_days: float = 14.0
+    # Entities with no recorded activity for this long go dormant at
+    # aggregation time (user_marked_done rows are immune).
+    entity_dormant_after_days: float = 21.0
+    # REAL row cap on observations scanned per aggregation run (the composite
+    # (ts, id) cursor resumes where the capped run stopped).
+    entity_evidence_batch_limit: int = 2000
+
     # Optional cross-encoder reranker (between RRF fusion and MMR). DISABLED by
     # default: an empty rerank_model is a no-op, so search behavior is unchanged.
     # When set (e.g. "bge-reranker-v2-m3"), search reorders the fused candidates by
@@ -454,6 +468,10 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "week_rollup_lookback_weeks": 2,
     "week_rollup_min_interval_seconds": 21600.0,
     "summary_index_batch_limit": 32,
+    "entity_ledger_enabled": True,
+    "entity_aggregation_lookback_days": 14.0,
+    "entity_dormant_after_days": 21.0,
+    "entity_evidence_batch_limit": 2000,
     "embed_dim": 768,
     "llm_timeout": 60.0,
     "embed_timeout": 30.0,
