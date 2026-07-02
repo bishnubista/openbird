@@ -829,6 +829,7 @@ class MemoryStore:
         url_host: str | None = None,
         identity_key: str | None = None,
         afk: bool = False,
+        meeting: bool = False,
         reason: str | None = None,
         span_id: str | None = None,
     ) -> str:
@@ -837,8 +838,10 @@ class MemoryStore:
         Enforces the tier contract in Python BEFORE SQL (fail-closed, testable
         error) in addition to the schema CHECKs: tier 0 must carry a reason from
         the closed enum and NO window/url_host/identity_key; tier 1 carries no
-        reason. Metadata only — nothing here is captured content (window titles
-        arrive already scrubbed by the caller).
+        reason. ``meeting`` (Phase C1) is legal on BOTH tiers — a coarse
+        non-allowlisted Zoom span may still be a meeting. Metadata only —
+        nothing here is captured content (window titles arrive already
+        scrubbed by the caller).
         """
         from openbird.capture.redact import SPAN_REASONS, SPAN_TIER_COARSE, SPAN_TIER_FULL
 
@@ -862,7 +865,7 @@ class MemoryStore:
                 "INSERT INTO activity_spans("
                 "span_id, epoch_id, start_ts, end_ts, bundle_id, app, detail_tier, "
                 "window, url_host, identity_key, afk, meeting, reason"
-                ") VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?)",
+                ") VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     epoch_id,
@@ -874,6 +877,7 @@ class MemoryStore:
                     url_host,
                     identity_key,
                     1 if afk else 0,
+                    1 if meeting else 0,
                     reason,
                 ),
             )

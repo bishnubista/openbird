@@ -273,6 +273,70 @@ time facts read from spans; sessions remain a content-grouping concept.
    Electron-only and version-fragile (fixed only after electron#38102) — set, tolerate
    failure, fall back.
 
+#### Phase C1 — decisions as implemented (meeting flag; `MicMonitor.swift`, `spans.py`)
+
+- **Signal plumbing**: the helper emits `{type:"system", kind:"mic_started"|"mic_stopped"}`
+  edge events (the `system` vocabulary gained exactly these two — closed set; an OLD
+  daemon coerces unknown kinds to `None` and `on_system(None, ts)` is a no-op, so
+  back-compat is free). Edges, not heartbeat booleans: heartbeats quantize to ~5s and a
+  mismatched-identity heartbeat closes without reopening; an edge splits at the exact
+  instant, mirroring `afk_transition`. Named `mic_*`, not `meeting_*`: the helper reports
+  the raw hardware signal; the meeting JUDGMENT is daemon-side policy.
+- **CoreAudio mechanics**: `MicMonitor` (CaptureHelperCore) is a pure state machine over
+  an injectable `MicHAL` protocol so the stateful listener lifecycle is unit-tested;
+  `CoreAudioMicHAL` (executable target) is the mechanism-only adapter, listener blocks on
+  the MAIN dispatch queue. Run state is read on the **input-scope**
+  `DeviceIsRunningSomewhere` address (global scope goes true for output playback on
+  duplex devices — AirPods music must not read as mic-hot), with a per-device
+  global-scope fallback and a one-time `mic_scope_fallback` diag when the input-scope
+  query errors. All input-capable devices are watched (Zoom can use a non-default mic);
+  per-device listeners are removed BEFORE every re-enumeration (leak guard); emission is
+  aggregate-flip-only plus an initial `mic_started` when already hot at startup. No TCC:
+  run-state is metadata. Stream mode only (one-shot has no process to host listeners,
+  same as AFK).
+- **Meeting definition** (conjunction, computed in `SpanTracker`):
+  `meeting = mic_hot AND (bundle_id in MEETING_BUNDLES OR url_host in MEETING_HOSTS)`.
+  Mic-alone flags dictation/Siri; app-alone flags idling in Discord. The sets live in
+  `spans.py` as frozensets storing CASEFOLDED constants; comparisons casefold and storage
+  stays raw. Python-only — no Swift copy, no parity test (unlike `dangerous_apps.json`,
+  which is a privacy boundary; a stale meeting entry mislabels time, never leaks
+  content). Tier-0 spans match on bundle only (URL stripped by design): a coarse browser
+  span never flags via a Meet tab (acceptable — needs the browser allowlisted +
+  `capture_urls`), while a non-allowlisted Zoom still flags. User override deferred.
+- **Span mechanics**: `meeting` joins `_SpanIdentity` — a mid-span mic edge SPLITS the
+  span (truncate-close at the edge, reopen flipped), like `afk`; the AFK mirror copies
+  `meeting` as-is (on a call you don't type — meeting spans routinely go AFK). Paused
+  pseudo-spans never flag. Pending app-boundary markers record the mic state at marker
+  time and backdate ONLY when the marker-time meeting bit equals the frame-time bit;
+  otherwise the new span opens at the mic-transition ts and the pre-edge stretch is
+  materialized with the marker bit (switch-to-Zoom at t=100 + mic at t=101 yields
+  non-meeting [100,101) + meeting [101,...), never a meeting span backdated to 100).
+  `begin_epoch` resets mic state — the fresh helper re-emits `mic_started` when already
+  hot, so a live call is never lost, but a dead helper's stale hot bit cannot survive.
+  `store.open_span` gained `meeting=` (the column existed since Phase B; NO migration).
+- **Day-memory (v9 bump)**: `_span_metrics` adds `meeting_seconds` (AFK meeting spans
+  COUNT — accumulated before the AFK early-continue) and `meeting_count` (intervals
+  merged into runs across gaps <= 120s: split spans, brief mutes, and mid-call app
+  switches stay one meeting). The bump to `day-memory-v9` is REQUIRED: the reuse gate
+  compares `extractor_version` and span-extent hashes only, so a metrics-shape change
+  alone would never invalidate cached days.
+- **LLM deferral**: the liveness sidecar gains a `meeting` bit — the tracker latch
+  `_mic_hot AND _meeting_seen` (set when a meeting span opens/extends; cleared on
+  mic-off/epoch), so deferral holds while glancing at Notes mid-call and never fires for
+  dictation. `should_run_background_llm` checks fresh+meeting FIRST and defers with
+  `meeting_live` even on AC power (Zoom GPU/CPU contention exists on AC too — the
+  screenpipe lesson). A STALE sidecar never defers on meeting alone (fail-open on
+  meeting ONLY — a dead daemon must not block summaries forever; the 30s freshness bound
+  self-heals a lost `mic_stopped`); the battery path stays fail-closed unchanged.
+- **Block-summary interaction (documented tradeoff)**: a meeting split changes block
+  span membership -> a NEW block key. In routine mode the 15-min settle rule means a
+  live span being split can never belong to an already-summarized settled block, so no
+  stale overlap arises. Only `--force` on-demand builds can summarize an unsettled block
+  that a subsequent split re-keys, leaving an overlapping stale row until its sources
+  change — documented in the CLI `--force` help text, not silently ignored.
+- **Privacy**: no new content-bearing fields anywhere — the mic signal, the span bit,
+  and the sidecar field are metadata bits; all logging is reason codes.
+
 ### Phase D — Hierarchical context for the AI (what the model should see)
 
 The research consensus: raw capture dumps don't answer "how did I spend my day" —

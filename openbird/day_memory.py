@@ -25,7 +25,7 @@ if TYPE_CHECKING:  # annotation-only: avoids a runtime import cycle risk
     from openbird.types import DerivedCitation
 from openbird.reasoning_ledger import packet_payload_audit
 
-EXTRACTOR_VERSION = "day-memory-v8"
+EXTRACTOR_VERSION = "day-memory-v9"
 _UNGROUNDED_PRODUCTIVITY_COACH_ANSWER = (
     "I could not ground productivity coaching in the local facts packet."
 )
@@ -218,6 +218,11 @@ def build_day_memory(
 # Cap on the uncategorized-identity fallback queue surfaced in span_metrics.
 _UNCATEGORIZED_IDENTITY_LIMIT = 8
 
+# Meeting-run merging (Phase C1): meeting spans separated by at most this gap
+# belong to the SAME meeting (a brief mute, a reconnect, or an app-switch
+# split must not double-count the meeting).
+_MEETING_GAP_SECONDS = 120.0
+
 
 def span_fingerprint_for_spans(spans: list[dict]) -> dict:
     """Freshness fingerprint over span extents.
@@ -256,6 +261,10 @@ def _span_metrics(
     identity_seconds: Counter[str] = Counter()
     afk_seconds = 0.0
     paused_seconds = 0.0
+    meeting_seconds = 0.0
+    # Clipped (s, e) intervals of meeting spans, in start order (the loop is
+    # start-sorted), for the meeting-run merge below.
+    meeting_intervals: list[tuple[float, float]] = []
 
     for span in sorted(spans, key=lambda x: float(x.get("start_ts") or 0.0)):
         s, e, seconds = _clip_seconds(span, start_ts, end_ts)
@@ -272,6 +281,11 @@ def _span_metrics(
             time_by_reason["paused"] += seconds
             paused_seconds += seconds
             continue
+        if span.get("meeting"):
+            # BEFORE the AFK early-continue: on a call you don't type, so AFK
+            # meeting spans MUST still count as meeting time.
+            meeting_seconds += seconds
+            meeting_intervals.append((s, e))
         if span.get("afk"):
             afk_seconds += seconds
             continue
@@ -321,12 +335,26 @@ def _span_metrics(
         for block in compute_span_blocks(spans, start_ts=start_ts, end_ts=end_ts)
     ]
 
+    # Meeting count (Phase C1): merge the start-ordered meeting intervals into
+    # runs, bridging gaps <= _MEETING_GAP_SECONDS — split spans, brief mutes,
+    # and mid-call app switches stay ONE meeting.
+    meeting_count = 0
+    run_end: float | None = None
+    for m_start, m_end in meeting_intervals:
+        if run_end is None or m_start - run_end > _MEETING_GAP_SECONDS:
+            meeting_count += 1
+            run_end = m_end
+        else:
+            run_end = max(run_end, m_end)
+
     metrics = {
         "span_time_by_app": _round_counter(time_by_app),
         "span_time_by_reason": _round_counter(time_by_reason),
         "span_time_by_hour": _round_counter(time_by_hour),
         "afk_seconds": round(afk_seconds, 3),
         "paused_seconds": round(paused_seconds, 3),
+        "meeting_seconds": round(meeting_seconds, 3),
+        "meeting_count": meeting_count,
         "active_span_seconds": round(sum(time_by_app.values()), 3),
         "span_focus_blocks": focus_blocks,
         "span_coverage": {"span_count": len(span_ids)},

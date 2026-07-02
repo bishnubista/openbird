@@ -2307,7 +2307,13 @@ def summaries_build(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Bypass the battery/idle gate and the settle delay (NEVER the cloud gate).",
+        help=(
+            "Bypass the battery/idle/meeting gate and the settle delay (NEVER "
+            "the cloud gate). Tradeoff: forcing may summarize a still-active "
+            "block whose membership later changes (e.g. a mid-block meeting "
+            "split re-keys it), leaving a stale overlapping summary until its "
+            "sources change; the settled routine path cannot hit this."
+        ),
     ),
 ) -> None:
     """Build block summaries on demand (same bounded runner the routine uses).

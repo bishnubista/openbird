@@ -561,6 +561,22 @@ def test_open_span_validates_tier_contract(store):
         )
 
 
+def test_open_span_persists_meeting_and_defaults_off(store):
+    # Phase C1: the meeting bit persists on both tiers and defaults to 0.
+    flagged = _open_full_span(store, start=100.0, end=110.0, meeting=True)
+    plain = store.open_span(
+        epoch_id="e", start_ts=200.0, end_ts=210.0, bundle_id="us.zoom.xos",
+        detail_tier=0, reason="not_allowlisted", meeting=True,
+    )
+    default = store.open_span(
+        epoch_id="e", start_ts=300.0, end_ts=310.0, bundle_id="b", detail_tier=1
+    )
+    rows = {r["span_id"]: r for r in store.spans_in_range(0.0, 1_000.0)}
+    assert rows[flagged]["meeting"] == 1
+    assert rows[plain]["meeting"] == 1  # legal on the coarse tier too
+    assert rows[default]["meeting"] == 0  # default off
+
+
 def test_extend_span_is_monotone(store):
     sid = _open_full_span(store, start=100.0, end=110.0)
     store.extend_span(sid, 120.0)

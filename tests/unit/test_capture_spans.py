@@ -314,6 +314,199 @@ def test_store_failure_returns_none_and_never_raises(settings):
     assert tracker.error_count >= 1
 
 
+# -- meeting flag (Phase C1) --------------------------------------------------
+
+
+def test_meeting_requires_conjunction_of_mic_and_meeting_app(settings):
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 99.0)
+    # Mic hot + meeting bundle -> meeting (coarse tier still matches bundles:
+    # a non-allowlisted Zoom gets meeting=1 on its coarse span).
+    a = frame(tracker, app="us.zoom.xos", window=None, ts=100.0)
+    assert store.spans[a]["meeting"] is True
+    assert store.spans[a]["detail_tier"] == 0
+    # Mic hot + non-meeting app -> NOT a meeting (dictation/Siri guard).
+    clock.t += 2.0
+    b = frame(tracker, ts=102.0)
+    assert store.spans[b]["meeting"] is False
+
+
+def test_meeting_app_without_mic_never_flags(settings):
+    # App-alone (idling in Discord, mic cold) -> not a meeting.
+    tracker, store, clock = make_tracker(settings)
+    a = frame(tracker, app="com.hnc.Discord", window=None, ts=100.0)
+    assert store.spans[a]["meeting"] is False
+
+
+def test_mid_span_mic_flip_splits_at_exact_edge_both_directions(settings):
+    tracker, store, clock = make_tracker(settings)
+    a = frame(tracker, app="us.zoom.xos", window=None, ts=100.0)
+    clock.t += 3.0
+    frame(tracker, app="us.zoom.xos", window=None, ts=103.0)
+    clock.t += 2.0
+    tracker.on_mic(True, 105.0)  # mic starts mid-span
+    assert store.spans[a]["end_ts"] == 105.0  # closed at the exact edge
+    meeting_span = tracker._open
+    assert meeting_span is not None and meeting_span.identity.meeting is True
+    assert store.spans[meeting_span.span_id]["start_ts"] == 105.0
+    clock.t += 5.0
+    tracker.on_mic(False, 110.0)  # mic stops mid-span: split back
+    assert store.spans[meeting_span.span_id]["end_ts"] == 110.0
+    after = tracker._open
+    assert after is not None and after.identity.meeting is False
+    assert store.spans[after.span_id]["start_ts"] == 110.0
+
+
+def test_duplicate_mic_edges_are_noops(settings):
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 99.0)
+    frame(tracker, app="us.zoom.xos", window=None, ts=100.0)
+    clock.t += 1.0
+    tracker.on_mic(True, 101.0)  # duplicate edge: no split
+    assert len(store.spans) == 1
+
+
+def test_afk_mirror_preserves_meeting(settings):
+    # On a call you don't type: meeting spans routinely go AFK and must stay
+    # meeting time.
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 99.0)
+    frame(tracker, app="us.zoom.xos", window=None, ts=100.0)
+    clock.t += 10.0
+    tracker.on_afk_transition(afk=True, ts=105.0)
+    mirror = tracker._open
+    assert mirror is not None
+    assert mirror.identity.afk is True and mirror.identity.meeting is True
+    assert store.spans[mirror.span_id]["meeting"] is True
+
+
+def test_tier1_meet_tab_flags_via_url_host(settings):
+    settings.allowlist = settings.allowlist + ["com.google.Chrome"]
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 99.0)
+    sid = frame(tracker, app="com.google.Chrome", window="Meet",
+                url="https://meet.google.com/abc-defg", ts=100.0)
+    row = store.spans[sid]
+    assert row["detail_tier"] == 1
+    assert row["url_host"] == "meet.google.com"
+    assert row["meeting"] is True
+
+
+def test_tier0_browser_span_never_flags_via_url(settings):
+    # Chrome NOT allowlisted -> coarse span strips the URL, so a Meet tab
+    # cannot flag through a tier-0 browser span (documented, acceptable).
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 99.0)
+    sid = frame(tracker, app="com.google.Chrome",
+                url="https://meet.google.com/abc", ts=100.0)
+    row = store.spans[sid]
+    assert row["detail_tier"] == 0
+    assert row["url_host"] is None
+    assert row["meeting"] is False
+
+
+def test_meeting_matching_casefolds_but_stores_raw(settings):
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 99.0)
+    a = frame(tracker, app="COM.APPLE.facetime", window=None, ts=100.0)
+    assert store.spans[a]["meeting"] is True
+    assert store.spans[a]["bundle_id"] == "COM.APPLE.facetime"  # stored raw
+    clock.t += 2.0
+    b = frame(tracker, app="com.hnc.DISCORD", window=None, ts=102.0)
+    assert store.spans[b]["meeting"] is True
+    assert store.spans[b]["bundle_id"] == "com.hnc.DISCORD"
+
+
+def test_marker_then_mic_start_never_backdates_the_meeting_span(settings):
+    # App switch to Zoom at t=100, mic starts at t=101, frame at t=101.3:
+    # must yield non-meeting [100,101) + meeting [101,...) — NEVER a meeting
+    # span backdated to 100.
+    tracker, store, clock = make_tracker(settings)
+    frame(tracker, ts=99.0)
+    clock.t += 1.0
+    tracker.on_app_changed("us.zoom.xos", 100.0)  # marker records mic COLD
+    clock.t += 1.0
+    tracker.on_mic(True, 101.0)
+    clock.t += 0.3
+    sid = frame(tracker, app="us.zoom.xos", window=None, ts=101.3)
+    assert store.spans[sid]["meeting"] is True
+    assert store.spans[sid]["start_ts"] == 101.0  # opened at the mic edge
+    pre = [r for r in store.spans.values()
+           if r["bundle_id"] == "us.zoom.xos" and r["meeting"] is False]
+    assert len(pre) == 1  # pre-edge stretch materialized with the marker bit
+    assert (pre[0]["start_ts"], pre[0]["end_ts"]) == (100.0, 101.0)
+
+
+def test_marker_then_mic_stop_never_backdates_the_nonmeeting_span(settings):
+    # The inverse ordering: switch to Zoom mid-call at t=100, mic stops at
+    # t=101 -> meeting [100,101) + non-meeting [101,...).
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 98.0)
+    frame(tracker, ts=99.0)  # mail: mic hot but not a meeting surface
+    clock.t += 1.0
+    tracker.on_app_changed("us.zoom.xos", 100.0)  # marker records mic HOT
+    clock.t += 1.0
+    tracker.on_mic(False, 101.0)
+    clock.t += 0.3
+    sid = frame(tracker, app="us.zoom.xos", window=None, ts=101.3)
+    assert store.spans[sid]["meeting"] is False
+    assert store.spans[sid]["start_ts"] == 101.0
+    pre = [r for r in store.spans.values()
+           if r["bundle_id"] == "us.zoom.xos" and r["meeting"] is True]
+    assert len(pre) == 1
+    assert (pre[0]["start_ts"], pre[0]["end_ts"]) == (100.0, 101.0)
+
+
+def test_marker_with_unchanged_meeting_bit_backdates_normally(settings):
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 98.0)
+    frame(tracker, ts=99.0)
+    clock.t += 1.0
+    tracker.on_app_changed("us.zoom.xos", 100.0)
+    clock.t += 0.3
+    sid = frame(tracker, app="us.zoom.xos", window=None, ts=100.3)
+    # No mic edge between marker and frame: the classic exact backdate holds.
+    assert store.spans[sid]["start_ts"] == 100.0
+    assert store.spans[sid]["meeting"] is True
+
+
+def test_meeting_live_latch_survives_glance_and_clears_on_mic_off(settings):
+    tracker, store, clock = make_tracker(settings)
+    assert tracker.meeting_live is False
+    tracker.on_mic(True, 99.0)
+    assert tracker.meeting_live is False  # mic alone (dictation) never defers
+    frame(tracker, app="us.zoom.xos", window=None, ts=100.0)
+    assert tracker.meeting_live is True
+    clock.t += 2.0
+    frame(tracker, app="com.apple.notes", ts=102.0)  # glance mid-call
+    assert tracker.meeting_live is True  # latch holds while the mic is hot
+    tracker.on_mic(False, 104.0)
+    assert tracker.meeting_live is False
+
+
+def test_meeting_live_latch_clears_on_epoch(settings):
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 99.0)
+    frame(tracker, app="us.zoom.xos", window=None, ts=100.0)
+    assert tracker.meeting_live is True
+    tracker.begin_epoch()
+    assert tracker.meeting_live is False
+
+
+def test_paused_pseudo_span_never_flags_meeting(settings):
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 99.0)
+    tracker.on_heartbeat(afk=False, paused=True, ts=100.0)
+    paused = tracker._open
+    assert paused is not None and paused.identity.reason == "paused"
+    assert paused.identity.meeting is False
+    # A mic edge never splits the paused pseudo-span.
+    clock.t += 1.0
+    tracker.on_mic(False, 101.0)
+    assert tracker._open is not None
+    assert tracker._open.span_id == paused.span_id
+
+
 def test_app_switch_never_fragments_paused_span(settings):
     # CodeRabbit regression: app switches while paused must not close the
     # paused span (capture is off; the switch attributes nothing).
@@ -331,3 +524,46 @@ def test_app_switch_never_fragments_paused_span(settings):
     assert tracker._open.span_id == paused.span_id
     paused_rows = [r for r in store.spans.values() if r["reason"] == "paused"]
     assert len(paused_rows) == 1
+
+
+def test_fast_aba_middle_span_splits_at_mic_edge(settings):
+    # Codex diff-review regression: Mail -> Zoom at 100 (mic cold), mic starts
+    # at 101, back to Mail at 102 before any Zoom frame. The materialized Zoom
+    # stretch must split: [100,101) meeting=0, [101,102) meeting=1.
+    tracker, store, clock = make_tracker(settings)
+    frame(tracker, app="com.apple.mail", ts=99.0)
+    clock.t += 1.0
+    tracker.on_app_changed("us.zoom.xos", 100.0)  # mic cold at marker time
+    clock.t += 1.0
+    tracker.on_mic(True, 101.0)
+    clock.t += 1.0
+    tracker.on_app_changed("com.apple.mail", 102.0)  # back before a Zoom frame
+    zoom = sorted(
+        (r for r in store.spans.values() if r["bundle_id"] == "us.zoom.xos"),
+        key=lambda r: r["start_ts"],
+    )
+    assert [(r["start_ts"], r["end_ts"], r["meeting"]) for r in zoom] == [
+        (100.0, 101.0, False),
+        (101.0, 102.0, True),
+    ]
+
+
+def test_fast_aba_middle_span_mic_stop_inverse(settings):
+    # Inverse ordering: mic hot at the marker, stops mid-stretch.
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 98.0)
+    frame(tracker, app="com.apple.mail", ts=99.0)
+    clock.t += 1.0
+    tracker.on_app_changed("us.zoom.xos", 100.0)  # mic hot at marker time
+    clock.t += 1.0
+    tracker.on_mic(False, 101.0)
+    clock.t += 1.0
+    tracker.on_app_changed("com.apple.mail", 102.0)
+    zoom = sorted(
+        (r for r in store.spans.values() if r["bundle_id"] == "us.zoom.xos"),
+        key=lambda r: r["start_ts"],
+    )
+    assert [(r["start_ts"], r["end_ts"], r["meeting"]) for r in zoom] == [
+        (100.0, 101.0, True),
+        (101.0, 102.0, False),
+    ]

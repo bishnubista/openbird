@@ -166,12 +166,15 @@ def test_block_fingerprint_uses_real_span_ends():
 # -- gate truth table -------------------------------------------------------------
 
 
-def _write_sidecar(settings, *, updated_at, afk=True, malformed=False):
+def _write_sidecar(settings, *, updated_at, afk=True, meeting=None, malformed=False):
     path = settings.data_dir / "capture.liveness.json"
     if malformed:
         path.write_text("{not json")
         return
-    path.write_text(json.dumps({"updated_at": updated_at, "afk": afk}))
+    payload = {"updated_at": updated_at, "afk": afk}
+    if meeting is not None:  # None = pre-C1 sidecar without the key
+        payload["meeting"] = meeting
+    path.write_text(json.dumps(payload))
 
 
 def test_gate_ac_power_always_allows(monkeypatch, tmp_path):
@@ -231,6 +234,59 @@ def test_gate_battery_stale_future_malformed_absent_defer(monkeypatch, tmp_path)
     # Absent sidecar.
     (settings.data_dir / "capture.liveness.json").unlink()
     assert should_run_background_llm(None, settings, now=now) == expect
+
+
+def test_gate_fresh_meeting_defers_even_on_ac(monkeypatch, tmp_path):
+    # Meeting deferral is checked FIRST: Zoom GPU/CPU contention exists on AC
+    # power too (the screenpipe lesson).
+    settings = Settings(data_dir=tmp_path)
+    monkeypatch.setattr(
+        summaries_mod, "_pmset_output", lambda: "Now drawing from 'AC Power'"
+    )
+    now = 10_000.0
+    _write_sidecar(settings, updated_at=now - 5.0, afk=False, meeting=True)
+    assert should_run_background_llm(None, settings, now=now) == (
+        False, "meeting_live"
+    )
+
+
+def test_gate_battery_meeting_outranks_afk_allowance(monkeypatch, tmp_path):
+    settings = Settings(data_dir=tmp_path)
+    monkeypatch.setattr(summaries_mod, "_pmset_output", lambda: "Battery Power")
+    now = 10_000.0
+    _write_sidecar(settings, updated_at=now - 5.0, afk=True, meeting=True)
+    # On a call you look AFK (not typing) — the meeting bit must still defer.
+    assert should_run_background_llm(None, settings, now=now) == (
+        False, "meeting_live"
+    )
+
+
+def test_gate_stale_sidecar_never_defers_on_meeting(monkeypatch, tmp_path):
+    # Fail-open on meeting ONLY: a dead daemon (stale sidecar, lost
+    # mic_stopped) must not block summaries forever. Battery staleness stays
+    # fail-closed, unchanged.
+    settings = Settings(data_dir=tmp_path)
+    now = 10_000.0
+    _write_sidecar(settings, updated_at=now - 31.0, afk=True, meeting=True)
+    monkeypatch.setattr(
+        summaries_mod, "_pmset_output", lambda: "Now drawing from 'AC Power'"
+    )
+    assert should_run_background_llm(None, settings, now=now) == (True, "ac_power")
+    monkeypatch.setattr(summaries_mod, "_pmset_output", lambda: "Battery Power")
+    assert should_run_background_llm(None, settings, now=now) == (
+        False, "battery_liveness_stale"
+    )
+
+
+def test_gate_missing_meeting_key_means_no_meeting_deferral(monkeypatch, tmp_path):
+    # A pre-C1 sidecar (no "meeting" key) stays valid: coerced to False.
+    settings = Settings(data_dir=tmp_path)
+    monkeypatch.setattr(
+        summaries_mod, "_pmset_output", lambda: "Now drawing from 'AC Power'"
+    )
+    now = 10_000.0
+    _write_sidecar(settings, updated_at=now - 5.0, afk=False)
+    assert should_run_background_llm(None, settings, now=now) == (True, "ac_power")
 
 
 def test_gate_uses_shared_staleness_constant():

@@ -285,8 +285,9 @@ def test_liveness_sidecar_written_and_metadata_only(allow_settings, tmp_path):
     # Metadata only: no content-bearing keys, and no captured text anywhere.
     assert set(payload) == {
         "updated_at", "last_event_ts", "last_capture_ts", "mode", "afk",
-        "heartbeat_seq",
+        "heartbeat_seq", "meeting",
     }
+    assert payload["meeting"] is False  # a metadata BIT, off by default
     assert "hello from stream" not in path.read_text()
     # No stray temp file left behind (atomic rename).
     assert not (tmp_path / (LIVENESS_FILENAME + ".tmp")).exists()
@@ -339,6 +340,21 @@ def test_parse_app_changed_carries_bundle_only():
     # Never content-bearing fields.
     for forbidden in ("window", "url", "text"):
         assert forbidden not in e
+
+
+def test_parse_system_accepts_mic_kinds_and_rejects_unknown():
+    from openbird.capture.daemon import parse_event
+
+    for kind in ("mic_started", "mic_stopped"):
+        e = parse_event(json.dumps({"type": "system", "ts": 5.0, "kind": kind}))
+        assert e is not None and e["type"] == "system"
+        assert e["kind"] == kind
+    # Closed vocabulary: an unknown kind still coerces to None (the old-daemon
+    # back-compat contract — on_system(None, ts) is a no-op).
+    e = parse_event(
+        json.dumps({"type": "system", "ts": 5.0, "kind": "mic_exploded"})
+    )
+    assert e is not None and e["kind"] is None
 
 
 def test_app_changed_counted_not_ingested(allow_settings):
@@ -434,3 +450,19 @@ def test_allowlisted_empty_ax_yields_tier1_span_without_observation(allow_settin
     assert stats.ingested == 0 and stats.rejected == 1
     assert len(store.spans) == 1
     assert next(iter(store.spans.values()))["detail_tier"] == 1
+
+
+def test_mic_system_events_drive_the_meeting_flag_end_to_end(allow_settings):
+    # mic_started -> Zoom frame -> mic_stopped, through the real parse/dispatch
+    # path: the span carries meeting=1 and splits at the mic_stopped edge.
+    daemon, store = _span_daemon(allow_settings)
+    daemon.run_lines([
+        json.dumps({"type": "system", "ts": 99.0, "kind": "mic_started"}),
+        json.dumps({"app": "us.zoom.xos", "window": None, "url": None,
+                    "text": "", "ts": 100.0, "incognito": False}),
+        json.dumps({"type": "system", "ts": 105.0, "kind": "mic_stopped"}),
+    ])
+    rows = sorted(store.spans.values(), key=lambda r: r["start_ts"])
+    assert [bool(r["meeting"]) for r in rows] == [True, False]
+    assert rows[0]["end_ts"] == 105.0  # split at the exact edge
+    assert rows[1]["start_ts"] == 105.0
