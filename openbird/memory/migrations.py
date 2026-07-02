@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -268,6 +268,232 @@ def _apply_v4_activity_spans(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+# The six day-memory-source-refs triggers the v5 rebuild replaces. Two of them
+# live on observations/activity_spans (NOT on the rebuilt table), so a DROP
+# TABLE would leave them behind with stale semantics; the rebuild therefore
+# drops ALL SIX explicitly and recreates every one (never bare IF NOT EXISTS
+# during the rebuild). Keyed by trigger name -> the exact CREATE statement,
+# textually in lockstep with schema.sql (tests assert the sqlite_master SQL).
+_V5_DAY_MEMORY_TRIGGERS: dict[str, str] = {
+    "trg_day_memory_source_refs_obs_exists": """
+        CREATE TRIGGER trg_day_memory_source_refs_obs_exists
+        BEFORE INSERT ON day_memory_source_refs
+        WHEN NEW.source_kind = 'observation'
+            AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'day_memory_source_refs: unknown observation ref');
+        END
+    """,
+    "trg_day_memory_source_refs_span_exists": """
+        CREATE TRIGGER trg_day_memory_source_refs_span_exists
+        BEFORE INSERT ON day_memory_source_refs
+        WHEN NEW.source_kind = 'span'
+            AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'day_memory_source_refs: unknown span ref');
+        END
+    """,
+    "trg_day_memory_source_refs_summary_exists": """
+        CREATE TRIGGER trg_day_memory_source_refs_summary_exists
+        BEFORE INSERT ON day_memory_source_refs
+        WHEN NEW.source_kind = 'summary'
+            AND NOT EXISTS (SELECT 1 FROM block_summaries WHERE id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'day_memory_source_refs: unknown summary ref');
+        END
+    """,
+    "trg_day_memory_source_observation_delete": """
+        CREATE TRIGGER trg_day_memory_source_observation_delete
+        BEFORE DELETE ON observations
+        BEGIN
+            DELETE FROM day_memories
+            WHERE id IN (
+                SELECT day_memory_id
+                FROM day_memory_source_refs
+                WHERE source_kind = 'observation' AND source_id = OLD.id
+            );
+        END
+    """,
+    "trg_day_memory_source_span_delete": """
+        CREATE TRIGGER trg_day_memory_source_span_delete
+        BEFORE DELETE ON activity_spans
+        BEGIN
+            DELETE FROM day_memories
+            WHERE id IN (
+                SELECT day_memory_id
+                FROM day_memory_source_refs
+                WHERE source_kind = 'span' AND source_id = OLD.span_id
+            );
+        END
+    """,
+    "trg_day_memory_source_summary_delete": """
+        CREATE TRIGGER trg_day_memory_source_summary_delete
+        BEFORE DELETE ON block_summaries
+        BEGIN
+            DELETE FROM day_memories
+            WHERE id IN (
+                SELECT day_memory_id
+                FROM day_memory_source_refs
+                WHERE source_kind = 'summary' AND source_id = OLD.id
+            );
+        END
+    """,
+}
+
+
+def _apply_v5_block_summaries(conn: sqlite3.Connection) -> None:
+    """Add block summaries, the taxonomy cache, and the 'summary' source kind (Phase D).
+
+    Same idempotency contract as v4: ``schema.sql`` (with the FINAL shape) has
+    already run on this connection, so the new tables/indexes/triggers usually
+    exist — every statement is IF-NOT-EXISTS / guarded.
+
+    The one non-additive change is ``day_memory_source_refs``'s CHECK gaining
+    'summary'. SQLite cannot ALTER a CHECK, so an upgrading DB (whose table
+    predates v5 and was silently kept by schema.sql's CREATE IF NOT EXISTS) is
+    REBUILT: detect the old shape via the table's sqlite_master SQL lacking
+    'summary', copy rows into a new-shape table, drop, and rename. Trigger
+    replacement around the rebuild is EXPLICIT: all six affected triggers are
+    dropped by name FIRST (two live on observations/activity_spans and would
+    survive the table drop with pre-rebuild text) and every one is recreated
+    after — never bare IF NOT EXISTS during the rebuild.
+    """
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS block_summaries (
+            id                TEXT PRIMARY KEY,
+            local_date        TEXT NOT NULL,
+            block_key         TEXT NOT NULL UNIQUE,
+            block_fingerprint TEXT NOT NULL,
+            start_ts          REAL NOT NULL,
+            end_ts            REAL NOT NULL,
+            dominant_bundle   TEXT,
+            level             TEXT CHECK (level IS NULL OR level IN
+                              ('focus_work','other_work','neutral','personal',
+                               'distracting')),
+            summary_text      TEXT NOT NULL,
+            model             TEXT NOT NULL,
+            extractor_version TEXT NOT NULL,
+            generated_at      REAL NOT NULL,
+            source_count      INTEGER NOT NULL,
+            CHECK (end_ts >= start_ts)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_block_summaries_date ON block_summaries(local_date)",
+        "CREATE INDEX IF NOT EXISTS idx_block_summaries_start ON block_summaries(start_ts)",
+        """
+        CREATE TABLE IF NOT EXISTS block_summary_source_refs (
+            summary_id  TEXT NOT NULL REFERENCES block_summaries(id) ON DELETE CASCADE,
+            source_kind TEXT NOT NULL CHECK (source_kind IN ('observation','span')),
+            source_id   TEXT NOT NULL,
+            PRIMARY KEY (summary_id, source_kind, source_id)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_block_summary_source_refs_source
+            ON block_summary_source_refs(source_kind, source_id)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS category_assignments (
+            identity_key TEXT PRIMARY KEY,
+            level        TEXT NOT NULL CHECK (level IN
+                         ('focus_work','other_work','neutral','personal','distracting')),
+            model        TEXT NOT NULL,
+            generated_at REAL NOT NULL
+        )
+        """,
+        # Block-summary integrity/cascade triggers (textually in lockstep with
+        # schema.sql; not part of the six-trigger rebuild set below because none
+        # of them reference day_memory_source_refs).
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_block_summary_source_refs_obs_exists
+        BEFORE INSERT ON block_summary_source_refs
+        WHEN NEW.source_kind = 'observation'
+            AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'block_summary_source_refs: unknown observation ref');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_block_summary_source_refs_span_exists
+        BEFORE INSERT ON block_summary_source_refs
+        WHEN NEW.source_kind = 'span'
+            AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'block_summary_source_refs: unknown span ref');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_block_summary_source_observation_delete
+        BEFORE DELETE ON observations
+        BEGIN
+            DELETE FROM block_summaries
+            WHERE id IN (
+                SELECT summary_id
+                FROM block_summary_source_refs
+                WHERE source_kind = 'observation' AND source_id = OLD.id
+            );
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_block_summary_source_span_delete
+        BEFORE DELETE ON activity_spans
+        BEGIN
+            DELETE FROM block_summaries
+            WHERE id IN (
+                SELECT summary_id
+                FROM block_summary_source_refs
+                WHERE source_kind = 'span' AND source_id = OLD.span_id
+            );
+        END
+        """,
+    ]
+    for statement in statements:
+        conn.execute(statement)
+
+    # Drop the six affected triggers BEFORE the rebuild so the DROP/RENAME never
+    # reparses a trigger body against a transiently missing table, then recreate
+    # all six after — replacement is explicit either way (rebuild or not).
+    for name in _V5_DAY_MEMORY_TRIGGERS:
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+    # Rebuild day_memory_source_refs only when its stored SQL still carries the
+    # pre-v5 CHECK (fresh DBs got the final shape from schema.sql and no-op).
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'day_memory_source_refs'"
+    ).fetchone()
+    table_sql = str(_scalar(row) or "")
+    if table_sql and "'summary'" not in table_sql:
+        conn.execute(
+            """
+            CREATE TABLE day_memory_source_refs_v5 (
+                day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,
+                source_kind   TEXT NOT NULL CHECK (source_kind IN
+                              ('observation','span','summary')),
+                source_id     TEXT NOT NULL,
+                PRIMARY KEY (day_memory_id, source_kind, source_id)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO day_memory_source_refs_v5 (day_memory_id, source_kind, source_id) "
+            "SELECT day_memory_id, source_kind, source_id FROM day_memory_source_refs"
+        )
+        conn.execute("DROP TABLE day_memory_source_refs")
+        conn.execute(
+            "ALTER TABLE day_memory_source_refs_v5 RENAME TO day_memory_source_refs"
+        )
+        # The index was dropped with the old table; recreate it.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_day_memory_source_refs_source "
+            "ON day_memory_source_refs(source_kind, source_id)"
+        )
+
+    for statement in _V5_DAY_MEMORY_TRIGGERS.values():
+        conn.execute(statement)
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
 # so migrations here only ever upgrade an existing DB from one version to the
 # next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
@@ -287,6 +513,11 @@ MIGRATIONS: list[Migration] = [
         version=4,
         description="add activity spans + typed day-memory source refs",
         apply=_apply_v4_activity_spans,
+    ),
+    Migration(
+        version=5,
+        description="add block summaries, taxonomy cache, summary source kind",
+        apply=_apply_v5_block_summaries,
     ),
 ]
 

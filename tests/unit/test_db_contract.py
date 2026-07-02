@@ -1093,3 +1093,368 @@ def test_activity_spans_check_constraints(tmp_path):
             )
     finally:
         s.close()
+
+
+# ---------------------------------------------------------------------------
+# v5: block summaries + taxonomy cache + summary source kind (Phase D)
+# ---------------------------------------------------------------------------
+
+
+# The six day-memory-source-refs triggers the v5 rebuild owns, name -> the
+# load-bearing fragments their sqlite_master SQL must carry.
+_V5_TRIGGER_EXPECTATIONS: dict[str, tuple[str, ...]] = {
+    "trg_day_memory_source_refs_obs_exists": (
+        "BEFORE INSERT ON day_memory_source_refs",
+        "NEW.source_kind = 'observation'",
+        "unknown observation ref",
+    ),
+    "trg_day_memory_source_refs_span_exists": (
+        "BEFORE INSERT ON day_memory_source_refs",
+        "NEW.source_kind = 'span'",
+        "unknown span ref",
+    ),
+    "trg_day_memory_source_refs_summary_exists": (
+        "BEFORE INSERT ON day_memory_source_refs",
+        "NEW.source_kind = 'summary'",
+        "SELECT 1 FROM block_summaries WHERE id = NEW.source_id",
+        "unknown summary ref",
+    ),
+    "trg_day_memory_source_observation_delete": (
+        "BEFORE DELETE ON observations",
+        "DELETE FROM day_memories",
+        "source_kind = 'observation' AND source_id = OLD.id",
+    ),
+    "trg_day_memory_source_span_delete": (
+        "BEFORE DELETE ON activity_spans",
+        "DELETE FROM day_memories",
+        "source_kind = 'span' AND source_id = OLD.span_id",
+    ),
+    "trg_day_memory_source_summary_delete": (
+        "BEFORE DELETE ON block_summaries",
+        "DELETE FROM day_memories",
+        "source_kind = 'summary' AND source_id = OLD.id",
+    ),
+}
+
+
+def _normalized_trigger_sql(conn, name: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+    ).fetchone()
+    assert row is not None, f"trigger {name} is missing"
+    sql = row["sql"] if isinstance(row, dict) else row[0]
+    return " ".join(str(sql).split())
+
+
+def _assert_v5_trigger_sql(conn) -> None:
+    """Assert every rebuilt trigger's sqlite_master SQL matches the expected text."""
+    for name, fragments in _V5_TRIGGER_EXPECTATIONS.items():
+        sql = _normalized_trigger_sql(conn, name)
+        for fragment in fragments:
+            assert fragment in sql, f"{name}: expected {fragment!r} in {sql!r}"
+
+
+def _make_v4_shaped_db(path) -> sqlite3.Connection:
+    """Build a realistic v4-stamped DB (pre-Phase-D shape) from current schema.sql.
+
+    Strips every v5-only object and rebuilds day_memory_source_refs with the OLD
+    two-kind CHECK, exactly as a released v4 build shipped it, then stamps 4.
+    """
+    conn = _make_v1_shaped_db(path)
+    for name in _V5_TRIGGER_EXPECTATIONS:
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute("DROP TRIGGER IF EXISTS trg_block_summary_source_refs_obs_exists")
+    conn.execute("DROP TRIGGER IF EXISTS trg_block_summary_source_refs_span_exists")
+    conn.execute("DROP TRIGGER IF EXISTS trg_block_summary_source_observation_delete")
+    conn.execute("DROP TRIGGER IF EXISTS trg_block_summary_source_span_delete")
+    conn.execute("DROP TABLE IF EXISTS block_summary_source_refs")
+    conn.execute("DROP TABLE IF EXISTS block_summaries")
+    conn.execute("DROP TABLE IF EXISTS category_assignments")
+    conn.execute("DROP TABLE IF EXISTS day_memory_source_refs")
+    conn.execute(
+        "CREATE TABLE day_memory_source_refs ("
+        "day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,"
+        "source_kind   TEXT NOT NULL CHECK (source_kind IN ('observation','span')),"
+        "source_id     TEXT NOT NULL,"
+        "PRIMARY KEY (day_memory_id, source_kind, source_id))"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_day_memory_source_refs_source "
+        "ON day_memory_source_refs(source_kind, source_id)"
+    )
+    # Recreate the four v4 triggers as the released v4 build shipped them.
+    conn.executescript(
+        """
+        CREATE TRIGGER trg_day_memory_source_refs_obs_exists
+        BEFORE INSERT ON day_memory_source_refs
+        WHEN NEW.source_kind = 'observation'
+            AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'day_memory_source_refs: unknown observation ref');
+        END;
+        CREATE TRIGGER trg_day_memory_source_refs_span_exists
+        BEFORE INSERT ON day_memory_source_refs
+        WHEN NEW.source_kind = 'span'
+            AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'day_memory_source_refs: unknown span ref');
+        END;
+        CREATE TRIGGER trg_day_memory_source_observation_delete
+        BEFORE DELETE ON observations
+        BEGIN
+            DELETE FROM day_memories
+            WHERE id IN (
+                SELECT day_memory_id
+                FROM day_memory_source_refs
+                WHERE source_kind = 'observation' AND source_id = OLD.id
+            );
+        END;
+        CREATE TRIGGER trg_day_memory_source_span_delete
+        BEFORE DELETE ON activity_spans
+        BEGIN
+            DELETE FROM day_memories
+            WHERE id IN (
+                SELECT day_memory_id
+                FROM day_memory_source_refs
+                WHERE source_kind = 'span' AND source_id = OLD.span_id
+            );
+        END;
+        """
+    )
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    return conn
+
+
+def test_empty_db_ladder_reaches_v5_cleanly(tmp_path):
+    """Fresh DB: every v5 object exists exactly once, with the final trigger SQL."""
+    db = str(tmp_path / "fresh-v5.db")
+    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
+                    provider=FakeProvider(embed_dim=64))
+    try:
+        assert s.conn.execute("PRAGMA user_version").fetchone()["user_version"] == SCHEMA_VERSION
+        for kind, name in [
+            ("table", "block_summaries"),
+            ("table", "block_summary_source_refs"),
+            ("table", "category_assignments"),
+            ("trigger", "trg_block_summary_source_refs_obs_exists"),
+            ("trigger", "trg_block_summary_source_refs_span_exists"),
+            ("trigger", "trg_block_summary_source_observation_delete"),
+            ("trigger", "trg_block_summary_source_span_delete"),
+            ("trigger", "trg_day_memory_source_refs_summary_exists"),
+            ("trigger", "trg_day_memory_source_summary_delete"),
+            ("index", "idx_block_summaries_date"),
+            ("index", "idx_block_summaries_start"),
+            ("index", "idx_block_summary_source_refs_source"),
+        ]:
+            rows = s.conn.execute(
+                "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()
+            assert rows["c"] == 1, f"{kind} {name} count={rows['c']}"
+        # The fresh table carries the final three-kind CHECK.
+        table_sql = s.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='day_memory_source_refs'"
+        ).fetchone()["sql"]
+        assert "'summary'" in table_sql
+        _assert_v5_trigger_sql(s.conn)
+    finally:
+        s.close()
+
+
+def test_v4_db_rebuild_preserves_rows_and_replaces_all_six_triggers(tmp_path):
+    """v4 -> v5: the refs rebuild keeps rows, extends the CHECK, and the migration
+    explicitly replaces all six day-memory triggers (asserted via sqlite_master)."""
+    conn = _make_v4_shaped_db(tmp_path / "v4-to-v5.db")
+    try:
+        conn.execute("INSERT INTO content_blobs(content_hash, text) VALUES ('h1', 'txt')")
+        conn.execute(
+            "INSERT INTO observations(id, content_hash, ts, source) "
+            "VALUES ('obs1', 'h1', 1.0, 'capture')"
+        )
+        conn.execute(
+            "INSERT INTO activity_spans(span_id, epoch_id, start_ts, end_ts, "
+            "bundle_id, detail_tier) VALUES ('sp1', 'e', 1.0, 2.0, 'b', 1)"
+        )
+        conn.execute(
+            "INSERT INTO day_memories(id, local_date, source_scope, "
+            "extractor_version, generated_at, payload_json, source_count) "
+            "VALUES ('dm1', '2026-01-01', 'capture', 'v7', 1.0, '{}', 2)"
+        )
+        conn.execute(
+            "INSERT INTO day_memory_source_refs VALUES ('dm1', 'observation', 'obs1')"
+        )
+        conn.execute("INSERT INTO day_memory_source_refs VALUES ('dm1', 'span', 'sp1')")
+        conn.commit()
+        # The pre-v5 CHECK rejects the new kind — proving the fixture is real.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO day_memory_source_refs VALUES ('dm1', 'summary', 'x')"
+            )
+
+        # Apply the current baseline first, exactly like MemoryStore._apply_schema
+        # (schema.sql runs BEFORE the ladder on every open).
+        conn.executescript(_SCHEMA_SQL)
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+
+        refs = conn.execute(
+            "SELECT source_kind, source_id FROM day_memory_source_refs "
+            "WHERE day_memory_id='dm1' ORDER BY source_kind"
+        ).fetchall()
+        assert [tuple(r) for r in refs] == [("observation", "obs1"), ("span", "sp1")]
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='day_memory_source_refs'"
+        ).fetchone()[0]
+        assert "'summary'" in table_sql
+        # Exactly one of each trigger, with the expected post-rebuild SQL.
+        for name in _V5_TRIGGER_EXPECTATIONS:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?",
+                (name,),
+            ).fetchone()[0]
+            assert count == 1, f"{name} count={count}"
+        _assert_v5_trigger_sql(conn)
+        # The rebuilt index came back.
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='idx_day_memory_source_refs_source'"
+        ).fetchone()
+        # Old triggers still function after the rebuild.
+        conn.execute("DELETE FROM observations WHERE id='obs1'")
+        assert conn.execute("SELECT COUNT(*) FROM day_memories").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_v5_migration_is_idempotent_on_rerun(tmp_path):
+    """Re-running the v5 step on an already-migrated DB leaves one of everything."""
+    from openbird.memory.migrations import _apply_v5_block_summaries
+
+    conn = _make_v4_shaped_db(tmp_path / "v5-rerun.db")
+    try:
+        conn.executescript(_SCHEMA_SQL)
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+        # Second application must not duplicate or fail.
+        _apply_v5_block_summaries(conn)
+        conn.commit()
+        for name in _V5_TRIGGER_EXPECTATIONS:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?",
+                (name,),
+            ).fetchone()[0]
+            assert count == 1
+        _assert_v5_trigger_sql(conn)
+    finally:
+        conn.close()
+
+
+def test_summary_ref_insert_rejected_for_unknown_id(tmp_path):
+    db = str(tmp_path / "summary-ref.db")
+    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
+                    provider=FakeProvider(embed_dim=64))
+    try:
+        s.conn.execute(
+            "INSERT INTO day_memories(id, local_date, source_scope, "
+            "extractor_version, generated_at, payload_json, source_count) "
+            "VALUES ('dm1', '2026-01-01', 'capture', 'v8', 1.0, '{}', 0)"
+        )
+        with pytest.raises(Exception, match="unknown summary ref"):
+            s.conn.execute(
+                "INSERT INTO day_memory_source_refs VALUES ('dm1', 'summary', 'nope')"
+            )
+    finally:
+        s.close()
+
+
+def _seed_summary_chain(conn) -> None:
+    """Insert span -> block summary (citing the span) -> day memory (citing the summary)."""
+    conn.execute(
+        "INSERT INTO activity_spans(span_id, epoch_id, start_ts, end_ts, "
+        "bundle_id, detail_tier) VALUES ('sp1', 'e', 100.0, 200.0, 'b', 1)"
+    )
+    conn.execute(
+        "INSERT INTO block_summaries(id, local_date, block_key, block_fingerprint, "
+        "start_ts, end_ts, dominant_bundle, level, summary_text, model, "
+        "extractor_version, generated_at, source_count) "
+        "VALUES ('bs1', '2026-01-01', 'k1', 'f1', 100.0, 200.0, 'b', NULL, "
+        "'summary body', 'm', 'block-summary-v1', 1.0, 1)"
+    )
+    conn.execute(
+        "INSERT INTO block_summary_source_refs VALUES ('bs1', 'span', 'sp1')"
+    )
+    conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) "
+        "VALUES ('dm1', '2026-01-01', 'capture', 'v8', 1.0, '{}', 1)"
+    )
+    conn.execute(
+        "INSERT INTO day_memory_source_refs VALUES ('dm1', 'summary', 'bs1')"
+    )
+
+
+def test_recursive_trigger_chain_span_to_summary_to_day_memory(tmp_path):
+    """span delete -> its block summary deleted -> the day memory citing it deleted.
+
+    The middle hop is a trigger firing another trigger, so this is the direct
+    proof that PRAGMA recursive_triggers is on and load-bearing.
+    """
+    db = str(tmp_path / "chain.db")
+    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
+                    provider=FakeProvider(embed_dim=64))
+    try:
+        _seed_summary_chain(s.conn)
+        s.conn.execute("DELETE FROM activity_spans WHERE span_id='sp1'")
+        assert s.conn.execute("SELECT COUNT(*) c FROM block_summaries").fetchone()["c"] == 0
+        assert s.conn.execute("SELECT COUNT(*) c FROM day_memories").fetchone()["c"] == 0
+        assert s.conn.execute(
+            "SELECT COUNT(*) c FROM day_memory_source_refs"
+        ).fetchone()["c"] == 0
+    finally:
+        s.close()
+
+
+def test_recursive_trigger_chain_on_sqlcipher_backend(tmp_path):
+    """The same chain holds on the SQLCipher backend when the extra is importable."""
+    dbapi = pytest.importorskip("sqlcipher3").dbapi2
+    conn = dbapi.connect(str(tmp_path / "chain-enc.db"))
+    try:
+        conn.execute("PRAGMA key = 'test-chain-key'")
+        conn.execute("PRAGMA recursive_triggers = ON")
+        assert int(conn.execute("PRAGMA recursive_triggers").fetchone()[0]) == 1
+        conn.executescript(_SCHEMA_SQL)
+        _seed_summary_chain(conn)
+        conn.execute("DELETE FROM activity_spans WHERE span_id='sp1'")
+        assert conn.execute("SELECT COUNT(*) FROM block_summaries").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM day_memories").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_recursive_triggers_pragma_verified_and_raises_on_silent_noop(tmp_path):
+    """The store sets + reads back recursive_triggers; a no-op backend is refused."""
+    from openbird.memory.store import _enable_recursive_triggers
+
+    db = str(tmp_path / "pragma.db")
+    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
+                    provider=FakeProvider(embed_dim=64))
+    try:
+        row = s.conn.execute("PRAGMA recursive_triggers").fetchone()
+        assert int(next(iter(row.values()))) == 1
+    finally:
+        s.close()
+
+    class _NoOpPragmaConn:
+        """Backend that silently ignores the pragma (reads back nothing)."""
+
+        def execute(self, sql, *args):
+            class _Cur:
+                @staticmethod
+                def fetchone():
+                    return None
+
+            return _Cur()
+
+    with pytest.raises(RuntimeError, match="recursive_triggers"):
+        _enable_recursive_triggers(_NoOpPragmaConn())
