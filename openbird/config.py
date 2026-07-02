@@ -7,6 +7,7 @@ environment overrides.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import plistlib
@@ -18,6 +19,37 @@ from pathlib import Path
 from xml.parsers.expat import ExpatError
 
 import platformdirs
+
+logger = logging.getLogger("openbird.config")
+
+
+def _clamp_setting(
+    name: str,
+    value: object,
+    *,
+    default: float,
+    lo: float,
+    hi: float | None = None,
+) -> float:
+    """Clamp a numeric tuning knob into its legal range (never raise).
+
+    Non-finite/unparseable values fall back to ``default`` first. Any
+    adjustment logs a reason-code line (name + bounds only — settings values
+    are operator-supplied numbers, safe to log).
+    """
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = float("nan")
+    if not math.isfinite(parsed):
+        logger.warning("config: %s invalid; using default %.1f", name, default)
+        parsed = default
+    clamped = max(lo, parsed if hi is None else min(hi, parsed))
+    if clamped != parsed:
+        logger.warning(
+            "config: %s=%.3f out of range; clamped to %.1f", name, parsed, clamped
+        )
+    return clamped
 
 # Apps excluded from capture until the user explicitly enables them:
 # terminals, code editors, browsers, password managers, finance/health apps.
@@ -226,6 +258,17 @@ class Settings:
     # in sync with capture.daemon._DEFAULT_SESSION_GAP.
     session_gap_seconds: float = 300.0
 
+    # Stream-mode capture timing knobs (Phase A, event-driven capture). All four
+    # are CLAMPED into their legal ranges in __post_init__ rather than rejected:
+    # capture must never fail to start over a bad tuning knob, but an
+    # out-of-range value (e.g. a 0.01s idle tick) would defeat the CPU/power
+    # budget or the >=1s capture floor, so the clamp is the budget's enforcement
+    # point. A clamped value logs a reason-code line. Env: OPENBIRD_CAPTURE_*.
+    capture_afk_threshold_seconds: float = 150.0  # AFK after this HID-idle; >= 30
+    capture_idle_tick_seconds: float = 5.0  # backstop poll cadence; [5, 10]
+    capture_force_ceiling_seconds: float = 60.0  # max capture gap; >= max(gap, tick)
+    capture_min_gap_seconds: float = 1.0  # hard floor between captures; >= 1
+
     # Optional cross-encoder reranker (between RRF fusion and MMR). DISABLED by
     # default: an empty rerank_model is a no-op, so search behavior is unchanged.
     # When set (e.g. "bge-reranker-v2-m3"), search reorders the fused candidates by
@@ -261,6 +304,37 @@ class Settings:
         self.rerank_top_n = int(self.rerank_top_n)
         if self.rerank_top_n < 0:
             raise ValueError("rerank_top_n must be >= 0 (0 = rerank all candidates)")
+        # Clamp the stream-capture timing knobs into their legal ranges (never
+        # reject: capture must not fail to start over a tuning knob, but the
+        # ranges ARE the CPU/power budget, so out-of-range values can't stand).
+        # NaN/inf fall back to the field default before clamping.
+        self.capture_afk_threshold_seconds = _clamp_setting(
+            "capture_afk_threshold_seconds",
+            self.capture_afk_threshold_seconds,
+            default=150.0,
+            lo=30.0,
+        )
+        self.capture_idle_tick_seconds = _clamp_setting(
+            "capture_idle_tick_seconds",
+            self.capture_idle_tick_seconds,
+            default=5.0,
+            lo=5.0,
+            hi=10.0,
+        )
+        self.capture_min_gap_seconds = _clamp_setting(
+            "capture_min_gap_seconds",
+            self.capture_min_gap_seconds,
+            default=1.0,
+            lo=1.0,
+        )
+        # Cross-field: the force ceiling must not undercut the floor or the tick
+        # (a ceiling below either would force captures faster than the budget).
+        self.capture_force_ceiling_seconds = _clamp_setting(
+            "capture_force_ceiling_seconds",
+            self.capture_force_ceiling_seconds,
+            default=60.0,
+            lo=max(self.capture_min_gap_seconds, self.capture_idle_tick_seconds),
+        )
         self.data_dir = Path(self.data_dir).expanduser()
         if self.db_path is None:
             self.db_path = str(self.data_dir / "openbird.db")
@@ -308,6 +382,10 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "capture_urls": False,
     "retention_days": 0,
     "session_gap_seconds": 300.0,
+    "capture_afk_threshold_seconds": 150.0,
+    "capture_idle_tick_seconds": 5.0,
+    "capture_force_ceiling_seconds": 60.0,
+    "capture_min_gap_seconds": 1.0,
     "embed_dim": 768,
     "llm_timeout": 60.0,
     "embed_timeout": 30.0,
