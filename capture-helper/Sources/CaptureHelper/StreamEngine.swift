@@ -234,6 +234,9 @@ final class StreamEngine {
                 // Main-thread by MicMonitor contract: mirror the bit for the
                 // OCR gate's mic-hot suppression, then emit the edge event.
                 self?.micHot = hot
+                // Live-propagate into the OCR runtime (lock-backed setter):
+                // the OCR decision must see mic flips that happen mid-walk.
+                self?.ocrRuntime?.micHot = hot
                 self?.emitSystem(hot ? "mic_started" : "mic_stopped")
             },
             diag: { diag($0) })
@@ -407,10 +410,6 @@ final class StreamEngine {
         if capturePaused(pauseFile) { return }
         if walkInFlight { return }  // next tick backstops the dropped trigger
         walkInFlight = true
-        // Snapshot the main-confined mic bit into the runtime NOW (no walk is
-        // in flight, and the async dispatch below is the happens-before edge),
-        // so the walk queue never touches main-thread state.
-        ocrRuntime?.micHot = micHot
         let trigger = kind.rawValue
         walkQueue.async { [weak self] in
             guard let self else { return }

@@ -397,10 +397,12 @@ func isSelfCapture(_ bundleId: String?) -> Bool {
 /// stream-only precedent as MicMonitor/AFK).
 ///
 /// Threading: `gate`/`lastTccState` are mutated on the walk queue ONLY
-/// (captures run one-at-a-time there); `micHot` is WRITTEN on the main thread
-/// at dispatch time — while no walk is in flight — and READ on the walk queue
-/// (the dispatch itself is the happens-before edge). `emitSystem` is the
-/// locked StreamEmitter (thread-safe).
+/// (captures run one-at-a-time there). The mic bit is a LOCK-BACKED LIVE READ
+/// (`micHotNow`), not a dispatch-time snapshot: a call can start during the
+/// multi-second AX walk, and the OCR decision must see the mic state AT
+/// DECISION TIME — a stale snapshot could run SCK/Vision GPU work into a live
+/// call (the exact contention the mic gate exists to prevent). `emitSystem`
+/// is the locked StreamEmitter (thread-safe).
 final class OcrRuntime {
     /// The opt-in set (`--ocr-apps`), matched via the same `bundleMatches`
     /// grammar as the allowlist. Opted-in ⊆ allowlisted holds by construction:
@@ -414,8 +416,23 @@ final class OcrRuntime {
     private let tccPreflight: () -> Bool
     /// Locked stream emitter for `ocr_available`/`ocr_unavailable` system events.
     private let emitSystem: (String) -> Void
-    /// Mic-hot snapshot for the current capture (see threading note above).
-    var micHot = false
+    /// Lock-backed live mic state (see threading note above). Written on the
+    /// main thread on every MicMonitor flip; read on the walk queue at OCR
+    /// decision time.
+    private let micLock = NSLock()
+    private var _micHot = false
+    var micHot: Bool {
+        get {
+            micLock.lock()
+            defer { micLock.unlock() }
+            return _micHot
+        }
+        set {
+            micLock.lock()
+            defer { micLock.unlock() }
+            _micHot = newValue
+        }
+    }
     /// Last TCC state we told the daemon about (walk-queue-confined after the
     /// startup emission; used to re-emit only on an observed flip).
     private var lastTccState: Bool?
