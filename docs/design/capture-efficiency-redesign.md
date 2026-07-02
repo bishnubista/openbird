@@ -82,7 +82,12 @@ Current pipeline (see `openbird/capture/daemon.py`, `capture-helper/`):
 
 Replace "spawn helper every 2 s" with a **persistent helper process** in supervised
 long-run mode (same signed binary — TCC grants are path-bound, so keeping one binary
-matters), speaking length-prefixed JSON events over the existing private pipe.
+matters), speaking newline-delimited JSON (NDJSON) events over the existing
+private pipe. (Decided during Phase A plan review: the pipeline is already
+NDJSON end-to-end and JSON string escaping guarantees framing; a typed line
+protocol with `type`-less lines as capture frames keeps old binaries
+compatible. Length-prefixing was considered and rejected — it would break
+back-compat and buy nothing.)
 
 Trigger table (adapted from screenpipe's spec + macOS API report):
 
