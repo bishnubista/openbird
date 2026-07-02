@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,13 @@ from openbird.capture import adapters, redact
 from openbird.config import Settings, get_settings
 
 DEFAULT_RECENT_WINDOW_SECONDS = 24 * 60 * 60
+
+# Daemon-liveness staleness bound: the sidecar is written at most every
+# ~10s by an eventing daemon (see daemon._LIVENESS_WRITE_INTERVAL), so a
+# sidecar older than 3x that gap means the daemon is gone or wedged. Per the
+# design budget: NEVER report "ok" off a stale timestamp; an absent/unreadable
+# sidecar is "unknown", never ok.
+_DAEMON_STALE_AFTER_SECONDS = 30.0
 
 
 def _policy_for_app(bundle_id: str, settings: Settings) -> dict[str, Any]:
@@ -81,6 +90,47 @@ def _effective_state(*, policy: dict[str, Any], total_observations: int, recent_
     return "allowed_no_recent"
 
 
+def _daemon_liveness(*, settings: Settings, now: float) -> dict[str, Any]:
+    """Read the daemon's liveness sidecar into a metadata-only health block.
+
+    States: ``ok`` (fresh sidecar), ``stale`` (sidecar exists but is older than
+    the staleness bound — daemon gone or wedged), ``unknown`` (no sidecar /
+    unreadable / malformed — e.g. the daemon predates stream mode or hasn't
+    started). Only timestamps, mode, AFK, and seq are surfaced — no content.
+    """
+    path = Path(settings.data_dir, "capture.liveness.json")
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {"state": "unknown"}
+    if not isinstance(raw, dict):
+        return {"state": "unknown"}
+
+    def _finite(value: object) -> float | None:
+        try:
+            parsed = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    updated_at = _finite(raw.get("updated_at"))
+    if updated_at is None:
+        return {"state": "unknown"}
+    age = now - updated_at
+    state = "ok" if 0 <= age <= _DAEMON_STALE_AFTER_SECONDS else "stale"
+    seq = raw.get("heartbeat_seq")
+    return {
+        "state": state,
+        "updated_at": updated_at,
+        "age_seconds": age,
+        "mode": raw.get("mode") if raw.get("mode") in ("stream", "oneshot") else None,
+        "afk": bool(raw.get("afk", False)),
+        "last_event_ts": _finite(raw.get("last_event_ts")),
+        "last_capture_ts": _finite(raw.get("last_capture_ts")),
+        "heartbeat_seq": seq if isinstance(seq, int) else None,
+    }
+
+
 def build_capture_health(
     *,
     settings: Settings | None = None,
@@ -136,6 +186,10 @@ def build_capture_health(
         "paused": bool(paused),
         "allowlist_count": len(settings.allowlist),
         "blocklist_count": len(settings.blocklist),
+        # Daemon liveness from the metadata-only sidecar (additive block;
+        # Swift's JSONDecoder ignores unknown keys, and the Python consumers
+        # key into it explicitly).
+        "daemon": _daemon_liveness(settings=settings, now=now),
         "apps": apps,
     }
 

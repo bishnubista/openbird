@@ -54,6 +54,13 @@ def capture(
         help="Permit a non-bundle helper command (for testing). TCC grants are "
         "per signed path, so this is unsafe for real capture.",
     ),
+    stream: bool = typer.Option(
+        True,
+        "--stream/--poll",
+        help="--loop only: run the helper persistently (event-driven --stream, "
+        "the default; auto-downgrades to polling for an old helper binary) or "
+        "force the legacy one-shot polling mode.",
+    ),
 ) -> None:
     """Run the capture daemon once (or in a loop) over the capture helper.
 
@@ -116,6 +123,11 @@ def capture(
                 helper_cmd=helper_cmd,
                 require_signed_helper=not allow_unsigned,
             )
+            if not stream:
+                # --poll: force the legacy one-shot cadence for this run. The
+                # default (--stream) keeps auto behavior: persistent unless the
+                # env forces otherwise or the binary proves it can't stream.
+                daemon._stream_supported = False
             try:
                 if once:
                     stats = daemon.run(max_events=max_events)
@@ -197,7 +209,8 @@ def _report_and_finish(stats, *, once: bool) -> None:
     _console.print(
         f"[green]Capture {'pass' if once else 'session'} complete.[/] "
         f"received={stats.received} ingested={stats.ingested} "
-        f"coalesced={stats.coalesced} rejected={stats.rejected} errors={stats.errors}"
+        f"coalesced={stats.coalesced} rejected={stats.rejected} errors={stats.errors} "
+        f"heartbeats={stats.heartbeats} afk_transitions={stats.afk_transitions}"
     )
     if stats.received > 0 and stats.ingested == 0 and stats.errors > 0:
         _err_console.print(

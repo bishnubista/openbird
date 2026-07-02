@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import queue
 import select
 import shutil
 import subprocess
@@ -136,6 +137,21 @@ _DEFAULT_SESSION_GAP = 300.0
 _DEFAULT_MAX_CONSECUTIVE_FAILURES = 5  # circuit breaker: stop after this many
 _BACKOFF_BASE = 1.0  # first retry delay (seconds), doubled each consecutive fail
 _BACKOFF_MAX = 60.0  # cap on the exponential backoff delay
+
+# Persistent (stream) mode. The helper runs long-lived (`--stream`), pushing
+# typed NDJSON events; the daemon reads them in short queue slices so a stop
+# request is honored within ~1s regardless of the stall-detection timeout.
+CAPTURE_MODE_ENV = "OPENBIRD_CAPTURE_MODE"  # "oneshot" | "persistent" (force)
+_STREAM_READ_TIMEOUT_MIN = 30.0  # floor for the no-events stall timeout
+_STREAM_STOP_SLICE = 1.0  # queue.get slice: stop-responsiveness bound
+_LIVENESS_WRITE_INTERVAL = 10.0  # max sidecar write frequency (seconds)
+# A persistent cycle that survived at least this long resets the consecutive-
+# failure counter BEFORE its failure is counted: a once-a-day crash must never
+# accumulate into a breaker trip, while a restart storm still trips it fast.
+_FAILURE_DECAY_SECONDS = 300.0
+#: Liveness sidecar filename (inside data_dir). Metadata only — timestamps,
+#: mode, AFK flag, heartbeat seq. Never content. capture-health reads it.
+LIVENESS_FILENAME = "capture.liveness.json"
 
 # App-supervised self-exit (orphan cleanup).
 #
@@ -424,6 +440,11 @@ class CaptureDaemon:
         # Metadata only; used for diagnostics/liveness, never gates ingestion
         # (the helper already suppresses captures while AFK at the source).
         self._afk = False
+        # Whether the helper binary supports --stream. Optimistic until proven
+        # otherwise: a helper that EOFs rc=0 without EVER emitting a heartbeat
+        # is an old one-shot binary that ignored the flag — we then downgrade
+        # to poll mode for the rest of this daemon's life (no respawn storm).
+        self._stream_supported = True
         self._stderr_thread: threading.Thread | None = None
         # Safe, content-free error counter for the whole-data-path privacy gate:
         # store/embed failures bump this instead of emitting tracebacks that
@@ -676,7 +697,7 @@ class CaptureDaemon:
             stats = self.handle_event(event, stats)
         return stats
 
-    def _resolve_helper(self) -> list[str]:
+    def _resolve_helper(self, *, stream: bool = False) -> list[str]:
         """Return the launch argv, failing closed if the signed helper is absent.
 
         Enforces the signed-bundle / TCC requirement: when
@@ -689,7 +710,7 @@ class CaptureDaemon:
         argv = list(self.helper_cmd)
         if not argv:
             raise HelperUnavailableError("capture: empty helper command")
-        argv = self._with_policy_args(argv)
+        argv = self._with_policy_args(argv, stream=stream)
         if not self.require_signed_helper:
             return argv
 
@@ -713,13 +734,17 @@ class CaptureDaemon:
         argv[0] = resolved
         return argv
 
-    def _with_policy_args(self, argv: list[str]) -> list[str]:
+    def _with_policy_args(self, argv: list[str], *, stream: bool = False) -> list[str]:
         """Append the allow/block policy so the helper gates content AT THE SOURCE.
 
         The capture helper enforces the pause + allowlist-only policy before
         reading any AX text, so paused/disallowed app content is never read or
         sent over IPC. The Python redaction pass (`redact.decide`) still runs as
         authoritative defense-in-depth.
+
+        With ``stream=True`` the persistent-mode flags are appended: ``--stream``
+        plus the (config-clamped) timing knobs. Poll/one-shot spawns never pass
+        them, so ``openbird doctor`` and ``--once`` behave exactly as before.
         """
         allow = list(getattr(self.settings, "allowlist", None) or [])
         block = list(getattr(self.settings, "blocklist", None) or [])
@@ -733,9 +758,22 @@ class CaptureDaemon:
         # triggers an Automation prompt — by default.
         if getattr(self.settings, "capture_urls", False):
             extra += ["--capture-urls"]
+        if stream:
+            s = self.settings
+            extra += [
+                "--stream",
+                "--idle-tick",
+                str(getattr(s, "capture_idle_tick_seconds", 5.0)),
+                "--afk-threshold",
+                str(getattr(s, "capture_afk_threshold_seconds", 150.0)),
+                "--ceiling",
+                str(getattr(s, "capture_force_ceiling_seconds", 60.0)),
+                "--min-gap",
+                str(getattr(s, "capture_min_gap_seconds", 1.0)),
+            ]
         return argv + extra
 
-    def _spawn(self) -> subprocess.Popen[str]:
+    def _spawn(self, *, stream: bool = False) -> subprocess.Popen[str]:
         """Launch the helper as a text-mode subprocess yielding stdout lines.
 
         stdout carries the JSON event stream. stderr is **drained on a separate
@@ -743,7 +781,7 @@ class CaptureDaemon:
         stderr cannot fill the pipe buffer and deadlock capture; its contents are
         never logged (only a capped byte count), honoring subprocess hygiene.
         """
-        argv = self._resolve_helper()
+        argv = self._resolve_helper(stream=stream)
         proc = subprocess.Popen(
             argv,
             # Detach the helper from FD 0. When the app supervises us, FD 0 is the
@@ -879,6 +917,175 @@ class CaptureDaemon:
             if rc is not None and rc != 0:
                 raise HelperExitError(f"capture helper exited with code {rc}")
         return stats
+
+    # -- persistent (stream) mode ---------------------------------------------
+
+    def _stream_read_timeout(self) -> float:
+        """No-events stall bound: 3 heartbeat intervals, floored at 30s."""
+        tick = float(getattr(self.settings, "capture_idle_tick_seconds", 5.0))
+        return max(_STREAM_READ_TIMEOUT_MIN, 3.0 * tick)
+
+    def _liveness_path(self) -> Path:
+        return Path(self.settings.data_dir) / LIVENESS_FILENAME
+
+    def _write_liveness(
+        self,
+        *,
+        mode: str,
+        last_event_ts: float | None,
+        last_capture_ts: float | None,
+        heartbeat_seq: int | None,
+    ) -> None:
+        """Atomically write the metadata-only liveness sidecar (best-effort).
+
+        capture-health reads this to distinguish "daemon alive and eventing"
+        from "daemon gone / wedged" without ever reporting ok off a stale
+        timestamp. Write-temp-then-rename inside data_dir keeps readers from
+        ever observing a torn file. Failures are logged as a reason code only.
+        """
+        payload = {
+            "updated_at": time.time(),
+            "last_event_ts": last_event_ts,
+            "last_capture_ts": last_capture_ts,
+            "mode": mode,
+            "afk": self._afk,
+            "heartbeat_seq": heartbeat_seq,
+        }
+        path = self._liveness_path()
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(payload))
+            os.replace(tmp, path)
+        except OSError:
+            logger.debug("capture: liveness_write_failed")
+
+    def run_persistent(
+        self, *, stop_event: "threading.Event | None" = None
+    ) -> CaptureStats:
+        """Run ONE persistent-helper cycle: spawn ``--stream``, consume events.
+
+        A reader thread pushes decoded lines into a queue; this loop drains it
+        in :data:`_STREAM_STOP_SLICE` slices so a stop request is honored
+        within ~1s (never a full stall timeout). Outcomes:
+
+          * ``stop_event`` set -> helper terminated, CLEAN return (stats).
+          * helper stdout EOF, rc != 0 -> :class:`HelperExitError` (supervisor
+            backoff applies; exit 2 = AX denial, 3 = pipe/EPIPE refusal).
+          * EOF, rc == 0, NO heartbeat ever seen -> old binary that ignored
+            ``--stream``: mark stream unsupported, CLEAN return (the caller
+            falls back to poll mode — no error, no breaker hit).
+          * EOF, rc == 0, heartbeats seen -> unexpected self-exit of a healthy
+            stream helper: :class:`HelperExitError` (respawn with backoff).
+          * no events for the stall timeout with the process alive -> reap it
+            and raise :class:`HelperExitError` ("stalled").
+        """
+        stop = stop_event or threading.Event()
+        proc = self._spawn(stream=True)
+        stats = CaptureStats()
+        lines: "queue.Queue[object]" = queue.Queue()
+        eof_sentinel = object()
+
+        def _reader(stdout) -> None:
+            try:
+                for line in stdout:
+                    lines.put(line)
+            except (OSError, ValueError):
+                pass  # stream closed during shutdown
+            finally:
+                lines.put(eof_sentinel)
+
+        reader = threading.Thread(
+            target=_reader, args=(proc.stdout,), name="capture-stream-reader",
+            daemon=True,
+        )
+        reader.start()
+
+        saw_heartbeat = False
+        heartbeat_seq: int | None = None
+        last_event_ts: float | None = None
+        last_capture_ts: float | None = None
+        read_timeout = self._stream_read_timeout()
+        last_line_mono = time.monotonic()
+        last_liveness_mono = 0.0
+        stopped_by_us = False
+        try:
+            while True:
+                if stop.is_set():
+                    stopped_by_us = True
+                    break
+                try:
+                    item = lines.get(timeout=_STREAM_STOP_SLICE)
+                except queue.Empty:
+                    if time.monotonic() - last_line_mono > read_timeout:
+                        if proc.poll() is None:
+                            # Alive but silent past 3 heartbeat intervals: a
+                            # wedged helper. Reap and let the supervisor back
+                            # off (metadata-only log).
+                            logger.warning(
+                                "capture stream: reason=helper_stalled "
+                                "(silent for %.0fs)",
+                                read_timeout,
+                            )
+                            raise HelperExitError("capture helper stalled")
+                        # Process died; the reader's EOF sentinel arrives next.
+                    continue
+                if item is eof_sentinel:
+                    break
+                last_line_mono = time.monotonic()
+                event = parse_event(item)  # type: ignore[arg-type]
+                if event is None:
+                    if str(item).strip():
+                        stats = stats._with(errors=1)
+                    continue
+                event_type = event.get("type", "capture")
+                if event_type == "heartbeat":
+                    saw_heartbeat = True
+                    seq = event.get("seq")
+                    heartbeat_seq = seq if isinstance(seq, int) else heartbeat_seq
+                ts = _finite_ts(event.get("ts"))
+                last_event_ts = ts
+                if event_type == "capture":
+                    last_capture_ts = ts
+                stats = self.handle_event(event, stats)
+                now_mono = time.monotonic()
+                if now_mono - last_liveness_mono >= _LIVENESS_WRITE_INTERVAL:
+                    self._write_liveness(
+                        mode="stream",
+                        last_event_ts=last_event_ts,
+                        last_capture_ts=last_capture_ts,
+                        heartbeat_seq=heartbeat_seq,
+                    )
+                    last_liveness_mono = now_mono
+        finally:
+            self._shutdown(proc)
+            # Final flush so the sidecar reflects end-of-cycle state (the
+            # periodic write is interval-bounded and may lag the last events).
+            self._write_liveness(
+                mode="stream",
+                last_event_ts=last_event_ts,
+                last_capture_ts=last_capture_ts,
+                heartbeat_seq=heartbeat_seq,
+            )
+
+        if stopped_by_us or stop.is_set():
+            return stats
+        rc = proc.returncode
+        if rc is not None and rc != 0:
+            raise HelperExitError(f"capture helper exited with code {rc}")
+        if not saw_heartbeat:
+            # Old binary: ignored --stream, did its one-shot capture, exited 0.
+            self._stream_supported = False
+            logger.info("capture: stream_unsupported; falling back to one-shot polling")
+            return stats
+        # A healthy stream helper never exits 0 on its own (only on our signal).
+        raise HelperExitError("stream helper exited unexpectedly (code 0)")
+
+    def _capture_mode(self) -> str:
+        """Effective loop mode: env force wins, else downgrade-aware default."""
+        forced = os.environ.get(CAPTURE_MODE_ENV, "").strip().lower()
+        if forced in ("oneshot", "persistent"):
+            return forced
+        return "persistent" if self._stream_supported else "oneshot"
 
     @staticmethod
     def _watch_supervisor(token: str, fd: int, stop: "threading.Event") -> None:
@@ -1018,12 +1225,22 @@ class CaptureDaemon:
         logger.info("capture supervisor: starting (poll_interval=%.1fs)", poll_interval)
         try:
             while not stop.is_set():
+                cycle_start = time.monotonic()
                 try:
-                    total = total._add(self.run(stop_event=stop))
+                    if self._capture_mode() == "persistent":
+                        total = total._add(self.run_persistent(stop_event=stop))
+                    else:
+                        total = total._add(self.run(stop_event=stop))
                 except HelperUnavailableError:
                     # Missing signed bundle is permanent, not transient: don't retry.
                     raise
                 except Exception as exc:  # noqa: BLE001 - one bad cycle must not kill the loop
+                    # Duration-based decay: a persistent cycle that survived a
+                    # long time before failing is NOT part of a failure streak.
+                    # A once-a-day crash must never accumulate into a breaker
+                    # trip; a restart storm (fast failures) still trips it.
+                    if time.monotonic() - cycle_start >= _FAILURE_DECAY_SECONDS:
+                        failures = 0
                     failures += 1
                     self.error_count += 1
                     # Metadata only: class + consecutive count, never the message.
@@ -1110,4 +1327,6 @@ __all__ = [
     "HELPER_PATH_ENV",
     "DEFAULT_SIGNED_HELPER_PATH",
     "SUPERVISOR_TOKEN_ENV",
+    "CAPTURE_MODE_ENV",
+    "LIVENESS_FILENAME",
 ]
