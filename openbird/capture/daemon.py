@@ -244,6 +244,7 @@ class IngestSink(Protocol):
         session_id: str | None = ...,
         source: str,
         ts: float | None = ...,
+        span_id: str | None = ...,
     ) -> Observation: ...
 
 

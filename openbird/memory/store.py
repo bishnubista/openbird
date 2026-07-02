@@ -279,6 +279,7 @@ class MemoryStore:
         session_id: str | None = None,
         source: str,
         ts: float | None = None,
+        span_id: str | None = None,
     ) -> Observation:
         """Record one occurrence of captured content.
 
@@ -286,6 +287,11 @@ class MemoryStore:
         (a unique chunk's text/embedding/index entries are created once); ALWAYS
         inserts a new observation row (occurrences are never deduped). Returns
         the created :class:`Observation`.
+
+        ``span_id`` is EVENT-SCOPED: the caller (capture daemon) resolves the
+        activity span at trigger-handling time and passes the immutable id in —
+        this method never queries a "current open span" (the span row was
+        committed by ``open_span`` before this call, so the FK holds).
         """
         ts = time.time() if ts is None else ts
         blob_hash = ingest.content_hash(text)
@@ -323,6 +329,7 @@ class MemoryStore:
             obs = self._write_observation(
                 blob_hash, norm, chunks, chunk_hashes, embeddings, ts,
                 app=app, window=window, url=url, session_id=session_id, source=source,
+                span_id=span_id,
             )
             self.conn.commit()
             return obs
@@ -346,6 +353,7 @@ class MemoryStore:
         url: str | None,
         session_id: str | None,
         source: str,
+        span_id: str | None = None,
     ) -> Observation:
         """Insert blob/observation/chunks/index rows. Runs inside an open txn.
 
@@ -366,9 +374,10 @@ class MemoryStore:
         # 2) Observation (NEVER deduped).
         obs_id = uuid.uuid4().hex
         cur.execute(
-            "INSERT INTO observations(id, content_hash, ts, app, window, url, session_id, source)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (obs_id, blob_hash, ts, app, window, url, session_id, source),
+            "INSERT INTO observations("
+            "id, content_hash, ts, app, window, url, session_id, source, span_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (obs_id, blob_hash, ts, app, window, url, session_id, source, span_id),
         )
 
         # 3) Chunks: deduped GLOBALLY by chunk_hash (normalized chunk text), so an
@@ -418,6 +427,7 @@ class MemoryStore:
             url=url,
             session_id=session_id,
             source=source,
+            span_id=span_id,
         )
 
     # -- search ---------------------------------------------------------------
@@ -754,6 +764,101 @@ class MemoryStore:
             source=row["source"],
         )
 
+    # -- activity spans (Phase B) ----------------------------------------------
+
+    def open_span(
+        self,
+        *,
+        epoch_id: str,
+        start_ts: float,
+        end_ts: float,
+        bundle_id: str | None,
+        detail_tier: int,
+        window: str | None = None,
+        url_host: str | None = None,
+        identity_key: str | None = None,
+        afk: bool = False,
+        reason: str | None = None,
+        span_id: str | None = None,
+    ) -> str:
+        """Insert one activity span and return its id (own short transaction).
+
+        Enforces the tier contract in Python BEFORE SQL (fail-closed, testable
+        error) in addition to the schema CHECKs: tier 0 must carry a reason from
+        the closed enum and NO window/url_host/identity_key; tier 1 carries no
+        reason. Metadata only — nothing here is captured content (window titles
+        arrive already scrubbed by the caller).
+        """
+        from openbird.capture.redact import SPAN_REASONS, SPAN_TIER_COARSE, SPAN_TIER_FULL
+
+        if detail_tier == SPAN_TIER_COARSE:
+            if reason not in SPAN_REASONS:
+                raise ValueError("coarse span requires a reason from SPAN_REASONS")
+            if window is not None or url_host is not None or identity_key is not None:
+                raise ValueError("coarse span must not carry window/url_host/identity_key")
+        elif detail_tier == SPAN_TIER_FULL:
+            if reason is not None:
+                raise ValueError("full span must not carry a reason")
+        else:
+            raise ValueError("detail_tier must be 0 or 1")
+        if not (end_ts >= start_ts):
+            raise ValueError("span end_ts must be >= start_ts")
+
+        new_id = span_id or uuid.uuid4().hex
+        try:
+            self._begin()
+            self.conn.execute(
+                "INSERT INTO activity_spans("
+                "span_id, epoch_id, start_ts, end_ts, bundle_id, app, detail_tier, "
+                "window, url_host, identity_key, afk, meeting, reason"
+                ") VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?)",
+                (
+                    new_id,
+                    epoch_id,
+                    float(start_ts),
+                    float(end_ts),
+                    bundle_id,
+                    int(detail_tier),
+                    window,
+                    url_host,
+                    identity_key,
+                    1 if afk else 0,
+                    reason,
+                ),
+            )
+            self.conn.commit()
+            return new_id
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def extend_span(self, span_id: str, end_ts: float) -> None:
+        """Advance a span's end (monotone: never regresses on stale updates)."""
+        try:
+            self._begin()
+            self.conn.execute(
+                "UPDATE activity_spans SET end_ts = MAX(end_ts, ?) WHERE span_id = ?",
+                (float(end_ts), span_id),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    # There is deliberately NO open/closed status column: the tracker is the
+    # single writer, and a crash leaves end_ts at the last flush — which IS the
+    # correct closed value (never "now"). Closing == a final extend.
+    close_span = extend_span
+
+    def spans_in_range(self, start_ts: float, end_ts: float) -> list[dict]:
+        """Return spans OVERLAPPING [start_ts, end_ts], ordered by start."""
+        rows = self.conn.execute(
+            "SELECT * FROM activity_spans WHERE start_ts <= ? AND end_ts >= ? "
+            "ORDER BY start_ts",
+            (float(end_ts), float(start_ts)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # -- day memories ---------------------------------------------------------
 
     def save_day_memory(
@@ -764,6 +869,7 @@ class MemoryStore:
         extractor_version: str,
         payload: dict,
         source_ids: list[str],
+        span_ids: list[str] | None = None,
         generated_at: float | None = None,
     ) -> dict:
         """Persist one deterministic daily memory and its source dependencies.
@@ -778,6 +884,7 @@ class MemoryStore:
         generated = time.time() if generated_at is None else generated_at
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         unique_source_ids = sorted(set(source_ids))
+        unique_span_ids = sorted(set(span_ids or []))
         try:
             self._begin()
             self.conn.execute(
@@ -796,13 +903,14 @@ class MemoryStore:
                     extractor_version,
                     generated,
                     payload_json,
-                    len(unique_source_ids),
+                    len(unique_source_ids) + len(unique_span_ids),
                 ),
             )
             self.conn.executemany(
-                "INSERT INTO day_memory_sources(day_memory_id, observation_id) "
-                "VALUES (?, ?)",
-                [(day_memory_id, obs_id) for obs_id in unique_source_ids],
+                "INSERT INTO day_memory_source_refs("
+                "day_memory_id, source_kind, source_id) VALUES (?, ?, ?)",
+                [(day_memory_id, "observation", i) for i in unique_source_ids]
+                + [(day_memory_id, "span", i) for i in unique_span_ids],
             )
             self.conn.commit()
         except Exception:
@@ -883,9 +991,12 @@ class MemoryStore:
                     ),
                 )
                 self.conn.executemany(
-                    "INSERT INTO day_memory_sources(day_memory_id, observation_id) "
-                    "VALUES (?, ?)",
-                    [(day_memory_id, obs_id) for obs_id in unique_source_ids],
+                    "INSERT INTO day_memory_source_refs("
+                    "day_memory_id, source_kind, source_id) VALUES (?, ?, ?)",
+                    [
+                        (day_memory_id, "observation", obs_id)
+                        for obs_id in unique_source_ids
+                    ],
                 )
                 self.conn.commit()
                 return self._get_day_memory_unchecked(
@@ -944,9 +1055,9 @@ class MemoryStore:
         ).fetchone()
         if row is None:
             return None
-        source_rows = self.conn.execute(
-            "SELECT observation_id FROM day_memory_sources WHERE day_memory_id = ? "
-            "ORDER BY observation_id",
+        ref_rows = self.conn.execute(
+            "SELECT source_kind, source_id FROM day_memory_source_refs "
+            "WHERE day_memory_id = ? ORDER BY source_kind, source_id",
             (row["id"],),
         ).fetchall()
         return {
@@ -956,7 +1067,13 @@ class MemoryStore:
             "extractor_version": row["extractor_version"],
             "generated_at": row["generated_at"],
             "source_count": row["source_count"],
-            "source_ids": [r["observation_id"] for r in source_rows],
+            # Back-compat key: observation refs only, as before.
+            "source_ids": [
+                r["source_id"] for r in ref_rows if r["source_kind"] == "observation"
+            ],
+            "span_ids": [
+                r["source_id"] for r in ref_rows if r["source_kind"] == "span"
+            ],
             "payload": json.loads(row["payload_json"]),
         }
 
@@ -1128,9 +1245,10 @@ class MemoryStore:
                 # explicitly before the raw observation wipe so no synthesized
                 # daily artifact survives a full purge.
                 cur.execute("DELETE FROM day_memories")
-                cur.execute("DELETE FROM day_memory_sources")
+                cur.execute("DELETE FROM day_memory_source_refs")
                 cur.execute("DELETE FROM reasoning_send_ledger")
                 cur.execute("DELETE FROM observations")
+                cur.execute("DELETE FROM activity_spans")
                 cur.execute("DELETE FROM blob_chunks")
                 cur.execute("DELETE FROM chunks")
                 cur.execute("DELETE FROM content_blobs")
@@ -1147,8 +1265,16 @@ class MemoryStore:
 
             if since_ts is not None:
                 where, param = "ts >= ?", since_ts
+                # Purge-of-recent: any span TOUCHING the purged window goes —
+                # a purge must not leave partial evidence of the erased time.
+                span_where = "end_ts >= ?"
             else:
                 where, param = "ts < ?", before_ts
+                # Retention: a span that BEGAN before the cutoff is deleted
+                # ENTIRELY (never truncated/retained) — no span data from the
+                # pruned window may survive, and truncation would bypass the
+                # span-delete invalidation trigger.
+                span_where = "start_ts < ?"
 
             victims = cur.execute(
                 f"SELECT id, content_hash FROM observations WHERE {where}", (param,)
@@ -1156,6 +1282,10 @@ class MemoryStore:
             count = len(victims)
             affected_hashes = {r["content_hash"] for r in victims}
             cur.execute(f"DELETE FROM observations WHERE {where}", (param,))
+            # Span deletion fires trg_day_memory_source_span_delete, which
+            # invalidates any day memory citing a deleted span; observations
+            # referencing a deleted span get span_id NULLed by the FK.
+            cur.execute(f"DELETE FROM activity_spans WHERE {span_where}", (param,))
 
             # Drop blobs now orphaned (no remaining observations). FK ON DELETE
             # CASCADE removes their blob_chunks mappings.
@@ -1282,6 +1412,7 @@ class MemoryStore:
             "chunks": count("chunks"),
             "vectors": count("vec_chunks"),
             "day_memories": count("day_memories"),
+            "activity_spans": count("activity_spans"),
             "embed_dim": self.embed_dim,
             "cohort_key": cohort_row["value"] if cohort_row else None,
             "encryption_enabled": self.settings.encryption_enabled,

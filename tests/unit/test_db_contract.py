@@ -236,12 +236,16 @@ def test_fresh_store_ships_day_memory_and_reasoning_ledger_tables(tmp_path):
         }
         assert {
             "day_memories",
-            "day_memory_sources",
+            "day_memory_source_refs",
+            "activity_spans",
             "reasoning_send_ledger",
         } <= tables
+        # The legacy observation-only junction must NOT survive on a fresh DB
+        # (v4 drops it after the v2 ladder step transiently re-creates it).
+        assert "day_memory_sources" not in tables
         trigger = s.conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='trigger' "
-            "AND name='trg_day_memory_observation_delete'"
+            "AND name='trg_day_memory_source_observation_delete'"
         ).fetchone()
         assert trigger is not None
         assert "BEFORE DELETE ON observations" in trigger["sql"]
@@ -531,12 +535,22 @@ def test_real_v1_db_migrates_to_v2_day_memory_shape(tmp_path):
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='day_memories'"
         ).fetchone()
+        # After the full ladder (v4), the OLD observation-only trigger is
+        # replaced by the typed-refs pair; the legacy junction table is gone.
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+            "AND name='trg_day_memory_observation_delete'"
+        ).fetchone() is None
         trigger = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='trigger' "
-            "AND name='trg_day_memory_observation_delete'"
+            "AND name='trg_day_memory_source_observation_delete'"
         ).fetchone()
         assert trigger is not None
         assert "BEFORE DELETE ON observations" in trigger[0]
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='day_memory_sources'"
+        ).fetchone() is None
     finally:
         conn.close()
 
@@ -919,5 +933,163 @@ def test_prune_requires_a_cutoff(tmp_path):
     try:
         with pytest.raises(ValueError, match="retention_days"):
             s.prune()
+    finally:
+        s.close()
+
+
+# ---------------------------------------------------------------------------
+# v4: activity spans + typed day-memory source refs (Phase B)
+# ---------------------------------------------------------------------------
+
+
+def test_empty_db_ladder_reaches_v4_cleanly(tmp_path):
+    """Fresh DB: schema.sql -> v1 stamp -> v2 -> v3 -> v4, objects exactly once."""
+    db = str(tmp_path / "fresh-v4.db")
+    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
+                    provider=FakeProvider(embed_dim=64))
+    try:
+        assert s.conn.execute("PRAGMA user_version").fetchone()["user_version"] == SCHEMA_VERSION
+        # Every v4 object present exactly once (idempotency between schema.sql
+        # and the migration would otherwise duplicate or fail).
+        for kind, name in [
+            ("table", "activity_spans"),
+            ("table", "day_memory_source_refs"),
+            ("trigger", "trg_day_memory_source_observation_delete"),
+            ("trigger", "trg_day_memory_source_span_delete"),
+            ("trigger", "trg_day_memory_source_refs_obs_exists"),
+            ("trigger", "trg_day_memory_source_refs_span_exists"),
+            ("index", "idx_observations_span"),
+            ("index", "idx_activity_spans_start"),
+        ]:
+            rows = s.conn.execute(
+                "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()
+            assert rows["c"] == 1, f"{kind} {name} count={rows['c']}"
+        cols = {
+            r["name"] for r in s.conn.execute("PRAGMA table_info(observations)").fetchall()
+        }
+        assert "span_id" in cols
+    finally:
+        s.close()
+
+
+def test_v3_db_with_existing_day_memory_sources_backfills_refs(tmp_path):
+    """Upgrade path: existing junction rows migrate into typed refs, table drops."""
+    conn = _make_v1_shaped_db(tmp_path / "v3-backfill.db")
+    try:
+        # Model a real v3 DB: run the ladder up to v3 only by stamping v1 and
+        # temporarily truncating the ladder... simpler: stamp v1, run full
+        # ladder is v4 — so instead build the v3 state by hand: day-memory
+        # tables per the v2 migration + a seeded row, stamped 3.
+        conn.execute("DROP TABLE IF EXISTS day_memory_source_refs")
+        conn.execute("DROP TABLE IF EXISTS activity_spans")
+        conn.execute("DROP TRIGGER IF EXISTS trg_day_memory_source_observation_delete")
+        conn.execute("DROP TRIGGER IF EXISTS trg_day_memory_source_span_delete")
+        conn.execute("DROP TRIGGER IF EXISTS trg_day_memory_source_refs_obs_exists")
+        conn.execute("DROP TRIGGER IF EXISTS trg_day_memory_source_refs_span_exists")
+        # Recreate the LEGACY observations shape (no span_id column) so the v4
+        # guarded ALTER path is exercised exactly as on a real v3 DB.
+        conn.execute("DROP INDEX IF EXISTS idx_observations_span")
+        conn.execute("DROP TABLE observations")
+        conn.execute(
+            "CREATE TABLE observations ("
+            "id TEXT PRIMARY KEY,"
+            "content_hash TEXT NOT NULL REFERENCES content_blobs(content_hash) "
+            "ON DELETE CASCADE,"
+            "ts REAL NOT NULL, app TEXT, window TEXT, url TEXT, "
+            "session_id TEXT, source TEXT NOT NULL)"
+        )
+        # Recreate the LEGACY junction + trigger exactly as the old v2 shipped.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS day_memory_sources ("
+            "day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,"
+            "observation_id TEXT NOT NULL REFERENCES observations(id) ON DELETE CASCADE,"
+            "PRIMARY KEY(day_memory_id, observation_id))"
+        )
+        conn.execute(
+            "INSERT INTO content_blobs(content_hash, text) VALUES ('h1', 'txt')"
+        )
+        conn.execute(
+            "INSERT INTO observations(id, content_hash, ts, source) "
+            "VALUES ('obs1', 'h1', 1.0, 'capture')"
+        )
+        conn.execute(
+            "INSERT INTO day_memories(id, local_date, source_scope, "
+            "extractor_version, generated_at, payload_json, source_count) "
+            "VALUES ('dm1', '2026-01-01', 'capture', 'v1', 1.0, '{}', 1)"
+        )
+        conn.execute(
+            "INSERT INTO day_memory_sources(day_memory_id, observation_id) "
+            "VALUES ('dm1', 'obs1')"
+        )
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+        refs = conn.execute(
+            "SELECT source_kind, source_id FROM day_memory_source_refs "
+            "WHERE day_memory_id = 'dm1'"
+        ).fetchall()
+        assert [tuple(r) for r in refs] == [("observation", "obs1")]
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='day_memory_sources'"
+        ).fetchone() is None
+        # The preserved day memory is still invalidated by observation delete
+        # (through the NEW trigger).
+        conn.execute("DELETE FROM observations WHERE id = 'obs1'")
+        assert conn.execute("SELECT COUNT(*) FROM day_memories").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_day_memory_source_refs_integrity_triggers(tmp_path):
+    db = str(tmp_path / "refs-integrity.db")
+    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
+                    provider=FakeProvider(embed_dim=64))
+    try:
+        s.conn.execute(
+            "INSERT INTO day_memories(id, local_date, source_scope, "
+            "extractor_version, generated_at, payload_json, source_count) "
+            "VALUES ('dm1', '2026-01-01', 'capture', 'v1', 1.0, '{}', 0)"
+        )
+        with pytest.raises(Exception, match="unknown observation ref"):
+            s.conn.execute(
+                "INSERT INTO day_memory_source_refs VALUES ('dm1', 'observation', 'nope')"
+            )
+        with pytest.raises(Exception, match="unknown span ref"):
+            s.conn.execute(
+                "INSERT INTO day_memory_source_refs VALUES ('dm1', 'span', 'nope')"
+            )
+    finally:
+        s.close()
+
+
+def test_activity_spans_check_constraints(tmp_path):
+    db = str(tmp_path / "span-checks.db")
+    s = MemoryStore(db_path=db, settings=Settings(data_dir=tmp_path, embed_dim=64),
+                    provider=FakeProvider(embed_dim=64))
+    try:
+        # Tier 0 with a window title violates the tier CHECK.
+        with pytest.raises(Exception, match="CHECK constraint failed"):
+            s.conn.execute(
+                "INSERT INTO activity_spans(span_id, epoch_id, start_ts, end_ts, "
+                "bundle_id, detail_tier, window, reason) "
+                "VALUES ('s1', 'e', 1.0, 2.0, 'b', 0, 'TITLE', 'blocklisted')"
+            )
+        # Tier 1 with a reason violates it too.
+        with pytest.raises(Exception, match="CHECK constraint failed"):
+            s.conn.execute(
+                "INSERT INTO activity_spans(span_id, epoch_id, start_ts, end_ts, "
+                "bundle_id, detail_tier, reason) "
+                "VALUES ('s2', 'e', 1.0, 2.0, 'b', 1, 'blocklisted')"
+            )
+        # Reason outside the closed enum rejected.
+        with pytest.raises(Exception, match="CHECK constraint failed"):
+            s.conn.execute(
+                "INSERT INTO activity_spans(span_id, epoch_id, start_ts, end_ts, "
+                "bundle_id, detail_tier, reason) "
+                "VALUES ('s3', 'e', 1.0, 2.0, 'b', 0, 'made_up')"
+            )
     finally:
         s.close()

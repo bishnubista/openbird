@@ -225,7 +225,7 @@ def test_day_memory_deleted_when_source_observation_deleted_since(store):
     assert store.delete(since_ts=250.0) == 1
 
     assert store.get_day_memory(local_date="2026-06-12", source_scope="capture") is None
-    assert store.conn.execute("SELECT COUNT(*) c FROM day_memory_sources").fetchone()["c"] == 0
+    assert store.conn.execute("SELECT COUNT(*) c FROM day_memory_source_refs").fetchone()["c"] == 0
 
 
 def test_day_memory_deleted_when_source_observation_deleted_before(store):
@@ -262,7 +262,7 @@ def test_day_memory_deleted_by_full_wipe(store):
 
     assert store.get_day_memory(local_date="2026-06-12", source_scope="capture") is None
     assert store.conn.execute("SELECT COUNT(*) c FROM day_memories").fetchone()["c"] == 0
-    assert store.conn.execute("SELECT COUNT(*) c FROM day_memory_sources").fetchone()["c"] == 0
+    assert store.conn.execute("SELECT COUNT(*) c FROM day_memory_source_refs").fetchone()["c"] == 0
 
 
 def test_ensure_day_memory_rebuilds_after_closed_day_backfill(store):
@@ -525,3 +525,129 @@ def test_purge_all_allows_reopen_with_different_dimension(mem_settings, fake_pro
     assert s2.stats()["embed_dim"] == 512
     assert s2.stats()["vectors"] == 1  # inserted into the rebuilt FLOAT[512] table
     s2.close()
+
+
+# ---------------------------------------------------------------------------
+# activity spans (Phase B): store APIs + lifecycle cascades
+# ---------------------------------------------------------------------------
+
+
+def _open_full_span(store, *, start=100.0, end=110.0, bundle="com.apple.mail", **kw):
+    return store.open_span(
+        epoch_id="epoch1", start_ts=start, end_ts=end, bundle_id=bundle,
+        detail_tier=1, window=kw.pop("window", "Inbox"), **kw,
+    )
+
+
+def test_open_span_validates_tier_contract(store):
+    # Coarse span with a window must fail in PYTHON (before SQL).
+    with pytest.raises(ValueError, match="coarse span must not carry"):
+        store.open_span(
+            epoch_id="e", start_ts=1.0, end_ts=2.0, bundle_id="b",
+            detail_tier=0, window="TITLE", reason="blocklisted",
+        )
+    with pytest.raises(ValueError, match="requires a reason"):
+        store.open_span(
+            epoch_id="e", start_ts=1.0, end_ts=2.0, bundle_id="b", detail_tier=0
+        )
+    with pytest.raises(ValueError, match="must not carry a reason"):
+        store.open_span(
+            epoch_id="e", start_ts=1.0, end_ts=2.0, bundle_id="b",
+            detail_tier=1, reason="blocklisted",
+        )
+    with pytest.raises(ValueError, match="end_ts"):
+        store.open_span(
+            epoch_id="e", start_ts=2.0, end_ts=1.0, bundle_id="b", detail_tier=1
+        )
+
+
+def test_extend_span_is_monotone(store):
+    sid = _open_full_span(store, start=100.0, end=110.0)
+    store.extend_span(sid, 120.0)
+    store.extend_span(sid, 105.0)  # stale update must not regress
+    row = store.spans_in_range(0.0, 1_000.0)[0]
+    assert row["end_ts"] == 120.0
+    # close_span is a final extend (no status column by design).
+    store.close_span(sid, 125.0)
+    assert store.spans_in_range(0.0, 1_000.0)[0]["end_ts"] == 125.0
+
+
+def test_spans_in_range_overlap_semantics(store):
+    a = _open_full_span(store, start=100.0, end=200.0)
+    _open_full_span(store, start=300.0, end=400.0)
+    got = store.spans_in_range(150.0, 250.0)  # overlaps only span A
+    assert [r["span_id"] for r in got] == [a]
+    assert len(store.spans_in_range(0.0, 500.0)) == 2
+    assert store.spans_in_range(201.0, 299.0) == []
+
+
+def test_observation_links_to_span_and_set_null_on_span_delete(store):
+    sid = _open_full_span(store)
+    obs = store.add_observation("linked text", source="capture", ts=105.0, span_id=sid)
+    assert obs.span_id == sid
+    row = store.conn.execute(
+        "SELECT span_id FROM observations WHERE id = ?", (obs.id,)
+    ).fetchone()
+    assert row["span_id"] == sid
+    # Deleting the span nulls the link (FK SET NULL), never the observation.
+    store.conn.execute("DELETE FROM activity_spans WHERE span_id = ?", (sid,))
+    row = store.conn.execute(
+        "SELECT span_id FROM observations WHERE id = ?", (obs.id,)
+    ).fetchone()
+    assert row["span_id"] is None
+
+
+def test_prune_deletes_crossing_span_entirely_and_invalidates_day_memory(store):
+    # Span crossing the cutoff: began before, ended after.
+    crossing = _open_full_span(store, start=100.0, end=300.0)
+    late = _open_full_span(store, start=400.0, end=500.0)
+    obs = store.add_observation("txt", source="capture", ts=450.0)
+    store.save_day_memory(
+        local_date="2026-01-01", source_scope="capture", extractor_version="v1",
+        payload={}, source_ids=[obs.id], span_ids=[crossing],
+    )
+    deleted = store.delete(before_ts=200.0)
+    assert deleted == 0  # no observations before the cutoff
+    ids = {r["span_id"] for r in store.spans_in_range(0.0, 1_000.0)}
+    # The crossing span is deleted ENTIRELY (start < cutoff); the late one stays.
+    assert ids == {late}
+    # The day memory citing the deleted span was invalidated by the trigger.
+    assert store.get_day_memory(local_date="2026-01-01", source_scope="capture") is None
+
+
+def test_purge_since_deletes_touching_spans(store):
+    early = _open_full_span(store, start=100.0, end=150.0)
+    touching = _open_full_span(store, start=180.0, end=250.0)
+    store.delete(since_ts=200.0)
+    ids = {r["span_id"] for r in store.spans_in_range(0.0, 1_000.0)}
+    assert early in ids and touching not in ids
+
+
+def test_full_wipe_clears_spans_and_refs(store):
+    sid = _open_full_span(store)
+    obs = store.add_observation("txt", source="capture", ts=105.0, span_id=sid)
+    store.save_day_memory(
+        local_date="2026-01-01", source_scope="capture", extractor_version="v1",
+        payload={}, source_ids=[obs.id], span_ids=[sid],
+    )
+    store.delete(all=True)
+    assert store.spans_in_range(0.0, 1e12) == []
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM day_memory_source_refs"
+    ).fetchone()["c"] == 0
+    assert store.stats()["activity_spans"] == 0
+
+
+def test_day_memory_span_refs_round_trip(store):
+    sid = _open_full_span(store)
+    obs = store.add_observation("txt", source="capture", ts=105.0)
+    saved = store.save_day_memory(
+        local_date="2026-01-02", source_scope="capture", extractor_version="v1",
+        payload={}, source_ids=[obs.id], span_ids=[sid],
+    )
+    assert saved["source_ids"] == [obs.id]
+    assert saved["span_ids"] == [sid]
+    assert saved["source_count"] == 2
+    # Deleting the SPAN invalidates the day memory (typed trigger).
+    store.conn.execute("DELETE FROM activity_spans WHERE span_id = ?", (sid,))
+    assert store.get_day_memory(local_date="2026-01-02", source_scope="capture") is None
