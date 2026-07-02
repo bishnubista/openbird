@@ -324,12 +324,14 @@ def test_runner_summarizes_settled_block_with_typed_refs(store, mem_settings):
     assert ("span", s1) in kinds and ("span", s2) in kinds
     assert ("observation", obs.id) in kinds
 
-    # Re-run: fingerprint match -> skipped, zero provider calls.
+    # Re-run: fingerprint match -> skipped, zero provider calls (the week
+    # digest's member fingerprint matches too, so the week step also skips).
     calls_before = len(provider.calls)
     counts = run_block_summaries(store, provider, now=now, settings=mem_settings)
     assert counts == {
-        "summarized": 0, "skipped": 1, "ungrounded": 0, "classified": 0,
-        "deferred_reason": None,
+        "summarized": 0, "skipped": 1, "ungrounded": 0,
+        "weeks": 0, "week_ungrounded": 0, "indexed": 0,
+        "classified": 0, "deferred_reason": None,
     }
     assert len(provider.calls) == calls_before
 
@@ -636,3 +638,310 @@ def test_adjacent_date_builds_keep_both_clipped_summaries(store, mem_settings):
     jan6 = store.block_summaries_for_date("2026-01-06")
     assert len(jan5) == 1 and len(jan6) == 1
     assert jan5[0]["end_ts"] <= day6 and jan6[0]["start_ts"] >= day6
+
+
+# -- week rollups + summary indexing (Phase E1) --------------------------------------
+
+
+class _ScriptedProvider:
+    """Cites all labels for BLOCK calls; returns a scripted response for WEEK calls."""
+
+    llm_model = "stub-model"
+
+    def __init__(self, week_response, summary="Blockwise summary text."):
+        self.week_response = week_response
+        self.summary = summary
+        self.calls: list[list[dict]] = []
+
+    def complete(self, messages, *, json_schema=None):
+        self.calls.append(messages)
+        content = messages[-1]["content"]
+        if "Summarize this week" in content:
+            return self.week_response
+        labels = re.findall(r"\[source_id: (S\d+)\]", content)
+        return {"summary": self.summary, "citation_ids": labels}
+
+
+def _week_now() -> tuple[float, str, float, float]:
+    """A deterministic 'now' (a Wednesday afternoon) plus its week window."""
+    from openbird.summaries import compute_week_windows
+
+    now = 1_800_000_000.0
+    monday, wstart, wend = compute_week_windows(now, 1)[-1]
+    # Center 'now' mid-week so seeded blocks are settled and inside the week.
+    now = wstart + 3 * 86_400.0
+    monday, wstart, wend = compute_week_windows(now, 1)[-1]
+    return now, monday, wstart, wend
+
+
+def _seed_week_block(store, wstart, *, offset=3600.0):
+    s1 = store.open_span(
+        epoch_id="e", start_ts=wstart + offset, end_ts=wstart + offset + 400.0,
+        bundle_id="com.apple.mail", detail_tier=1,
+    )
+    s2 = store.open_span(
+        epoch_id="e", start_ts=wstart + offset + 430.0,
+        end_ts=wstart + offset + 900.0,
+        bundle_id="com.apple.Notes", detail_tier=1,
+    )
+    return s1, s2
+
+
+def test_compute_week_windows_monday_aligned_current_last():
+    import datetime as _dt
+
+    from openbird.summaries import compute_week_windows
+
+    now = 1_800_000_000.0
+    windows = compute_week_windows(now, 2)
+    assert len(windows) == 2
+    for monday, start, end in windows:
+        start_dt = _dt.datetime.fromtimestamp(start)
+        assert start_dt.weekday() == 0 and start_dt.hour == 0
+        assert monday == start_dt.strftime("%Y-%m-%d")
+        assert end > start
+    assert windows[-1][1] <= now <= windows[-1][2]  # current week last
+    assert windows[0][1] < windows[1][1]
+
+
+def test_week_member_fingerprint_over_key_fingerprint_pairs():
+    from openbird.summaries import week_member_fingerprint
+
+    a = [{"block_key": "k1", "block_fingerprint": "f1", "id": "x"}]
+    b = [{"block_key": "k1", "block_fingerprint": "f1", "id": "DIFFERENT-ID"}]
+    assert week_member_fingerprint(a) == week_member_fingerprint(b)  # ids ignored
+    c = [{"block_key": "k1", "block_fingerprint": "f2"}]
+    assert week_member_fingerprint(a) != week_member_fingerprint(c)
+    d = a + [{"block_key": "k2", "block_fingerprint": "f9"}]
+    assert week_member_fingerprint(a) != week_member_fingerprint(d)  # additions drift
+
+
+def test_runner_stores_week_digest_with_cited_summary_refs(store, mem_settings):
+    now, monday, wstart, _wend = _week_now()
+    _seed_week_block(store, wstart)
+    provider = _CiteAllProvider()
+    counts = run_block_summaries(store, provider, now=now, settings=mem_settings)
+    assert counts["summarized"] == 1
+    assert counts["weeks"] == 1
+    assert counts["week_ungrounded"] == 0
+    # blocks + week digest were also swept into the summary index.
+    assert counts["indexed"] == 2
+
+    week = store.get_week_memory(monday)
+    assert week is not None
+    block = store.block_summaries_for_range(0.0, 1e12)[0]
+    assert week["summary_ids"] == [block["id"]]
+    payload = week["payload"]
+    assert payload["digest_text"] == provider.summary
+    assert payload["member_fingerprint"] == summaries_mod.week_member_fingerprint(
+        [block]
+    )
+    assert payload["window"]["start"] == wstart
+    assert week["extractor_version"] == summaries_mod.WEEK_EXTRACTOR_VERSION
+
+    # Freshness: an unchanged week skips with zero provider calls.
+    calls_before = len(provider.calls)
+    counts = run_block_summaries(store, provider, now=now, settings=mem_settings)
+    assert counts["weeks"] == 0 and counts["indexed"] == 0
+    assert len(provider.calls) == calls_before
+
+
+def test_week_regenerates_on_member_drift_for_past_week(store, mem_settings):
+    now, _monday, wstart, wend = _week_now()
+    _seed_week_block(store, wstart)
+    provider = _CiteAllProvider()
+    run_block_summaries(store, provider, now=now, settings=mem_settings)
+
+    # Move to early NEXT week (the seeded week becomes a PAST week,
+    # lookback=2) and add a new settled SUNDAY block inside the old week --
+    # close enough to `later` to sit inside the 3-day BLOCK lookback, so it
+    # gets summarized and the old week's member fingerprint drifts.
+    later = wstart + 7 * 86_400.0 + 3_600.0
+    _seed_week_block(store, wstart, offset=6 * 86_400.0)
+    counts = run_block_summaries(store, provider, now=later, settings=mem_settings)
+    assert counts["summarized"] == 1  # the new block
+    assert counts["weeks"] == 1  # past week regenerated on drift alone
+
+
+def test_current_week_throttled_until_min_interval(store, mem_settings):
+    now, monday, wstart, _wend = _week_now()
+    saved_span1, _ = _seed_week_block(store, wstart)
+    provider = _CiteAllProvider()
+    run_block_summaries(store, provider, now=now, settings=mem_settings)
+    first = store.get_week_memory(monday)
+    assert first is not None
+
+    # Force a KNOWN generated_at so the throttle window is deterministic.
+    store.conn.execute(
+        "UPDATE day_memories SET generated_at = ? WHERE id = ?",
+        (now, first["id"]),
+    )
+    # Drift the members: another settled block in the current week.
+    _seed_week_block(store, wstart, offset=30_000.0)
+
+    soon = now + 600.0  # inside the 21600s min interval
+    counts = run_block_summaries(store, provider, now=soon, settings=mem_settings)
+    assert counts["summarized"] == 1
+    assert counts["weeks"] == 0  # drifted but throttled (live week)
+    assert store.get_week_memory(monday)["id"] == first["id"]
+
+    later = now + float(mem_settings.week_rollup_min_interval_seconds) + 1.0
+    counts = run_block_summaries(store, provider, now=later, settings=mem_settings)
+    assert counts["weeks"] == 1  # interval elapsed -> drift regenerates
+    assert store.get_week_memory(monday)["id"] != first["id"]
+
+
+def test_current_week_force_bypasses_throttle_not_cloud_gate(store, mem_settings):
+    now, monday, wstart, _wend = _week_now()
+    _seed_week_block(store, wstart)
+    provider = _CiteAllProvider()
+    run_block_summaries(store, provider, now=now, settings=mem_settings)
+    first = store.get_week_memory(monday)
+    store.conn.execute(
+        "UPDATE day_memories SET generated_at = ? WHERE id = ?", (now, first["id"])
+    )
+    _seed_week_block(store, wstart, offset=30_000.0)
+    counts = run_block_summaries(
+        store, provider, now=now + 600.0, settings=mem_settings, force=True
+    )
+    assert counts["weeks"] == 1  # force bypasses the throttle (never the cloud gate)
+
+
+def test_week_version_bump_alone_never_regenerates_but_unknown_lazy_upgrades(
+    store, mem_settings, monkeypatch
+):
+    now, monday, wstart, _wend = _week_now()
+    _seed_week_block(store, wstart)
+    provider = _CiteAllProvider()
+    run_block_summaries(store, provider, now=now, settings=mem_settings)
+    first = store.get_week_memory(monday)
+
+    # A version bump with the OLD version still compatible: no drift -> skip.
+    monkeypatch.setattr(summaries_mod, "WEEK_EXTRACTOR_VERSION", "week-memory-v2")
+    monkeypatch.setattr(
+        summaries_mod,
+        "_COMPATIBLE_WEEK_EXTRACTOR_VERSIONS",
+        frozenset({"week-memory-v1", "week-memory-v2"}),
+    )
+    counts = run_block_summaries(store, provider, now=now, settings=mem_settings)
+    assert counts["weeks"] == 0
+    assert store.get_week_memory(monday)["id"] == first["id"]
+
+    # An UNKNOWN/incompatible stored version lazily upgrades exactly once.
+    monkeypatch.setattr(
+        summaries_mod,
+        "_COMPATIBLE_WEEK_EXTRACTOR_VERSIONS",
+        frozenset({"week-memory-v2"}),
+    )
+    counts = run_block_summaries(store, provider, now=now, settings=mem_settings)
+    assert counts["weeks"] == 1
+    upgraded = store.get_week_memory(monday)
+    assert upgraded["extractor_version"] == "week-memory-v2"
+    counts = run_block_summaries(store, provider, now=now, settings=mem_settings)
+    assert counts["weeks"] == 0  # one-time, not every pass
+
+
+def test_week_zero_valid_citations_stores_nothing(store, mem_settings, caplog):
+    now, monday, wstart, _wend = _week_now()
+    _seed_week_block(store, wstart)
+    provider = _ScriptedProvider(
+        {"summary": "made-up week", "citation_ids": ["S99", "junk"]}
+    )
+    with caplog.at_level(logging.INFO, logger="openbird.summaries"):
+        counts = run_block_summaries(store, provider, now=now, settings=mem_settings)
+    assert counts["summarized"] == 1  # the block itself grounded fine
+    assert counts["weeks"] == 0
+    assert counts["week_ungrounded"] == 1
+    assert store.get_week_memory(monday) is None
+    assert any("week_memory_ungrounded" in r.getMessage() for r in caplog.records)
+    assert "made-up week" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_week_rollup_disabled_setting_skips_week_step(store, tmp_path):
+    now, monday, wstart, _wend = _week_now()
+    _seed_week_block(store, wstart)
+    settings = Settings(data_dir=tmp_path, embed_dim=768, week_rollup_enabled=False)
+    provider = _CiteAllProvider()
+    counts = run_block_summaries(store, provider, now=now, settings=settings)
+    assert counts["summarized"] == 1
+    assert counts["weeks"] == 0
+    assert store.get_week_memory(monday) is None
+    # Indexing still ran for the block summary (independent of week rollups).
+    assert counts["indexed"] == 1
+
+
+def test_week_prompt_fences_labels_map_to_summaries_and_caps_members(monkeypatch):
+    from openbird.summaries import build_week_summary_messages
+
+    monkeypatch.setattr(summaries_mod, "_WEEK_MAX_MEMBER_LINES", 2)
+    summaries = [
+        {"id": f"s{i}", "summary_text": "x" * (10 + i), "start_ts": 1000.0 + i}
+        for i in range(4)
+    ]
+    messages, label_map = build_week_summary_messages(
+        "2026-06-22", summaries, ["day 2026-06-22: ~30 active minutes"]
+    )
+    content = messages[-1]["content"]
+    assert summaries_mod._FENCE.open_token in content
+    assert summaries_mod._FENCE.close_token in content
+    assert "day 2026-06-22" in content
+    # Cap prefers the LONGEST texts (s2, s3), chronological order.
+    assert set(label_map.values()) == {("summary", "s2"), ("summary", "s3")}
+    # Labels map ONLY to block-summary ids; day-fact lines carry no label.
+    assert all(kind == "summary" for kind, _ in label_map.values())
+    assert content.count("[source_id: ") == 2
+
+
+def test_index_sweep_reindexes_drifted_block_and_reclaims_orphans(
+    store, mem_settings
+):
+    now, monday, wstart, _wend = _week_now()
+    s1, s2 = _seed_week_block(store, wstart)
+    provider = _CiteAllProvider()
+    counts = run_block_summaries(store, provider, now=now, settings=mem_settings)
+    assert counts["indexed"] == 2  # block + week digest
+    assert store.summary_index_pending(limit=32) == []
+
+    # Extend a member span: block fingerprint drifts -> regen replaces the row,
+    # sweeping the old index rows; the next pass re-indexes with zero orphans.
+    store.extend_span(s2, wstart + 3600.0 + 2000.0)
+    counts = run_block_summaries(
+        store, provider, now=now + 3_600.0, settings=mem_settings
+    )
+    assert counts["summarized"] == 1
+    assert counts["indexed"] >= 1
+    assert store.summary_index_pending(limit=32) == []
+    assert store.summary_index_orphan_counts()["ok"] is True
+    state = store.summary_index_state()
+    block = store.block_summaries_for_range(0.0, 1e12)[0]
+    assert state[("block", block["id"])] == block["block_fingerprint"]
+
+
+def test_index_batch_limit_bounds_one_pass(store, tmp_path):
+    now, _monday, wstart, _wend = _week_now()
+    _seed_week_block(store, wstart)
+    _seed_week_block(store, wstart, offset=30_000.0)
+    settings = Settings(
+        data_dir=tmp_path, embed_dim=768, summary_index_batch_limit=1,
+        week_rollup_enabled=False,
+    )
+    provider = _CiteAllProvider()
+    counts = run_block_summaries(store, provider, now=now, settings=settings)
+    assert counts["summarized"] == 2
+    assert counts["indexed"] == 1  # bounded
+    counts = run_block_summaries(store, provider, now=now, settings=settings)
+    assert counts["indexed"] == 1  # the next pass picks up the remainder
+    assert store.summary_index_pending(limit=32) == []
+
+
+def test_counts_line_is_metadata_only_and_includes_week_fields(store, mem_settings):
+    now, _monday, wstart, _wend = _week_now()
+    _seed_week_block(store, wstart)
+    secret = "SECRET-WEEK-DIGEST-marker"
+    provider = _CiteAllProvider(summary=secret)
+    counts = run_block_summaries(store, provider, now=now, settings=mem_settings)
+    line = format_counts_line(counts)
+    assert "weeks=1" in line
+    assert "week_ungrounded=0" in line
+    assert "indexed=2" in line
+    assert secret not in line

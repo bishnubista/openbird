@@ -193,8 +193,9 @@ def test_all_prompts_registered():
     # ``rag_synthesis`` is the synthesis-intent answering persona (separate,
     # independently-overridable prompt) used by the time-range scan.
     # ``taxonomy`` (identity classifier) and ``block_summary`` (idle-time block
-    # summarizer) are the Phase D prompts.
+    # summarizer) are the Phase D prompts; ``week_summary`` is the Phase E1
+    # week-digest reduce.
     assert set(registry.keys()) == {
         "rag", "rag_synthesis", "routine", "meeting", "signal",
-        "taxonomy", "block_summary",
+        "taxonomy", "block_summary", "week_summary",
     }
