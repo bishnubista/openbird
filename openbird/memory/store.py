@@ -1009,6 +1009,11 @@ class MemoryStore:
             build_day_memory,
             span_fingerprint_for_spans,
         )
+        from openbird.taxonomy import (
+            levels_for_spans,
+            load_overrides,
+            taxonomy_fingerprint,
+        )
 
         attempts = 3
         for attempt in range(attempts):
@@ -1022,9 +1027,22 @@ class MemoryStore:
                 if source_scope == "capture":
                     spans = self.spans_in_range(start_ts, end_ts)
                     span_fp = span_fingerprint_for_spans(spans)
+                    # Pre-resolved identity -> level mapping (overrides + rules
+                    # + LLM cache) for the measured span_time_by_level block;
+                    # its fingerprint joins the freshness check so an edited
+                    # taxonomy.json or a new cached level rebuilds the row.
+                    overrides = load_overrides(self.settings)
+                    taxonomy_map = levels_for_spans(
+                        spans,
+                        overrides=overrides,
+                        cache=self.get_category_assignments(),
+                    )
+                    tax_fp = taxonomy_fingerprint(taxonomy_map, overrides)
                 else:
                     spans = None
                     span_fp = None
+                    taxonomy_map = None
+                    tax_fp = None
                 existing = self._get_day_memory_unchecked(
                     local_date=local_date, source_scope=source_scope
                 )
@@ -1036,6 +1054,7 @@ class MemoryStore:
                     # Span freshness: an EXTENDED span fires no delete trigger,
                     # so the fingerprint (which includes end_ts) catches it.
                     and existing["payload"].get("span_fingerprint") == span_fp
+                    and existing["payload"].get("taxonomy_fingerprint") == tax_fp
                 ):
                     self.conn.commit()
                     return existing
@@ -1050,6 +1069,8 @@ class MemoryStore:
                     source_fingerprint=fingerprint,
                     as_of=min(end_ts, time.time()),
                     spans=spans,  # None outside capture scope (no span block)
+                    taxonomy=taxonomy_map,
+                    taxonomy_fingerprint=tax_fp,
                 )
                 day_memory_id = uuid.uuid4().hex
                 generated = time.time()

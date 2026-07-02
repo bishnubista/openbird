@@ -1861,3 +1861,190 @@ def test_productivity_report_legacy_fallback_without_spans():
     facts = build_productivity_report(saved)["productivity"]["facts"]
     assert facts["duration_basis"] == "observations"
     assert "afk_minutes" not in facts
+
+
+# -- Phase D: taxonomy-level measured time (day-memory-v8) ----------------------
+
+
+def _tspan(sid, start, end, *, bundle="com.apple.mail", host=None, afk=0, reason=None):
+    span = _span(sid, start, end, bundle=bundle, afk=afk, reason=reason)
+    span["url_host"] = host
+    return span
+
+
+def test_extractor_version_is_v8():
+    assert EXTRACTOR_VERSION == "day-memory-v8"
+
+
+def test_span_time_by_level_host_over_bundle_with_afk_and_paused_excluded():
+    from openbird.day_memory import build_day_memory
+
+    taxonomy = {
+        "bundle:com.apple.mail": "other_work",
+        "bundle:com.google.chrome": "personal",  # host must outrank this
+        "host:github.com": "focus_work",
+    }
+    spans = [
+        _tspan("s1", 1000.0, 1600.0),  # 600s mail -> other_work
+        _tspan("s2", 1600.0, 1900.0, bundle="com.google.chrome",
+               host="github.com"),  # 300s -> focus_work (host over bundle)
+        _tspan("s3", 1900.0, 2500.0, afk=1),  # AFK: excluded from level time
+        _tspan("s4", 2500.0, 2800.0, bundle=None, reason="paused"),  # excluded
+        _tspan("s5", 2800.0, 2900.0, bundle="com.unknown.app"),  # 100s uncategorized
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans,
+        taxonomy=taxonomy, taxonomy_fingerprint="fp-1",
+    )
+    m = built.payload["span_metrics"]
+    assert m["span_time_by_level"] == {
+        "other_work": 600.0,
+        "focus_work": 300.0,
+        "uncategorized": 100.0,
+    }
+    assert built.payload["taxonomy_fingerprint"] == "fp-1"
+
+
+def test_no_taxonomy_omits_level_block_and_fingerprint():
+    from openbird.day_memory import build_day_memory
+
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=10_000.0, day_offset=0,
+        spans=[_tspan("s1", 1000.0, 1600.0)],
+    )
+    assert "span_time_by_level" not in built.payload["span_metrics"]
+    assert "uncategorized_identity_seconds" not in built.payload["span_metrics"]
+    assert "taxonomy_fingerprint" not in built.payload
+
+
+def test_uncategorized_identity_seconds_threshold_and_ordering():
+    from openbird.day_memory import build_day_memory
+
+    taxonomy = {"bundle:com.apple.mail": "other_work"}
+    spans = [
+        _tspan("s1", 0.0, 600.0),  # mail: categorized, never queued
+        _tspan("s2", 600.0, 800.0, bundle="com.unknown.big"),  # 200s >= 120 queued
+        _tspan("s3", 800.0, 900.0, bundle="com.unknown.small"),  # 100s < 120 skipped
+        _tspan("s4", 900.0, 1100.0, bundle="com.google.chrome",
+               host="mystery.example"),  # both identities 200s, uncategorized
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=10_000.0, day_offset=0, spans=spans,
+        taxonomy=taxonomy, taxonomy_fingerprint="fp",
+    )
+    pending = built.payload["span_metrics"]["uncategorized_identity_seconds"]
+    assert pending == {
+        "bundle:com.google.chrome": 200.0,
+        "bundle:com.unknown.big": 200.0,
+        "host:mystery.example": 200.0,
+    }
+
+
+def test_render_prose_includes_descriptive_level_sentence():
+    from openbird.day_memory import render_day_memory_prose
+
+    payload = {
+        "local_date": "2026-06-13",
+        "coverage": {"observations": 4, "sessions": 1},
+        "metrics": {"active_seconds": 1200.0},
+        "span_metrics": {
+            "span_time_by_level": {
+                "focus_work": 3600.0,
+                "other_work": 600.0,
+                "uncategorized": 90.0,
+            }
+        },
+    }
+    prose = render_day_memory_prose(payload)
+    assert "Measured span time leaned toward focus work (60m), other work (10m)." in prose
+    assert "uncategorized" not in prose
+    # No score/judgment words — descriptive framing only.
+    assert "productivity" not in prose.lower()
+    assert "score" not in prose.lower()
+
+
+def test_render_prose_unchanged_without_level_block():
+    from openbird.day_memory import render_day_memory_prose
+
+    payload = {
+        "local_date": "2026-06-13",
+        "coverage": {"observations": 4, "sessions": 1},
+        "metrics": {"active_seconds": 1200.0},
+    }
+    assert "Measured span time" not in render_day_memory_prose(payload)
+
+
+def test_ensure_day_memory_taxonomy_fingerprint_freshness(tmp_path):
+    """Editing taxonomy.json rebuilds the cached day memory (fingerprint miss)."""
+    import json as _json
+
+    from tests.unit.conftest import FakeProvider
+
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(db_path=":memory:", settings=settings,
+                        provider=FakeProvider(embed_dim=64))
+    try:
+        start = dt.datetime(2026, 6, 13, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 13, 23, 59, 59).timestamp()
+        store.open_span(
+            epoch_id="e", start_ts=start + 3600, end_ts=start + 4200,
+            bundle_id="com.unknown.app", detail_tier=1,
+        )
+        first = store.ensure_day_memory(
+            local_date="2026-06-13", start_ts=start, end_ts=end, day_offset=0
+        )
+        assert first["extractor_version"] == "day-memory-v8"
+        assert first["payload"]["span_metrics"]["span_time_by_level"] == {
+            "uncategorized": 600.0
+        }
+        # Unchanged sources + unchanged taxonomy -> the cached row is reused.
+        again = store.ensure_day_memory(
+            local_date="2026-06-13", start_ts=start, end_ts=end, day_offset=0
+        )
+        assert again["id"] == first["id"]
+
+        (tmp_path / "taxonomy.json").write_text(
+            _json.dumps({"bundle:com.unknown.app": "personal"})
+        )
+        rebuilt = store.ensure_day_memory(
+            local_date="2026-06-13", start_ts=start, end_ts=end, day_offset=0
+        )
+        assert rebuilt["id"] != first["id"]
+        assert rebuilt["payload"]["span_metrics"]["span_time_by_level"] == {
+            "personal": 600.0
+        }
+        assert (
+            rebuilt["payload"]["taxonomy_fingerprint"]
+            != first["payload"]["taxonomy_fingerprint"]
+        )
+    finally:
+        store.close()
+
+
+def test_ensure_day_memory_cache_hit_updates_after_llm_assignment(tmp_path):
+    """A newly cached LLM level also invalidates the cached day memory."""
+    from tests.unit.conftest import FakeProvider
+
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(db_path=":memory:", settings=settings,
+                        provider=FakeProvider(embed_dim=64))
+    try:
+        start = dt.datetime(2026, 6, 13, 0, 0, 0).timestamp()
+        end = dt.datetime(2026, 6, 13, 23, 59, 59).timestamp()
+        store.open_span(
+            epoch_id="e", start_ts=start + 3600, end_ts=start + 4200,
+            bundle_id="com.unknown.app", detail_tier=1,
+        )
+        first = store.ensure_day_memory(
+            local_date="2026-06-13", start_ts=start, end_ts=end, day_offset=0
+        )
+        store.save_category_assignment("bundle:com.unknown.app", "focus_work", "m")
+        rebuilt = store.ensure_day_memory(
+            local_date="2026-06-13", start_ts=start, end_ts=end, day_offset=0
+        )
+        assert rebuilt["id"] != first["id"]
+        assert rebuilt["payload"]["span_metrics"]["span_time_by_level"] == {
+            "focus_work": 600.0
+        }
+    finally:
+        store.close()

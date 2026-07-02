@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 from openbird.types import Observation
 from openbird.reasoning_ledger import packet_payload_audit
 
-EXTRACTOR_VERSION = "day-memory-v7"
+EXTRACTOR_VERSION = "day-memory-v8"
 _UNGROUNDED_PRODUCTIVITY_COACH_ANSWER = (
     "I could not ground productivity coaching in the local facts packet."
 )
@@ -120,12 +120,21 @@ def build_day_memory(
     source_fingerprint: dict | None = None,
     as_of: float | None = None,
     spans: list[dict] | None = None,
+    taxonomy: dict | None = None,
+    taxonomy_fingerprint: str | None = None,
 ) -> DayMemoryBuild:
     """Build a deterministic, no-model day-memory payload.
 
     ``spans`` (activity_spans rows overlapping the window, Phase B) add the
     measured-time ``span_metrics`` block; every metric there is computed from
     span ground truth and cited via the build's ``span_ids``.
+
+    ``taxonomy`` (Phase D) is a PRE-RESOLVED ``identity_key -> level`` mapping
+    (overrides + rules + LLM cache, built by the caller — see
+    :func:`openbird.taxonomy.levels_for_spans`); when given, ``span_metrics``
+    gains the measured ``span_time_by_level`` breakdown and the
+    ``uncategorized_identity_seconds`` fallback queue, and the payload carries
+    ``taxonomy_fingerprint`` so an edited mapping invalidates the cached row.
     """
     ordered = sorted(rows, key=lambda item: _observation_sort_key(item[0]))
     source_ids = [obs.id for obs, _ in ordered]
@@ -188,9 +197,13 @@ def build_day_memory(
     }
     span_ids: list[str] = []
     if spans is not None:
-        metrics, span_ids = _span_metrics(spans, start_ts=start_ts, end_ts=end_ts)
+        metrics, span_ids = _span_metrics(
+            spans, start_ts=start_ts, end_ts=end_ts, taxonomy=taxonomy
+        )
         payload["span_metrics"] = metrics
         payload["span_fingerprint"] = span_fingerprint_for_spans(spans)
+        if taxonomy is not None and taxonomy_fingerprint is not None:
+            payload["taxonomy_fingerprint"] = taxonomy_fingerprint
     return DayMemoryBuild(payload=payload, source_ids=source_ids, span_ids=span_ids)
 
 
@@ -201,6 +214,8 @@ def build_day_memory(
 _SPAN_FOCUS_MAX_GAP = 60.0
 _SPAN_FOCUS_MAX_BUNDLES = 2
 _SPAN_FOCUS_MIN_SECONDS = 600.0
+# Cap on the uncategorized-identity fallback queue surfaced in span_metrics.
+_UNCATEGORIZED_IDENTITY_LIMIT = 8
 
 
 def span_fingerprint_for_spans(spans: list[dict]) -> dict:
@@ -223,13 +238,21 @@ def _clip_seconds(span: dict, start_ts: float, end_ts: float) -> tuple[float, fl
 
 
 def _span_metrics(
-    spans: list[dict], *, start_ts: float, end_ts: float
+    spans: list[dict], *, start_ts: float, end_ts: float, taxonomy: dict | None = None
 ) -> tuple[dict, list[str]]:
     """Deterministic measured-time metrics from activity spans (no model)."""
+    from openbird.taxonomy import (
+        LLM_FALLBACK_MIN_SECONDS,
+        bundle_key,
+        host_key,
+    )
+
     span_ids: list[str] = []
     time_by_app: Counter[str] = Counter()
     time_by_reason: Counter[str] = Counter()
     time_by_hour: Counter[str] = Counter()
+    time_by_level: Counter[str] = Counter()
+    identity_seconds: Counter[str] = Counter()
     afk_seconds = 0.0
     paused_seconds = 0.0
     active: list[tuple[float, float, str, str]] = []  # (s, e, bundle, span_id)
@@ -256,6 +279,20 @@ def _span_metrics(
             time_by_reason[str(reason)] += seconds
         bundle = span.get("bundle_id") or "(untracked)"
         time_by_app[bundle] += seconds
+        if taxonomy is not None:
+            # Measured level time (Phase D): host level outranks bundle level;
+            # unresolved identities pool under "uncategorized". Paused/AFK time
+            # was already excluded above — only active seconds are judged.
+            host = span.get("url_host")
+            raw_bundle = span.get("bundle_id")
+            level = taxonomy.get(host_key(str(host))) if host else None
+            if level is None and raw_bundle:
+                level = taxonomy.get(bundle_key(str(raw_bundle)))
+            time_by_level[level or "uncategorized"] += seconds
+            if raw_bundle:
+                identity_seconds[bundle_key(str(raw_bundle))] += seconds
+            if host:
+                identity_seconds[host_key(str(host))] += seconds
         # Split the span's active time at local hour boundaries.
         cursor = s
         while cursor < e:
@@ -312,6 +349,22 @@ def _span_metrics(
         "span_focus_blocks": focus_blocks,
         "span_coverage": {"span_count": len(span_ids)},
     }
+    if taxonomy is not None:
+        metrics["span_time_by_level"] = _round_counter(time_by_level)
+        # The idle-time worker's queue: identities with enough measured active
+        # time to be worth an LLM call but no resolved level yet. Bounded and
+        # deterministically ordered (most time first, then key).
+        pending = sorted(
+            (
+                (key, seconds)
+                for key, seconds in identity_seconds.items()
+                if seconds >= LLM_FALLBACK_MIN_SECONDS and key not in taxonomy
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )[:_UNCATEGORIZED_IDENTITY_LIMIT]
+        metrics["uncategorized_identity_seconds"] = {
+            key: round(seconds, 3) for key, seconds in pending
+        }
     return metrics, span_ids
 
 
@@ -763,6 +816,25 @@ def render_day_memory_prose(payload: dict) -> str:
         top = sorted(categories.items(), key=lambda kv: (-float(kv[1]), kv[0]))[:3]
         labels = ", ".join(f"{name} ({round(float(seconds) / 60)}m)" for name, seconds in top)
         pieces.append(f"Recorded time by category: {labels}.")
+    # Measured taxonomy time (Phase D): one DESCRIPTIVE sentence — narrative
+    # framing of where the measured minutes went, never a productivity score.
+    levels = (payload.get("span_metrics") or {}).get("span_time_by_level") or {}
+    named = sorted(
+        (
+            (name, float(seconds))
+            for name, seconds in levels.items()
+            if name != "uncategorized" and float(seconds) > 0
+        ),
+        key=lambda kv: (-kv[1], kv[0]),
+    )[:3]
+    if named:
+        from openbird.taxonomy import LEVEL_LABELS
+
+        labels = ", ".join(
+            f"{LEVEL_LABELS.get(name, name)} ({round(seconds / 60)}m)"
+            for name, seconds in named
+        )
+        pieces.append(f"Measured span time leaned toward {labels}.")
     loops = payload.get("open_loops", [])[:3]
     if loops:
         labels = ", ".join(str(item.get("title") or item.get("cue")) for item in loops)
