@@ -821,6 +821,71 @@ def render_day_memory_prose(payload: dict) -> str:
     return " ".join(pieces)
 
 
+def compose_day_narrative(
+    payload: dict, summaries: list[dict]
+) -> tuple[str, list["DerivedCitation"]]:
+    """Compose stored block summaries into a chronological day narrative.
+
+    Pure helper shared by the chat/Ask deterministic day route and the CLI
+    ``briefing`` default path so the two surfaces render the SAME narrative and
+    cannot drift. Returns ``("", [])`` when no usable summary exists — callers
+    then keep the byte-identical deterministic answer and its
+    ``local_deterministic`` route label. When non-empty, the caller MUST flip
+    its ``reasoning_route`` to ``local_cached_model_summary``: the narrative
+    sentences are PRECOMPUTED LOCAL-MODEL prose (generated earlier under the
+    routines battery/idle gate), and the route label must disclose that.
+
+    Each narrative line is ``HH:MM–HH:MM — <summary_text>``; each summary
+    contributes one typed :class:`DerivedCitation` (``type="block_summary"``)
+    carrying the summary's full typed source refs (``derived_from_refs``) plus
+    the legacy observation-id-only ``derived_from`` for client compatibility.
+    Composition happens at ANSWER time (never embedded into the day-memory
+    payload) so a trigger-deleted summary vanishes with no freshness plumbing.
+    """
+    from openbird.types import DerivedCitation
+
+    del payload  # narrative depends only on the stored summaries today
+    lines: list[str] = []
+    citations: list[DerivedCitation] = []
+    for summary in sorted(summaries, key=lambda s: float(s.get("start_ts") or 0.0)):
+        text = " ".join(str(summary.get("summary_text") or "").split())
+        summary_id = summary.get("id")
+        if not text or not summary_id:
+            continue
+        window = (
+            f"{_fmt_clock(float(summary.get('start_ts') or 0.0))}–"
+            f"{_fmt_clock(float(summary.get('end_ts') or 0.0))}"
+        )
+        lines.append(f"{window} — {text}")
+        refs = [
+            {"source_kind": str(r.get("source_kind")), "source_id": str(r.get("source_id"))}
+            for r in (summary.get("source_refs") or [])
+            if r.get("source_kind") and r.get("source_id")
+        ]
+        observation_ids = sorted(
+            {r["source_id"] for r in refs if r["source_kind"] == "observation"}
+        )
+        snippet = text if len(text) <= 240 else text[:239].rstrip() + "…"
+        citations.append(
+            DerivedCitation(
+                index=len(citations) + 1,
+                source_id=str(summary_id),
+                type="block_summary",
+                label=f"Block summary {window}",
+                snippet=snippet,
+                derived_from=observation_ids[:12],
+                derived_from_total=int(summary.get("source_count") or len(refs)),
+                derived_from_refs=refs,
+            )
+        )
+    return "\n".join(lines), citations
+
+
+def _fmt_clock(ts: float) -> str:
+    """Local HH:MM for narrative windows."""
+    return dt.datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
 def day_memory_context(saved: dict) -> dict:
     """Build the route/provenance ``memory_context`` for a persisted day memory.
 

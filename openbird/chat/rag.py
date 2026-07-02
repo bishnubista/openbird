@@ -491,6 +491,14 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
 _ROUTE_LOCAL_DETERMINISTIC = "local_deterministic"
 _ROUTE_LOCAL_MODEL = "local_model"
 _ROUTE_CLOUD_REASONING = "cloud_reasoning_active"
+# ROUTE TRUTHFULNESS (Phase D): when precomputed block summaries are composed
+# into the deterministic day answer, the facts remain deterministic but the
+# narrative sentences are CACHED LOCAL-MODEL prose (generated earlier under the
+# routines battery/idle gate, no provider call at answer time) — the label must
+# disclose that, so the route flips to this constant instead of lying with
+# ``local_deterministic``. See docs/privacy-routes.yaml
+# (chat.day_memory_cached_summary).
+_ROUTE_LOCAL_CACHED_SUMMARY = "local_cached_model_summary"
 
 
 class _Completer(Protocol):
@@ -567,6 +575,9 @@ class AnswerResult:
                     "snippet": c.snippet,
                     "derived_from": c.derived_from,
                     "derived_from_total": c.derived_from_total,
+                    # Typed provenance (Phase D); the legacy observation-only
+                    # ``derived_from`` above stays for client compatibility.
+                    "derived_from_refs": c.derived_from_refs,
                 }
                 for c in self.derived_citations
             ],
@@ -1011,14 +1022,43 @@ class RAG:
         derived = self._day_memory_derived_citations(payload)
         if not derived:
             return None
+        answer = self._render_day_memory_answer(payload)
+        reasoning_route = _ROUTE_LOCAL_DETERMINISTIC
+
+        # Phase D: compose stored block summaries (chronological narrative +
+        # typed block_summary derived citations) AFTER the facts prose. This is
+        # answer-time composition — a trigger-deleted summary simply vanishes —
+        # and NEVER a provider call. Composing cached model prose flips the
+        # route label to local_cached_model_summary (route truthfulness);
+        # absent summaries leave the answer byte-identical local_deterministic.
+        summaries = self._day_block_summaries(str(local_date))
+        if summaries:
+            from openbird.day_memory import compose_day_narrative
+
+            narrative, summary_citations = compose_day_narrative(payload, summaries)
+            if narrative:
+                answer = f"{answer}\n\n{narrative}"
+                offset = len(derived)
+                derived = derived + [
+                    citation.model_copy(update={"index": offset + i})
+                    for i, citation in enumerate(summary_citations, start=1)
+                ]
+                reasoning_route = _ROUTE_LOCAL_CACHED_SUMMARY
         return AnswerResult(
-            answer=self._render_day_memory_answer(payload),
+            answer=answer,
             citations=[],
             derived_citations=derived,
             grounding="derived",
             memory_context=memory_context,
-            reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+            reasoning_route=reasoning_route,
         )
+
+    def _day_block_summaries(self, local_date: str) -> list[dict]:
+        """Stored block summaries for one local day (hasattr-guarded store read)."""
+        reader = getattr(self.store, "block_summaries_for_date", None)
+        if not callable(reader):
+            return []
+        return reader(local_date) or []
 
     @staticmethod
     def _day_memory_uncitable(local_date: str, memory_context: dict) -> AnswerResult:

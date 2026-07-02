@@ -165,6 +165,69 @@ routes:
       - cli.chat_json.reasoning_route
       - app.ChatResult.routeLabel
 
+  - id: chat.day_memory_cached_summary
+    class: local
+    source: deterministic day answer composed with precomputed local-model block-summary narrative
+    derives_from:
+      - chat.day_memory
+      - summaries.block
+    captured_fields:
+      - distilled_day_memory_metrics
+      - stored_block_summary_prose
+      - block_summary_derived_citations
+      - derived_citation_typed_source_refs
+      - memory_context_counts
+    forbidden_fields:
+      - captured_text
+      - raw_window_title
+      - raw_url
+      - raw_title
+      - source_ids_in_memory_context
+    storage:
+      - sqlite.day_memories
+      - sqlite.block_summaries
+    egress:
+      default: none
+      note: composition is an answer-time local read — no provider call and no embedding request; the narrative prose was generated EARLIER by the local model under the routines battery/idle gate (summaries.block). Absent summaries the answer stays byte-identical chat.day_memory (local_deterministic).
+    truth_surface:
+      - cli.chat_json.reasoning_route
+      - app.ChatResult.routeLabel
+      - app.DayBriefing.routeLabel
+
+  - id: summaries.block
+    class: local
+    source: idle-time routines worker summarizing settled focus blocks over spans and policy-accepted observations
+    derives_from:
+      - capture.active_window
+    captured_fields:
+      - span_metadata_lines
+      - captured_text_excerpts_fenced
+      - generated_block_summary_prose
+      - validated_typed_citations
+      - taxonomy_identity_levels
+    forbidden_fields:
+      - summary_text_in_logs
+      - summary_text_in_routine_output
+      - captured_text_in_logs
+    storage:
+      - sqlite.block_summaries
+      - sqlite.category_assignments
+    egress:
+      default: inherits_active_model_route
+      inherited_from:
+        - chat.local
+        - chat.remote
+      note: generation runs ONLY under the battery/idle gate in the routines daemon (or explicit `openbird summaries build`); the shared LLMProvider's CloudOptInRequired enforcement is the cloud gate — a cloud-opted user has opted this path in. Routine output and logs carry counts + reason codes only.
+    deletion:
+      command: openbird data purge/prune
+      must_remove:
+        - block_summaries_citing_deleted_sources
+        - day_memories_citing_deleted_summaries
+        - category_assignments_on_full_purge
+    truth_surface:
+      - cli.summaries_list
+      - routine_run_output
+
   - id: deep_brain.preview
     class: local
     source: exclusion-filtered day/week memory plus selected cited snippets

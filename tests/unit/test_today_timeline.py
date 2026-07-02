@@ -576,3 +576,74 @@ def test_briefing_cli_handles_empty_day_memory_result(monkeypatch, tmp_path):
     assert payload["memory_context"]["route"] == "local_deterministic"
     assert payload["sources"] == []
     assert "no activity" in payload["text"].lower()
+
+
+# -- Phase D: briefing composes stored block summaries --------------------------
+
+
+class _CompletionWithSummaries(_Completion):
+    """Store stub that also serves stored block summaries for the day."""
+
+    def __init__(self, rows, summaries):
+        super().__init__(rows)
+        self._summaries = summaries
+        self.summary_dates: list[str] = []
+
+    def block_summaries_for_date(self, local_date):
+        self.summary_dates.append(local_date)
+        return list(self._summaries)
+
+
+def test_briefing_cli_composes_block_summaries_and_flips_route(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    today = _day(*dt.datetime.now().timetuple()[:3], 9)
+    rows = [
+        (_obs("o1", h="h1", ts=today, window="rag.py"), "edited rag.py"),
+        (_obs("o2", h="h2", ts=today + 60, window="notes"), "took notes"),
+    ]
+    summaries = [
+        {
+            "id": "bs1",
+            "start_ts": today,
+            "end_ts": today + 3600,
+            "summary_text": "Deep work on the RAG citation validator.",
+            "source_count": 2,
+            "source_refs": [
+                {"source_kind": "observation", "source_id": "o1"},
+                {"source_kind": "span", "source_id": "sp1"},
+            ],
+        }
+    ]
+    stub = _CompletionWithSummaries(rows, summaries)
+    _patch_briefing_store(monkeypatch, stub)
+    monkeypatch.setattr(
+        cli,
+        "_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("briefing must be no-model")),
+    )
+
+    res = CliRunner().invoke(cli.app, ["briefing", "--json", "--day", "0"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    # Route truthfulness: composed cached-model prose flips the label...
+    assert payload["reasoning_route"] == "local_cached_model_summary"
+    assert "Deep work on the RAG citation validator." in payload["text"]
+    assert "recorded observations" in payload["text"]  # facts prose still first
+    assert stub.summary_dates  # the store was actually consulted for the day
+
+
+def test_briefing_cli_without_summaries_keeps_local_deterministic(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    today = _day(*dt.datetime.now().timetuple()[:3], 9)
+    rows = [(_obs("o1", h="h1", ts=today, window="rag.py"), "edited rag.py")]
+    stub = _CompletionWithSummaries(rows, [])
+    _patch_briefing_store(monkeypatch, stub)
+
+    res = CliRunner().invoke(cli.app, ["briefing", "--json", "--day", "0"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "local_deterministic"
