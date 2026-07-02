@@ -353,7 +353,11 @@ def _block_observation_rows(store, block: Block) -> list[tuple[Any, str]]:
     """
     from openbird.capture.redact import _is_self_capture
 
-    rows = store.time_range_text(block.start_ts, block.end_ts)
+    # CAPTURE rows only: the NULL-span fallback below exists for legacy
+    # capture rows that predate span linking — it must never sweep in
+    # non-capture observations (meetings/files/manual) that happen to sit
+    # inside the block window.
+    rows = store.time_range_text(block.start_ts, block.end_ts, source="capture")
     span_ids = set(block.span_ids)
     deduped: list[tuple[Any, str]] = []
     seen: set[tuple[str | None, str]] = set()
@@ -563,7 +567,10 @@ def run_block_summaries(
         range_end = now
 
     spans = store.spans_in_range(range_start, range_end)
-    blocks = compute_span_blocks(spans)
+    # Clip blocks to the runner window: a --date run must not summarize a
+    # cross-midnight block under the previous local_date (it would then never
+    # compose into the requested day's answer).
+    blocks = compute_span_blocks(spans, start_ts=range_start, end_ts=range_end)
     settle = float(settings.block_summaries_settle_seconds)
     existing = store.block_summary_keys()
     overrides = _taxonomy.load_overrides(settings)

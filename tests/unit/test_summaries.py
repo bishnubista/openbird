@@ -494,3 +494,60 @@ def test_block_observation_rows_window_fallback_and_cap(store):
     (block, *_rest) = compute_span_blocks(store.spans_in_range(0.0, 2000.0))
     rows = summaries_mod._block_observation_rows(store, block)
     assert [obs.id for obs, _ in rows] == [inside.id]
+
+
+# -- Codex diff-review regressions (capture-only inputs; --date clipping) --------
+
+
+def test_block_inputs_are_capture_rows_only(store, mem_settings):
+    # A non-capture NULL-span observation inside the block window must be
+    # excluded from summarizer grounding; a legacy capture NULL-span row kept.
+    _seed_block(store)
+    store.add_observation(
+        "meeting transcript line that must not ground a block summary",
+        source="meeting", ts=1100.0,
+    )
+    legacy = store.add_observation(
+        "legacy capture text predating span linking with plenty of characters",
+        source="capture", ts=1200.0,
+    )
+    provider = _CiteAllProvider()
+    counts = run_block_summaries(store, provider, now=10_000.0, settings=mem_settings)
+    assert counts["summarized"] == 1
+    prompt = provider.calls[0][-1]["content"]
+    assert "meeting transcript line" not in prompt
+    assert "legacy capture text" in prompt
+    saved = store.block_summaries_for_range(0.0, 10_000.0)[0]
+    obs_refs = {
+        r["source_id"]
+        for r in saved["source_refs"]
+        if r["source_kind"] == "observation"
+    }
+    assert legacy.id in obs_refs  # the legacy capture row grounds the summary
+
+
+def test_date_run_clips_cross_midnight_block(store, mem_settings):
+    # A block crossing midnight, built for --date D, is stored under D with a
+    # clipped start — never under the previous local_date.
+    import datetime as dt
+
+    day_start = dt.datetime(2026, 1, 6, 0, 0, 0).timestamp()
+    day_end = day_start + 86400.0
+    sid = store.open_span(
+        epoch_id="e", start_ts=day_start - 1800.0, end_ts=day_start + 1800.0,
+        bundle_id="com.apple.mail", detail_tier=1,
+    )
+    store.add_observation(
+        "work continuing across midnight with enough text to ground",
+        source="capture", ts=day_start + 60.0, span_id=sid,
+    )
+    provider = _CiteAllProvider()
+    counts = run_block_summaries(
+        store, provider, now=day_end + 10_000.0, settings=mem_settings,
+        window=(day_start, day_end), force=True,
+    )
+    assert counts["summarized"] == 1
+    rows = store.block_summaries_for_date("2026-01-06")
+    assert len(rows) == 1
+    assert rows[0]["start_ts"] >= day_start
+    assert store.block_summaries_for_date("2026-01-05") == []
