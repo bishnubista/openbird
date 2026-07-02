@@ -4,6 +4,11 @@ You are implementing the **OpenBird** macOS app UI from a design handoff. Read `
 folder first — it is the source of truth for layout, tokens, copy, and the Liquid Glass material recipe.
 This file tells you **how to validate** your implementation against the reference screenshots.
 
+Privacy-copy note: this prototype predates Phase C2 deep capture. Use the root
+`README.md`, `docs/design/privacy-data-flow.md`, and `docs/privacy-routes.yaml`
+for current capture/OCR wording; do not reintroduce absolutist "never
+screenshots" or "no images captured" copy.
+
 ## Target environment
 OpenBird is a native macOS menu-bar app. Implement in **SwiftUI on macOS 26+** and use the system
 **Liquid Glass** APIs (`.glassEffect(.regular)` / `Glass` materials, `.regularMaterial`) rather than
@@ -68,9 +73,9 @@ Single centered command-palette card (~620px wide).
 
 ### `screenshots/06-setup-onboarding-dark.png` — Onboarding / permissions (dark)
 540px centered sheet.
-- [ ] Centered 54px bird, `Welcome to OpenBird`, privacy subhead emphasizing it reads the **text** of the active window — never screenshots.
+- [ ] Centered 54px bird, `Welcome to OpenBird`, privacy subhead emphasizing that OpenBird stores text, not screenshots or images.
 - [ ] Four permission rows (icon tile in faint-accent square, title + subtitle, trailing status): Screen text capture **✓ Granted** · Accessibility **✓ Granted** · System audio for meetings **[Enable]** button · Local model · Ollama **● Connected** (`llama3.2 + nomic-embed-text`).
-- [ ] Primary full-width `Start capturing` button (accent). Footer lock line "Nothing leaves your device…" (may sit below the fold — verify it exists).
+- [ ] Primary full-width `Start capturing` button (accent). Footer lock line should use current route-truth copy from the app, not the historical absolute "Nothing leaves your device…" phrase.
 
 ### `screenshots/07-ask-spotlight-light.png` — Ask · Spotlight (light)
 Same as `02` but **light appearance**.

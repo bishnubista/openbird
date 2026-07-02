@@ -1,8 +1,9 @@
 # Security Policy
 
-OpenBird is a local-first personal-memory tool: it reads the text of your active
-window, transcribes meetings, and stores everything in an on-device database. A
-security flaw here can expose deeply personal data, so we take reports seriously.
+OpenBird is a local-first personal-memory tool: it stores text from your active
+window, can use opt-in per-app OCR over transient window stills, transcribes
+meetings, and keeps memory in an on-device database. A security flaw here can
+expose deeply personal data, so we take reports seriously.
 
 ## Reporting a vulnerability
 
@@ -38,6 +39,8 @@ In scope — issues that undermine OpenBird's privacy or integrity guarantees:
 
 - Captured text, window titles, or URLs leaking into logs, exceptions, argv, or
   any off-device destination.
+- OCR window images being persisted, logged, exported, or retained beyond the
+  bounded in-helper recognition scope.
 - Redaction / allowlist / blocklist bypasses that cause unintended capture.
 - Encryption-at-rest weaknesses: the SQLCipher gate passing when it should fail
   closed, key material exposure, or weak file permissions on the data store.

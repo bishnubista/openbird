@@ -52,8 +52,11 @@ The cautionary tales are equally consistent:
   (end-of-day narrative + routines/briefings, *no* productivity score) is worth
   copying; their storage locus is not.
 
-**Validation**: OpenBird's existing choices — AX text, no screenshots, allowlist-first
-privacy, observations vs. deduped content blobs — are the converged industry answer.
+**Validation**: OpenBird's baseline choices — AX text-first capture, no persisted
+screenshots/images, allowlist-first privacy, observations vs. deduped content blobs
+— are the converged industry answer. Phase C2 below adds the explicit exception:
+opt-in, per-app, transient window stills for OCR when AX text is empty; only
+recognized text is stored.
 The gaps are (a) *when* we capture (2-s blind polling), (b) *time-accounting ground
 truth* (we have observations, not measured durations), and (c) *context shaping for
 the LLM* (raw chunks, no intermediate summarization layer).

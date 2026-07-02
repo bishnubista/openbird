@@ -66,10 +66,11 @@ struct SetupSheetView: View {
                 .padding(.top, OB.Space.ml)            // 14
                 .padding(.bottom, 5)
 
-            // The "reads text, never screenshots" promise is fixed; the storage and
-            // transmission summaries are appended LIVE so this copy can never claim
-            // local-only behavior for a remote route (project privacy-truthfulness rule).
-            Text("Local-first memory for your Mac. It reads the **text** of your active window — never screenshots. \(model.privacyStorageSummary) \(model.privacyTransmissionSummary)")
+            // Keep this setup copy focused on storage truth. Deep-capture/OCR
+            // sensor details live in Settings where the per-app opt-in is configured.
+            // Storage and transmission summaries are appended LIVE so this copy can
+            // never claim local-only behavior for a remote route.
+            Text("Local-first memory for your Mac. It stores text, not screenshots or images. \(model.privacyStorageSummary) \(model.privacyTransmissionSummary)")
                 .font(.system(size: 13.5))
                 .foregroundStyle(OB.textSecondary(scheme))
                 .multilineTextAlignment(.center)
