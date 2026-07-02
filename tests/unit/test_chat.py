@@ -2299,3 +2299,42 @@ def test_explicit_window_generic_synthesis_never_gets_week_digest():
     # (the week reader MAY still be consulted for model context — that path
     # respects the window and the question).
     assert result.reasoning_route != "local_cached_model_summary"
+
+
+def test_summary_context_requires_week_containment():
+    """Codex round-3 regression: a week digest whose ISO week merely OVERLAPS
+    the asked window (crossing its boundary) must not enter model context —
+    only digests fully contained in the window may."""
+    import datetime as _dtmod
+
+    monday = _dtmod.datetime(2026, 6, 22)
+    week_row = {
+        "id": "wk1",
+        "local_date": "2026-06-22",
+        "source_scope": "week",
+        "summary_ids": ["bs1"],
+        "source_refs": [{"source_kind": "summary", "source_id": "bs1"}],
+        "payload": {
+            "week_start_date": "2026-06-22",
+            "digest_text": "OUT OF WINDOW WEEK PROSE",
+            "member_fingerprint": "mf",
+        },
+    }
+
+    class WeekStore(StubStore):
+        def week_memories_overlapping(self, start, end):
+            return [week_row]
+
+        def block_summaries_for_range(self, start, end):
+            return []
+
+    rag = RAG(WeekStore([]), BoomLLM())
+    # Window starts mid-week (Wed): the digest's week is NOT contained.
+    wed = (monday + _dtmod.timedelta(days=2)).timestamp()
+    items = rag._summary_context_items((wed, wed + 7 * 86_400.0))
+    assert all("OUT OF WINDOW" not in (i.get("text") or "") for i in items)
+    # Fully containing window: the digest qualifies.
+    items = rag._summary_context_items(
+        (monday.timestamp() - 3600.0, monday.timestamp() + 8 * 86_400.0)
+    )
+    assert any("OUT OF WINDOW WEEK PROSE" in (i.get("text") or "") for i in items)

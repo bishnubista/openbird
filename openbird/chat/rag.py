@@ -1091,6 +1091,18 @@ class RAG:
         weeks_reader = getattr(self.store, "week_memories_overlapping", None)
         if callable(weeks_reader):
             for week in weeks_reader(start, end) or []:
+                # CONTAINMENT, not overlap: a digest whose ISO week merely
+                # crosses the window boundary summarizes out-of-window time;
+                # feeding it to the model would leak that prose into a
+                # hard-scoped answer. Only digests whose full Mon-Sun span
+                # lies inside the asked window may serve as context (one-hour
+                # tolerance absorbs DST-length weeks).
+                span = _week_span_for_row(week)
+                if span is None:
+                    continue
+                w_start, w_end = span
+                if w_start < start - 3600.0 or w_end > end + 3600.0:
+                    continue
                 normalized = _normalize_week_memory(week)
                 if normalized is not None:
                     items.append(normalized)
@@ -2396,6 +2408,21 @@ def _normalize_block_summary(item: dict) -> dict:
         "local_date": item.get("local_date"),
         "source_refs": item.get("source_refs") or [],
     }
+
+
+def _week_span_for_row(week: dict) -> tuple[float, float] | None:
+    """Return the (monday_start, next_monday) wall span of a week row."""
+    date_str = week.get("local_date") or (week.get("payload") or {}).get(
+        "week_start_date"
+    )
+    if not date_str:
+        return None
+    try:
+        monday = _dt.datetime.strptime(str(date_str), "%Y-%m-%d")
+    except ValueError:
+        return None
+    start = monday.timestamp()
+    return start, (monday + _dt.timedelta(days=7)).timestamp()
 
 
 def _normalize_week_memory(week: dict) -> dict | None:
