@@ -677,6 +677,9 @@ final class OpenBirdService: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let defaults = UserDefaults.standard
     private let allowlistKey = "openbird.captureAllowlist"
+    /// Phase C2 deep-capture (OCR) opt-in list. Mirrored by the CLI's
+    /// GUI-prefs bridge (openbird/config.py `_GUI_OCR_APPS_KEY`) — keep in sync.
+    private let ocrAppsKey = "openbird.captureOcrApps"
     private let accessibilityProbe: @Sendable () -> Bool
     private let accessibilityPrompter: @Sendable () -> Void
     private let privacyPaneOpener: @Sendable (PrivacyPane) -> Void
@@ -1166,6 +1169,14 @@ final class OpenBirdService: @unchecked Sendable {
         if !allow.isEmpty {
             env["OPENBIRD_ALLOWLIST"] = allow.joined(separator: ",")
         }
+        // Deep-capture (OCR) opt-in list (Phase C2): injected alongside the
+        // allowlist so the daemon it spawns sees the same policy the UI shows.
+        // Absent when empty — the CLI's GUI-prefs bridge is the fallback for
+        // daemons the app did not launch.
+        let ocr = ocrApps()
+        if !ocr.isEmpty {
+            env["OPENBIRD_CAPTURE_OCR_APPS"] = ocr.joined(separator: ",")
+        }
 
         // App-supervised self-exit ("death pipe"). Hand the daemon a pipe as its
         // stdin and stamp a per-launch random token into the environment. We write
@@ -1479,6 +1490,34 @@ final class OpenBirdService: @unchecked Sendable {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && seen.insert($0).inserted }
         defaults.set(cleaned, forKey: allowlistKey)
+        // Structural subset invariant: removing an app from the allowlist also
+        // removes it from the OCR opt-in list — a de-allowlisted app must not
+        // silently retain a deep-capture grant it can no longer honor.
+        let pruned = Self.filteredOcrApps(ocrApps(), allowlist: cleaned)
+        defaults.set(pruned, forKey: ocrAppsKey)
+    }
+
+    // MARK: - Deep-capture (OCR) opt-in list (Phase C2)
+
+    /// Pure filter shared by both writers: the saved OCR list is always a
+    /// trimmed, de-duped, order-stable SUBSET of the allowlist (exact ids —
+    /// the UI only offers toggles for allowlisted apps).
+    static func filteredOcrApps(_ bundleIDs: [String], allowlist: [String]) -> [String] {
+        let allowed = Set(allowlist)
+        var seen = Set<String>()
+        return bundleIDs
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && allowed.contains($0) && seen.insert($0).inserted }
+    }
+
+    func ocrApps() -> [String] {
+        defaults.stringArray(forKey: ocrAppsKey) ?? []
+    }
+
+    func setOcrApps(_ bundleIDs: [String]) {
+        defaults.set(
+            Self.filteredOcrApps(bundleIDs, allowlist: allowlist()),
+            forKey: ocrAppsKey)
     }
 
     /// Bundle IDs of other apps currently running with a regular UI, useful as

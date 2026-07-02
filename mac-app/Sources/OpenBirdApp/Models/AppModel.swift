@@ -138,6 +138,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var isReindexing = false
     @Published private(set) var helpers: [HelperStatus] = []
     @Published private(set) var allowlist: [String] = []
+    /// Deep-capture (OCR) opt-in list (Phase C2) — always a subset of
+    /// `allowlist` by construction (the service filters on every write).
+    @Published private(set) var ocrApps: [String] = []
     // TCC grants are checked from the APP's own process (that is where macOS
     // records them — a nested helper's request is attributed to the app bundle).
     @Published private(set) var accessibilityGranted = false
@@ -184,6 +187,7 @@ final class AppModel: ObservableObject {
         self.capturePaused = service.isCapturePaused()
         self.helpers = service.helperStatuses()
         self.allowlist = service.allowlist()
+        self.ocrApps = service.ocrApps()
         self.captureRunning = service.isCaptureRunning()
         self.accessibilityGranted = service.accessibilityGranted()
         self.screenRecordingGranted = service.screenRecordingGranted()
@@ -903,6 +907,7 @@ final class AppModel: ObservableObject {
         captureRunning = service.isCaptureRunning()
         helpers = service.helperStatuses()
         allowlist = service.allowlist()
+        ocrApps = service.ocrApps()
         refreshLaunchAtLoginState()
         refreshPermissionStates()
         report = await service.preflightReport()
@@ -1225,7 +1230,28 @@ final class AppModel: ObservableObject {
     func removeFromAllowlist(_ bundleID: String) {
         service.setAllowlist(allowlist.filter { $0 != bundleID })
         allowlist = service.allowlist()
+        // The service pruned the OCR opt-in list to the new allowlist
+        // (structural subset); mirror the persisted truth.
+        ocrApps = service.ocrApps()
         lastActionMessage = "Removed \(bundleID) from capture allowlist."
+        applyPolicyChangeToRunningCapture()
+        Task { await refreshCaptureHealth() }
+    }
+
+    /// Toggle the deep-capture (OCR) opt-in for one allowlisted app. A running
+    /// app-launched daemon is cycled so the new policy actually applies (the
+    /// daemon reads OPENBIRD_CAPTURE_OCR_APPS at spawn time only — the same
+    /// restart precedent as an allowlist edit).
+    func setOcrCapture(_ bundleID: String, enabled: Bool) {
+        var updated = ocrApps.filter { $0 != bundleID }
+        if enabled {
+            updated.append(bundleID)
+        }
+        service.setOcrApps(updated)
+        ocrApps = service.ocrApps()
+        lastActionMessage = enabled
+            ? "Enabled deep capture (OCR) for \(bundleID)."
+            : "Disabled deep capture (OCR) for \(bundleID)."
         applyPolicyChangeToRunningCapture()
         Task { await refreshCaptureHealth() }
     }

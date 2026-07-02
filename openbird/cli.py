@@ -1811,7 +1811,7 @@ def _render_preflight(report: dict) -> None:
         "privacy",
         "info",
         f"allowlist={len(priv['allowlist'])} blocklist={len(priv['blocklist'])} "
-        f"ocr={priv['ocr_enabled']}",
+        f"ocr={priv['ocr_enabled']} ocr_apps={priv.get('ocr_apps', 0)}",
     )
 
     mac = report["macos"]
@@ -3056,13 +3056,31 @@ def data_capture_health(
     table.add_column("App")
     table.add_column("State")
     table.add_column("Quality")
+    table.add_column("OCR")
     table.add_column("Recent", justify="right")
     table.add_column("Total", justify="right")
+    # Daemon-level OCR availability (Phase C2): the helper's Screen Recording
+    # preflight edges, via the liveness sidecar. Rendered ONLY off a FRESH
+    # daemon (state == "ok") — a dead daemon's stale "available" must not
+    # claim OCR is live. health.py already nulls ocr_state for a non-ok
+    # daemon; this guard is defense-in-depth at the render boundary.
+    daemon = payload.get("daemon", {})
+    daemon_ocr_state = daemon.get("ocr_state") if daemon.get("state") == "ok" else None
     for row in payload["apps"]:
+        if row.get("ocr") == "opted_in":
+            # Opted-in row: combine with the fresh daemon state — available /
+            # unavailable when reported, honest "unknown" otherwise.
+            if daemon_ocr_state in ("available", "unavailable"):
+                ocr_cell = f"ocr_{daemon_ocr_state}"
+            else:
+                ocr_cell = "unknown"
+        else:
+            ocr_cell = "-"
         table.add_row(
             row["bundle_id"],
             row["effective_state"],
             row["quality"],
+            ocr_cell,
             str(row["recent_observations"]),
             str(row["total_observations"]),
         )

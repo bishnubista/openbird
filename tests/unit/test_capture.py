@@ -461,6 +461,7 @@ def test_parse_event_valid():
         "text": "t",
         "ts": 123.5,
         "incognito": False,
+        "ocr": False,
     }
 
 
@@ -514,6 +515,27 @@ def test_parse_event_capture_trigger_sanitized():
     assert ok is not None and ok["trigger"] == "idle_tick"
     bad = parse_event(_line(app="a", text="t", ts=1.0).replace('"app"', '"trigger": "free text!", "app"', 1))
     assert bad is not None and bad["trigger"] is None
+
+
+def test_parse_event_ocr_flag_sanitized():
+    # Absent -> False (every pre-C2 helper line).
+    absent = parse_event(_line(app="a", text="t", ts=1.0))
+    assert absent is not None and absent["ocr"] is False
+    # JSON true -> True.
+    true = parse_event(_line(app="a", text="t", ts=1.0, ocr=True))
+    assert true is not None and true["ocr"] is True
+    # Strict sanitization: any non-bool (a helper bug) coerces to False.
+    for junk in ("yes", 1, {"nested": True}, None):
+        e = parse_event(_line(app="a", text="t", ts=1.0, ocr=junk))
+        assert e is not None and e["ocr"] is False
+
+
+def test_parse_event_typed_events_unaffected_by_ocr_key():
+    # Typed (non-capture) events never gain the ocr key, even if a buggy
+    # helper stamps one.
+    e = parse_event(json.dumps({"type": "heartbeat", "ts": 1.0, "ocr": True}))
+    assert e is not None and e["type"] == "heartbeat"
+    assert "ocr" not in e
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +758,47 @@ def test_policy_args_include_capture_urls_when_opted_in(allow_settings):
     assert "--capture-urls" in argv
 
 
+def test_policy_args_include_ocr_args_only_when_opted_in_and_stream(allow_settings):
+    import dataclasses
+
+    opted_in = dataclasses.replace(
+        allow_settings,
+        capture_ocr_apps=["com.apple.mail"],
+        capture_ocr_min_interval_seconds=45.0,
+    )
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=opted_in,
+        helper_cmd=("capture-helper",),
+        require_signed_helper=False,
+    )
+    # Stream spawn: both OCR flags present (opted in AND stream).
+    stream_argv = daemon._with_policy_args(["capture-helper"], stream=True)
+    i = stream_argv.index("--ocr-apps")
+    assert stream_argv[i + 1] == "com.apple.mail"
+    j = stream_argv.index("--ocr-min-interval")
+    assert stream_argv[j + 1] == "45.0"
+    # One-shot/poll spawn: NEVER passed — OCR is stream-mode-only (the per-app
+    # throttle needs process-lifetime state a fresh spawn cannot hold).
+    poll_argv = daemon._with_policy_args(["capture-helper"])
+    assert "--ocr-apps" not in poll_argv
+    assert "--ocr-min-interval" not in poll_argv
+
+
+def test_policy_args_omit_ocr_args_when_not_opted_in(allow_settings):
+    daemon = CaptureDaemon(
+        FakeStore(),
+        settings=allow_settings,
+        helper_cmd=("capture-helper",),
+        require_signed_helper=False,
+    )
+    # Default (no opted-in apps): even a stream spawn carries no OCR flags,
+    # so an un-opted helper never touches ScreenCaptureKit.
+    stream_argv = daemon._with_policy_args(["capture-helper"], stream=True)
+    assert "--ocr-apps" not in stream_argv
+    assert "--ocr-min-interval" not in stream_argv
+
+
 @pytest.mark.skipif(
     sys.platform != "darwin" or shutil.which("swift") is None,
     reason="capture helper requires macOS and the Swift toolchain",
@@ -933,6 +996,50 @@ def test_daemon_scrubs_before_ingest(allow_settings):
     stored = store.calls[0]["text"]
     assert "sk-abcdefghijklmnop" not in stored
     assert "REDACTED" in stored
+
+
+def test_ocr_frame_scrubbed_identically_to_ax_frame(allow_settings):
+    """The Phase C2 no-bypass guarantee: OCR text takes the EXACT ingest path.
+
+    An ``ocr: true`` frame with a fake secret must store byte-identically to
+    the same frame captured via AX — redact.apply -> normalize -> volatility
+    -> scrub -> truncate -> scrub_metadata, with no OCR side door.
+    """
+    secret_text = "meeting notes\nAPI key sk-abcdefghijklmnop1234567890 shared"
+
+    ax_store = FakeStore()
+    CaptureDaemon(ax_store, settings=allow_settings).run_lines(
+        [_line(app="com.apple.mail", window="Notes", text=secret_text, ts=5.0)]
+    )
+    ocr_store = FakeStore()
+    ocr_stats = CaptureDaemon(ocr_store, settings=allow_settings).run_lines(
+        [_line(app="com.apple.mail", window="Notes", text=secret_text, ts=5.0, ocr=True)]
+    )
+
+    assert len(ax_store.calls) == 1 and len(ocr_store.calls) == 1
+    # Identical stored record (text AND scrubbed metadata) either way.
+    # session_id is a fresh uuid per daemon instance — exclude only that.
+    ax_row = {k: v for k, v in ax_store.calls[0].items() if k != "session_id"}
+    ocr_row = {k: v for k, v in ocr_store.calls[0].items() if k != "session_id"}
+    assert ocr_row == ax_row
+    assert "sk-abcdefghijklmnop" not in ocr_store.calls[0]["text"]
+    assert "REDACTED" in ocr_store.calls[0]["text"]
+    # The only OCR-specific effect is the counter.
+    assert ocr_stats.ocr_captures == 1
+    assert ocr_stats.ingested == 1
+
+
+def test_ocr_captures_counter_counts_only_ocr_frames(allow_settings):
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings, duplicate_window=0)
+    stats = daemon.run_lines(
+        [
+            _line(app="com.apple.mail", window="A", text="ax text", ts=1.0),
+            _line(app="com.apple.mail", window="B", text="ocr text", ts=2.0, ocr=True),
+        ]
+    )
+    assert stats.ingested == 2
+    assert stats.ocr_captures == 1
 
 
 def test_daemon_skips_incognito(allow_settings):

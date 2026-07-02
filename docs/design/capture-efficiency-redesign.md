@@ -337,6 +337,67 @@ time facts read from spans; sessions remain a content-grouping concept.
 - **Privacy**: no new content-bearing fields anywhere — the mic signal, the span bit,
   and the sidecar field are metadata bits; all logging is reason codes.
 
+#### Phase C2 — decisions as implemented (OCR fallback; `OcrGate.swift`, `OCRCapture.swift`, `OcrBridge.swift`)
+
+- **Stream-mode only** (decisive, not stylistic): the per-app OCR throttle needs
+  process-lifetime "last attempt at" state, and a one-shot helper is a fresh process
+  every ~2s — helper-local throttle state cannot exist there. Same precedent as
+  MicMonitor/AFK. The daemon passes `--ocr-apps a,b --ocr-min-interval <s>` only when
+  `capture_ocr_apps` is non-empty AND the spawn is `--stream`; one-shot spawns never
+  see the flags, keeping `openbird doctor` / `--once` byte-identical.
+- **Gate order** (`OcrGate`, pure state machine in CaptureHelperCore, injected
+  monotonic clock, closed reason codes): axTextEmpty → optedIn → tccGranted →
+  !micHot → per-app min-interval. Mic-hot suppression is the screenpipe
+  Vision-vs-Zoom GPU-contention lesson; the throttle slot is consumed at DECISION
+  time so a timed-out attempt cannot retry-storm. `Scheduler` is untouched — OCR is
+  a per-capture fallback, not a cadence concern (AFK suppression already happens
+  upstream in `Scheduler.tick`).
+- **Self-capture gate grew a Swift copy**: `isSelfCapture` (exact
+  `ai.openbird.openbird` root or dotted-child, NEVER substring) now runs in
+  `captureFrontmost` BEFORE the allowlist gate / AX element creation / SCK — with
+  screenshots in play, the Python-side backstop alone would have permitted a still of
+  OpenBird's own UI. A two-copy parity test pins the Swift literal to
+  `redact._SELF_BUNDLE_ROOT`.
+- **macOS-14 floor, `.v13` package**: `SCScreenshotManager` requires macOS 14, so the
+  real `ScreenCaptureKitOcrHAL` sits behind `#available(macOS 14.0, *)` and a
+  macOS 13 stub reports `ocr_unavailable`. Window resolution is
+  `SCShareableContent.excludingDesktopWindows` filtered by pid + layer 0 (exact
+  AX-title match preferred, else largest area) — no private `_AXUIElementGetWindow`.
+  Vision ships on `VNRecognizeTextRequest` (`.accurate`, auto language) ONLY; the
+  macOS-26 `RecognizeDocumentsRequest` branch is deferred until the toolchain gate
+  has CI coverage.
+- **Two-phase semaphore bridge with late-completion ownership** (`OcrBridge`,
+  unit-tested with fake HALs): the HAL is split at the PIXEL boundary. The async
+  ACQUIRE phase (SCK window lookup + still) runs in a retained cancellable `Task`
+  raced against the OCR share of a COMBINED AX+OCR ≤ 4s per-capture budget (OCR gets
+  `min(2.5s, remaining)`); on timeout the task is cancelled and a per-call generation
+  box is closed, so a late-acquired image is dropped UNREAD — never recognized,
+  never emitted, never bleeding into a later capture. The synchronous RECOGNIZE
+  phase (Vision) is NEVER abandoned: cancellation cannot interrupt
+  `VNImageRequestHandler.perform`, so the bridge waits for the pass to finish and
+  the image scope to close before returning (scope-bound pixel invariant; worst-case
+  walk-queue occupancy is `deadline + one sub-second-typical .accurate pass`,
+  documented in OcrBridge.swift). `CGPreflightScreenCaptureAccess` only — the helper
+  never prompts; the grant flow lives in the mac-app (deep-capture section, stating
+  the three costs: Screen Recording permission, monthly re-auth nag, permanent
+  orange indicator).
+- **Wire protocol**: capture frames gain `ocr: true` (only on fallback frames) via an
+  explicit `encode(to:)` with `encodeIfPresent` for `type`/`trigger`/`ocr` — the
+  omitted-when-nil contract is now stated rather than synthesized, pinned by
+  raw-JSON shape tests. The `system` vocabulary gained exactly
+  `ocr_available` / `ocr_unavailable` (startup preflight reading + observed flips);
+  the daemon mirrors them into the liveness sidecar `ocr_state`, capture-health
+  renders opted-in rows as available/unavailable/unknown, and stats grew an
+  `ocr_captures` counter. Old daemons ignore the unknown key/kinds — back-compat is
+  free, same argument as `mic_*`.
+- **Pixels + text**: the `CGImage` never leaves the HAL function's scope (file-header
+  invariant — never disk, never stderr/logs); recognized text flows over the same
+  private stdout pipe and through the EXACT existing ingest path
+  (`redact.apply → normalize → volatility → scrub → truncate → scrub_metadata`) —
+  the no-bypass guarantee is asserted by test, not by new code. `preflight.py` now
+  routes `screen_recording` to the CAPTURE helper (it owns SCK); mic/system-audio
+  stay on the audio helper.
+
 ### Phase D — Hierarchical context for the AI (what the model should see)
 
 The research consensus: raw capture dumps don't answer "how did I spend my day" —

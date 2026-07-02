@@ -578,7 +578,12 @@ def _packaged_helper_probe(
     errors: dict[str, Exception] = {}
 
     def _probe(capability: str) -> str:
-        if capability == "accessibility":
+        # Capability -> helper routing. The CAPTURE helper owns Accessibility
+        # AND (since Phase C2, when it grew ScreenCaptureKit for the OCR
+        # fallback) Screen Recording; microphone/system-audio stay on the
+        # AUDIO helper. Routing screen_recording to the audio helper would
+        # silently ignore the capture helper's new grant-report field.
+        if capability in ("accessibility", "screen_recording"):
             if capture_path is None:
                 raise FileNotFoundError(CAPTURE_HELPER_PATH_ENV)
             key, path = "capture", capture_path
@@ -826,7 +831,10 @@ def run_preflight(
         "privacy": {
             "allowlist": list(settings.allowlist),
             "blocklist": list(settings.blocklist),
-            "ocr_enabled": bool(settings.ocr_enabled),
+            # OCR is on iff apps are opted in (Phase C2 retired the vestigial
+            # ocr_enabled dataclass flag; the list IS the source of truth).
+            "ocr_enabled": bool(settings.capture_ocr_apps),
+            "ocr_apps": len(settings.capture_ocr_apps),
         },
         "macos": macos,
         "meetings": {

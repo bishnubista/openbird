@@ -25,6 +25,7 @@ struct SettingsView: View {
                     }
                     permissionsCard
                     allowlistCard
+                    deepCaptureCard
                     privacyCard
                     promptCustomizationCard
                     trustCard
@@ -365,6 +366,85 @@ struct SettingsView: View {
             .overlay(Capsule().strokeBorder(OB.separator(scheme), lineWidth: 0.5))
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: Deep capture (OCR) — Phase C2 opt-in
+
+    /// The truth surface `privacy-routes.yaml` names `app.deep_capture_section`.
+    /// Per-app toggles are rendered ONLY for allowlisted apps (the structural
+    /// subset, mirrored in the UI), and the copy states the three real costs
+    /// of the Screen Recording route up front — never a silent grant.
+    private var deepCaptureCard: some View {
+        sectionCard {
+            sectionLabel("Deep capture (OCR)")
+            Text(
+                "When an allowed app exposes no readable text, OpenBird can take a "
+                + "window-scoped screenshot and read it with on-device OCR. Pixels are "
+                + "discarded immediately; only recognized text is stored, scrubbed like "
+                + "any other capture. Costs: the Screen Recording permission, macOS's "
+                + "monthly re-auth nag, and a permanent orange indicator in the menu bar."
+            )
+            .font(.system(size: 11.5))
+            .foregroundStyle(OB.textSecondary(scheme))
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 16).padding(.bottom, 12)
+
+            hairline
+            permissionRow(
+                icon: "rectangle.inset.filled", title: "Screen Recording", badge: .required,
+                subtitle: "Required before any deep capture can run · granted to the OpenBird app",
+                trailing: model.screenRecordingGranted
+                    ? .affirm("Granted")
+                    : .primary("Grant") { model.requestScreenRecording() }
+            )
+
+            if model.allowlist.isEmpty {
+                hairline
+                Text("Add apps to the capture allowlist first — deep capture is a per-app upgrade, never a blanket grant.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(OB.textSecondary(scheme))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+            } else {
+                // Toggles ONLY for allowlisted apps: opted-in ⊆ allowlist.
+                ForEach(model.allowlist, id: \.self) { bundleID in
+                    hairline
+                    deepCaptureRow(bundleID)
+                }
+            }
+        }
+    }
+
+    private func deepCaptureRow(_ bundleID: String) -> some View {
+        let id = AppIdentity.forBundleID(bundleID)
+        return HStack(spacing: 12) {
+            appIconTile(id)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(id.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(OB.textPrimary(scheme))
+                Text(bundleID)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(OB.textTertiary(scheme))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer()
+            Toggle(
+                "Deep capture for \(id.name)",
+                isOn: Binding(
+                    get: { model.ocrApps.contains(bundleID) },
+                    set: { model.setOcrCapture(bundleID, enabled: $0) }
+                )
+            )
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            // The toggle is inert until Screen Recording is actually granted:
+            // an opt-in the helper cannot honor would be a silent lie.
+            .disabled(!model.screenRecordingGranted)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 9)
     }
 
     // MARK: Privacy & storage

@@ -74,15 +74,18 @@ _DEFAULT_BLOCKLIST: list[str] = [
     "com.apple.keychainaccess",
 ]
 
-# The macOS menu-bar app persists the user's capture allowlist in its
-# ``UserDefaults.standard`` domain (its bundle id). The CLI is a SEPARATE process
-# with no shared defaults, so absent an ``OPENBIRD_ALLOWLIST`` override it reads
-# this domain directly to stay in lockstep with what the app captures — otherwise
+# The macOS menu-bar app persists the user's capture allowlist (and the Phase
+# C2 OCR opt-in list) in its ``UserDefaults.standard`` domain (its bundle id).
+# The CLI is a SEPARATE process with no shared defaults, so absent an
+# ``OPENBIRD_ALLOWLIST`` / ``OPENBIRD_CAPTURE_OCR_APPS`` override it reads this
+# domain directly to stay in lockstep with what the app captures — otherwise
 # ``openbird doctor`` reports EMPTY and a hand-started ``openbird capture --loop``
 # records nothing even though the app is configured. Keep these in sync with
-# mac-app/Sources/OpenBirdApp/Services/OpenBirdService.swift (allowlistKey).
+# mac-app/Sources/OpenBirdApp/Services/OpenBirdService.swift (allowlistKey /
+# ocrAppsKey).
 _GUI_PREFS_DOMAIN = "ai.openbird.OpenBird"
 _GUI_ALLOWLIST_KEY = "openbird.captureAllowlist"
+_GUI_OCR_APPS_KEY = "openbird.captureOcrApps"
 
 
 def _default_data_dir() -> Path:
@@ -232,7 +235,6 @@ class Settings:
     allowlist: list[str] = field(default_factory=list)
     blocklist: list[str] = field(default_factory=lambda: list(_DEFAULT_BLOCKLIST))
 
-    ocr_enabled: bool = False
     # Opt-in: capture the active browser tab's URL via Apple Events. OFF by
     # default — enabling it makes the helper script browsers (Chrome/Safari/…),
     # which triggers a one-time macOS Automation consent prompt per browser. URLs
@@ -271,6 +273,21 @@ class Settings:
     # Span merge pulsetime (Phase B). 0 = derive from the idle tick
     # (max(2*tick+5, 15)); explicit values clamp to [5, ceiling].
     capture_span_pulsetime_seconds: float = 0.0
+
+    # Opt-in OCR fallback (Phase C2). Bundle ids whose AX-EMPTY captures may
+    # fall back to a window-scoped screenshot + on-device Vision OCR in the
+    # stream helper. Default EMPTY = OCR fully off. Env:
+    # OPENBIRD_CAPTURE_OCR_APPS (comma-separated); absent that, the menu-bar
+    # app's saved ``openbird.captureOcrApps`` prefs key bridges in — exactly
+    # mirroring the allowlist precedence. Subset-of-allowlist holds BY
+    # CONSTRUCTION, not by validation: the helper's OCR branch sits after its
+    # allowlist gate returned true, so an OCR entry that is not allowlisted is
+    # simply inert — no cross-list validation code exists on purpose.
+    capture_ocr_apps: list[str] = field(default_factory=list)
+    # Per-app minimum seconds between OCR attempts (the helper's OcrGate
+    # throttle). Clamped in __post_init__ (lo=10) — clamp-never-reject, same
+    # budget-enforcement stance as the other capture_*_seconds knobs.
+    capture_ocr_min_interval_seconds: float = 30.0
 
     # Idle-time block summaries (Phase D). Generated ONLY by the routines-daemon
     # worker / the on-demand `openbird summaries build` — never the capture or
@@ -373,6 +390,14 @@ class Settings:
             default=1.0,
             lo=1.0,
         )
+        # OCR throttle floor: 10s per app is the budget's enforcement point
+        # (the Swift OcrGate defensively re-clamps the argv value too).
+        self.capture_ocr_min_interval_seconds = _clamp_setting(
+            "capture_ocr_min_interval_seconds",
+            self.capture_ocr_min_interval_seconds,
+            default=30.0,
+            lo=10.0,
+        )
         # Cross-field: the force ceiling must not undercut the floor or the tick
         # (a ceiling below either would force captures faster than the budget).
         self.capture_force_ceiling_seconds = _clamp_setting(
@@ -416,7 +441,6 @@ def _coerce(name: str, raw: str, default: object) -> object:
     if isinstance(default, list):
         return [item.strip() for item in raw.split(",") if item.strip()]
     if isinstance(default, bool) or name in (
-        "ocr_enabled",
         "encryption_enabled",
         "allow_cloud",
         "deep_brain_enabled",
@@ -443,7 +467,8 @@ def _coerce(name: str, raw: str, default: object) -> object:
 _COERCE_DEFAULTS: dict[str, object] = {
     "allowlist": [],
     "blocklist": [],
-    "ocr_enabled": False,
+    "capture_ocr_apps": [],
+    "capture_ocr_min_interval_seconds": 30.0,
     "encryption_enabled": False,
     "allow_cloud": False,
     "deep_brain_enabled": False,
@@ -582,15 +607,15 @@ def is_loopback_host(host_url: str) -> bool:
     return hostname.lower() in _LOOPBACK_HOSTS
 
 
-def _read_gui_allowlist() -> list[str] | None:
-    """Read the menu-bar app's saved capture allowlist from macOS user defaults.
+def _read_gui_string_list(key: str) -> list[str] | None:
+    """Read one saved string-list ``key`` from the menu-bar app's user defaults.
 
     Returns the normalized list, or ``None`` when it cannot be read (non-macOS,
     domain/key absent, malformed, or ``defaults`` unavailable/slow) so the caller
     falls back to the empty default. Read via ``defaults export`` (cfprefsd-backed,
     so it reflects the app's latest value even when the on-disk plist lags) rather
     than parsing the plist file directly. Best-effort and never raises: a failure
-    here must degrade to "no allowlist", never crash the CLI.
+    here must degrade to "no list", never crash the CLI.
     """
     if sys.platform != "darwin":
         return None
@@ -612,10 +637,10 @@ def _read_gui_allowlist() -> list[str] | None:
         data = plistlib.loads(proc.stdout)
     except (plistlib.InvalidFileException, ValueError, ExpatError):
         return None
-    raw = data.get(_GUI_ALLOWLIST_KEY) if isinstance(data, dict) else None
+    raw = data.get(key) if isinstance(data, dict) else None
     if not isinstance(raw, list):
         return None
-    # Normalize identically to the OPENBIRD_ALLOWLIST env path: str-only, trimmed,
+    # Normalize identically to the OPENBIRD_* env list path: str-only, trimmed,
     # de-duped, order-preserving. Return None (not []) when nothing usable remains
     # so an explicitly-empty saved list and "unreadable" both fall back to default.
     cleaned: list[str] = []
@@ -628,6 +653,21 @@ def _read_gui_allowlist() -> list[str] | None:
             seen.add(bundle_id)
             cleaned.append(bundle_id)
     return cleaned or None
+
+
+def _read_gui_allowlist() -> list[str] | None:
+    """The menu-bar app's saved capture allowlist (see _read_gui_string_list)."""
+    return _read_gui_string_list(_GUI_ALLOWLIST_KEY)
+
+
+def _read_gui_ocr_apps() -> list[str] | None:
+    """The menu-bar app's saved OCR opt-in list (see _read_gui_string_list).
+
+    Kept as a named wrapper (not an inline ``_read_gui_string_list`` call) so
+    tests can neutralize/patch each GUI bridge independently, exactly like
+    ``_read_gui_allowlist``.
+    """
+    return _read_gui_string_list(_GUI_OCR_APPS_KEY)
 
 
 def _settings_from_env() -> Settings:
@@ -667,6 +707,13 @@ def _settings_from_env() -> Settings:
         gui_allowlist = _read_gui_allowlist()
         if gui_allowlist is not None:
             overrides["allowlist"] = gui_allowlist
+
+    # Same bridge for the Phase C2 OCR opt-in list (env wins, incl. explicit
+    # empty; otherwise the app's saved ``openbird.captureOcrApps`` applies).
+    if "capture_ocr_apps" not in overrides:
+        gui_ocr_apps = _read_gui_ocr_apps()
+        if gui_ocr_apps is not None:
+            overrides["capture_ocr_apps"] = gui_ocr_apps
 
     return Settings(**overrides)  # type: ignore[arg-type]
 
