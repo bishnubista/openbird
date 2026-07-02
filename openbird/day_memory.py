@@ -240,18 +240,20 @@ def _span_metrics(
             continue
         span_id = str(span.get("span_id"))
         span_ids.append(span_id)
+        reason = span.get("reason")
+        if reason == "paused":
+            # Paused dominates (matching classify_policy's structural order):
+            # a paused+AFK span is PAUSED time, not AFK time. It is neither
+            # active nor app-attributable — time_by_reason/paused_seconds
+            # only, never per-app time, hour buckets, or focus blocks.
+            time_by_reason["paused"] += seconds
+            paused_seconds += seconds
+            continue
         if span.get("afk"):
             afk_seconds += seconds
             continue
-        reason = span.get("reason")
         if reason:
             time_by_reason[str(reason)] += seconds
-        if reason == "paused":
-            # Paused time is neither active nor app-attributable: capture was
-            # off. It appears under time_by_reason/paused_seconds only — never
-            # in per-app time, hour buckets, or focus blocks.
-            paused_seconds += seconds
-            continue
         bundle = span.get("bundle_id") or "(untracked)"
         time_by_app[bundle] += seconds
         # Split the span's active time at local hour boundaries.

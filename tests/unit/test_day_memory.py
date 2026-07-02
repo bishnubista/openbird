@@ -1792,6 +1792,23 @@ def test_paused_spans_are_not_active_time():
     assert sum(m["span_time_by_hour"].values()) == 600.0
 
 
+def test_paused_afk_span_counts_as_paused_not_afk():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        {"span_id": "s1", "start_ts": 1000.0, "end_ts": 1500.0,
+         "bundle_id": None, "afk": 1, "reason": "paused", "detail_tier": 0},
+    ]
+    m = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    ).payload["span_metrics"]
+    # Paused dominates: 500s is PAUSED time, never AFK or active.
+    assert m["paused_seconds"] == 500.0
+    assert m["afk_seconds"] == 0.0
+    assert m["active_span_seconds"] == 0.0
+    assert m["span_time_by_reason"]["paused"] == 500.0
+
+
 def test_productivity_report_prefers_span_ground_truth():
     from openbird.day_memory import build_day_memory, build_productivity_report
 
