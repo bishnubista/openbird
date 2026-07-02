@@ -2433,11 +2433,11 @@ def test_capture_exits_reindex_required_on_cohort_mismatch(tmp_path, monkeypatch
 
 
 def _span_settings(**kw):
-    defaults = {"data_dir": "/tmp/x", "allowlist": ["com.apple.mail"], "blocklist": []}
-    defaults.update(kw)
     import tempfile
 
-    defaults["data_dir"] = tempfile.mkdtemp(prefix="openbird-span-policy-")
+    defaults = {"allowlist": ["com.apple.mail"], "blocklist": []}
+    defaults.update(kw)
+    defaults.setdefault("data_dir", tempfile.mkdtemp(prefix="openbird-span-policy-"))
     return Settings(**defaults)
 
 

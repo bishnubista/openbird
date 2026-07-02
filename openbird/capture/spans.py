@@ -365,6 +365,13 @@ class SpanTracker:
         """Pre-debounce boundary marker: exact span edges on app switches."""
         now_mono = self._mono()
         span = self._open
+        if span is not None and span.identity.reason == "paused":
+            # Capture is paused: app switches are not span boundaries (there
+            # is nothing being captured to attribute). Record the marker so a
+            # near-simultaneous unpause frame can still backdate its start,
+            # but never fragment the paused span itself.
+            self._pending = (bundle_id, ts, now_mono)
+            return
         if span is not None and span.identity.bundle_id == bundle_id:
             # Re-activation of the same app: not a boundary.
             return

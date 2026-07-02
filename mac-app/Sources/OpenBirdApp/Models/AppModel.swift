@@ -1235,8 +1235,20 @@ final class AppModel: ObservableObject {
     /// external daemon we must not touch, say so honestly instead of letting
     /// the old policy keep capturing (a removed app would otherwise still be
     /// recorded until the next manual restart).
+    /// Serializes policy-change restarts: two quick allowlist edits must not
+    /// overlap (both would wait on the same daemon exit and both would spawn).
+    /// A second edit arriving mid-restart is COALESCED — the queued run picks
+    /// up the latest saved policy, so no edit is lost.
+    private var policyRestartInFlight = false
+    private var policyRestartQueued = false
+
     private func applyPolicyChangeToRunningCapture() {
         guard captureRunning else { return }  // policy applies on next start
+        if policyRestartInFlight {
+            policyRestartQueued = true
+            return
+        }
+        policyRestartInFlight = true
         Task {
             let outcome = await service.restartCaptureForPolicyChange(
                 onExit: { [weak self] code in
@@ -1256,6 +1268,13 @@ final class AppModel: ObservableObject {
                 break
             }
             captureRunning = service.isCaptureRunning()
+            policyRestartInFlight = false
+            if policyRestartQueued {
+                // An edit landed mid-restart: run once more with the latest
+                // saved policy (never in parallel, never lost).
+                policyRestartQueued = false
+                applyPolicyChangeToRunningCapture()
+            }
         }
     }
 

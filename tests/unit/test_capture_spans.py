@@ -312,3 +312,22 @@ def test_store_failure_returns_none_and_never_raises(settings):
     sid = frame(tracker, ts=100.0)
     assert sid is None
     assert tracker.error_count >= 1
+
+
+def test_app_switch_never_fragments_paused_span(settings):
+    # CodeRabbit regression: app switches while paused must not close the
+    # paused span (capture is off; the switch attributes nothing).
+    tracker, store, clock = make_tracker(settings)
+    clock.t += 1.0
+    tracker.on_heartbeat(afk=False, paused=True, ts=100.0)
+    paused = tracker._open
+    assert paused is not None and paused.identity.reason == "paused"
+    clock.t += 3.0
+    tracker.on_app_changed("com.apple.notes", 103.0)  # switch while paused
+    clock.t += 3.0
+    tracker.on_heartbeat(afk=False, paused=True, ts=106.0)
+    # Still ONE paused span, alive across the switch.
+    assert tracker._open is not None
+    assert tracker._open.span_id == paused.span_id
+    paused_rows = [r for r in store.spans.values() if r["reason"] == "paused"]
+    assert len(paused_rows) == 1

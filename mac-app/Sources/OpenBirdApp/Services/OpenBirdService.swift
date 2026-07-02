@@ -1266,7 +1266,12 @@ final class OpenBirdService: @unchecked Sendable {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         if proc.isRunning {
-            return .failed  // never spawn a second daemon over a live one
+            // Never spawn a second daemon over a live one. Restore exit
+            // visibility first: we detached the handler for a planned stop,
+            // but this stop did NOT complete, so the app must still observe
+            // this daemon's eventual exit (the onExit supervision contract).
+            proc.terminationHandler = { p in onExit?(p.terminationStatus) }
+            return .failed
         }
         captureProcess = nil
         try? captureSupervisorPipe?.close()

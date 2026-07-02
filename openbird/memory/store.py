@@ -975,8 +975,15 @@ class MemoryStore:
                 self._begin()
                 rows = self.time_range_text(start_ts, end_ts, source=source_scope)
                 fingerprint = self.day_memory_source_fingerprint_from_rows(rows)
-                spans = self.spans_in_range(start_ts, end_ts)
-                span_fp = span_fingerprint_for_spans(spans)
+                # Spans are CAPTURE ground truth: only capture-scope memories
+                # cite them (a meetings-scope memory must neither include
+                # span metrics nor be invalidated by unrelated capture spans).
+                if source_scope == "capture":
+                    spans = self.spans_in_range(start_ts, end_ts)
+                    span_fp = span_fingerprint_for_spans(spans)
+                else:
+                    spans = None
+                    span_fp = None
                 existing = self._get_day_memory_unchecked(
                     local_date=local_date, source_scope=source_scope
                 )
@@ -1001,7 +1008,7 @@ class MemoryStore:
                     gap_seconds=self.settings.session_gap_seconds,
                     source_fingerprint=fingerprint,
                     as_of=min(end_ts, time.time()),
-                    spans=spans,
+                    spans=spans,  # None outside capture scope (no span block)
                 )
                 day_memory_id = uuid.uuid4().hex
                 generated = time.time()
