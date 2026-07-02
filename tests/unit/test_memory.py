@@ -1156,3 +1156,211 @@ def test_week_memories_overlapping_windows(store):
     assert [w["local_date"] for w in hits] == ["2026-06-15", "2026-06-22"]
     # A window before all stored weeks hits nothing.
     assert store.week_memories_overlapping(ts("2026-05-01"), ts("2026-05-02")) == []
+
+
+# --------------------------------------------------------------------------- #
+# entity ledger store APIs (Phase E2)                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_upsert_entity_deterministic_id_and_min_max_ts(store):
+    from openbird.memory.store import entity_id_for
+
+    a = store.upsert_entity("repo", "bbista/openbird", seen_ts=200.0)
+    assert a["id"] == entity_id_for("repo", "bbista/openbird")
+    assert a["first_ts"] == 200.0 and a["last_ts"] == 200.0
+    assert a["aliases"] == []
+
+    # Casefolded identity: a differently-cased sighting upserts the SAME row.
+    b = store.upsert_entity("repo", "BBista/OpenBird", seen_ts=100.0)
+    assert b["id"] == a["id"]
+    assert b["name"] == "bbista/openbird"  # original stored name kept
+    assert b["first_ts"] == 100.0 and b["last_ts"] == 200.0
+
+    c = store.upsert_entity("repo", "bbista/openbird", seen_ts=300.0)
+    assert c["first_ts"] == 100.0 and c["last_ts"] == 300.0
+    assert len(store.list_entities(kind="repo")) == 1
+
+
+def test_upsert_entity_last_seen_ref_updates_only_when_newer(store):
+    obs_old = store.add_observation("old", source="capture", ts=100.0)
+    obs_new = store.add_observation("new", source="capture", ts=200.0)
+    store.upsert_entity(
+        "repo", "bbista/openbird", seen_ts=200.0,
+        source_kind="observation", source_id=obs_new.id,
+    )
+    stale = store.upsert_entity(
+        "repo", "bbista/openbird", seen_ts=100.0,
+        source_kind="observation", source_id=obs_old.id,
+    )
+    # The older sighting neither regresses last_ts nor replaces the ref.
+    assert stale["last_ts"] == 200.0
+    assert stale["last_seen_source_id"] == obs_new.id
+
+
+def test_entity_status_transitions_and_user_marked_done_immunity(store):
+    e = store.upsert_entity("repo", "bbista/openbird", seen_ts=100.0)
+    assert e["status"] == "active"
+    assert store.mark_dormant_entities(cutoff_ts=200.0) == 1
+    assert store.get_entity(e["id"])["status"] == "dormant"
+
+    # NEW activity (strictly newer ts) flips dormant back to active…
+    again = store.upsert_entity("repo", "bbista/openbird", seen_ts=300.0)
+    assert again["status"] == "active"
+
+    # …but user_marked_done is immune to BOTH directions.
+    store.set_entity_status(e["id"], "user_marked_done")
+    assert store.upsert_entity(
+        "repo", "bbista/openbird", seen_ts=400.0
+    )["status"] == "user_marked_done"
+    assert store.mark_dormant_entities(cutoff_ts=999.0) == 0
+    assert store.get_entity(e["id"])["status"] == "user_marked_done"
+
+
+def test_entities_matching_casefolded_both_directions(store):
+    e = store.upsert_entity("repo", "bbista/openbird", seen_ts=100.0)
+    store.set_entity_aliases(e["id"], ["openbird"])
+    store.upsert_entity("domain", "github.com", seen_ts=100.0)
+
+    # Query contains the alias.
+    assert [x["name"] for x in store.entities_matching("the openbird repo")] == [
+        "bbista/openbird"
+    ]
+    # Query IS a substring of the name.
+    assert [x["name"] for x in store.entities_matching("OPENBIRD")] == [
+        "bbista/openbird"
+    ]
+    # Exact full name.
+    assert [x["name"] for x in store.entities_matching("bbista/openbird")] == [
+        "bbista/openbird"
+    ]
+    assert store.entities_matching("unrelated thing") == []
+    assert store.entities_matching("") == []
+
+
+def test_entity_evidence_for_newest_first_and_dedup(store):
+    obs = store.add_observation("merged text", source="capture", ts=100.0)
+    obs2 = store.add_observation("closed text", source="capture", ts=200.0)
+    e = store.upsert_entity("repo", "bbista/openbird", seen_ts=100.0)
+    assert store.add_entity_evidence(
+        e["id"], ts=100.0, kind="pr_merged", source_kind="observation",
+        source_id=obs.id, detail="github:bbista/openbird#1",
+    )
+    # Identical row: UNIQUE dedup, returns False.
+    assert not store.add_entity_evidence(
+        e["id"], ts=100.0, kind="pr_merged", source_kind="observation",
+        source_id=obs.id, detail="github:bbista/openbird#1",
+    )
+    assert store.add_entity_evidence(
+        e["id"], ts=200.0, kind="ticket_closed", source_kind="observation",
+        source_id=obs2.id, detail="github:bbista/openbird#2",
+    )
+    rows = store.entity_evidence_for(e["id"])
+    assert [r["kind"] for r in rows] == ["ticket_closed", "pr_merged"]
+
+    with pytest.raises(ValueError, match="unknown evidence kind"):
+        store.add_entity_evidence(
+            e["id"], ts=1.0, kind="vibes", source_kind="observation",
+            source_id=obs.id,
+        )
+    with pytest.raises(ValueError, match="unknown entity kind"):
+        store.upsert_entity("project", "x", seen_ts=1.0)
+    with pytest.raises(ValueError, match="together"):
+        store.upsert_entity("repo", "x", seen_ts=1.0, source_kind="observation")
+
+
+def test_stats_has_entity_counts(store):
+    stats = store.stats()
+    assert stats["entities"] == 0 and stats["entity_evidence"] == 0
+    obs = store.add_observation("t", source="capture", ts=1.0)
+    e = store.upsert_entity("repo", "a/b", seen_ts=1.0)
+    store.add_entity_evidence(
+        e["id"], ts=1.0, kind="open_loop", source_kind="observation",
+        source_id=obs.id, detail="github:a/b#1",
+    )
+    stats = store.stats()
+    assert stats["entities"] == 1 and stats["entity_evidence"] == 1
+
+
+def test_entity_evidence_orphan_counts_clean(store):
+    obs = store.add_observation("t", source="capture", ts=1.0)
+    e = store.upsert_entity("repo", "a/b", seen_ts=1.0)
+    store.add_entity_evidence(
+        e["id"], ts=1.0, kind="open_loop", source_kind="observation",
+        source_id=obs.id,
+    )
+    counts = store.entity_evidence_orphan_counts()
+    assert counts["ok"] is True
+    store.delete(all=True)
+    assert store.entity_evidence_orphan_counts()["ok"] is True
+
+
+def test_observations_text_page_row_cap_and_composite_cursor(store):
+    ids = []
+    for i in range(5):
+        obs = store.add_observation(f"row {i} text", source="capture", ts=100.0 + i)
+        ids.append(obs.id)
+    page1 = store.observations_text_page(0.0, "", limit=2)
+    assert [o.id for o, _ in page1] == ids[:2]
+    last = page1[-1][0]
+    page2 = store.observations_text_page(last.ts, last.id, limit=10)
+    assert [o.id for o, _ in page2] == ids[2:]
+    # max_chars caps text per row.
+    capped = store.observations_text_page(0.0, "", limit=1, max_chars=4)
+    assert capped[0][1] == "row "
+
+
+def test_observations_text_page_ties_on_same_ts(store):
+    a = store.add_observation("tie a", source="capture", ts=100.0)
+    b = store.add_observation("tie b", source="capture", ts=100.0)
+    first, second = sorted([a.id, b.id])
+    page = store.observations_text_page(100.0, first, limit=10)
+    assert [o.id for o, _ in page] == [second]
+
+
+def test_kv_roundtrip(store):
+    assert store.get_kv("entity_aggregation.obs_ts") is None
+    store.set_kv("entity_aggregation.obs_ts", "123.5")
+    assert store.get_kv("entity_aggregation.obs_ts") == "123.5"
+    store.set_kv("entity_aggregation.obs_ts", "456.0")
+    assert store.get_kv("entity_aggregation.obs_ts") == "456.0"
+
+
+def test_entity_evidence_for_window_filter_applied_before_row_cap(store):
+    """REGRESSION (Codex finding 1): the window filter runs in SQL BEFORE the
+    newest-first LIMIT — an older window's completion evidence must be found
+    even when more than ``limit`` newer rows exist."""
+    e = store.upsert_entity("repo", "bbista/openbird", seen_ts=1000.0)
+    old_obs = store.add_observation("old merge", source="capture", ts=1000.0)
+    assert store.add_entity_evidence(
+        e["id"], ts=1000.0, kind="pr_merged", source_kind="observation",
+        source_id=old_obs.id, detail="github:bbista/openbird#1",
+    )
+    filler_obs = store.add_observation("filler", source="capture", ts=200000.0)
+    for i in range(55):  # more than the default limit=50, all newer
+        store.add_entity_evidence(
+            e["id"], ts=200000.0 + i, kind="open_loop",
+            source_kind="observation", source_id=filler_obs.id,
+            detail=f"github:bbista/openbird#{100 + i}",
+        )
+    # The global newest-50 fetch cannot see the old row…
+    assert all(float(r["ts"]) >= 200000.0 for r in store.entity_evidence_for(e["id"]))
+    # …but the WINDOWED query must.
+    windowed = store.entity_evidence_for(e["id"], start_ts=900.0, end_ts=1100.0)
+    assert [r["detail"] for r in windowed] == ["github:bbista/openbird#1"]
+    assert windowed[0]["kind"] == "pr_merged"
+
+
+def test_spans_page_row_cap_and_composite_cursor(store):
+    span_ids = [
+        store.open_span(
+            epoch_id="e", start_ts=100.0 + i, end_ts=200.0 + i, bundle_id="b",
+            detail_tier=1, url_host=f"host{i}.example.com",
+        )
+        for i in range(3)
+    ]
+    page1 = store.spans_page(0.0, "", limit=2)
+    assert [s["span_id"] for s in page1] == span_ids[:2]
+    last = page1[-1]
+    page2 = store.spans_page(float(last["start_ts"]), str(last["span_id"]), limit=10)
+    assert [s["span_id"] for s in page2] == span_ids[2:]

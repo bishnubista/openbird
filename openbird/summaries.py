@@ -784,6 +784,26 @@ def _run_week_rollups(
             counts["weeks"] += 1
 
 
+def _run_entity_aggregation_step(store, *, now: float, settings, counts: dict) -> None:
+    """Entity-ledger step (Phase E2): deterministic, STRUCTURALLY no LLM.
+
+    ``run_entity_aggregation`` takes no provider argument at all — every
+    evidence row is a regex match over a stored, citable source. Runs in the
+    same gated routines pass (the caller already passed the battery/idle/
+    meeting gate); ``entity_ledger_enabled`` and a store without the v7 APIs
+    (fakes/tests) skip cleanly. Counts only — entity names/details never
+    reach routine output or logs."""
+    if not getattr(settings, "entity_ledger_enabled", True):
+        return
+    if not callable(getattr(store, "upsert_entity", None)):
+        return
+    from openbird.entities import run_entity_aggregation
+
+    agg = run_entity_aggregation(store, now=now, settings=settings)
+    for key in ("entities", "evidence", "loops_promoted", "loops_resolved"):
+        counts[key] = int(agg.get(key, 0))
+
+
 def _run_summary_indexing(store, *, settings, counts: dict) -> None:
     """Bounded indexing step: (re)embed stored summaries whose index rows are
     missing or stale. Runs in the same gated routines pass — embedding is
@@ -925,6 +945,10 @@ def run_block_summaries(
         "weeks": 0,
         "week_ungrounded": 0,
         "indexed": 0,
+        "entities": 0,
+        "evidence": 0,
+        "loops_promoted": 0,
+        "loops_resolved": 0,
         "classified": 0,
         "deferred_reason": None,
     }
@@ -996,6 +1020,10 @@ def run_block_summaries(
         store, provider, now=now, settings=settings, force=force, counts=counts
     )
     _run_summary_indexing(store, settings=settings, counts=counts)
+    # Entity ledger (Phase E2): the deterministic aggregation pass — runs
+    # AFTER the week/index steps so summaries stored this run are mined by the
+    # generation-time cursor in the same firing.
+    _run_entity_aggregation_step(store, now=now, settings=settings, counts=counts)
 
     # Taxonomy LLM fallback: bounded pass over identities with enough measured
     # active time but no resolved level from any source.
@@ -1027,13 +1055,18 @@ def run_block_summaries(
 
     logger.info(
         "block summaries run: summarized=%d skipped=%d ungrounded=%d weeks=%d "
-        "week_ungrounded=%d indexed=%d classified=%d",
+        "week_ungrounded=%d indexed=%d entities=%d evidence=%d "
+        "loops_promoted=%d loops_resolved=%d classified=%d",
         counts["summarized"],
         counts["skipped"],
         counts["ungrounded"],
         counts["weeks"],
         counts["week_ungrounded"],
         counts["indexed"],
+        counts["entities"],
+        counts["evidence"],
+        counts["loops_promoted"],
+        counts["loops_resolved"],
         counts["classified"],
     )
     return counts
@@ -1048,6 +1081,10 @@ def format_counts_line(counts: dict) -> str:
         f"weeks={counts.get('weeks', 0)} "
         f"week_ungrounded={counts.get('week_ungrounded', 0)} "
         f"indexed={counts.get('indexed', 0)} "
+        f"entities={counts.get('entities', 0)} "
+        f"evidence={counts.get('evidence', 0)} "
+        f"loops_promoted={counts.get('loops_promoted', 0)} "
+        f"loops_resolved={counts.get('loops_resolved', 0)} "
         f"classified={counts.get('classified', 0)} "
         f"deferred_reason={counts.get('deferred_reason') or 'none'}"
     )

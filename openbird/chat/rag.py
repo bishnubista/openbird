@@ -163,6 +163,44 @@ _QUERY_STOPWORDS = frozenset(
 )
 _QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_'-]*")
 
+# Completion/state intent (Phase E2): "did I finish X?", "is the X done?".
+# Deliberately verb-anchored and first-person so content questions stay on
+# their normal routes; ZERO entity-ledger matches for the extracted X always
+# FALL THROUGH to the existing routing (the intent regex must never eat
+# content queries like "did I finish reading that article"). Checked AFTER
+# window resolution: a windowed completion question answers from the ledger
+# FILTERED to that window; only no-window questions use global ledger state.
+_COMPLETION_VERB_RE = re.compile(
+    r"\b(?:did|have)\s+i\s+(?:finish(?:ed)?|complete(?:d)?|ship(?:ped)?|"
+    r"merge(?:d)?|close(?:d)?|wrap(?:ped)?\s+up|(?:been\s+)?done\s+with)\b"
+    r"\s*(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_COMPLETION_IS_RE = re.compile(
+    r"\bis\s+(?:the\s+)?(?P<rest>.+?)\s+(?:done|finished|shipped|complete)\b",
+    re.IGNORECASE,
+)
+# Extra glue stripped from the extracted entity phrase (beyond
+# _QUERY_STOPWORDS): temporal residue and completion-phrase leftovers.
+_COMPLETION_PHRASE_STOPWORDS = frozenset({"yet", "already", "project", "repo"})
+# Human-readable labels for evidence kinds in the deterministic answer.
+_EVIDENCE_KIND_LABELS = {
+    "pr_merged": "PR merged",
+    "ticket_closed": "ticket closed",
+    "shipped_language": "shipped-language mention",
+    "open_loop": "open loop",
+    "open_loop_resolved": "open loop resolved",
+}
+_COMPLETION_EVIDENCE_KINDS = frozenset(
+    {"pr_merged", "ticket_closed", "shipped_language", "open_loop_resolved"}
+)
+# Deterministic label for the typed last-seen ref in the honest line.
+_LAST_SEEN_EVENT_LABELS = {
+    "observation": "captured observation",
+    "span": "activity span",
+    "summary": "block summary",
+}
+
 _FACT_CONTENT_QUERY_RE = re.compile(
     r"\b("
     r"which|what|who"
@@ -715,6 +753,12 @@ class RAG:
                 raise TypeError(
                     "explicit day scope requires a store exposing time_range_text()"
                 )
+            # Completion intent (Phase E2), checked AFTER window resolution: an
+            # explicit window scopes the ledger answer to that period. Zero
+            # entity matches fall through to the normal scoped routing.
+            completion = self._try_entity_completion(query, window)
+            if completion is not None:
+                return completion
             deterministic = self.answer_deterministic_day_memory(query, window)
             if deterministic is not None:
                 return deterministic
@@ -742,6 +786,12 @@ class RAG:
         # the model honestly cites nothing and the grounding gate blanks it.
         intent_window = self._intent_window(query)
         if intent_window is not None and hasattr(self.store, "time_range_text"):
+            # Completion intent (Phase E2), AFTER window resolution: "did I
+            # finish X yesterday?" answers from the ledger filtered to the
+            # query-derived window; zero matches fall through.
+            completion = self._try_entity_completion(query, intent_window)
+            if completion is not None:
+                return completion
             is_synthesis = self._is_synthesis_query(query)
             route = "intent_window"
             if debug_level() is not None:
@@ -767,6 +817,13 @@ class RAG:
                         return week_answer
                 return self._answer_temporal(query, intent_window, route)
             return self._answer_scoped_specific(query, intent_window, route)
+
+        # Completion intent (Phase E2) with NO window (window resolution above
+        # produced none): only this no-window form consults GLOBAL ledger
+        # state. Zero entity matches fall through to semantic retrieval.
+        completion = self._try_entity_completion(query, None)
+        if completion is not None:
+            return completion
 
         hits = self.store.search(query, k=k, semantic=semantic)
         # Semantic-path summary merge (Phase E1): compact block/week narratives
@@ -1938,6 +1995,304 @@ class RAG:
 
         return render_day_memory_prose(payload)
 
+    # -- entity-ledger completion answers (Phase E2) ------------------------------
+
+    @staticmethod
+    def _completion_entity_phrase(query: str) -> str | None:
+        """Extract the asked-about entity phrase X, or ``None`` (no intent).
+
+        The residue after the completion verb is stripped of temporal words,
+        question glue (``_QUERY_STOPWORDS``), and punctuation; what remains is
+        matched casefolded against entity names + aliases. An empty residue
+        means no matchable X — the caller falls through.
+        """
+        match = _COMPLETION_VERB_RE.search(query) or _COMPLETION_IS_RE.search(query)
+        if match is None:
+            return None
+        rest = _TEMPORAL_RE.sub(" ", match.group("rest"))
+        tokens: list[str] = []
+        for raw in rest.split():
+            token = raw.strip("\"'?.!,:;()[]{}")
+            folded = token.casefold()
+            if not token:
+                continue
+            if folded in _QUERY_STOPWORDS or folded in _COMPLETION_PHRASE_STOPWORDS:
+                continue
+            tokens.append(token)
+        phrase = " ".join(tokens).strip()
+        return phrase or None
+
+    def _try_entity_completion(
+        self, query: str, window: tuple[float, float] | None
+    ) -> AnswerResult | None:
+        """Terminal ledger answer for a completion question, or ``None``.
+
+        ``None`` (fall through to the existing routing) when: the store has no
+        entity ledger, the query carries no completion intent, no entity
+        phrase could be extracted, or ZERO entities match — the ledger must
+        never eat content queries it has no facts about. Ambiguity (several
+        candidates, no single exact match) returns a deterministic candidate
+        list instead of guessing.
+        """
+        if not hasattr(self.store, "entities_matching"):
+            return None
+        phrase = self._completion_entity_phrase(query)
+        if phrase is None:
+            return None
+        candidates = self.store.entities_matching(phrase)  # type: ignore[attr-defined]
+        if not candidates:
+            return None
+
+        needle = phrase.casefold()
+
+        def _is_exact(entity: dict) -> bool:
+            keys = [str(entity.get("name") or "").casefold()]
+            keys += [str(a).casefold() for a in entity.get("aliases") or []]
+            return needle in keys
+
+        exact = [e for e in candidates if _is_exact(e)]
+        pool = exact or candidates
+        if len(pool) > 1:
+            names = ", ".join(sorted(str(e.get("name")) for e in pool))
+            return AnswerResult(
+                answer=(
+                    f"That matches {len(pool)} tracked entities: {names}. "
+                    "Ask about one of them specifically."
+                ),
+                citations=[],
+                derived_citations=[],
+                grounding="empty",
+                reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+            )
+        return self._answer_entity_completion(pool[0], window=window)
+
+    def _answer_entity_completion(
+        self, entity: dict, *, window: tuple[float, float] | None
+    ) -> AnswerResult:
+        """Deterministic completion answer from ledger evidence rows.
+
+        Terminal and provider-free (route ``local_deterministic``). Only
+        evidence rows JUST read from the store are citable (construction-side
+        validation, mirroring the day-fact pattern); a windowed question
+        filters BOTH the evidence lines and the last-activity lookup to the
+        window and never cites out-of-window evidence.
+        """
+        name = str(entity.get("name"))
+        rows = self.store.entity_evidence_for(  # type: ignore[attr-defined]
+            entity["id"], limit=50
+        )
+        if window is not None:
+            # The window filter runs IN the store query, BEFORE its
+            # newest-first LIMIT: an older window with real completion
+            # evidence must be found even when more than ``limit`` newer rows
+            # exist — filtering the global newest-50 fetch afterwards falsely
+            # reported "no activity in that period" (a grounding-rule
+            # violation). These same windowed rows feed BOTH the evidence
+            # lines and the last-activity selection below.
+            start_ts, end_ts = window
+            scoped = self.store.entity_evidence_for(  # type: ignore[attr-defined]
+                entity["id"], limit=50, start_ts=start_ts, end_ts=end_ts
+            )
+        else:
+            scoped = rows
+
+        completions = [
+            r for r in scoped if r["kind"] in _COMPLETION_EVIDENCE_KINDS
+        ]  # newest-first (store order)
+        # A loop is resolved iff a resolution row for the SAME detail has ts
+        # LATER than THAT loop row's ts — track the LATEST resolution per
+        # detail (a reopened loop, newer than the last resolution, must show
+        # as unresolved until a later completion resolves it again).
+        resolved_latest: dict[str, float] = {}
+        for r in [*rows, *scoped]:
+            if r["kind"] != "open_loop_resolved":
+                continue
+            detail = str(r["detail"])
+            resolved_latest[detail] = max(
+                resolved_latest.get(detail, float("-inf")), float(r["ts"])
+            )
+        unresolved = [
+            r
+            for r in scoped
+            if r["kind"] == "open_loop"
+            and not resolved_latest.get(str(r["detail"]), float("-inf"))
+            > float(r["ts"])
+        ]
+
+        citations: list[DerivedCitation] = []
+
+        def _cite(row: dict, label: str, snippet: str) -> int:
+            citations.append(
+                DerivedCitation(
+                    index=len(citations) + 1,
+                    source_id=str(row["id"]),
+                    type="entity_evidence",
+                    label=label,
+                    snippet=snippet,
+                    derived_from=(
+                        [str(row["source_id"])]
+                        if row["source_kind"] == "observation"
+                        else []
+                    ),
+                    derived_from_total=1,
+                    derived_from_refs=[
+                        {
+                            "source_kind": str(row["source_kind"]),
+                            "source_id": str(row["source_id"]),
+                        }
+                    ],
+                )
+            )
+            return len(citations)
+
+        parts: list[str] = []
+        if str(entity.get("status")) == "user_marked_done":
+            parts.append(f"You marked {name} as done.")
+
+        if completions:
+            lines: list[str] = []
+            for row in completions:
+                label = _EVIDENCE_KIND_LABELS.get(str(row["kind"]), str(row["kind"]))
+                detail = str(row.get("detail") or "")
+                suffix = f" ({detail})" if detail else ""
+                n = _cite(row, f"Entity evidence: {label}", f"{label}{suffix}")
+                lines.append(f"- {_date(row['ts'])}: {label}{suffix} [{n}]")
+            scope_phrase = " in that period" if window is not None else ""
+            parts.append(
+                f"Completion signals for {name}{scope_phrase}:\n" + "\n".join(lines)
+            )
+            for row in unresolved:
+                detail = str(row.get("detail") or "an item")
+                n = _cite(row, "Entity evidence: open loop", f"open loop ({detail})")
+                parts.append(
+                    f"Still unresolved: {detail} (seen {_date(row['ts'])}) [{n}]."
+                )
+            last_line = self._entity_last_activity_line(
+                entity, scoped, window=window, cite=_cite
+            )
+            if last_line:
+                parts.append(last_line)
+            answer = "\n".join(parts)
+        else:
+            no_signal = self._entity_no_signal_line(
+                entity, scoped, window=window, cite=_cite
+            )
+            for row in unresolved:
+                detail = str(row.get("detail") or "an item")
+                n = _cite(row, "Entity evidence: open loop", f"open loop ({detail})")
+                parts.append(
+                    f"Still unresolved: {detail} (seen {_date(row['ts'])}) [{n}]."
+                )
+            answer = "\n".join([no_signal, *parts]) if parts else no_signal
+
+        return AnswerResult(
+            answer=answer,
+            citations=[],
+            derived_citations=citations,
+            grounding="derived" if citations else "empty",
+            reasoning_route=_ROUTE_LOCAL_DETERMINISTIC,
+        )
+
+    def _entity_last_activity_line(
+        self,
+        entity: dict,
+        scoped: list[dict],
+        *,
+        window: tuple[float, float] | None,
+        cite,
+    ) -> str | None:
+        """The trailing 'Last activity' recency line (window-scoped when asked)."""
+        if window is not None:
+            if not scoped:
+                return None
+            latest = scoped[0]  # newest-first
+            n = cite(
+                latest,
+                "Entity evidence: last activity in period",
+                _EVIDENCE_KIND_LABELS.get(str(latest["kind"]), str(latest["kind"])),
+            )
+            return f"Last activity in the period: {_date(latest['ts'])} [{n}]."
+        return self._entity_global_last_activity_line(entity)
+
+    def _entity_global_last_activity_line(self, entity: dict) -> str | None:
+        """Global last-activity line citing the TYPED last-seen ref (or degraded)."""
+        last_ts = entity.get("last_ts")
+        if last_ts is None:
+            return None
+        kind = entity.get("last_seen_source_kind")
+        if kind is None:
+            # The referenced source was deleted (the trigger NULLed the pair):
+            # degrade honestly to the date-only line.
+            return (
+                f"Last activity was {_date(last_ts)}; the underlying event "
+                "was deleted."
+            )
+        return f"Last activity: {_date(last_ts)} ({_LAST_SEEN_EVENT_LABELS[kind]})."
+
+    def _entity_no_signal_line(
+        self,
+        entity: dict,
+        scoped: list[dict],
+        *,
+        window: tuple[float, float] | None,
+        cite,
+    ) -> str:
+        """The honest no-signal answer (wording is part of the E2 contract)."""
+        name = str(entity.get("name"))
+        if window is not None:
+            if not scoped:
+                return (
+                    f"No completion signal observed for {name} in that period; "
+                    "no activity in that period."
+                )
+            latest = scoped[0]  # newest-first: the period's last activity
+            label = _EVIDENCE_KIND_LABELS.get(str(latest["kind"]), str(latest["kind"]))
+            n = cite(latest, "Entity evidence: last activity in period", label)
+            return (
+                f"No completion signal observed for {name} in that period; "
+                f"last activity in the period was {_date(latest['ts'])}: "
+                f"{label} [{n}]."
+            )
+        last_ts = entity.get("last_ts")
+        kind = entity.get("last_seen_source_kind")
+        if last_ts is None:
+            return f"No completion signal observed for {name}."
+        if kind is None:
+            return (
+                f"No completion signal observed for {name}. Last activity was "
+                f"{_date(last_ts)}; the underlying event was deleted."
+            )
+        event = _LAST_SEEN_EVENT_LABELS[str(kind)]
+        n = self._cite_last_seen(entity, cite_list_len=None, cite=cite)
+        return (
+            f"No completion signal observed for {name}. Last activity was "
+            f"{_date(last_ts)}: {event} [{n}]."
+        )
+
+    @staticmethod
+    def _cite_last_seen(entity: dict, *, cite_list_len, cite) -> int:
+        """Cite the entity's typed last-seen ref via the shared cite closure.
+
+        Not an evidence row, so the citation's source_id is a synthetic
+        ``E<entity-id-prefix>-last-seen`` label while ``derived_from_refs``
+        carries the real typed ref — construction-side validated (the pair was
+        just read from the entities row and is trigger-maintained).
+        """
+        del cite_list_len
+        kind = str(entity.get("last_seen_source_kind"))
+        source_id = str(entity.get("last_seen_source_id"))
+        row = {
+            "id": f"E{str(entity.get('id'))[:12]}-last-seen",
+            "kind": "last_seen",
+            "source_kind": kind,
+            "source_id": source_id,
+        }
+        return cite(
+            row,
+            "Entity last activity",
+            _LAST_SEEN_EVENT_LABELS.get(kind, kind),
+        )
+
     def _answer_scoped_specific(
         self, query: str, window: tuple[float, float], route: str
     ) -> AnswerResult:
@@ -2546,6 +2901,11 @@ def _clock(ts: Any) -> str | None:
     if ts is None:
         return None
     return _dt.datetime.fromtimestamp(float(ts)).strftime("%H:%M")
+
+
+def _date(ts: Any) -> str:
+    """Local YYYY-MM-DD for deterministic entity-ledger answer lines."""
+    return _dt.datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d")
 
 
 def answer(

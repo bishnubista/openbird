@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -551,6 +551,170 @@ def _apply_v6_summary_index(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _apply_v7_entity_ledger(conn: sqlite3.Connection) -> None:
+    """Add the entity ledger + completion evidence (Phase E2).
+
+    Same idempotency contract as v4/v5/v6: ``schema.sql`` (with the FINAL
+    shape) has already run on this connection under the schema.sql-first
+    startup order, so every object here usually exists — every statement is
+    IF-NOT-EXISTS and stays textually in lockstep with schema.sql. Purely
+    additive: no table rebuilds, no drops.
+
+    Deliberately NO fts/vec indexing for entities or evidence: the ledger is
+    queried by exact casefolded name/alias match and answered deterministically
+    from rows — indexing would extend the API-enforced sweep contract for zero
+    recall benefit (see the schema.sql comment). Plain-table triggers therefore
+    fully cover evidence deletion.
+    """
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS entities (
+            id               TEXT PRIMARY KEY,
+            kind             TEXT NOT NULL CHECK (kind IN ('repo','domain','document','topic')),
+            name             TEXT NOT NULL,
+            aliases          TEXT NOT NULL DEFAULT '[]',
+            first_ts         REAL,
+            last_ts          REAL,
+            status           TEXT NOT NULL DEFAULT 'active'
+                             CHECK (status IN ('active','dormant','user_marked_done')),
+            last_seen_source_kind TEXT CHECK (last_seen_source_kind IN
+                             ('observation','span','summary')),
+            last_seen_source_id  TEXT,
+            CHECK ((last_seen_source_kind IS NULL) = (last_seen_source_id IS NULL)),
+            UNIQUE(kind, name)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS entity_evidence (
+            id          TEXT PRIMARY KEY,
+            entity_id   TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            ts          REAL NOT NULL,
+            kind        TEXT NOT NULL CHECK (kind IN ('pr_merged','ticket_closed',
+                        'shipped_language','open_loop','open_loop_resolved')),
+            source_kind TEXT NOT NULL CHECK (source_kind IN ('observation','span','summary')),
+            source_id   TEXT NOT NULL,
+            detail      TEXT NOT NULL DEFAULT '',
+            UNIQUE(entity_id, kind, source_kind, source_id, detail)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_entity_evidence_entity
+            ON entity_evidence(entity_id, ts)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_entity_evidence_source
+            ON entity_evidence(source_kind, source_id)
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_obs_exists
+        BEFORE INSERT ON entity_evidence
+        WHEN NEW.source_kind = 'observation'
+            AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'entity_evidence: unknown observation ref');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_span_exists
+        BEFORE INSERT ON entity_evidence
+        WHEN NEW.source_kind = 'span'
+            AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'entity_evidence: unknown span ref');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_summary_exists
+        BEFORE INSERT ON entity_evidence
+        WHEN NEW.source_kind = 'summary'
+            AND NOT EXISTS (SELECT 1 FROM block_summaries WHERE id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'entity_evidence: unknown summary ref');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_observation_delete
+        BEFORE DELETE ON observations
+        BEGIN
+            DELETE FROM entity_evidence
+            WHERE source_kind = 'observation' AND source_id = OLD.id;
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_span_delete
+        BEFORE DELETE ON activity_spans
+        BEGIN
+            DELETE FROM entity_evidence
+            WHERE source_kind = 'span' AND source_id = OLD.span_id;
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_summary_delete
+        BEFORE DELETE ON block_summaries
+        BEGIN
+            DELETE FROM entity_evidence
+            WHERE source_kind = 'summary' AND source_id = OLD.id;
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_exists_insert
+        BEFORE INSERT ON entities
+        WHEN NEW.last_seen_source_kind IS NOT NULL AND (
+            (NEW.last_seen_source_kind = 'observation'
+                AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.last_seen_source_id))
+            OR (NEW.last_seen_source_kind = 'span'
+                AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.last_seen_source_id))
+            OR (NEW.last_seen_source_kind = 'summary'
+                AND NOT EXISTS (SELECT 1 FROM block_summaries WHERE id = NEW.last_seen_source_id))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'entities: unknown last_seen source ref');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_exists_update
+        BEFORE UPDATE OF last_seen_source_kind, last_seen_source_id ON entities
+        WHEN NEW.last_seen_source_kind IS NOT NULL AND (
+            (NEW.last_seen_source_kind = 'observation'
+                AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.last_seen_source_id))
+            OR (NEW.last_seen_source_kind = 'span'
+                AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.last_seen_source_id))
+            OR (NEW.last_seen_source_kind = 'summary'
+                AND NOT EXISTS (SELECT 1 FROM block_summaries WHERE id = NEW.last_seen_source_id))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'entities: unknown last_seen source ref');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_observation_delete
+        BEFORE DELETE ON observations
+        BEGIN
+            UPDATE entities SET last_seen_source_kind = NULL, last_seen_source_id = NULL
+            WHERE last_seen_source_kind = 'observation' AND last_seen_source_id = OLD.id;
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_span_delete
+        BEFORE DELETE ON activity_spans
+        BEGIN
+            UPDATE entities SET last_seen_source_kind = NULL, last_seen_source_id = NULL
+            WHERE last_seen_source_kind = 'span' AND last_seen_source_id = OLD.span_id;
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_summary_delete
+        BEFORE DELETE ON block_summaries
+        BEGIN
+            UPDATE entities SET last_seen_source_kind = NULL, last_seen_source_id = NULL
+            WHERE last_seen_source_kind = 'summary' AND last_seen_source_id = OLD.id;
+        END
+        """,
+    ]
+    for statement in statements:
+        conn.execute(statement)
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
 # so migrations here only ever upgrade an existing DB from one version to the
 # next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
@@ -580,6 +744,11 @@ MIGRATIONS: list[Migration] = [
         version=6,
         description="add the parallel summary index (entries, FTS, cleanup triggers)",
         apply=_apply_v6_summary_index,
+    ),
+    Migration(
+        version=7,
+        description="add the entity ledger + completion evidence",
+        apply=_apply_v7_entity_ledger,
     ),
 ]
 

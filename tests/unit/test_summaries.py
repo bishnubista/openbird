@@ -331,6 +331,8 @@ def test_runner_summarizes_settled_block_with_typed_refs(store, mem_settings):
     assert counts == {
         "summarized": 0, "skipped": 1, "ungrounded": 0,
         "weeks": 0, "week_ungrounded": 0, "indexed": 0,
+        "entities": counts["entities"], "evidence": 0,
+        "loops_promoted": 0, "loops_resolved": 0,
         "classified": 0, "deferred_reason": None,
     }
     assert len(provider.calls) == calls_before
@@ -987,3 +989,65 @@ def test_week_recap_gate_blocks_generic_synthesis(mem_settings):
     assert not rag._is_week_recap("what should I follow up on?", (0.0, 7 * 86400.0))
     # Week word but a short window -> fall through to windowed retrieval.
     assert not rag._is_week_recap("my week so far", (0.0, 2 * 86400.0))
+
+
+# -- entity-ledger step (Phase E2) ------------------------------------------------
+
+
+def test_gate_deferral_skips_entity_aggregation(store, mem_settings, monkeypatch):
+    """A deferred pass (battery, stale sidecar) never runs the entity step —
+    no watermark is written and the entity counts stay zero."""
+    store.add_observation(
+        "work on github.com/bbista/openbird", source="capture", ts=1000.0
+    )
+    monkeypatch.setattr(summaries_mod, "_pmset_output", lambda: None)  # battery
+    counts = run_block_summaries(store, object(), now=2000.0, settings=mem_settings)
+    assert counts["deferred_reason"] == "battery_liveness_stale"
+    assert counts["entities"] == 0 and counts["evidence"] == 0
+    assert store.get_kv("entity_aggregation.obs_ts") is None
+    assert store.stats()["entities"] == 0
+
+
+def test_runner_entity_step_runs_after_indexing_and_counts(store, mem_settings):
+    store.add_observation(
+        "This pull request was merged", source="capture", ts=1000.0,
+        window="Merge PR #3 · bbista/openbird",
+        url="https://github.com/bbista/openbird/pull/3",
+    )
+    counts = run_block_summaries(
+        store, _CiteAllProvider(), now=5000.0, settings=mem_settings, force=True
+    )
+    assert counts["entities"] >= 1
+    assert counts["evidence"] == 1
+    assert store.get_kv("entity_aggregation.obs_ts") is not None
+    assert store.stats()["entity_evidence"] == 1
+
+
+def test_entity_ledger_disabled_setting_skips_step(store, tmp_path):
+    settings = Settings(data_dir=tmp_path, embed_dim=768,
+                        entity_ledger_enabled=False)
+    store.add_observation(
+        "work on github.com/bbista/openbird", source="capture", ts=1000.0
+    )
+    counts = run_block_summaries(
+        store, _CiteAllProvider(), now=5000.0, settings=settings, force=True
+    )
+    assert counts["entities"] == 0
+    assert store.get_kv("entity_aggregation.obs_ts") is None
+    assert store.stats()["entities"] == 0
+
+
+def test_counts_line_includes_entity_fields_and_stays_metadata_only(store, mem_settings):
+    secret_repo = "github.com/bbista/super-secret-project"
+    store.add_observation(
+        f"work on {secret_repo}", source="capture", ts=1000.0
+    )
+    counts = run_block_summaries(
+        store, _CiteAllProvider(), now=5000.0, settings=mem_settings, force=True
+    )
+    line = format_counts_line(counts)
+    assert "entities=" in line
+    assert "evidence=" in line
+    assert "loops_promoted=" in line
+    assert "loops_resolved=" in line
+    assert "super-secret-project" not in line

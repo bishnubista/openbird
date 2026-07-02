@@ -1048,3 +1048,329 @@ def test_semantic_path_without_summary_index_is_unchanged():
     assert result.grounding == "occurrence"
     assert [c.observation_id for c in result.citations] == ["o1"]
     assert result.derived_citations == []
+
+
+# -- entity-ledger completion routing (Phase E2) -----------------------------------
+
+
+class FakeEntityStore(FakeTemporalStore):
+    """FakeTemporalStore + the v7 entity-ledger read APIs."""
+
+    def __init__(self, rows=(), *, entities=None, evidence=None):
+        super().__init__(list(rows))
+        self._entities = list(entities or [])
+        self._evidence = dict(evidence or {})
+
+    def entities_matching(self, text):
+        needle = " ".join(str(text or "").split()).casefold()
+        if not needle:
+            return []
+        out = []
+        for entity in self._entities:
+            keys = [entity["name"].casefold()]
+            keys += [a.casefold() for a in entity.get("aliases") or []]
+            if any(k == needle or k in needle or needle in k for k in keys):
+                out.append(entity)
+        return out
+
+    def entity_evidence_for(self, entity_id, limit=50, *, start_ts=None, end_ts=None):
+        rows = self._evidence.get(entity_id, [])
+        if start_ts is not None:
+            rows = [r for r in rows if float(r["ts"]) >= start_ts]
+        if end_ts is not None:
+            rows = [r for r in rows if float(r["ts"]) <= end_ts]
+        rows = sorted(rows, key=lambda r: (-float(r["ts"]), r["id"]))
+        return rows[:limit]
+
+
+def _entity(
+    *, id_="e1", name="bbista/openbird", aliases=("openbird",), status="active",
+    last_ts=NOW - _DAY, last_seen=("observation", "obs-last"),
+):
+    kind, source_id = last_seen if last_seen else (None, None)
+    return {
+        "id": id_,
+        "kind": "repo",
+        "name": name,
+        "aliases": list(aliases),
+        "first_ts": NOW - 10 * _DAY,
+        "last_ts": last_ts,
+        "status": status,
+        "last_seen_source_kind": kind,
+        "last_seen_source_id": source_id,
+    }
+
+
+def _ev(id_, *, ts, kind, detail, source_kind="observation", source_id=None):
+    return {
+        "id": id_,
+        "entity_id": "e1",
+        "ts": ts,
+        "kind": kind,
+        "source_kind": source_kind,
+        "source_id": source_id or f"src-{id_}",
+        "detail": detail,
+    }
+
+
+def _entity_rag(store) -> RAG:
+    completer = CiteAllCompleter()
+    rag = RAG(store, completer)
+    rag._now = lambda: NOW
+    return rag, completer
+
+
+def test_completion_phrase_extraction():
+    extract = RAG._completion_entity_phrase
+    assert extract("did I finish openbird?") == "openbird"
+    assert extract("Have I shipped the openbird repo?") == "openbird"
+    assert extract("is the entity ledger done?") == "entity ledger"
+    assert extract("did I finish openbird yesterday?") == "openbird"
+    assert extract("did I wrap up bbista/openbird?") == "bbista/openbird"
+    # Non-completion queries carry no phrase at all.
+    assert extract("what did I do yesterday?") is None
+    assert extract("summarize my day") is None
+    # A content-shaped completion query still extracts a phrase — the ZERO
+    # entity match is what makes it fall through, not the regex.
+    assert extract("did I finish reading that article?") == "reading article"
+
+
+def test_zero_entity_match_falls_through_to_semantic():
+    store = FakeEntityStore(entities=[_entity()])
+    rag, completer = _entity_rag(store)
+    result = rag.answer("did I finish the quantum-widget spike?")
+    # No ledger claim: the query fell through to the semantic path.
+    assert store.search_calls == 1
+    assert "quantum-widget" not in " ".join(
+        c.snippet for c in result.derived_citations
+    )
+
+
+def test_completion_global_answer_cites_evidence_and_last_seen():
+    evidence = {
+        "e1": [
+            _ev("ev1", ts=NOW - 2 * _DAY, kind="pr_merged",
+                detail="github:bbista/openbird#12"),
+            _ev("ev2", ts=NOW - 5 * _DAY, kind="open_loop",
+                detail="github:bbista/openbird#9"),
+        ]
+    }
+    store = FakeEntityStore(entities=[_entity()], evidence=evidence)
+    rag, completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+
+    assert completer.calls == 0  # terminal deterministic: zero provider calls
+    assert result.reasoning_route == "local_deterministic"
+    assert result.grounding == "derived"
+    assert result.grounded is True
+    assert store.search_calls == 0
+
+    assert "Completion signals for bbista/openbird" in result.answer
+    assert "PR merged (github:bbista/openbird#12) [1]" in result.answer
+    assert "Still unresolved: github:bbista/openbird#9" in result.answer
+    assert "Last activity:" in result.answer
+
+    first = result.derived_citations[0]
+    assert first.type == "entity_evidence"
+    assert first.source_id == "ev1"
+    assert first.derived_from == ["src-ev1"]
+    assert first.derived_from_refs == [
+        {"source_kind": "observation", "source_id": "src-ev1"}
+    ]
+
+
+def test_completion_no_signal_wording_is_exact():
+    store = FakeEntityStore(entities=[_entity(aliases=("openbird",))])
+    rag, completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    date = _dt.datetime.fromtimestamp(NOW - _DAY).strftime("%Y-%m-%d")
+    assert result.answer == (
+        "No completion signal observed for bbista/openbird. "
+        f"Last activity was {date}: captured observation [1]."
+    )
+    assert completer.calls == 0
+    assert result.reasoning_route == "local_deterministic"
+    assert result.grounding == "derived"
+    (citation,) = result.derived_citations
+    assert citation.type == "entity_evidence"
+    assert citation.derived_from_refs == [
+        {"source_kind": "observation", "source_id": "obs-last"}
+    ]
+
+
+def test_completion_no_signal_degrades_when_last_event_deleted():
+    store = FakeEntityStore(entities=[_entity(last_seen=None)])
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    date = _dt.datetime.fromtimestamp(NOW - _DAY).strftime("%Y-%m-%d")
+    assert result.answer == (
+        "No completion signal observed for bbista/openbird. "
+        f"Last activity was {date}; the underlying event was deleted."
+    )
+    assert result.derived_citations == []
+    assert result.grounding == "empty"
+
+
+def test_completion_windowed_filters_evidence_and_wording():
+    evidence = {
+        "e1": [
+            # Out of yesterday's window: must NOT be cited for a windowed ask.
+            _ev("ev-old", ts=NOW - 10 * _DAY, kind="pr_merged",
+                detail="github:bbista/openbird#3"),
+            # Inside yesterday's window: the period's last activity.
+            _ev("ev-loop", ts=NOW - _DAY, kind="open_loop",
+                detail="github:bbista/openbird#9"),
+        ]
+    }
+    store = FakeEntityStore(entities=[_entity()], evidence=evidence)
+    rag, completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird yesterday?")
+    date = _dt.datetime.fromtimestamp(NOW - _DAY).strftime("%Y-%m-%d")
+    assert result.answer.startswith(
+        "No completion signal observed for bbista/openbird in that period; "
+        f"last activity in the period was {date}: open loop [1]."
+    )
+    cited = {c.source_id for c in result.derived_citations}
+    assert "ev-old" not in cited  # never cite out-of-window evidence
+    assert completer.calls == 0
+
+
+def test_completion_windowed_no_activity_wording():
+    store = FakeEntityStore(entities=[_entity()], evidence={"e1": []})
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird yesterday?")
+    assert result.answer == (
+        "No completion signal observed for bbista/openbird in that period; "
+        "no activity in that period."
+    )
+    assert result.grounding == "empty"
+
+
+def test_completion_windowed_completion_scopes_lines():
+    evidence = {
+        "e1": [
+            _ev("ev-in", ts=NOW - _DAY, kind="pr_merged",
+                detail="github:bbista/openbird#12"),
+            _ev("ev-old", ts=NOW - 10 * _DAY, kind="pr_merged",
+                detail="github:bbista/openbird#3"),
+        ]
+    }
+    store = FakeEntityStore(entities=[_entity()], evidence=evidence)
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I merge openbird yesterday?")
+    assert "in that period" in result.answer
+    assert "github:bbista/openbird#12" in result.answer
+    assert "github:bbista/openbird#3" not in result.answer
+    assert {c.source_id for c in result.derived_citations} >= {"ev-in"}
+    assert "ev-old" not in {c.source_id for c in result.derived_citations}
+
+
+def test_completion_ambiguity_returns_candidate_list_never_guesses():
+    entities = [
+        _entity(id_="e1", name="bbista/openbird", aliases=()),
+        _entity(id_="e2", name="acme/openbird", aliases=()),
+    ]
+    store = FakeEntityStore(entities=entities)
+    rag, completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    assert "matches 2 tracked entities" in result.answer
+    assert "acme/openbird" in result.answer and "bbista/openbird" in result.answer
+    assert result.derived_citations == []
+    assert result.reasoning_route == "local_deterministic"
+    assert completer.calls == 0
+
+
+def test_completion_exact_match_wins_over_substring():
+    entities = [
+        _entity(id_="e1", name="bbista/openbird", aliases=("openbird",)),
+        _entity(id_="e2", name="acme/openbird-tools", aliases=()),
+    ]
+    store = FakeEntityStore(entities=entities)
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    # The exact alias match wins; no ambiguity list.
+    assert "matches 2 tracked entities" not in result.answer
+    assert "bbista/openbird" in result.answer
+
+
+def test_completion_explicit_window_param_scopes_ledger():
+    evidence = {
+        "e1": [
+            _ev("ev-old", ts=NOW - 10 * _DAY, kind="pr_merged",
+                detail="github:bbista/openbird#3"),
+        ]
+    }
+    store = FakeEntityStore(entities=[_entity()], evidence=evidence)
+    rag, completer = _entity_rag(store)
+    day_start = NOW - _DAY
+    result = rag.answer("did I finish openbird?", window=(day_start, NOW))
+    assert "in that period" in result.answer
+    assert "github:bbista/openbird#3" not in result.answer
+    assert completer.calls == 0
+
+
+def test_completion_user_marked_done_is_reported():
+    store = FakeEntityStore(entities=[_entity(status="user_marked_done")])
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    # The user's mark is reported alongside — never instead of — the honest
+    # evidence-derived line.
+    assert "You marked bbista/openbird as done." in result.answer
+    assert "No completion signal observed for bbista/openbird" in result.answer
+
+
+def test_completion_user_marked_done_prefixed_with_evidence():
+    evidence = {
+        "e1": [
+            _ev("ev1", ts=NOW - 2 * _DAY, kind="pr_merged",
+                detail="github:bbista/openbird#12"),
+        ]
+    }
+    store = FakeEntityStore(
+        entities=[_entity(status="user_marked_done")], evidence=evidence
+    )
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    assert result.answer.startswith("You marked bbista/openbird as done.")
+
+
+def test_store_without_entity_ledger_is_untouched():
+    store = FakeTemporalStore([])  # no entities_matching at all
+    rag = RAG(store, CiteAllCompleter())
+    rag._now = lambda: NOW
+    result = rag.answer("did I finish openbird?")
+    assert store.search_calls == 1  # plain semantic fall-through
+    assert isinstance(result.answer, str)
+
+
+def test_completion_reopened_loop_shows_unresolved_until_later_resolution():
+    """REGRESSION (Codex finding 4, answer path): per-loop timestamps — a
+    reopened loop (newer than the last resolution) is unresolved until a
+    LATER resolution exists."""
+    detail = "github:bbista/openbird#9"
+    base = [
+        _ev("ev-loop1", ts=NOW - 5 * _DAY, kind="open_loop", detail=detail),
+        _ev("ev-merge1", ts=NOW - 4 * _DAY, kind="pr_merged", detail=detail),
+        _ev("ev-res1", ts=NOW - 4 * _DAY, kind="open_loop_resolved",
+            detail=detail),
+        _ev("ev-loop2", ts=NOW - 2 * _DAY, kind="open_loop", detail=detail),
+    ]
+    store = FakeEntityStore(entities=[_entity()], evidence={"e1": list(base)})
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    # The REOPENED loop is unresolved (the old resolution predates it)…
+    assert "Still unresolved: github:bbista/openbird#9" in result.answer
+    unresolved_cites = {c.source_id for c in result.derived_citations}
+    assert "ev-loop2" in unresolved_cites
+    # …and the original (resolved) loop is NOT re-listed as unresolved.
+    assert "ev-loop1" not in unresolved_cites
+
+    # A LATER resolution clears it.
+    later = base + [
+        _ev("ev-res2", ts=NOW - 1 * _DAY, kind="open_loop_resolved",
+            detail=detail),
+    ]
+    store = FakeEntityStore(entities=[_entity()], evidence={"e1": later})
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    assert "Still unresolved" not in result.answer

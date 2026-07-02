@@ -1304,7 +1304,8 @@ def test_block_summaries_template_run_returns_counts_only(monkeypatch):
     assert seen["now"] == 123.0
     assert out == (
         "summarized=3 skipped=1 ungrounded=0 weeks=0 week_ungrounded=0 "
-        "indexed=0 classified=2 deferred_reason=none"
+        "indexed=0 entities=0 evidence=0 loops_promoted=0 loops_resolved=0 "
+        "classified=2 deferred_reason=none"
     )
 
 
