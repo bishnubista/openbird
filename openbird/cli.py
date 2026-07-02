@@ -1811,7 +1811,7 @@ def _render_preflight(report: dict) -> None:
         "privacy",
         "info",
         f"allowlist={len(priv['allowlist'])} blocklist={len(priv['blocklist'])} "
-        f"ocr={priv['ocr_enabled']}",
+        f"ocr={priv['ocr_enabled']} ocr_apps={priv.get('ocr_apps', 0)}",
     )
 
     mac = report["macos"]

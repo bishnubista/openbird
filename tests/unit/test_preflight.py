@@ -684,18 +684,23 @@ def test_run_preflight_reflects_privacy_config(tmp_path):
     s = Settings(
         data_dir=tmp_path,
         embed_dim=768,
-        allowlist=["com.apple.Safari"],
+        allowlist=["com.apple.Safari", "com.microsoft.teams2"],
         blocklist=["com.apple.Terminal"],
-        ocr_enabled=True,
+        capture_ocr_apps=["com.microsoft.teams2"],
     )
     report = run_preflight(
         s,
         http_get=make_http_get(),
         db_opener=plaintext_handle_opener(),
     )
-    assert report["privacy"]["allowlist"] == ["com.apple.Safari"]
+    assert report["privacy"]["allowlist"] == [
+        "com.apple.Safari", "com.microsoft.teams2"
+    ]
     assert report["privacy"]["blocklist"] == ["com.apple.Terminal"]
+    # ocr_enabled is DERIVED truth now: on iff apps are opted in (the
+    # vestigial Settings.ocr_enabled flag was retired in Phase C2).
     assert report["privacy"]["ocr_enabled"] is True
+    assert report["privacy"]["ocr_apps"] == 1
 
 
 def test_run_preflight_reports_parakeet_meeting_backend(monkeypatch, settings):

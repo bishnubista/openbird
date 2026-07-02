@@ -826,7 +826,10 @@ def run_preflight(
         "privacy": {
             "allowlist": list(settings.allowlist),
             "blocklist": list(settings.blocklist),
-            "ocr_enabled": bool(settings.ocr_enabled),
+            # OCR is on iff apps are opted in (Phase C2 retired the vestigial
+            # ocr_enabled dataclass flag; the list IS the source of truth).
+            "ocr_enabled": bool(settings.capture_ocr_apps),
+            "ocr_apps": len(settings.capture_ocr_apps),
         },
         "macos": macos,
         "meetings": {

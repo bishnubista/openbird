@@ -215,6 +215,89 @@ def test_read_gui_allowlist_none_when_only_invalid_entries(monkeypatch):
     assert _read_gui_allowlist() is None
 
 
+# --------------------------------------------------------------------------- #
+# capture_ocr_apps (Phase C2): env + GUI-prefs bridge + interval clamp        #
+# --------------------------------------------------------------------------- #
+
+
+def test_capture_ocr_apps_coerced_from_env(monkeypatch):
+    monkeypatch.setenv("OPENBIRD_CAPTURE_OCR_APPS", "com.microsoft.teams2, us.zoom.xos")
+    assert get_settings().capture_ocr_apps == ["com.microsoft.teams2", "us.zoom.xos"]
+
+
+def test_capture_ocr_apps_default_empty(monkeypatch):
+    monkeypatch.delenv("OPENBIRD_CAPTURE_OCR_APPS", raising=False)
+    assert get_settings().capture_ocr_apps == []
+
+
+def test_capture_ocr_apps_from_gui_prefs_when_env_unset(monkeypatch):
+    monkeypatch.delenv("OPENBIRD_CAPTURE_OCR_APPS", raising=False)
+    monkeypatch.setattr(
+        "openbird.config._read_gui_ocr_apps", lambda: ["com.microsoft.teams2"]
+    )
+    assert get_settings().capture_ocr_apps == ["com.microsoft.teams2"]
+
+
+def test_env_capture_ocr_apps_overrides_gui_prefs(monkeypatch):
+    monkeypatch.setenv("OPENBIRD_CAPTURE_OCR_APPS", "us.zoom.xos")
+    monkeypatch.setattr(
+        "openbird.config._read_gui_ocr_apps",
+        lambda: pytest.fail("GUI prefs must not be consulted when env is set"),
+    )
+    assert get_settings().capture_ocr_apps == ["us.zoom.xos"]
+
+
+def test_empty_env_capture_ocr_apps_beats_gui_prefs(monkeypatch):
+    # Explicit clear: OPENBIRD_CAPTURE_OCR_APPS="" turns OCR fully off even
+    # when the app has apps saved.
+    monkeypatch.setenv("OPENBIRD_CAPTURE_OCR_APPS", "")
+    monkeypatch.setattr(
+        "openbird.config._read_gui_ocr_apps", lambda: ["com.microsoft.teams2"]
+    )
+    assert get_settings().capture_ocr_apps == []
+
+
+def test_read_gui_string_list_reads_the_ocr_key(monkeypatch):
+    # The conftest autouse fixture stubs the _read_gui_ocr_apps WRAPPER, so
+    # exercise the generalized reader directly with the OCR key.
+    from openbird.config import _GUI_OCR_APPS_KEY, _read_gui_string_list
+
+    payload = plistlib.dumps(
+        {
+            "openbird.captureAllowlist": ["com.apple.Safari"],
+            "openbird.captureOcrApps": [" com.microsoft.teams2 ", "com.microsoft.teams2"],
+        }
+    )
+    _fake_defaults(monkeypatch, stdout=payload)
+    # Generalized reader: same normalize/de-dupe mechanics, its own key (the
+    # allowlist entry in the same domain is NOT picked up).
+    assert _read_gui_string_list(_GUI_OCR_APPS_KEY) == ["com.microsoft.teams2"]
+
+
+def test_capture_ocr_min_interval_clamped_to_floor(tmp_path):
+    s = Settings(data_dir=tmp_path, capture_ocr_min_interval_seconds=1.0)
+    assert s.capture_ocr_min_interval_seconds == 10.0
+
+
+def test_capture_ocr_min_interval_env_nan_tolerant(monkeypatch):
+    # Clamp-never-reject: a typo'd env value must not prevent settings
+    # construction; it falls back to the default (30s).
+    monkeypatch.setenv("OPENBIRD_CAPTURE_OCR_MIN_INTERVAL_SECONDS", "not-a-number")
+    assert get_settings().capture_ocr_min_interval_seconds == 30.0
+
+
+def test_capture_ocr_min_interval_valid_env(monkeypatch):
+    monkeypatch.setenv("OPENBIRD_CAPTURE_OCR_MIN_INTERVAL_SECONDS", "45")
+    assert get_settings().capture_ocr_min_interval_seconds == 45.0
+
+
+def test_vestigial_ocr_enabled_field_is_retired(tmp_path):
+    # Phase C2 removed the never-wired Settings.ocr_enabled flag; the opt-in
+    # list is the single source of truth (preflight derives ocr_enabled from it).
+    s = Settings(data_dir=tmp_path)
+    assert not hasattr(s, "ocr_enabled")
+
+
 def test_session_gap_seconds_default_and_valid(tmp_path):
     assert Settings(data_dir=tmp_path).session_gap_seconds == 300.0
     assert Settings(data_dir=tmp_path, session_gap_seconds=0).session_gap_seconds == 0.0
