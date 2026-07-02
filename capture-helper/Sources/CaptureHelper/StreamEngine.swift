@@ -139,10 +139,20 @@ final class StreamEngine {
     private var tickTimer: Timer?
     /// Mic run-state monitor (Phase C1); retained for the process lifetime.
     private var micMonitor: MicMonitor?
+    /// Main-thread mirror of the aggregate mic bit (flipped in the MicMonitor
+    /// callback); snapshotted into the OCR runtime at dispatch time so the
+    /// walk queue never reads main-confined state.
+    private var micHot = false
+    /// OCR fallback opt-in (Phase C2): the per-app set from `--ocr-apps` and
+    /// its min-interval. Runtime constructed once in run() when non-empty.
+    private let ocrApps: Set<String>
+    private let ocrMinInterval: Double
+    private var ocrRuntime: OcrRuntime?
 
     init(
         allow: Set<String>, block: Set<String>, pauseFile: String?,
-        captureUrls: Bool, config: SchedulerConfig
+        captureUrls: Bool, config: SchedulerConfig,
+        ocrApps: Set<String> = [], ocrMinInterval: Double = 30.0
     ) {
         self.allow = allow
         self.block = block
@@ -150,6 +160,8 @@ final class StreamEngine {
         self.captureUrls = captureUrls
         self.idleTick = config.idleTick
         self.scheduler = Scheduler(config: config)
+        self.ocrApps = ocrApps
+        self.ocrMinInterval = ocrMinInterval
     }
 
     /// Monotonic seconds (mach absolute time) — the Scheduler's only clock.
@@ -219,11 +231,31 @@ final class StreamEngine {
         let mic = MicMonitor(
             hal: CoreAudioMicHAL(),
             onFlip: { [weak self] hot in
+                // Main-thread by MicMonitor contract: mirror the bit for the
+                // OCR gate's mic-hot suppression, then emit the edge event.
+                self?.micHot = hot
                 self?.emitSystem(hot ? "mic_started" : "mic_stopped")
             },
             diag: { diag($0) })
         mic.start()
         micMonitor = mic
+
+        // OCR fallback runtime (Phase C2): constructed once, only when the
+        // user opted apps in. The first tccGranted() reading emits the startup
+        // `ocr_available` / `ocr_unavailable` system event (metadata only);
+        // later flips re-emit at OCR-attempt time. Preflight only — the
+        // helper NEVER triggers the Screen Recording prompt (the grant flow
+        // lives in the mac-app).
+        if !ocrApps.isEmpty {
+            let runtime = OcrRuntime(
+                apps: ocrApps,
+                minInterval: ocrMinInterval,
+                hal: makeOcrHAL(),
+                tccPreflight: { CGPreflightScreenCaptureAccess() },
+                emitSystem: { [weak self] kind in self?.emitSystem(kind) })
+            _ = runtime.tccGranted()
+            ocrRuntime = runtime
+        }
 
         installWorkspaceObservers()
         if let front = NSWorkspace.shared.frontmostApplication {
@@ -375,6 +407,10 @@ final class StreamEngine {
         if capturePaused(pauseFile) { return }
         if walkInFlight { return }  // next tick backstops the dropped trigger
         walkInFlight = true
+        // Snapshot the main-confined mic bit into the runtime NOW (no walk is
+        // in flight, and the async dispatch below is the happens-before edge),
+        // so the walk queue never touches main-thread state.
+        ocrRuntime?.micHot = micHot
         let trigger = kind.rawValue
         walkQueue.async { [weak self] in
             guard let self else { return }
@@ -383,7 +419,8 @@ final class StreamEngine {
             captureFrontmost(
                 allow: self.allow, block: self.block, pauseFile: self.pauseFile,
                 captureUrls: self.captureUrls, trigger: trigger,
-                emitter: { self.emitter.emit($0) })
+                emitter: { self.emitter.emit($0) },
+                ocr: self.ocrRuntime)
             ProcessInfo.processInfo.endActivity(activity)
             DispatchQueue.main.async { self.walkInFlight = false }
         }

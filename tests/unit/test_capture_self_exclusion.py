@@ -68,6 +68,26 @@ def test_self_bundle_root_constant_is_lowercased():
     assert redact._SELF_BUNDLE_ROOT == "ai.openbird.openbird"
 
 
+def test_self_bundle_root_swift_python_parity():
+    """The Swift helper's `selfBundleRoot` MUST equal `redact._SELF_BUNDLE_ROOT`.
+
+    Phase C2 added a helper-side self-capture gate (before the allowlist/AX/
+    SCK, so OpenBird's own UI is never read or screenshotted at the source).
+    Two-copy parity, same spirit as the dangerous-list tri-source test — there
+    is no JSON resource here, just the one constant on each side.
+    """
+    import re
+    from pathlib import Path
+
+    main_swift = (
+        Path(__file__).resolve().parents[2]
+        / "capture-helper" / "Sources" / "CaptureHelper" / "main.swift"
+    ).read_text()
+    m = re.search(r'let\s+selfBundleRoot\s*=\s*"([^"]+)"', main_swift)
+    assert m, "could not locate selfBundleRoot literal in main.swift"
+    assert m.group(1) == redact._SELF_BUNDLE_ROOT
+
+
 def test_is_self_capture_rejects_substring_regression_guard():
     # The load-bearing guard: a substring match would delete ~1,459 legitimate
     # Chrome rows and ~1,290 Ghostty rows whose text/ids contain "openbird".

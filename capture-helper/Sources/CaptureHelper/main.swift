@@ -27,7 +27,13 @@ private enum Limits {
     static let maxDepth = 40            // max AX subtree depth to descend
     static let maxNodes = 5_000         // max AX nodes to visit per capture
     static let maxTextBytes = 1_000_000 // cap aggregated text (daemon also caps)
-    static let deadlineSeconds = 2.0    // wall-clock budget per capture
+    static let deadlineSeconds = 2.0    // wall-clock budget for the AX walk
+    // Phase C2: COMBINED per-capture wall budget. AX walk + optional OCR
+    // fallback together may never exceed this, so one capture can never occupy
+    // the walk queue for ~5s and starve triggers while heartbeats keep
+    // liveness looking healthy. OCR gets min(ocrMaxSeconds, remaining).
+    static let combinedDeadlineSeconds = 4.0
+    static let ocrMaxSeconds = 2.5
 }
 
 // MARK: - Non-content diagnostics (stderr only)
@@ -102,11 +108,17 @@ func ensureAccessibilityTrust(prompt: Bool) -> Bool {
 
 private struct GrantReport: Encodable {
     let accessibility: String
+    // Phase C2: the CAPTURE helper owns ScreenCaptureKit now, so it reports
+    // the Screen Recording grant (preflight.py routes this capability here;
+    // microphone/system-audio stay on the audio helper). Preflight-only —
+    // CGPreflightScreenCaptureAccess never prompts.
+    let screen_recording: String
 }
 
 private func emitGrantReport() {
     let report = GrantReport(
-        accessibility: ensureAccessibilityTrust(prompt: false) ? "passed" : "failed"
+        accessibility: ensureAccessibilityTrust(prompt: false) ? "passed" : "failed",
+        screen_recording: CGPreflightScreenCaptureAccess() ? "passed" : "failed"
     )
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.withoutEscapingSlashes]
@@ -303,35 +315,9 @@ private func collectText(
 
 // MARK: - JSON emission
 
-/// One capture record. Encoded to a single JSON line on stdout.
-///
-/// `type`/`trigger` are stream-mode additions: nil in one-shot mode, so the
-/// synthesized encoder omits them and old-daemon output stays byte-compatible
-/// (the Python side treats a line without `type` as a capture frame).
-struct CaptureEvent: Encodable {
-    let type: String?
-    let trigger: String?
-    let app: String?
-    let window: String?
-    let url: String?
-    let text: String
-    let ts: Double
-    let incognito: Bool
-
-    init(
-        app: String?, window: String?, url: String?, text: String,
-        ts: Double, incognito: Bool, trigger: String? = nil
-    ) {
-        self.type = trigger == nil ? nil : "capture"
-        self.trigger = trigger
-        self.app = app
-        self.window = window
-        self.url = url
-        self.text = text
-        self.ts = ts
-        self.incognito = incognito
-    }
-}
+// NOTE: `CaptureEvent` now lives in CaptureHelperCore (CaptureEvent.swift) so
+// the raw wire shape — one-shot: no type/trigger/ocr keys; stream AX:
+// type+trigger, no ocr; OCR frame: ocr:true — is pinned by `swift test`.
 
 /// Emit a capture event as a single JSON line on STDOUT (the only content sink).
 func emit(_ event: CaptureEvent) {
@@ -381,6 +367,84 @@ private func globMatch(_ pattern: String, _ text: String) -> Bool {
 private func anyMatch(_ bundleId: String, _ entries: Set<String>) -> Bool {
     for e in entries where bundleMatches(bundleId, e) { return true }
     return false
+}
+
+// OpenBird's own bundle-id root (app + bundled helpers). MUST mirror the
+// Python `redact._SELF_BUNDLE_ROOT` — a two-copy parity test
+// (tests/unit/test_capture_self_exclusion.py) parses THIS literal and fails
+// if the two drift. Matching is EXACT or dotted-child, NEVER substring: the
+// literal "openbird" appears in legitimate Chrome/terminal rows
+// (github.com/…/openbird), so a substring match would delete real dev signal.
+private let selfBundleRoot = "ai.openbird.openbird"
+
+/// True iff `bundleId` is OpenBird's own process (the app or a bundled
+/// helper): exact root or dotted child, case-insensitively. Mirrors
+/// `redact._is_self_capture`. Runs BEFORE the allowlist gate / any AX element
+/// creation / SCK, so OpenBird's own UI is never read — with OCR in play the
+/// old Python-only backstop would otherwise permit a SCREENSHOT of our own UI.
+func isSelfCapture(_ bundleId: String?) -> Bool {
+    guard let id = bundleId?.lowercased() else { return false }
+    return id == selfBundleRoot || id.hasPrefix(selfBundleRoot + ".")
+}
+
+// MARK: - OCR fallback runtime (Phase C2, stream mode only)
+
+/// Everything one OCR fallback decision needs, constructed ONCE by the
+/// StreamEngine when `--ocr-apps` is non-empty. One-shot mode never builds
+/// one (`ocr: nil` keeps that path byte-identical): the per-app throttle
+/// needs process-lifetime state, and a one-shot helper is a fresh process
+/// every spawn — helper-local throttle state cannot exist there (the same
+/// stream-only precedent as MicMonitor/AFK).
+///
+/// Threading: `gate`/`lastTccState` are mutated on the walk queue ONLY
+/// (captures run one-at-a-time there); `micHot` is WRITTEN on the main thread
+/// at dispatch time — while no walk is in flight — and READ on the walk queue
+/// (the dispatch itself is the happens-before edge). `emitSystem` is the
+/// locked StreamEmitter (thread-safe).
+final class OcrRuntime {
+    /// The opt-in set (`--ocr-apps`), matched via the same `bundleMatches`
+    /// grammar as the allowlist. Opted-in ⊆ allowlisted holds by construction:
+    /// this branch is only reachable after `contentAllowed` returned true.
+    let apps: Set<String>
+    /// Pure gate/throttle state machine (CaptureHelperCore). Walk-queue-confined.
+    var gate: OcrGate
+    /// Cancellable async-in-sync bridge over the HAL (CaptureHelperCore).
+    let bridge: OcrBridge
+    /// `CGPreflightScreenCaptureAccess` (injected closure). NEVER prompts.
+    private let tccPreflight: () -> Bool
+    /// Locked stream emitter for `ocr_available`/`ocr_unavailable` system events.
+    private let emitSystem: (String) -> Void
+    /// Mic-hot snapshot for the current capture (see threading note above).
+    var micHot = false
+    /// Last TCC state we told the daemon about (walk-queue-confined after the
+    /// startup emission; used to re-emit only on an observed flip).
+    private var lastTccState: Bool?
+
+    init(
+        apps: Set<String>,
+        minInterval: Double,
+        hal: OcrHAL,
+        tccPreflight: @escaping () -> Bool,
+        emitSystem: @escaping (String) -> Void
+    ) {
+        self.apps = apps
+        self.gate = OcrGate(minInterval: minInterval)
+        self.bridge = OcrBridge(hal: hal)
+        self.tccPreflight = tccPreflight
+        self.emitSystem = emitSystem
+    }
+
+    /// Preflight the Screen Recording grant, emitting `ocr_available` /
+    /// `ocr_unavailable` on the FIRST reading (startup) and on every observed
+    /// flip afterwards (grant revoked/restored mid-run) — metadata only.
+    func tccGranted() -> Bool {
+        let granted = tccPreflight()
+        if granted != lastTccState {
+            lastTccState = granted
+            emitSystem(granted ? "ocr_available" : "ocr_unavailable")
+        }
+        return granted
+    }
 }
 
 // SINGLE SOURCE OF TRUTH: bundle-id substrings whose content is never
@@ -508,14 +572,18 @@ private func browserTabInfo(appName: String) -> BrowserTab {
 
 /// Capture the frontmost app's active-window text once and emit it.
 ///
-/// Stream mode passes `trigger` (stamped onto the event) and `emitter` (the
-/// locked POSIX-write sink); one-shot mode uses the defaults, keeping its
-/// output byte-compatible with older daemons.
+/// Stream mode passes `trigger` (stamped onto the event), `emitter` (the
+/// locked POSIX-write sink), and optionally `ocr` (the Phase C2 fallback
+/// runtime); one-shot mode uses the defaults — `ocr: nil` in particular keeps
+/// that path byte-identical with older daemons.
 func captureFrontmost(
     allow: Set<String>, block: Set<String>, pauseFile: String?, captureUrls: Bool,
-    trigger: String? = nil, emitter: ((CaptureEvent) -> Void)? = nil
+    trigger: String? = nil, emitter: ((CaptureEvent) -> Void)? = nil,
+    ocr: OcrRuntime? = nil
 ) {
     let send = emitter ?? emit
+    // Start of the COMBINED AX+OCR wall budget (monotonic).
+    let captureStart = DispatchTime.now()
     if skipIfPaused(pauseFile) { return }
 
     guard let frontApp = NSWorkspace.shared.frontmostApplication else {
@@ -525,6 +593,21 @@ func captureFrontmost(
     let bundleId = frontApp.bundleIdentifier
     let pid = frontApp.processIdentifier
     if skipIfPaused(pauseFile) { return }
+
+    // Self-capture gate FIRST (before the allowlist gate, any AX element
+    // creation, and SCK): OpenBird must never read — or, with OCR in play,
+    // screenshot — its own UI, even if (mis)allowlisted. Mirrors the Python
+    // `redact._is_self_capture` backstop, but enforced AT THE SOURCE so the
+    // text never crosses IPC. Emits the metadata-only frame like the other
+    // early returns so the daemon still sees the focus change.
+    if isSelfCapture(bundleId) {
+        diag("capture: skipped_self_capture")
+        if skipIfPaused(pauseFile) { return }
+        send(CaptureEvent(
+            app: bundleId, window: nil, url: nil, text: "",
+            ts: Date().timeIntervalSince1970, incognito: false, trigger: trigger))
+        return
+    }
 
     // Allowlist-first gate BEFORE reading any AX text. A disallowed app emits
     // metadata only (empty text) so the daemon sees the focus change but no
@@ -625,11 +708,67 @@ func captureFrontmost(
         text = String(decoding: Array(prefix), as: UTF8.self)
     }
 
+    // OCR fallback (Phase C2, stream-mode only — `ocr` is nil elsewhere).
+    // This branch sits INSIDE the same gated tail as the AX emit: every
+    // earlier privacy return (self-capture, not-allowlisted, dangerous,
+    // incognito title, confirmed-private mode, paused) already exited, so the
+    // gate ordering is inherited, not re-proven here.
+    var ocrUsed = false
+    if let runtime = ocr,
+       text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+       let id = bundleId {
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000.0
+        let decision = runtime.gate.decide(
+            bundleId: id,
+            axTextEmpty: true,
+            optedIn: anyMatch(id, runtime.apps),
+            tccGranted: runtime.tccGranted(),
+            micHot: runtime.micHot,
+            now: now)
+        switch decision {
+        case .skip(let reason):
+            diag("ocr: skipped_\(reason)")
+        case .run:
+            // Live pause re-check immediately before the HAL call: a pause
+            // that landed during the AX walk must also stop the screenshot.
+            if skipIfPaused(pauseFile) { return }
+            // COMBINED budget: AX + OCR <= combinedDeadlineSeconds total.
+            let elapsed = Double(
+                DispatchTime.now().uptimeNanoseconds - captureStart.uptimeNanoseconds
+            ) / 1_000_000_000.0
+            let ocrBudget = min(
+                Limits.ocrMaxSeconds, Limits.combinedDeadlineSeconds - elapsed)
+            let started = DispatchTime.now()
+            switch runtime.bridge.recognize(pid: pid, axTitle: windowTitle, timeout: ocrBudget) {
+            case .text(let recognized):
+                text = recognized
+                if text.utf8.count > Limits.maxTextBytes {
+                    let prefix = text.utf8.prefix(Limits.maxTextBytes)
+                    text = String(decoding: Array(prefix), as: UTF8.self)
+                }
+                ocrUsed = true
+                let ms = Int(
+                    Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds)
+                        / 1_000_000.0)
+                // Non-content diag: byte count + duration only.
+                diag("ocr: ok bytes=\(text.utf8.count) ms=\(ms)")
+            case .skipped(let reason):
+                diag("ocr: skipped_\(reason)")
+            case .timeout:
+                // The throttle slot was consumed at decision time, so this
+                // cannot retry-storm; the cancelled task's late result is
+                // owned (dropped) by the bridge's closed generation box.
+                diag("ocr: skipped_ocr_timeout")
+            }
+        }
+    }
+
     // Emit only NON-content metadata to stderr. `capturedURL` was probed above
     // (opt-in only); the diag carries a presence bit (0/1), never the URL string.
     diag("capture: ok nodes=\(budget.nodesVisited) bytes=\(text.utf8.count) "
         + "secure_skipped=\(budget.sensitiveSkipped) url=\(capturedURL != nil ? 1 : 0)"
-        + (budget.axTimedOut ? " partial=ax_timeout" : ""))
+        + (budget.axTimedOut ? " partial=ax_timeout" : "")
+        + (ocrUsed ? " ocr=1" : ""))
 
     let event = CaptureEvent(
         app: bundleId,
@@ -638,7 +777,8 @@ func captureFrontmost(
         text: text,
         ts: Date().timeIntervalSince1970,
         incognito: false,
-        trigger: trigger
+        trigger: trigger,
+        ocr: ocrUsed ? true : nil
     )
     if skipIfPaused(pauseFile) { return }
     send(event)
@@ -715,9 +855,15 @@ private func run() {
             forceCeiling: doubleArg("--ceiling") ?? 60.0,
             afkThreshold: doubleArg("--afk-threshold") ?? 150.0
         )
+        // OCR fallback opt-in (Phase C2): STREAM MODE ONLY — the per-app
+        // throttle needs process-lifetime state a fresh-per-spawn one-shot
+        // helper cannot hold. The daemon passes --ocr-apps only when the user
+        // opted apps in; one-shot spawns never receive (and would ignore) it.
         StreamEngine(
             allow: allow, block: block, pauseFile: pauseFile,
-            captureUrls: captureUrls, config: config
+            captureUrls: captureUrls, config: config,
+            ocrApps: listArg(args, "--ocr-apps"),
+            ocrMinInterval: doubleArg("--ocr-min-interval") ?? 30.0
         ).run(noPrompt: noPrompt)
     }
 
