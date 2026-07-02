@@ -11,12 +11,14 @@ Three pillars:
   the focus-block run-builder lifted out of ``day_memory._span_metrics`` (which
   now calls it), so the summarizer and the day-memory metrics can never disagree
   about what a "block" is.
-* :func:`should_run_background_llm` is the battery/idle gate: AC power always
-  allows; on battery a run is allowed ONLY when a FRESH capture-liveness
-  sidecar explicitly says the user is away (finite age within the shared
-  30s staleness bound AND ``afk`` true). A stale/absent/malformed/future
-  sidecar DEFERS — a stopped or wedged capture daemon must never make an
-  ACTIVE user look idle.
+* :func:`should_run_background_llm` is the battery/idle/meeting gate: a FRESH
+  capture-liveness sidecar with the meeting bit set defers FIRST (even on AC —
+  Zoom GPU/CPU contention exists on AC too); a stale sidecar never defers on
+  meeting alone (fail-open on meeting ONLY). Then AC power allows; on battery
+  a run is allowed ONLY when a FRESH sidecar explicitly says the user is away
+  (finite age within the shared 30s staleness bound AND ``afk`` true). A
+  stale/absent/malformed/future sidecar DEFERS on battery — a stopped or
+  wedged capture daemon must never make an ACTIVE user look idle.
 * :func:`run_block_summaries` is the bounded runner: recompute blocks over a
   trailing lookback, skip up-to-date block keys (fingerprint match), summarize
   up to the batch limit, then run the taxonomy LLM-fallback pass for
@@ -203,13 +205,15 @@ def _on_ac_power() -> bool:
     return out is not None and "AC Power" in out
 
 
-def _liveness_state(settings, now: float) -> tuple[bool, bool]:
-    """Read the capture liveness sidecar -> ``(fresh, afk)``.
+def _liveness_state(settings, now: float) -> tuple[bool, bool, bool]:
+    """Read the capture liveness sidecar -> ``(fresh, afk, meeting)``.
 
     ``fresh`` requires a FINITE age within the SHARED staleness bound:
     ``0 <= now - updated_at <= DAEMON_STALE_AFTER_SECONDS`` (imported from
     capture.health — one definition of "fresh"). A FUTURE timestamp (negative
     age) is invalid, not fresh. Absent/malformed sidecars are simply not fresh.
+    ``meeting`` is the daemon's meeting-live latch bit (Phase C1);
+    ``bool(raw.get("meeting", False))`` keeps pre-C1 sidecars valid.
     """
     from openbird.capture.daemon import LIVENESS_FILENAME
 
@@ -217,33 +221,43 @@ def _liveness_state(settings, now: float) -> tuple[bool, bool]:
     try:
         raw = json.loads(path.read_text())
     except (OSError, ValueError):
-        return False, False
+        return False, False, False
     if not isinstance(raw, dict):
-        return False, False
+        return False, False, False
     try:
         updated_at = float(raw.get("updated_at"))  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return False, False
+        return False, False, False
     if not math.isfinite(updated_at):
-        return False, False
+        return False, False, False
     age = now - updated_at
     fresh = 0 <= age <= DAEMON_STALE_AFTER_SECONDS
-    return fresh, bool(raw.get("afk", False))
+    return fresh, bool(raw.get("afk", False)), bool(raw.get("meeting", False))
 
 
 def should_run_background_llm(store, settings, now: float) -> tuple[bool, str]:
-    """Battery/idle gate for the idle-time worker.
+    """Battery/idle/meeting gate for the idle-time worker.
 
-    AC power always allows. On battery, allow ONLY when the capture-liveness
+    Meeting deferral comes FIRST and applies even on AC power (Zoom GPU/CPU
+    contention exists on AC too — the screenpipe lesson): a FRESH sidecar with
+    the meeting bit set defers with ``meeting_live``. A STALE sidecar never
+    defers on meeting alone (fail-open on meeting ONLY — a dead daemon must
+    not block summaries forever; the 30s freshness bound self-heals a lost
+    mic_stopped).
+
+    Then the power gate: AC power allows. On battery, allow ONLY when the
     sidecar is FRESH and explicitly says the user is away (``afk`` true): a
     stopped or wedged capture daemon (stale/absent/malformed/future sidecar)
-    DEFERS — it must never make an ACTIVE user look idle. Returns
-    ``(allowed, reason_code)``; reason codes only, nothing content-bearing.
+    DEFERS — it must never make an ACTIVE user look idle (fail-closed,
+    unchanged). Returns ``(allowed, reason_code)``; reason codes only, nothing
+    content-bearing.
     """
     del store  # gate reads power + the liveness sidecar only
+    fresh, afk, meeting = _liveness_state(settings, now)
+    if fresh and meeting:
+        return False, "meeting_live"
     if _on_ac_power():
         return True, "ac_power"
-    fresh, afk = _liveness_state(settings, now)
     if not fresh:
         return False, "battery_liveness_stale"
     if not afk:
@@ -550,12 +564,17 @@ def run_block_summaries(
 ) -> dict:
     """Run one bounded summarization + taxonomy-fallback pass. Counts-only result.
 
-    ``force`` bypasses the battery/idle gate and the settle rule ONLY (the
-    on-demand CLI); the cloud gate is never bypassed — it lives in provider
-    construction (CloudOptInRequired), which callers hit before reaching here.
-    The returned dict carries counts and reason codes exclusively (safe for the
-    plaintext routine store and launchd logs); summary bodies never leave the
-    encrypted store.
+    ``force`` bypasses the battery/idle/meeting gate and the settle rule ONLY
+    (the on-demand CLI); the cloud gate is never bypassed — it lives in
+    provider construction (CloudOptInRequired), which callers hit before
+    reaching here. Force-mode tradeoff (documented, accepted): forcing may
+    summarize an UNSETTLED block whose key later changes (e.g. a live span
+    split by a mid-block meeting flip re-keys the block), leaving a stale
+    overlapping summary row until its source spans change; the routine path
+    cannot hit this because the settle rule keeps live spans out of
+    summarized blocks. The returned dict carries counts and reason codes
+    exclusively (safe for the plaintext routine store and launchd logs);
+    summary bodies never leave the encrypted store.
     """
     counts: dict[str, Any] = {
         "summarized": 0,

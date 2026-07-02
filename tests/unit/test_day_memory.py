@@ -1677,10 +1677,11 @@ def test_productivity_cli_rejects_negative_day(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _span(sid, start, end, *, bundle="com.apple.mail", afk=0, reason=None):
+def _span(sid, start, end, *, bundle="com.apple.mail", afk=0, reason=None, meeting=0):
     return {
         "span_id": sid, "start_ts": start, "end_ts": end,
         "bundle_id": bundle, "afk": afk, "reason": reason, "detail_tier": 1,
+        "meeting": meeting,
     }
 
 
@@ -1702,6 +1703,7 @@ def test_span_metrics_time_accounting_and_afk():
     assert m["span_time_by_reason"]["blocklisted"] == 300.0
     assert m["afk_seconds"] == 600.0
     assert m["active_span_seconds"] == 900.0
+    assert m["meeting_seconds"] == 0.0 and m["meeting_count"] == 0
     assert built.span_ids == ["s1", "s2", "s3"]
     assert built.payload["span_fingerprint"]["span_count"] == 3
 
@@ -1863,7 +1865,92 @@ def test_productivity_report_legacy_fallback_without_spans():
     assert "afk_minutes" not in facts
 
 
-# -- Phase D: taxonomy-level measured time (day-memory-v8) ----------------------
+# -- Phase C1: meeting time metrics (day-memory-v9) -----------------------------
+
+
+def test_span_metrics_meeting_seconds_includes_afk_meeting_spans():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        _span("s1", 1000.0, 1600.0, bundle="us.zoom.xos", meeting=1),
+        # Mid-call AFK (on a call you don't type): MUST count as meeting time.
+        _span("s2", 1600.0, 2200.0, bundle="us.zoom.xos", afk=1, meeting=1),
+        _span("s3", 2200.0, 2500.0),
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    m = built.payload["span_metrics"]
+    assert m["meeting_seconds"] == 1200.0
+    assert m["meeting_count"] == 1  # contiguous split spans are ONE meeting
+    assert m["afk_seconds"] == 600.0  # AFK accounting unchanged
+    assert m["span_time_by_app"].get("us.zoom.xos") == 600.0  # active only
+
+
+def test_span_metrics_meeting_runs_merge_across_small_gaps():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        _span("s1", 1000.0, 1600.0, bundle="us.zoom.xos", meeting=1),
+        # 120s gap (== the bound): the SAME meeting.
+        _span("s2", 1720.0, 2000.0, bundle="us.zoom.xos", meeting=1),
+        # 121s gap (> the bound): a NEW meeting.
+        _span("s3", 2121.0, 2400.0, bundle="us.zoom.xos", meeting=1),
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    m = built.payload["span_metrics"]
+    assert m["meeting_count"] == 2
+    assert m["meeting_seconds"] == 600.0 + 280.0 + 279.0
+
+
+def test_v8_cached_day_memory_is_rebuilt_under_v9(mem_settings, fake_provider):
+    # The reuse gate compares extractor_version, so the v9 bump (required: a
+    # metrics-shape change alone never invalidates cached days) rebuilds.
+    store = MemoryStore(
+        db_path=":memory:", settings=mem_settings, provider=fake_provider
+    )
+    try:
+        start = _ts(2026, 6, 12, 9)
+        obs = store.add_observation(
+            "coding",
+            source="capture",
+            app="com.mitchellh.ghostty",
+            session_id="s1",
+            ts=start,
+        )
+        rows = store.time_range_text(start, start + 3600, source="capture")
+        fingerprint = store.day_memory_source_fingerprint_from_rows(rows)
+        store.save_day_memory(
+            local_date="2026-06-12",
+            source_scope="capture",
+            extractor_version="day-memory-v8",
+            payload={
+                "local_date": "2026-06-12",
+                "source_scope": "capture",
+                "source_fingerprint": fingerprint,
+                "coverage": {"observations": 1, "source_ids": [obs.id]},
+                "metrics": {"active_seconds": 9999},
+            },
+            source_ids=[obs.id],
+            generated_at=start,
+        )
+        saved = store.ensure_day_memory(
+            local_date="2026-06-12",
+            start_ts=start,
+            end_ts=start + 3600,
+            day_offset=0,
+            source_scope="capture",
+            force=False,
+        )
+        assert saved["extractor_version"] == "day-memory-v9"
+        assert saved["payload"]["metrics"]["active_seconds"] != 9999
+    finally:
+        store.close()
+
+
+# -- Phase D: taxonomy-level measured time (introduced in day-memory-v8) --------
 
 
 def _tspan(sid, start, end, *, bundle="com.apple.mail", host=None, afk=0, reason=None):
@@ -1872,8 +1959,8 @@ def _tspan(sid, start, end, *, bundle="com.apple.mail", host=None, afk=0, reason
     return span
 
 
-def test_extractor_version_is_v8():
-    assert EXTRACTOR_VERSION == "day-memory-v8"
+def test_extractor_version_is_v9():
+    assert EXTRACTOR_VERSION == "day-memory-v9"
 
 
 def test_span_time_by_level_host_over_bundle_with_afk_and_paused_excluded():
@@ -1993,7 +2080,7 @@ def test_ensure_day_memory_taxonomy_fingerprint_freshness(tmp_path):
         first = store.ensure_day_memory(
             local_date="2026-06-13", start_ts=start, end_ts=end, day_offset=0
         )
-        assert first["extractor_version"] == "day-memory-v8"
+        assert first["extractor_version"] == "day-memory-v9"
         assert first["payload"]["span_metrics"]["span_time_by_level"] == {
             "uncategorized": 600.0
         }
