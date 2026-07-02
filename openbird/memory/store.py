@@ -25,6 +25,7 @@ orphans. ``openbird data integrity`` reports orphan counts as the safety net.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -126,6 +127,29 @@ _BUSY_TIMEOUT_MS = 5000
 _TAXONOMY_LEVELS = frozenset(
     {"focus_work", "other_work", "neutral", "personal", "distracting"}
 )
+
+# Entity ledger enums (v7, Phase E2). Mirror the schema CHECK constraints so a
+# bad value fails loudly in Python before SQL.
+_ENTITY_KINDS = frozenset({"repo", "domain", "document", "topic"})
+_ENTITY_SOURCE_KINDS = frozenset({"observation", "span", "summary"})
+_ENTITY_EVIDENCE_KINDS = frozenset(
+    {"pr_merged", "ticket_closed", "shipped_language", "open_loop",
+     "open_loop_resolved"}
+)
+# Prefix for the entity-aggregation watermark keys in the embedding_meta KV
+# table. A FULL purge clears every key under this prefix (the watermarks are
+# derived from captured activity positions); the cohort_key stays.
+ENTITY_AGGREGATION_KV_PREFIX = "entity_aggregation."
+
+
+def entity_id_for(kind: str, name: str) -> str:
+    """Deterministic entity id: sha256 over ``kind:casefold(name)``.
+
+    Deterministic ids make aggregation upserts idempotent across runs; entity
+    identity is EXACT casefolded name within a kind — no fuzzy merging.
+    """
+    payload = f"{kind}:{str(name).casefold()}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _enable_recursive_triggers(conn) -> None:
@@ -1850,6 +1874,386 @@ class MemoryStore:
         """
         return _summary_index_orphan_counts(self.conn)
 
+    # -- entity ledger (Phase E2) -------------------------------------------------
+
+    def upsert_entity(
+        self,
+        kind: str,
+        name: str,
+        *,
+        seen_ts: float,
+        source_kind: str | None = None,
+        source_id: str | None = None,
+    ) -> dict:
+        """Create-or-refresh one ledger entity; returns the stored row.
+
+        The id is deterministic — ``sha256("kind:casefold(name)")`` — so
+        repeated aggregation runs upsert idempotently. On conflict:
+        ``first_ts`` keeps the minimum, ``last_ts`` the maximum, the TYPED
+        ``last_seen_source_kind``/``last_seen_source_id`` pair is replaced only
+        when this sighting is at least as new as the stored ``last_ts``, and a
+        ``dormant`` entity flips back to ``active`` on strictly newer activity.
+        ``user_marked_done`` is NEVER touched here (user intent outranks
+        activity). ``name`` is DERIVED SENSITIVE — this method logs nothing.
+        """
+        if kind not in _ENTITY_KINDS:
+            raise ValueError(f"unknown entity kind: {kind!r}")
+        if (source_kind is None) != (source_id is None):
+            raise ValueError("source_kind and source_id must be given together")
+        if source_kind is not None and source_kind not in _ENTITY_SOURCE_KINDS:
+            raise ValueError(f"unknown source kind: {source_kind!r}")
+        entity_id = entity_id_for(kind, name)
+        ts = float(seen_ts)
+        try:
+            self._begin()
+            self.conn.execute(
+                """
+                INSERT INTO entities(
+                    id, kind, name, aliases, first_ts, last_ts, status,
+                    last_seen_source_kind, last_seen_source_id
+                ) VALUES (?, ?, ?, '[]', ?, ?, 'active', ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    first_ts = MIN(COALESCE(first_ts, excluded.first_ts),
+                                   excluded.first_ts),
+                    last_seen_source_kind = CASE
+                        WHEN excluded.last_seen_source_kind IS NOT NULL
+                             AND excluded.last_ts >= COALESCE(last_ts, excluded.last_ts)
+                        THEN excluded.last_seen_source_kind
+                        ELSE last_seen_source_kind END,
+                    last_seen_source_id = CASE
+                        WHEN excluded.last_seen_source_kind IS NOT NULL
+                             AND excluded.last_ts >= COALESCE(last_ts, excluded.last_ts)
+                        THEN excluded.last_seen_source_id
+                        ELSE last_seen_source_id END,
+                    status = CASE
+                        WHEN status = 'dormant'
+                             AND (last_ts IS NULL OR excluded.last_ts > last_ts)
+                        THEN 'active' ELSE status END,
+                    last_ts = MAX(COALESCE(last_ts, excluded.last_ts),
+                                  excluded.last_ts)
+                """,
+                (entity_id, kind, name, ts, ts, source_kind, source_id),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        saved = self.get_entity(entity_id)
+        if saved is None:  # pragma: no cover - the insert above would have raised
+            raise RuntimeError("entity row was not inserted")
+        return saved
+
+    def get_entity(self, entity_id: str) -> dict | None:
+        """Return one entity row (aliases decoded), or ``None``."""
+        row = self.conn.execute(
+            "SELECT * FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+        return self._entity_row_to_dict(row) if row is not None else None
+
+    @staticmethod
+    def _entity_row_to_dict(row) -> dict:
+        item = dict(row)
+        try:
+            aliases = json.loads(item.get("aliases") or "[]")
+        except (TypeError, ValueError):
+            aliases = []
+        item["aliases"] = [str(a) for a in aliases] if isinstance(aliases, list) else []
+        return item
+
+    def set_entity_aliases(self, entity_id: str, aliases: list[str]) -> None:
+        """Replace one entity's alias list (aggregation-only writer)."""
+        payload = json.dumps(sorted({str(a) for a in aliases if a}), ensure_ascii=False)
+        try:
+            self._begin()
+            self.conn.execute(
+                "UPDATE entities SET aliases = ? WHERE id = ?", (payload, entity_id)
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def set_entity_status(self, entity_id: str, status: str) -> None:
+        """Set one entity's status (schema-ready for the mark-done affordance)."""
+        if status not in ("active", "dormant", "user_marked_done"):
+            raise ValueError(f"unknown entity status: {status!r}")
+        try:
+            self._begin()
+            self.conn.execute(
+                "UPDATE entities SET status = ? WHERE id = ?", (status, entity_id)
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def add_entity_evidence(
+        self,
+        entity_id: str,
+        *,
+        ts: float,
+        kind: str,
+        source_kind: str,
+        source_id: str,
+        detail: str = "",
+    ) -> bool:
+        """Insert one evidence row; returns whether a row was actually inserted.
+
+        ``INSERT OR IGNORE`` + the UNIQUE constraint make re-runs idempotent
+        (the aggregation overlap re-scan relies on this); the per-kind BEFORE
+        INSERT triggers still fail loudly on an unknown source ref (RAISE ABORT
+        overrides OR IGNORE). ``detail`` is DERIVED SENSITIVE — never logged.
+        """
+        if kind not in _ENTITY_EVIDENCE_KINDS:
+            raise ValueError(f"unknown evidence kind: {kind!r}")
+        if source_kind not in _ENTITY_SOURCE_KINDS:
+            raise ValueError(f"unknown source kind: {source_kind!r}")
+        try:
+            self._begin()
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO entity_evidence("
+                "id, entity_id, ts, kind, source_kind, source_id, detail"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (uuid.uuid4().hex, entity_id, float(ts), kind, source_kind,
+                 source_id, detail or ""),
+            )
+            inserted = cur.rowcount == 1
+            self.conn.commit()
+            return inserted
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def list_entities(
+        self, *, kind: str | None = None, status: str | None = None
+    ) -> list[dict]:
+        """Return entity rows (aliases decoded), newest activity first."""
+        sql = "SELECT * FROM entities WHERE 1=1"
+        params: list[object] = []
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY last_ts DESC, name ASC"
+        rows = self.conn.execute(sql, params).fetchall()
+        return [self._entity_row_to_dict(r) for r in rows]
+
+    def entities_matching(self, text: str) -> list[dict]:
+        """Entities whose name/alias matches ``text`` (casefolded, both directions).
+
+        A candidate matches when the casefolded query equals a name/alias,
+        contains one, or is contained by one — the RAG completion path then
+        prefers exact matches and refuses to guess between several candidates.
+        The entity table is small (exact-identity rows), so this is a plain
+        scan; no fts/vec indexing by design.
+        """
+        needle = " ".join(str(text or "").split()).casefold()
+        if not needle:
+            return []
+        out: list[dict] = []
+        for item in self.list_entities():
+            keys = [str(item.get("name") or "").casefold()]
+            keys += [a.casefold() for a in item.get("aliases") or []]
+            keys = [k for k in keys if k]
+            if any(k == needle or k in needle or needle in k for k in keys):
+                out.append(item)
+        return out
+
+    def entity_evidence_for(self, entity_id: str, limit: int = 50) -> list[dict]:
+        """Return one entity's evidence rows, newest first (bounded)."""
+        rows = self.conn.execute(
+            "SELECT * FROM entity_evidence WHERE entity_id = ? "
+            "ORDER BY ts DESC, id DESC LIMIT ?",
+            (entity_id, max(0, int(limit))),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_dormant_entities(self, cutoff_ts: float) -> int:
+        """Flip ACTIVE entities with no activity since ``cutoff_ts`` to dormant.
+
+        ``user_marked_done`` rows are immune (the WHERE targets 'active' only).
+        Returns the number of rows flipped. Own short transaction — the
+        aggregation-time dormancy path; the delete()/prune() paths run their
+        own synchronous in-transaction pass instead.
+        """
+        try:
+            self._begin()
+            cur = self.conn.execute(
+                "UPDATE entities SET status = 'dormant' "
+                "WHERE status = 'active' AND (last_ts IS NULL OR last_ts < ?)",
+                (float(cutoff_ts),),
+            )
+            count = int(cur.rowcount or 0)
+            self.conn.commit()
+            return count
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _mark_evidence_less_entities_dormant(self) -> int:
+        """Flip ACTIVE entities whose evidence set is now empty to dormant.
+
+        MUST run inside an already-open write transaction — this is the
+        synchronous delete()/prune() pass (never inside a trigger), so a
+        selective purge cannot leave evidence-less entities looking active
+        until the next routine run. ``user_marked_done`` rows are immune.
+        """
+        cur = self.conn.execute(
+            "UPDATE entities SET status = 'dormant' WHERE status = 'active' "
+            "AND id NOT IN (SELECT DISTINCT entity_id FROM entity_evidence)"
+        )
+        return int(cur.rowcount or 0)
+
+    def observations_text_page(
+        self,
+        after_ts: float,
+        after_id: str,
+        *,
+        limit: int,
+        max_chars: int = 4000,
+    ) -> list[tuple[Observation, str]]:
+        """One ROW-CAPPED page of observations+text after a composite cursor.
+
+        ``ORDER BY ts ASC, id ASC LIMIT ?`` with a strict ``(ts, id) >
+        (after_ts, after_id)`` predicate — the entity aggregation pass's real
+        batching bound (``time_range_text``'s ``max_chars`` caps text per row,
+        NOT row count, so it cannot bound a first 14-day scan). ``max_chars``
+        truncates each blob body; returned text is untrusted captured content.
+        """
+        rows = self.conn.execute(
+            "SELECT o.*, b.text AS blob_text FROM observations o "
+            "JOIN content_blobs b ON b.content_hash = o.content_hash "
+            "WHERE (o.ts > ? OR (o.ts = ? AND o.id > ?)) "
+            "ORDER BY o.ts ASC, o.id ASC LIMIT ?",
+            (float(after_ts), float(after_ts), str(after_id), max(0, int(limit))),
+        ).fetchall()
+        out: list[tuple[Observation, str]] = []
+        for r in rows:
+            text = r["blob_text"] or ""
+            if max_chars and len(text) > max_chars:
+                text = text[:max_chars]
+            out.append((self._row_to_observation(r), text))
+        return out
+
+    def observations_text_for_ids(
+        self, ids: list[str], *, max_chars: int = 4000
+    ) -> list[tuple[Observation, str]]:
+        """Observations+text for explicit ids, ordered by (ts, id).
+
+        Used by the open-loop promotion REHYDRATION: day-memory payloads carry
+        sorted/capped source_ids, so the aggregation pass re-reads the actual
+        rows to recover the item identity and the true earliest occurrence.
+        Missing ids are silently absent (their sources were deleted).
+        """
+        unique = sorted({str(i) for i in ids if i})
+        if not unique:
+            return []
+        placeholders = ",".join("?" for _ in unique)
+        rows = self.conn.execute(
+            "SELECT o.*, b.text AS blob_text FROM observations o "
+            "JOIN content_blobs b ON b.content_hash = o.content_hash "
+            f"WHERE o.id IN ({placeholders}) ORDER BY o.ts ASC, o.id ASC",
+            unique,
+        ).fetchall()
+        out: list[tuple[Observation, str]] = []
+        for r in rows:
+            text = r["blob_text"] or ""
+            if max_chars and len(text) > max_chars:
+                text = text[:max_chars]
+            out.append((self._row_to_observation(r), text))
+        return out
+
+    def block_summaries_generated_since(
+        self, after_generated_at: float, after_id: str, *, limit: int
+    ) -> list[dict]:
+        """One page of block summaries after a (generated_at, id) cursor.
+
+        The entity aggregation's SUMMARY cursor is generation-time, not
+        activity-time: ``save_block_summary`` regeneration REPLACES a
+        historical row in place with a fresh ``generated_at``, so this cursor
+        always re-mines a regenerated old block (an activity-time watermark
+        would strand it forever).
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM block_summaries "
+            "WHERE (generated_at > ? OR (generated_at = ? AND id > ?)) "
+            "ORDER BY generated_at ASC, id ASC LIMIT ?",
+            (float(after_generated_at), float(after_generated_at), str(after_id),
+             max(0, int(limit))),
+        ).fetchall()
+        return [self._block_summary_with_refs(dict(r)) for r in rows]
+
+    def entity_open_loop_candidates(self) -> list[dict]:
+        """Unresolved open loops paired with their exact-detail resolving row.
+
+        The precise resolution rule (Phase E2): an ``open_loop`` row is
+        resolved iff a ``pr_merged``/``ticket_closed`` row exists on the SAME
+        entity with the IDENTICAL ``detail`` key and a LATER ``ts`` — never
+        loop-text similarity. Pairs that already have an
+        ``open_loop_resolved`` row for that detail are filtered out (the
+        aggregation pass inserts exactly one per resolution; UNIQUE dedupes).
+        """
+        rows = self.conn.execute(
+            """
+            SELECT l.entity_id AS entity_id, l.detail AS detail, l.ts AS loop_ts,
+                   c.ts AS resolved_ts, c.source_kind AS source_kind,
+                   c.source_id AS source_id
+            FROM entity_evidence l
+            JOIN entity_evidence c
+              ON c.entity_id = l.entity_id AND c.detail = l.detail
+            WHERE l.kind = 'open_loop'
+              AND c.kind IN ('pr_merged', 'ticket_closed')
+              AND c.ts > l.ts
+              AND NOT EXISTS (
+                  SELECT 1 FROM entity_evidence r
+                  WHERE r.entity_id = l.entity_id AND r.detail = l.detail
+                    AND r.kind = 'open_loop_resolved'
+              )
+            ORDER BY l.entity_id, l.detail, c.ts ASC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def entity_evidence_orphan_counts(self) -> dict:
+        """Count evidence rows whose source row is gone (belt-and-braces probe).
+
+        The BEFORE DELETE triggers should keep these at zero always; non-zero
+        counts mean something deleted sources outside SQLite (or a trigger was
+        dropped) — `openbird data integrity` surfaces them. Counts only; never
+        entity names or details.
+        """
+        return _entity_evidence_orphan_counts(self.conn)
+
+    # -- aggregation watermarks (embedding_meta KV) ------------------------------
+
+    def get_kv(self, key: str) -> str | None:
+        """Read one small metadata value from the ``embedding_meta`` KV table.
+
+        ``embedding_meta`` is the store's only key/value table; the entity
+        aggregation watermarks (``entity_aggregation.*``) live here as plain
+        positions (timestamps/row ids — metadata, never captured content).
+        """
+        row = self.conn.execute(
+            "SELECT value FROM embedding_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return None if row is None else row["value"]
+
+    def set_kv(self, key: str, value: str) -> None:
+        """Write one small metadata value into the ``embedding_meta`` KV table."""
+        try:
+            self._begin()
+            self.conn.execute(
+                "INSERT INTO embedding_meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, str(value)),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
     # -- reasoning send ledger ------------------------------------------------
 
     def record_reasoning_send(
@@ -2030,6 +2434,16 @@ class MemoryStore:
                 cur.execute("DELETE FROM summary_index_entries")
                 cur.execute("DELETE FROM fts_summaries")
                 cur.execute("DELETE FROM vec_summaries")
+                # Entity ledger (v7): names/aliases/details are derived
+                # sensitive — a full purge wipes both tables AND the
+                # aggregation watermarks (positions derived from captured
+                # activity). The cohort_key row stays (see the NOTE below).
+                cur.execute("DELETE FROM entity_evidence")
+                cur.execute("DELETE FROM entities")
+                cur.execute(
+                    "DELETE FROM embedding_meta WHERE key LIKE ?",
+                    (ENTITY_AGGREGATION_KV_PREFIX + "%",),
+                )
                 cur.execute("DELETE FROM reasoning_send_ledger")
                 cur.execute("DELETE FROM observations")
                 cur.execute("DELETE FROM activity_spans")
@@ -2115,6 +2529,14 @@ class MemoryStore:
                 "DELETE FROM chunks WHERE chunk_hash NOT IN "
                 "(SELECT chunk_hash FROM blob_chunks)"
             )
+
+            # Entity dormancy (v7): the source deletes above trigger-deleted
+            # matching entity_evidence rows; flip any ACTIVE entity whose
+            # evidence set emptied to dormant SYNCHRONOUSLY, in this same
+            # transaction (user_marked_done is immune) — a selective purge
+            # must not leave evidence-less entities looking active until the
+            # next aggregation run.
+            self._mark_evidence_less_entities_dormant()
 
             cur.commit()
             return count
@@ -2236,6 +2658,8 @@ class MemoryStore:
             "activity_spans": count("activity_spans"),
             "block_summaries": count("block_summaries"),
             "category_assignments": count("category_assignments"),
+            "entities": count("entities"),
+            "entity_evidence": count("entity_evidence"),
             "embed_dim": self.embed_dim,
             "cohort_key": cohort_row["value"] if cohort_row else None,
             "encryption_enabled": self.settings.encryption_enabled,
@@ -2417,6 +2841,103 @@ def _scalar_name(row) -> object:
     return row[0]
 
 
+def _entity_evidence_orphan_counts(conn) -> dict:
+    """Compute entity-evidence orphan counts over an open connection.
+
+    Evidence whose typed source row is gone should ALWAYS be zero (the
+    BEFORE DELETE triggers cover every path); non-zero means a trigger was
+    bypassed or dropped. Counts only; never entity names or details.
+    """
+    obs_orphans = _scalar_count(
+        conn.execute(
+            "SELECT COUNT(*) FROM entity_evidence e "
+            "WHERE e.source_kind = 'observation' AND NOT EXISTS "
+            "  (SELECT 1 FROM observations o WHERE o.id = e.source_id)"
+        ).fetchone()
+    )
+    span_orphans = _scalar_count(
+        conn.execute(
+            "SELECT COUNT(*) FROM entity_evidence e "
+            "WHERE e.source_kind = 'span' AND NOT EXISTS "
+            "  (SELECT 1 FROM activity_spans s WHERE s.span_id = e.source_id)"
+        ).fetchone()
+    )
+    summary_orphans = _scalar_count(
+        conn.execute(
+            "SELECT COUNT(*) FROM entity_evidence e "
+            "WHERE e.source_kind = 'summary' AND NOT EXISTS "
+            "  (SELECT 1 FROM block_summaries b WHERE b.id = e.source_id)"
+        ).fetchone()
+    )
+    return {
+        "observation_orphans": obs_orphans,
+        "span_orphans": span_orphans,
+        "summary_orphans": summary_orphans,
+        "ok": obs_orphans == 0 and span_orphans == 0 and summary_orphans == 0,
+    }
+
+
+def check_entity_evidence_orphans(
+    db_path: str,
+    *,
+    settings=None,
+    opener=None,
+) -> dict:
+    """Raw-open probe for entity-evidence orphans (``openbird data integrity``).
+
+    Mirrors :func:`check_summary_index_orphans`'s never-raise contract: open
+    failures and query errors become findings, and a pre-v7 DB (tables absent)
+    is a clean skip (``{"ok": True, "counts": None}``). Reports counts only.
+    """
+    import sqlite3
+
+    def _default_opener():
+        from openbird.storage.crypto import open_encrypted_db
+
+        return open_encrypted_db(db_path, settings=settings)
+
+    try:
+        conn = (opener or _default_opener)()
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must report, not crash
+        return {
+            "ok": False,
+            "counts": None,
+            "problems": [f"cannot-open: {type(exc).__name__}"],
+        }
+    try:
+        tables = {
+            str(_scalar_name(row))
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+                "('entities', 'entity_evidence')"
+            ).fetchall()
+        }
+        if not {"entities", "entity_evidence"} <= tables:
+            # Pre-v7 DB: nothing to probe.
+            return {"ok": True, "counts": None, "problems": []}
+        counts = _entity_evidence_orphan_counts(conn)
+        problems: list[str] = []
+        if not counts["ok"]:
+            problems.append(
+                "entity-evidence-orphans: "
+                f"observations={counts['observation_orphans']} "
+                f"spans={counts['span_orphans']} "
+                f"summaries={counts['summary_orphans']}"
+            )
+        return {"ok": counts["ok"], "counts": counts, "problems": problems}
+    except sqlite3.DatabaseError as exc:
+        return {
+            "ok": False,
+            "counts": None,
+            "problems": [f"check-failed: {type(exc).__name__}"],
+        }
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def check_database_integrity(
     db_path: str,
     *,
@@ -2456,8 +2977,11 @@ def check_database_integrity(
 
 
 __all__ = [
+    "ENTITY_AGGREGATION_KV_PREFIX",
     "EmbeddingCohortMismatch",
     "MemoryStore",
     "check_database_integrity",
+    "check_entity_evidence_orphans",
     "check_summary_index_orphans",
+    "entity_id_for",
 ]

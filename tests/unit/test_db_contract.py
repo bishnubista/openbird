@@ -1565,7 +1565,9 @@ def test_empty_db_ladder_reaches_v6_cleanly(tmp_path):
     s = _open_store(tmp_path, "fresh-v6.db")
     try:
         ver = s.conn.execute("PRAGMA user_version").fetchone()
-        assert int(next(iter(ver.values()))) == SCHEMA_VERSION == 6
+        # SCHEMA_VERSION has moved past 6 (v7 entity ledger); this test pins
+        # only that the v6 objects exist and the stamp is the current build's.
+        assert int(next(iter(ver.values()))) == SCHEMA_VERSION >= 6
         for kind, name in _V6_OBJECTS:
             count = s.conn.execute(
                 "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
@@ -1790,3 +1792,372 @@ def test_check_summary_index_orphans_raw_open(tmp_path):
     missing = check_summary_index_orphans(str(tmp_path / "missing dir" / "x.db"),
                                           settings=settings)
     assert missing["ok"] is False or missing["counts"] is None
+
+
+# --------------------------------------------------------------------------- #
+# v7: entity ledger + completion evidence (Phase E2)                          #
+# --------------------------------------------------------------------------- #
+
+_V7_OBJECTS = [
+    ("table", "entities"),
+    ("table", "entity_evidence"),
+    ("index", "idx_entity_evidence_entity"),
+    ("index", "idx_entity_evidence_source"),
+    ("trigger", "trg_entity_evidence_obs_exists"),
+    ("trigger", "trg_entity_evidence_span_exists"),
+    ("trigger", "trg_entity_evidence_summary_exists"),
+    ("trigger", "trg_entity_evidence_observation_delete"),
+    ("trigger", "trg_entity_evidence_span_delete"),
+    ("trigger", "trg_entity_evidence_summary_delete"),
+    ("trigger", "trg_entities_last_seen_exists_insert"),
+    ("trigger", "trg_entities_last_seen_exists_update"),
+    ("trigger", "trg_entities_last_seen_observation_delete"),
+    ("trigger", "trg_entities_last_seen_span_delete"),
+    ("trigger", "trg_entities_last_seen_summary_delete"),
+]
+
+
+def _make_v6_shaped_db(path) -> sqlite3.Connection:
+    """Build a realistic v6-stamped DB (pre-E2 shape) from current schema.sql."""
+    conn = _make_v1_shaped_db(path)
+    for _kind, name in _V7_OBJECTS:
+        if _kind == "trigger":
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute("DROP TABLE IF EXISTS entity_evidence")
+    conn.execute("DROP TABLE IF EXISTS entities")
+    conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+    return conn
+
+
+def _seed_entity_with_sources(store, *, ts=1000.0):
+    """Seed one repo entity with observation/span/summary-backed evidence."""
+    obs = store.add_observation(
+        "Merged bbista/openbird pull #12", source="capture", ts=ts,
+        window="Merged PR", url="https://github.com/bbista/openbird/pull/12",
+    )
+    span_id = store.open_span(
+        epoch_id="e", start_ts=ts, end_ts=ts + 900.0, bundle_id="b", detail_tier=1
+    )
+    summary = store.save_block_summary(
+        local_date="2026-06-29",
+        block_key="ek1",
+        block_fingerprint="ef1",
+        start_ts=ts,
+        end_ts=ts + 900.0,
+        dominant_bundle="b",
+        level=None,
+        summary_text="Shipped the openbird entity ledger work.",
+        model="m",
+        extractor_version="block-summary-v1",
+        observation_ids=[obs.id],
+        span_ids=[span_id],
+    )
+    entity = store.upsert_entity(
+        "repo", "bbista/openbird", seen_ts=ts,
+        source_kind="observation", source_id=obs.id,
+    )
+    store.add_entity_evidence(
+        entity["id"], ts=ts, kind="pr_merged", source_kind="observation",
+        source_id=obs.id, detail="github:bbista/openbird#12",
+    )
+    store.add_entity_evidence(
+        entity["id"], ts=ts, kind="shipped_language", source_kind="summary",
+        source_id=summary["id"], detail="shipped",
+    )
+    store.add_entity_evidence(
+        entity["id"], ts=ts, kind="open_loop", source_kind="span",
+        source_id=span_id, detail="github:bbista/openbird#9",
+    )
+    return entity, obs, span_id, summary
+
+
+def test_empty_db_ladder_reaches_v7_cleanly(tmp_path):
+    """Fresh DB: every v7 object exists exactly once and the stamp is current."""
+    s = _open_store(tmp_path, "fresh-v7.db")
+    try:
+        ver = s.conn.execute("PRAGMA user_version").fetchone()
+        assert int(next(iter(ver.values()))) == SCHEMA_VERSION == 7
+        for kind, name in _V7_OBJECTS:
+            count = s.conn.execute(
+                "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()["c"]
+            assert count == 1, f"{kind} {name} count={count}"
+    finally:
+        s.close()
+
+
+def test_v6_db_upgrades_to_v7(tmp_path):
+    """A v6-stamped DB gains every v7 object and keeps the v6 objects intact."""
+    db = tmp_path / "v6-to-v7.db"
+    conn = _make_v6_shaped_db(db)
+    try:
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        for kind, name in _V7_OBJECTS + _V6_OBJECTS:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()
+            assert row[0] == 1, f"{kind} {name}"
+    finally:
+        conn.close()
+
+
+def test_v7_migration_is_idempotent_on_rerun(tmp_path):
+    """Double-applying the v7 step must be a clean no-op (IF NOT EXISTS)."""
+    from openbird.memory.migrations import _apply_v7_entity_ledger
+
+    conn = _make_v6_shaped_db(tmp_path / "v7-idem.db")
+    try:
+        _apply_v7_entity_ledger(conn)
+        _apply_v7_entity_ledger(conn)  # rerun: must not raise or duplicate
+        conn.commit()
+        for kind, name in _V7_OBJECTS:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()
+            assert row[0] == 1, f"{kind} {name}"
+    finally:
+        conn.close()
+
+
+def test_v7_ddl_lockstep_schema_and_migration(tmp_path):
+    """The migration's DDL must land the same sqlite_master text as schema.sql."""
+    fresh = _make_v1_shaped_db(tmp_path / "v7-lockstep-fresh.db")
+    upgraded = _make_v6_shaped_db(tmp_path / "v7-lockstep-upgraded.db")
+    try:
+        from openbird.memory.migrations import _apply_v7_entity_ledger
+
+        _apply_v7_entity_ledger(upgraded)
+        upgraded.commit()
+
+        def norm(row):
+            import re as _re
+
+            text = _re.sub(r"--[^\n]*", "", str(row[0]))
+            return " ".join(text.split())
+
+        for kind, name in _V7_OBJECTS:
+            a = fresh.execute(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?", (kind, name)
+            ).fetchone()
+            b = upgraded.execute(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?", (kind, name)
+            ).fetchone()
+            assert a is not None and b is not None, f"{name} missing"
+            assert norm(a) == norm(b), f"{name}: schema.sql and migration drifted"
+    finally:
+        fresh.close()
+        upgraded.close()
+
+
+def test_entity_evidence_existence_triggers_reject_unknown_refs(tmp_path):
+    """Per-kind BEFORE INSERT triggers refuse evidence citing a missing source."""
+    s = _open_store(tmp_path, "v7-refs.db")
+    try:
+        entity = s.upsert_entity("repo", "bbista/openbird", seen_ts=1.0)
+        for source_kind, message in (
+            ("observation", "unknown observation ref"),
+            ("span", "unknown span ref"),
+            ("summary", "unknown summary ref"),
+        ):
+            with pytest.raises(Exception, match=message):
+                s.add_entity_evidence(
+                    entity["id"], ts=1.0, kind="pr_merged",
+                    source_kind=source_kind, source_id="nope",
+                )
+        assert s.conn.execute(
+            "SELECT COUNT(*) c FROM entity_evidence"
+        ).fetchone()["c"] == 0
+    finally:
+        s.close()
+
+
+def test_entities_last_seen_validation_insert_and_update(tmp_path):
+    """The typed last-seen pair must point at a live source on insert AND update."""
+    s = _open_store(tmp_path, "v7-last-seen.db")
+    try:
+        with pytest.raises(Exception, match="unknown last_seen source ref"):
+            s.upsert_entity(
+                "repo", "bbista/openbird", seen_ts=1.0,
+                source_kind="observation", source_id="nope",
+            )
+        entity = s.upsert_entity("repo", "bbista/openbird", seen_ts=1.0)
+        with pytest.raises(Exception, match="unknown last_seen source ref"):
+            s.conn.execute(
+                "UPDATE entities SET last_seen_source_kind='span', "
+                "last_seen_source_id='nope' WHERE id = ?",
+                (entity["id"],),
+            )
+        # The half-NULL pair is refused by the table CHECK.
+        with pytest.raises(Exception):
+            s.conn.execute(
+                "UPDATE entities SET last_seen_source_kind='observation', "
+                "last_seen_source_id=NULL WHERE id = ?",
+                (entity["id"],),
+            )
+    finally:
+        s.close()
+
+
+def test_entity_evidence_cascades_per_source_kind(tmp_path):
+    """Evidence dies with its source; the entity row survives."""
+    s = _open_store(tmp_path, "v7-cascade.db")
+    try:
+        entity, obs, span_id, summary = _seed_entity_with_sources(s)
+        assert len(s.entity_evidence_for(entity["id"])) == 3
+
+        # Direct summary regeneration/delete removes ONLY the summary evidence.
+        s.conn.execute("DELETE FROM block_summaries WHERE id = ?", (summary["id"],))
+        kinds = {r["source_kind"] for r in s.entity_evidence_for(entity["id"])}
+        assert kinds == {"observation", "span"}
+
+        s.conn.execute("DELETE FROM activity_spans WHERE span_id = ?", (span_id,))
+        kinds = {r["source_kind"] for r in s.entity_evidence_for(entity["id"])}
+        assert kinds == {"observation"}
+
+        s.conn.execute("DELETE FROM observations WHERE id = ?", (obs.id,))
+        assert s.entity_evidence_for(entity["id"]) == []
+        assert s.get_entity(entity["id"]) is not None  # entity row survives
+    finally:
+        s.close()
+
+
+def test_entity_evidence_recursive_chain_span_to_summary(tmp_path):
+    """span delete -> block-summary delete -> summary-backed evidence delete."""
+    s = _open_store(tmp_path, "v7-recursive.db")
+    try:
+        entity, obs, span_id, summary = _seed_entity_with_sources(s)
+        # Deleting the span trigger-deletes the block summary citing it, which
+        # (recursive_triggers ON) trigger-deletes the summary-backed evidence.
+        s.conn.execute("DELETE FROM activity_spans WHERE span_id = ?", (span_id,))
+        kinds = {
+            (r["kind"], r["source_kind"]) for r in s.entity_evidence_for(entity["id"])
+        }
+        assert kinds == {("pr_merged", "observation")}
+        assert s.entity_evidence_orphan_counts()["ok"] is True
+    finally:
+        s.close()
+
+
+def test_entities_last_seen_nulled_per_source_kind(tmp_path):
+    """Each source-kind delete NULLs the typed last-seen pair pointing at it."""
+    s = _open_store(tmp_path, "v7-null.db")
+    try:
+        entity, obs, span_id, summary = _seed_entity_with_sources(s)
+
+        # observation-backed last-seen
+        assert s.get_entity(entity["id"])["last_seen_source_kind"] == "observation"
+        s.conn.execute("DELETE FROM observations WHERE id = ?", (obs.id,))
+        row = s.get_entity(entity["id"])
+        assert row["last_seen_source_kind"] is None
+        assert row["last_seen_source_id"] is None
+
+        # span-backed last-seen (span still exists: the summary died with the
+        # observation? no — the summary cited the observation, so it is gone;
+        # re-point at the span, then delete the span)
+        e2 = s.upsert_entity(
+            "domain", "github.com", seen_ts=2000.0,
+            source_kind="span", source_id=span_id,
+        )
+        s.conn.execute("DELETE FROM activity_spans WHERE span_id = ?", (span_id,))
+        row = s.get_entity(e2["id"])
+        assert row["last_seen_source_kind"] is None
+
+        # summary-backed last-seen
+        obs2 = s.add_observation("more text", source="capture", ts=3000.0)
+        span2 = s.open_span(
+            epoch_id="e", start_ts=3000.0, end_ts=3900.0, bundle_id="b",
+            detail_tier=1,
+        )
+        summary2 = s.save_block_summary(
+            local_date="2026-06-30", block_key="ek2", block_fingerprint="ef2",
+            start_ts=3000.0, end_ts=3900.0, dominant_bundle="b", level=None,
+            summary_text="More entity work.", model="m",
+            extractor_version="block-summary-v1",
+            observation_ids=[obs2.id], span_ids=[span2],
+        )
+        e3 = s.upsert_entity(
+            "repo", "bbista/other", seen_ts=3000.0,
+            source_kind="summary", source_id=summary2["id"],
+        )
+        s.conn.execute("DELETE FROM block_summaries WHERE id = ?", (summary2["id"],))
+        row = s.get_entity(e3["id"])
+        assert row["last_seen_source_kind"] is None
+    finally:
+        s.close()
+
+
+def test_selective_delete_marks_evidence_less_entities_dormant(tmp_path):
+    """delete(since_ts) flips evidence-less ACTIVE entities dormant in the SAME
+    transaction; user_marked_done entities are immune."""
+    s = _open_store(tmp_path, "v7-dormant.db")
+    try:
+        entity, obs, span_id, summary = _seed_entity_with_sources(s)
+        done = s.upsert_entity("repo", "bbista/done-project", seen_ts=1000.0)
+        s.set_entity_status(done["id"], "user_marked_done")
+        s.delete(since_ts=0.0)
+        assert s.get_entity(entity["id"])["status"] == "dormant"
+        assert s.get_entity(done["id"])["status"] == "user_marked_done"
+        assert s.entity_evidence_orphan_counts()["ok"] is True
+    finally:
+        s.close()
+
+
+def test_full_purge_wipes_entities_evidence_and_watermarks(tmp_path):
+    s = _open_store(tmp_path, "v7-purge.db")
+    try:
+        _seed_entity_with_sources(s)
+        s.set_kv("entity_aggregation.obs_ts", "1000.0")
+        s.set_kv("entity_aggregation.obs_id", "abc")
+        s.set_kv("entity_aggregation.summary_generated_at", "1000.0")
+        s.delete(all=True)
+        assert s.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"] == 0
+        assert s.conn.execute(
+            "SELECT COUNT(*) c FROM entity_evidence"
+        ).fetchone()["c"] == 0
+        assert s.get_kv("entity_aggregation.obs_ts") is None
+        assert s.get_kv("entity_aggregation.obs_id") is None
+        assert s.get_kv("entity_aggregation.summary_generated_at") is None
+        # The embedding cohort key deliberately survives a full purge.
+        assert s.get_kv("cohort_key") is not None
+    finally:
+        s.close()
+
+
+def test_check_entity_evidence_orphans_raw_open(tmp_path):
+    """The raw-open probe reports counts, never raises, and skips pre-v7 DBs."""
+    from openbird.memory.store import check_entity_evidence_orphans
+
+    db = str(tmp_path / "entity-probe.db")
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    s = MemoryStore(db_path=db, settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        entity, obs, span_id, summary = _seed_entity_with_sources(s)
+        # Simulate a bypassed trigger: drop it, then raw-delete the source.
+        s.conn.execute("DROP TRIGGER trg_entity_evidence_observation_delete")
+        s.conn.execute("DROP TRIGGER trg_entities_last_seen_observation_delete")
+        s.conn.execute("DROP TRIGGER trg_day_memory_source_observation_delete")
+        s.conn.execute("DROP TRIGGER trg_block_summary_source_observation_delete")
+        s.conn.execute("DELETE FROM observations WHERE id = ?", (obs.id,))
+    finally:
+        s.close()
+
+    result = check_entity_evidence_orphans(db, settings=settings)
+    assert result["ok"] is False
+    assert result["counts"]["observation_orphans"] == 1
+    assert any("entity-evidence-orphans" in p for p in result["problems"])
+
+    # A pre-v7 DB (tables absent) is a clean skip.
+    pre = sqlite3.connect(str(tmp_path / "pre-v7.db"))
+    pre.execute("CREATE TABLE observations (id TEXT)")
+    pre.commit()
+    pre.close()
+    skipped = check_entity_evidence_orphans(
+        str(tmp_path / "pre-v7.db"), settings=settings,
+        opener=lambda: sqlite3.connect(str(tmp_path / "pre-v7.db")),
+    )
+    assert skipped == {"ok": True, "counts": None, "problems": []}

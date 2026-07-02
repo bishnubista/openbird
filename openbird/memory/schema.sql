@@ -360,6 +360,165 @@ BEGIN
     WHERE summary_kind = 'week' AND summary_id = OLD.id;
 END;
 
+-- Entity ledger (v7, Phase E2): durable per-project/domain state derived
+-- DETERMINISTICALLY from stored sources (observations, spans, block summaries)
+-- by the nightly aggregation pass — no LLM ever writes these tables.
+-- ``name``/``aliases`` are DERIVED SENSITIVE (distilled from captured content):
+-- encrypted DB only, never logged; loggers emit counts and reason codes only.
+-- ``id`` is sha256("kind:casefold(name)") so upserts are deterministic and
+-- idempotent. ``last_seen_source_kind``/``last_seen_source_id`` is a TYPED
+-- last-activity ref (span-derived domain entities have no observation to
+-- cite); validity is enforced by the BEFORE INSERT/UPDATE triggers below and
+-- the per-kind BEFORE DELETE triggers NULL the pair when the source dies.
+--
+-- NO fts/vec indexing for entities or evidence — DELIBERATE: the ledger is
+-- queried by exact casefolded name/alias match and answers are composed
+-- deterministically from rows; there is no semantic-retrieval consumer.
+-- Indexing name/detail strings would extend the API-enforced sweep contract
+-- (_sweep_summary_index_*) and every deletion path for zero recall benefit,
+-- and would risk the double-counting E1 explicitly rejected. Consequence:
+-- delete()/prune() need NO new pre-select sweep — plain-table triggers fully
+-- cover entity evidence.
+CREATE TABLE IF NOT EXISTS entities (
+    id               TEXT PRIMARY KEY,
+    kind             TEXT NOT NULL CHECK (kind IN ('repo','domain','document','topic')),
+    name             TEXT NOT NULL,               -- DERIVED SENSITIVE: never logged
+    aliases          TEXT NOT NULL DEFAULT '[]',  -- JSON array; DERIVED SENSITIVE
+    first_ts         REAL,
+    last_ts          REAL,
+    status           TEXT NOT NULL DEFAULT 'active'
+                     CHECK (status IN ('active','dormant','user_marked_done')),
+    last_seen_source_kind TEXT CHECK (last_seen_source_kind IN
+                     ('observation','span','summary')),
+    last_seen_source_id  TEXT,
+    CHECK ((last_seen_source_kind IS NULL) = (last_seen_source_id IS NULL)),
+    UNIQUE(kind, name)
+);
+
+-- One row per completion/open-loop signal, always citing a live typed source.
+-- ``detail`` is the normalized matched cue (e.g. 'github:owner/repo#123') —
+-- load-bearing for open-loop -> resolution matching and the honest answer;
+-- NOT NULL DEFAULT '' so the UNIQUE constraint dedupes re-runs (SQLite treats
+-- NULLs as distinct in UNIQUE). DERIVED SENSITIVE: never logged.
+CREATE TABLE IF NOT EXISTS entity_evidence (
+    id          TEXT PRIMARY KEY,
+    entity_id   TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    ts          REAL NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('pr_merged','ticket_closed',
+                'shipped_language','open_loop','open_loop_resolved')),
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('observation','span','summary')),
+    source_id   TEXT NOT NULL,
+    detail      TEXT NOT NULL DEFAULT '',
+    UNIQUE(entity_id, kind, source_kind, source_id, detail)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_evidence_entity ON entity_evidence(entity_id, ts);
+CREATE INDEX IF NOT EXISTS idx_entity_evidence_source ON entity_evidence(source_kind, source_id);
+
+-- Insert-time integrity per source_kind (mirrors the day-memory/block-summary
+-- trigger pairs): evidence must never cite a missing source.
+CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_obs_exists
+BEFORE INSERT ON entity_evidence
+WHEN NEW.source_kind = 'observation'
+    AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.source_id)
+BEGIN
+    SELECT RAISE(ABORT, 'entity_evidence: unknown observation ref');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_span_exists
+BEFORE INSERT ON entity_evidence
+WHEN NEW.source_kind = 'span'
+    AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.source_id)
+BEGIN
+    SELECT RAISE(ABORT, 'entity_evidence: unknown span ref');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_summary_exists
+BEFORE INSERT ON entity_evidence
+WHEN NEW.source_kind = 'summary'
+    AND NOT EXISTS (SELECT 1 FROM block_summaries WHERE id = NEW.source_id)
+BEGIN
+    SELECT RAISE(ABORT, 'entity_evidence: unknown summary ref');
+END;
+
+-- Evidence dies with its source (BEFORE DELETE, like every other derived
+-- artifact); the ENTITY row survives — it goes dormant synchronously in the
+-- delete()/prune() transaction when its evidence set empties (never inside a
+-- trigger), and by inactivity at aggregation time.
+CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_observation_delete
+BEFORE DELETE ON observations
+BEGIN
+    DELETE FROM entity_evidence
+    WHERE source_kind = 'observation' AND source_id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_span_delete
+BEFORE DELETE ON activity_spans
+BEGIN
+    DELETE FROM entity_evidence
+    WHERE source_kind = 'span' AND source_id = OLD.span_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entity_evidence_summary_delete
+BEFORE DELETE ON block_summaries
+BEGIN
+    DELETE FROM entity_evidence
+    WHERE source_kind = 'summary' AND source_id = OLD.id;
+END;
+
+-- Typed last-seen validity: an entity row must never point at a missing
+-- source (insert AND update), and the per-kind BEFORE DELETE triggers NULL
+-- the pair when the referenced source dies (the completion answer then
+-- degrades to the honest date-only line).
+CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_exists_insert
+BEFORE INSERT ON entities
+WHEN NEW.last_seen_source_kind IS NOT NULL AND (
+    (NEW.last_seen_source_kind = 'observation'
+        AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.last_seen_source_id))
+    OR (NEW.last_seen_source_kind = 'span'
+        AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.last_seen_source_id))
+    OR (NEW.last_seen_source_kind = 'summary'
+        AND NOT EXISTS (SELECT 1 FROM block_summaries WHERE id = NEW.last_seen_source_id))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'entities: unknown last_seen source ref');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_exists_update
+BEFORE UPDATE OF last_seen_source_kind, last_seen_source_id ON entities
+WHEN NEW.last_seen_source_kind IS NOT NULL AND (
+    (NEW.last_seen_source_kind = 'observation'
+        AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.last_seen_source_id))
+    OR (NEW.last_seen_source_kind = 'span'
+        AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.last_seen_source_id))
+    OR (NEW.last_seen_source_kind = 'summary'
+        AND NOT EXISTS (SELECT 1 FROM block_summaries WHERE id = NEW.last_seen_source_id))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'entities: unknown last_seen source ref');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_observation_delete
+BEFORE DELETE ON observations
+BEGIN
+    UPDATE entities SET last_seen_source_kind = NULL, last_seen_source_id = NULL
+    WHERE last_seen_source_kind = 'observation' AND last_seen_source_id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_span_delete
+BEFORE DELETE ON activity_spans
+BEGIN
+    UPDATE entities SET last_seen_source_kind = NULL, last_seen_source_id = NULL
+    WHERE last_seen_source_kind = 'span' AND last_seen_source_id = OLD.span_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entities_last_seen_summary_delete
+BEFORE DELETE ON block_summaries
+BEGIN
+    UPDATE entities SET last_seen_source_kind = NULL, last_seen_source_id = NULL
+    WHERE last_seen_source_kind = 'summary' AND last_seen_source_id = OLD.id;
+END;
+
 -- Redacted audit metadata for remote reasoning packet send attempts. This table
 -- intentionally stores counts and a packet-content hash only — never raw
 -- question text, answer text, packet JSON, snippets, window titles, URLs,
