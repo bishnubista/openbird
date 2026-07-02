@@ -648,3 +648,397 @@ def test_content_query_with_do_prefix_word_stays_semantic():
     # ...the genuine synthesis phrasings still match.
     for synth in ("what did I do", "what did I do at 3pm", "what did I work on"):
         assert _SYNTHESIS_RE.search(synth) is not None, synth
+
+
+# -- Phase E1: cached week answer + summary-first multi-day context ----------------
+
+
+class RaisingCompleter:
+    """Proves a path is provider-free: any completion call fails the test."""
+
+    def complete(self, messages, *, json_schema=None):  # pragma: no cover
+        raise AssertionError("provider must not be called on the cached path")
+
+
+def _block(i, *, ts, text, date, key=None):
+    return {
+        "id": f"bs{i}",
+        "local_date": date,
+        "block_key": key or f"k{i}",
+        "block_fingerprint": f"f{i}",
+        "start_ts": ts,
+        "end_ts": ts + 900.0,
+        "dominant_bundle": "b",
+        "level": None,
+        "summary_text": text,
+        "model": "m",
+        "extractor_version": "block-summary-v1",
+        "generated_at": ts,
+        "source_count": 1,
+        "source_refs": [{"source_kind": "observation", "source_id": f"obs{i}"}],
+    }
+
+
+def _week_row(monday, digest, *, summary_ids=("bs1",), start=None, end=None):
+    return {
+        "id": f"wk-{monday}",
+        "local_date": monday,
+        "source_scope": "week",
+        "extractor_version": "week-memory-v1",
+        "generated_at": NOW,
+        "source_count": len(summary_ids),
+        "source_ids": [],
+        "span_ids": [],
+        "summary_ids": list(summary_ids),
+        "source_refs": [
+            {"source_kind": "summary", "source_id": sid} for sid in summary_ids
+        ],
+        "payload": {
+            "week_start_date": monday,
+            "digest_text": digest,
+            "member_fingerprint": "mf",
+            "window": {"start": start, "end": end},
+        },
+    }
+
+
+class SummaryStore(FakeTemporalStore):
+    """FakeTemporalStore plus the Phase E1 summary readers."""
+
+    def __init__(self, rows=None, *, weeks=None, blocks=None, day_memories=None,
+                 summary_search=None):
+        super().__init__(rows or [])
+        self.weeks = list(weeks or [])
+        self.blocks = list(blocks or [])
+        self.day_memories = dict(day_memories or {})
+        self.summary_search = list(summary_search or [])
+        self.search_summaries_calls = 0
+
+    def week_memories_overlapping(self, start, end):
+        return list(self.weeks)
+
+    def block_summaries_for_range(self, start, end):
+        return [
+            b for b in self.blocks
+            if b["start_ts"] <= end and b["end_ts"] >= start
+        ]
+
+    def block_summaries_for_date(self, local_date):
+        return [b for b in self.blocks if b["local_date"] == local_date]
+
+    def get_day_memory(self, *, local_date, source_scope="capture"):
+        return self.day_memories.get(local_date)
+
+    def search_summaries(self, query, k=6, *, semantic=True):
+        self.search_summaries_calls += 1
+        return list(self.summary_search)
+
+
+def _date_of(ts: float) -> str:
+    return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+
+def _multiday_window() -> tuple[float, float]:
+    return NOW - 3 * _DAY, NOW
+
+
+def _day_memory_for(ts: float, *, active_seconds=1800.0):
+    return {
+        "id": f"dm-{_date_of(ts)}",
+        "local_date": _date_of(ts),
+        "payload": {
+            "local_date": _date_of(ts),
+            "coverage": {"observations": 5, "sessions": 1, "apps": 1},
+            "metrics": {"active_seconds": active_seconds},
+        },
+    }
+
+
+def test_cached_week_answer_is_terminal_and_provider_free():
+    """Digest present -> composed cached answer; ZERO provider calls (raising
+    stub), route local_cached_model_summary, typed week_memory + block_summary
+    derived citations with full provenance."""
+    window = _multiday_window()
+    b1 = _block(1, ts=NOW - 2 * _DAY, text="Refactored the capture daemon.",
+                date=_date_of(NOW - 2 * _DAY))
+    store = SummaryStore(
+        weeks=[_week_row("2026-06-22", "A week of capture work.",
+                         start=window[0], end=window[1])],
+        blocks=[b1],
+        day_memories={_date_of(NOW - 2 * _DAY): _day_memory_for(NOW - 2 * _DAY)},
+    )
+    rag = RAG(store, RaisingCompleter())
+    rag._now = lambda: NOW
+    result = rag.answer("summarize my week", window=window)
+    assert result.reasoning_route == "local_cached_model_summary"
+    assert result.grounding == "derived"
+    assert result.grounded is True
+    assert "A week of capture work." in result.answer
+    assert "Refactored the capture daemon." in result.answer
+    assert "Deterministic totals" in result.answer
+    types = [c.type for c in result.derived_citations]
+    assert "week_memory" in types and "block_summary" in types
+    week_cite = next(c for c in result.derived_citations if c.type == "week_memory")
+    assert week_cite.source_id == "wk-2026-06-22"
+    assert week_cite.derived_from_refs == [
+        {"source_kind": "summary", "source_id": "bs1"}
+    ]
+    assert store.range_calls == 0 and store.search_calls == 0
+
+
+def test_intent_week_query_reaches_cached_week_answer():
+    """The no-explicit-window path ('my week' synthesis intent) also lands on
+    the cached week answer when a digest exists."""
+    window = _multiday_window()
+    store = SummaryStore(
+        weeks=[_week_row("2026-06-22", "Digest via intent window.",
+                         start=window[0], end=window[1])],
+        blocks=[_block(1, ts=NOW - 2 * _DAY, text="Block prose.",
+                       date=_date_of(NOW - 2 * _DAY))],
+    )
+    rag = RAG(store, RaisingCompleter())
+    rag._now = lambda: NOW
+    result = rag.answer("recap my week")
+    assert result.reasoning_route == "local_cached_model_summary"
+    assert "Digest via intent window." in result.answer
+
+
+def test_no_digest_but_day_summaries_still_cached_terminal():
+    """Fallback ladder: no digest but per-day block summaries exist -> STILL the
+    provider-free cached composition (narrative lines + totals), mirroring the
+    cached day path."""
+    window = _multiday_window()
+    blocks = [
+        _block(1, ts=NOW - 2.5 * _DAY, text="Worked on schema migrations.",
+               date=_date_of(NOW - 2.5 * _DAY)),
+    ]
+    store = SummaryStore(blocks=blocks)
+    rag = RAG(store, RaisingCompleter())
+    rag._now = lambda: NOW
+    result = rag.answer("summarize my week", window=window)
+    assert result.reasoning_route == "local_cached_model_summary"
+    assert "Worked on schema migrations." in result.answer
+    assert {c.type for c in result.derived_citations} == {"block_summary"}
+
+
+class RangeOnlySummaryStore(SummaryStore):
+    """Blocks visible to the RANGE reader only (no per-day narrative source):
+    exercises the summary-first MODEL branch behind the cached week path."""
+
+    def block_summaries_for_date(self, local_date):
+        return []
+
+
+def test_no_cached_prose_falls_through_to_summary_first_completion():
+    """Fallback ladder step 2: no digest and no per-day narrative -> FRESH
+    provider completion over summary context (derived-only grounding passes the
+    gate); raw rows untouched."""
+    window = _multiday_window()
+    blocks = [
+        _block(1, ts=NOW - 2.5 * _DAY, text="Worked on schema migrations.",
+               date=_date_of(NOW - 2.5 * _DAY)),
+        _block(2, ts=NOW - 1.2 * _DAY, text="Wrote the retrieval tests.",
+               date=_date_of(NOW - 1.2 * _DAY)),
+    ]
+    completer = CiteAllCompleter()
+    store = RangeOnlySummaryStore(blocks=blocks)
+    rag = RAG(store, completer)
+    rag._now = lambda: NOW
+    result = rag.answer("summarize my week", window=window)
+    assert completer.calls == 1
+    content = completer.last_messages[-1]["content"]
+    assert "(block summary " in content
+    assert "Worked on schema migrations." in content
+    # Fresh completion keeps its truthful completion route (None for a stub
+    # with no llm_model), NEVER the cached-summary label.
+    assert result.reasoning_route != "local_cached_model_summary"
+    assert result.grounded is True
+    assert result.grounding == "derived"
+    assert result.citations == []
+    assert {c.type for c in result.derived_citations} == {"block_summary"}
+    assert [c.source_id for c in result.derived_citations] == ["bs1", "bs2"]
+    assert result.derived_citations[0].derived_from_refs == [
+        {"source_kind": "observation", "source_id": "obs1"}
+    ]
+    assert store.range_calls == 0  # summary-first: no raw-row scan
+
+
+def test_fewer_than_two_summaries_falls_back_to_raw_rows():
+    """Fallback ladder step 3: <2 summary items -> the raw-row path,
+    byte-identical legacy behavior (occurrence citations)."""
+    window = _multiday_window()
+    rows = [_row("a", ts=NOW - 2 * _DAY,
+                 window="github PR #42 long informative title",
+                 text="pull request body with plenty of detail " * 3)]
+    store = RangeOnlySummaryStore(
+        rows,
+        blocks=[_block(1, ts=NOW - 2 * _DAY, text="only one block",
+                       date=_date_of(NOW - 2 * _DAY))],
+    )
+    completer = CiteAllCompleter()
+    rag = RAG(store, completer)
+    rag._now = lambda: NOW
+    result = rag.answer("summarize my week", window=window)
+    assert store.range_calls == 1
+    assert result.citations and result.citations[0].observation_id == "a"
+    assert result.derived_citations == []
+    assert result.grounding == "occurrence"
+
+
+def test_week_memory_ungated_when_model_cites_nothing():
+    """The grounding gate still replaces an uncited summary-context answer."""
+
+    class NoCiteCompleter:
+        def complete(self, messages, *, json_schema=None):
+            return {"answer": "vague uncited prose", "citations": []}
+
+    window = _multiday_window()
+    blocks = [
+        _block(1, ts=NOW - 2.5 * _DAY, text="alpha", date=_date_of(NOW - 2.5 * _DAY)),
+        _block(2, ts=NOW - 1.5 * _DAY, text="beta", date=_date_of(NOW - 1.5 * _DAY)),
+    ]
+    rag = RAG(RangeOnlySummaryStore(blocks=blocks), NoCiteCompleter())
+    rag._now = lambda: NOW
+    result = rag.answer("summarize my week", window=window)
+    assert result.grounding == "ungrounded"
+    assert "vague uncited prose" not in result.answer
+
+
+def test_single_day_synthesis_keeps_raw_path():
+    """A single-day window must NOT take the summary-first path (raw chunks
+    stay the detail path for day questions)."""
+    today = _today_start()
+    rows = [_row("a", ts=today + 3600.0,
+                 window="feat: informative commit message title",
+                 text="commit body text with details " * 4)]
+    store = SummaryStore(
+        rows,
+        blocks=[
+            _block(1, ts=today + 3600.0, text="block one", date=_date_of(today)),
+            _block(2, ts=today + 7200.0, text="block two", date=_date_of(today)),
+        ],
+    )
+    completer = CiteAllCompleter()
+    rag = RAG(store, completer)
+    rag._now = lambda: NOW
+    result = rag.answer("summarize my day", window=(today, NOW))
+    assert store.range_calls == 1  # raw scan, not summary context
+    assert result.derived_citations == []
+
+
+def test_specific_multiday_question_ranks_summaries_lexically():
+    """Specific questions over a multi-day window use summary context ranked by
+    query overlap (+ search_summaries), with the strict QA persona."""
+    window = _multiday_window()
+    blocks = [
+        _block(1, ts=NOW - 2.5 * _DAY, text="Debugged the sqlcipher keychain flow.",
+               date=_date_of(NOW - 2.5 * _DAY)),
+        _block(2, ts=NOW - 1.5 * _DAY, text="Wrote homebrew cask release notes.",
+               date=_date_of(NOW - 1.5 * _DAY)),
+        _block(3, ts=NOW - 1.0 * _DAY, text="More keychain access debugging.",
+               date=_date_of(NOW - 1.0 * _DAY)),
+    ]
+    completer = CiteAllCompleter()
+    store = SummaryStore(blocks=blocks)
+    rag = RAG(store, completer)
+    rag._now = lambda: NOW
+    result = rag.answer("what did I decide about the keychain?", window=window)
+    assert completer.calls == 1
+    content = completer.last_messages[-1]["content"]
+    assert "keychain" in content
+    assert "homebrew cask" not in content  # zero-overlap summary dropped
+    cited = {c.source_id for c in result.derived_citations}
+    assert cited == {"bs1", "bs3"}
+    # Strict QA persona (not synthesis) for specific questions.
+    assert "ACROSS" not in completer.last_messages[0]["content"]
+    assert store.range_calls == 0
+
+
+def test_specific_multiday_zero_overlap_falls_back_to_raw():
+    window = _multiday_window()
+    rows = [_row("a", ts=NOW - 2 * _DAY, window="quarterly plan document",
+                 text="quarterly plan contents")]
+    store = SummaryStore(
+        rows,
+        blocks=[
+            _block(1, ts=NOW - 2.5 * _DAY, text="alpha work",
+                   date=_date_of(NOW - 2.5 * _DAY)),
+            _block(2, ts=NOW - 1.5 * _DAY, text="beta work",
+                   date=_date_of(NOW - 1.5 * _DAY)),
+        ],
+    )
+    completer = CiteAllCompleter()
+    rag = RAG(store, completer)
+    rag._now = lambda: NOW
+    rag.answer("what did I write in the quarterly plan?", window=window)
+    assert store.range_calls == 1  # summaries matched nothing -> raw detail path
+
+
+def test_semantic_path_merges_summaries_capped_at_two_slots():
+    """No-window semantic retrieval admits AT MOST 2 summary items of the 6
+    context slots, RRF-merged with occurrence hits."""
+    from openbird.types import SearchHit
+
+    hits = [
+        SearchHit(
+            chunk_id=f"c{i}", content_hash=f"h{i}",
+            text=f"occurrence chunk number {i} about the widget",
+            score=1.0 - i * 0.05,
+            observation=_obs(f"o{i}", ts=1000.0 + i),
+        )
+        for i in range(8)
+    ]
+    summary_results = [
+        {
+            "summary_kind": "block", "summary_id": f"bs{i}",
+            "text": f"summary narrative {i} about the widget",
+            "score": 0.9, "start_ts": 1000.0, "end_ts": 2000.0,
+            "local_date": "2026-06-22",
+            "source_refs": [{"source_kind": "observation", "source_id": f"o{i}"}],
+        }
+        for i in range(3)
+    ]
+
+    class SemanticStore(SummaryStore):
+        def search(self, query, k=10, *, semantic=True):
+            self.search_calls += 1
+            return list(hits)
+
+    store = SemanticStore(summary_search=summary_results)
+    completer = CiteAllCompleter()
+    rag = RAG(store, completer)
+    rag._now = lambda: NOW
+    result = rag.answer("tell me about the widget")
+    assert store.search_calls == 1
+    assert store.search_summaries_calls == 1
+    content = completer.last_messages[-1]["content"]
+    assert content.count("[source_id: ") == 6  # capped total context
+    assert content.count("(block summary ") == 2  # summary slots capped at 2
+    assert len(result.derived_citations) == 2
+    assert len(result.citations) == 4
+    assert result.grounding == "mixed"
+
+
+def test_semantic_path_without_summary_index_is_unchanged():
+    """A store without search_summaries keeps the historical occurrence-only
+    behavior (hasattr-guarded merge)."""
+    from openbird.types import SearchHit
+
+    hits = [
+        SearchHit(
+            chunk_id="c1", content_hash="h1", text="the only chunk",
+            score=1.0, observation=_obs("o1", ts=1000.0),
+        )
+    ]
+
+    class OccStore(FakeTemporalStore):
+        def search(self, query, k=10, *, semantic=True):
+            self.search_calls += 1
+            return list(hits)
+
+    completer = CiteAllCompleter()
+    rag = RAG(OccStore([]), completer)
+    result = rag.answer("tell me about the widget")
+    assert result.grounding == "occurrence"
+    assert [c.observation_id for c in result.citations] == ["o1"]
+    assert result.derived_citations == []

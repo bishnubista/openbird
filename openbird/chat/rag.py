@@ -33,6 +33,7 @@ from openbird.chat.rag_debug import (
     emit_grounding_trace,
     emit_retrieval_empty,
 )
+from openbird.memory.search import rrf
 from openbird.prompts import FenceSpec, PromptSpec, render
 from openbird.prompts import registry as _prompt_registry
 from openbird.types import Citation, DerivedCitation, SearchHit
@@ -296,6 +297,15 @@ _GENERIC_WINDOWS = frozenset(
 # Hard cap on how many retrieved chunks we feed into the prompt context. Keeps
 # the prompt bounded for small local models.
 _DEFAULT_MAX_CONTEXT = 6
+
+# Summary-first MODEL context (Phase E1): cap on block/week summary items in a
+# multi-day prompt. Summaries are 1-2 sentence narratives (far smaller than raw
+# chunks), so this can exceed _DEFAULT_MAX_CONTEXT while keeping the prompt
+# bounded; week digests are admitted first, block summaries evenly sampled.
+_SUMMARY_CONTEXT_MAX = 12
+# Semantic (no-window) path: summary hits may take AT MOST this many of the
+# context slots — occurrence chunks remain the primary grounding substrate.
+_SEMANTIC_SUMMARY_SLOTS = 2
 
 # Snippet length used for citations / context excerpts.
 _SNIPPET_LEN = 240  # displayed citation snippet only
@@ -587,10 +597,52 @@ class AnswerResult:
 
 @dataclass
 class _ContextItem:
-    """One assembled context entry: a stable source id mapped to its hit."""
+    """One assembled context entry — an explicit UNION of two source shapes.
+
+    Exactly one of ``hit`` (an occurrence-backed retrieval hit) or ``summary``
+    (a derived block-summary / week-digest payload: ``summary_kind``,
+    ``summary_id``, ``text``, ``start_ts``, ``end_ts``, ``local_date``,
+    ``source_refs``) is set. Consumers must go through the accessors — never
+    assume ``hit`` is populated. Occurrence items validate to :class:`Citation`;
+    summary items validate to :class:`DerivedCitation` (see
+    :meth:`RAG._validate_citations`).
+    """
 
     source_id: str
-    hit: SearchHit
+    hit: SearchHit | None = None
+    summary: dict | None = None
+
+    def __post_init__(self) -> None:
+        if (self.hit is None) == (self.summary is None):
+            raise ValueError("_ContextItem requires exactly one of hit/summary")
+
+    @property
+    def occurrence_hit(self) -> SearchHit | None:
+        """The occurrence-backed hit, or ``None`` for a summary item."""
+        return self.hit
+
+    @property
+    def text(self) -> str:
+        """The context text regardless of the item's shape."""
+        if self.hit is not None:
+            return self.hit.text
+        return str((self.summary or {}).get("text") or "")
+
+    def meta_line(self) -> str:
+        """Compact provenance label. Occurrence fields are neutralized
+        (untrusted); summary meta uses only OUR OWN formatted times/dates."""
+        if self.hit is not None:
+            obs = self.hit.observation
+            return _meta_label(
+                obs.app if obs is not None else None,
+                obs.window if obs is not None else None,
+            )
+        summary = self.summary or {}
+        if summary.get("summary_kind") == "week":
+            return f" (week digest {summary.get('local_date')})"
+        start = _clock(summary.get("start_ts")) or "?"
+        end = _clock(summary.get("end_ts")) or "?"
+        return f" (block summary {start}-{end})"
 
 
 class RAG:
@@ -667,6 +719,13 @@ class RAG:
             if deterministic is not None:
                 return deterministic
             if self._is_synthesis_query(query):
+                if self._is_multiday_window(window):
+                    # Terminal cached week answer (no provider call); returns
+                    # None when neither a week digest nor per-day summaries
+                    # exist, falling through to summary-first _answer_temporal.
+                    week_answer = self._answer_week_memory(query, window)
+                    if week_answer is not None:
+                        return week_answer
                 return self._answer_temporal(query, window, route="explicit_window")
             return self._answer_scoped_specific(
                 query, window, route="explicit_window_specific"
@@ -699,11 +758,20 @@ class RAG:
             if deterministic is not None:
                 return deterministic
             if is_synthesis:
+                if self._is_multiday_window(intent_window):
+                    week_answer = self._answer_week_memory(query, intent_window)
+                    if week_answer is not None:
+                        return week_answer
                 return self._answer_temporal(query, intent_window, route)
             return self._answer_scoped_specific(query, intent_window, route)
 
         hits = self.store.search(query, k=k, semantic=semantic)
-        context = self._assemble_context(hits)
+        # Semantic-path summary merge (Phase E1): compact block/week narratives
+        # compete for AT MOST 2 of the context slots via RRF across the two
+        # rankings, so "when did I work on X?" (no temporal word) can hit a
+        # summary. Stores without a summary index contribute nothing.
+        summary_results = self._semantic_summary_candidates(query, semantic=semantic)
+        context = self._assemble_context(hits, summary_results)
 
         if not context:
             return AnswerResult(
@@ -719,20 +787,23 @@ class RAG:
         latency_s = time.perf_counter() - t0
         answer_text, claimed_ids = self._parse_response(raw)
 
-        citations = self._validate_citations(claimed_ids, context)
-        used_hits = [item.hit for item in context]
+        citations, derived = self._validate_citations(claimed_ids, context)
+        used_hits = [item.hit for item in context if item.hit is not None]
         # Grounding gate: an answer over retrieved context that yields no VALID
         # citation (the model cited nothing, or only hallucinated ids) is REPLACED
         # with an explicit ungrounded message — never surface uncited factual
-        # claims as a normal answer.
-        grounded = len(citations) > 0
+        # claims as a normal answer. Derived-only grounding (summary citations
+        # alone) PASSES the gate.
+        grounded = bool(citations or derived)
         if debug_level() is not None:
             # Trace the ORIGINAL model output (pre-replacement) so the diagnostics
             # describe what the model actually produced, not the gate's stand-in.
             emit_grounding_trace(
                 route="semantic", raw=raw, answer_text=answer_text,
-                claimed_ids=claimed_ids, citations=citations, context=context,
-                retrieval={"hits": len(hits)}, latency_s=latency_s,
+                claimed_ids=claimed_ids, citations=list(citations) + list(derived),
+                context=context,
+                retrieval={"hits": len(hits), "summary_hits": len(summary_results)},
+                latency_s=latency_s,
                 model=getattr(self.provider, "llm_model", None),
             )
         if not grounded:
@@ -740,8 +811,9 @@ class RAG:
         return AnswerResult(
             answer=answer_text,
             citations=citations,
+            derived_citations=derived,
             used_hits=used_hits,
-            grounding="occurrence" if grounded else "ungrounded",
+            grounding="none" if grounded else "ungrounded",
             reasoning_route=self._completion_reasoning_route(),
         )
 
@@ -818,7 +890,19 @@ class RAG:
     def _answer_temporal(
         self, query: str, window: tuple[float, float], route: str = "temporal"
     ) -> AnswerResult:
-        """Answer a temporal question from a time-range scan of observations."""
+        """Answer a temporal question from summaries (multi-day) or raw rows.
+
+        Multi-day windows build the MODEL context summary-first — stored block
+        summaries + overlapping week digests (the Phase D deferred item) —
+        falling back to raw-row sampling when fewer than two summary items
+        exist. Raw chunks remain the detail path for single-day windows.
+        """
+        if self._is_multiday_window(window):
+            summary_items = self._summary_context_items(window)
+            if len(summary_items) >= 2:
+                return self._answer_from_summary_context(
+                    query, summary_items, route=route, synthesis=True
+                )
         rows, deduped, dropped_self = self._prepared_window_rows(window)
         if not rows:
             emit_retrieval_empty(
@@ -864,15 +948,16 @@ class RAG:
         raw = self.provider.complete(messages, json_schema=_RESPONSE_SCHEMA)
         latency_s = time.perf_counter() - t0
         answer_text, claimed_ids = self._parse_response(raw)
-        citations = self._validate_citations(claimed_ids, context)
-        grounded = len(citations) > 0
+        citations, derived = self._validate_citations(claimed_ids, context)
+        grounded = bool(citations or derived)
         if debug_level() is not None:
             # Trace the ORIGINAL model output (pre-replacement). The chosen rows'
             # signal scores expose a thin/low-signal day (H3) vs a model that got
             # rich sources but cited nothing (H1) or malformed ids (H4).
             emit_grounding_trace(
                 route=route, raw=raw, answer_text=answer_text,
-                claimed_ids=claimed_ids, citations=citations, context=context,
+                claimed_ids=claimed_ids,
+                citations=list(citations) + list(derived), context=context,
                 retrieval={
                     "rows": len(rows), "deduped": len(deduped),
                     "dropped_self": dropped_self,
@@ -886,11 +971,207 @@ class RAG:
         if not grounded:
             answer_text = _UNGROUNDED_MESSAGE
         return AnswerResult(
-            answer=answer_text, citations=citations,
-            used_hits=[i.hit for i in context],
-            grounding="occurrence" if grounded else "ungrounded",
+            answer=answer_text, citations=citations, derived_citations=derived,
+            used_hits=[i.hit for i in context if i.hit is not None],
+            grounding="none" if grounded else "ungrounded",
             reasoning_route=self._completion_reasoning_route(),
         )
+
+    # -- week memories + summary-first context (Phase E1) -----------------------
+
+    @staticmethod
+    def _is_multiday_window(window: tuple[float, float]) -> bool:
+        """True when the window spans more than one LOCAL calendar day.
+
+        Covers the ``_TEMPORAL_RE`` weekly variants (7d) and the
+        ``_MULTIDAY_WINDOW_DAYS`` (3d) synthesis default; a single local day
+        ("today"/"yesterday"/explicit day scope) stays on the day paths.
+        """
+        start, end = window
+        try:
+            return (
+                _dt.datetime.fromtimestamp(start).date()
+                != _dt.datetime.fromtimestamp(end).date()
+            )
+        except (OverflowError, OSError, ValueError):
+            # Out-of-range sentinel bounds (e.g. an "everything" test window):
+            # fall back to a plain duration check.
+            return (end - start) > _DAY
+
+    def _answer_week_memory(
+        self, query: str, window: tuple[float, float]
+    ) -> AnswerResult | None:
+        """Terminal cached week answer (mirrors the cached day path). No provider
+        call: composes stored week digest prose + per-day narrative lines
+        (shared ``compose_week_answer`` helper, so chat and the briefing CLI
+        cannot drift) + deterministic totals from STORED day memories (never
+        rebuilding days at answer time). Returns ``None`` when neither a digest
+        nor any per-day block summary exists — the caller falls through to
+        summary-first ``_answer_temporal``. Route ``local_cached_model_summary``
+        (route truthfulness: precomputed local-model prose, zero egress)."""
+        del query  # cached week answers depend only on the window
+        from openbird.day_memory import compose_week_answer
+
+        start, end = window
+        weeks_reader = getattr(self.store, "week_memories_overlapping", None)
+        weeks = weeks_reader(start, end) if callable(weeks_reader) else []
+        day_entries = self._week_day_entries(window)
+        text, derived, has_prose = compose_week_answer(weeks or [], day_entries)
+        if not has_prose:
+            return None
+        return AnswerResult(
+            answer=text,
+            citations=[],
+            derived_citations=derived,
+            used_hits=[],
+            grounding="derived",
+            reasoning_route=_ROUTE_LOCAL_CACHED_SUMMARY,
+        )
+
+    def _week_day_entries(
+        self, window: tuple[float, float]
+    ) -> list[tuple[str, dict | None, list[dict]]]:
+        """``(local_date, stored day memory | None, block summaries)`` per covered
+        day. STORED reads only (``get_day_memory``) — the cached week answer must
+        never trigger a day rebuild."""
+        day_reader = getattr(self.store, "get_day_memory", None)
+        blocks_reader = getattr(self.store, "block_summaries_for_date", None)
+        start, end = window
+        entries: list[tuple[str, dict | None, list[dict]]] = []
+        cursor = _dt.datetime.fromtimestamp(start).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        end_date = _dt.datetime.fromtimestamp(end).date()
+        while cursor.date() <= end_date:
+            local_date = cursor.strftime("%Y-%m-%d")
+            saved = day_reader(local_date=local_date) if callable(day_reader) else None
+            summaries = (
+                blocks_reader(local_date) or [] if callable(blocks_reader) else []
+            )
+            entries.append((local_date, saved, summaries))
+            cursor += _dt.timedelta(days=1)
+        return entries
+
+    def _summary_context_items(self, window: tuple[float, float]) -> list[dict]:
+        """Normalized summary payloads for MODEL context: overlapping week
+        digests first, then block summaries evenly sampled across the window
+        (bounded by ``_SUMMARY_CONTEXT_MAX``)."""
+        start, end = window
+        items: list[dict] = []
+        weeks_reader = getattr(self.store, "week_memories_overlapping", None)
+        if callable(weeks_reader):
+            for week in weeks_reader(start, end) or []:
+                normalized = _normalize_week_memory(week)
+                if normalized is not None:
+                    items.append(normalized)
+        blocks_reader = getattr(self.store, "block_summaries_for_range", None)
+        blocks = blocks_reader(start, end) if callable(blocks_reader) else []
+        normalized_blocks = [
+            _normalize_block_summary(b)
+            for b in (blocks or [])
+            if str(b.get("summary_text") or "").strip()
+        ]
+        remaining = max(0, _SUMMARY_CONTEXT_MAX - len(items))
+        items.extend(self._sample_even(normalized_blocks, remaining))
+        return items
+
+    @staticmethod
+    def _summaries_to_context(items: list[dict]) -> list[_ContextItem]:
+        return [
+            _ContextItem(source_id=f"S{i + 1}", summary=item)
+            for i, item in enumerate(items)
+        ]
+
+    def _answer_from_summary_context(
+        self,
+        query: str,
+        summary_items: list[dict],
+        *,
+        route: str,
+        synthesis: bool,
+    ) -> AnswerResult:
+        """Fresh provider completion over SUMMARY context items.
+
+        Route truthfulness: the answer is a fresh completion, so
+        ``reasoning_route`` stays ``_completion_reasoning_route()``
+        (local_model / cloud_reasoning_active). What changes is what egresses:
+        cached derived-sensitive summary prose enters the completion prompt
+        (privacy route ``chat.summary_grounded``). Derived-only grounding
+        passes the gate.
+        """
+        context = self._summaries_to_context(summary_items)
+        messages = self._build_messages(
+            query,
+            context,
+            system_prompt=self._synthesis_system_prompt if synthesis else None,
+        )
+        t0 = time.perf_counter()
+        raw = self.provider.complete(messages, json_schema=_RESPONSE_SCHEMA)
+        latency_s = time.perf_counter() - t0
+        answer_text, claimed_ids = self._parse_response(raw)
+        citations, derived = self._validate_citations(claimed_ids, context)
+        grounded = bool(citations or derived)
+        if debug_level() is not None:
+            emit_grounding_trace(
+                route=route, raw=raw, answer_text=answer_text,
+                claimed_ids=claimed_ids,
+                citations=list(citations) + list(derived), context=context,
+                retrieval={"summary_items": len(summary_items)},
+                latency_s=latency_s,
+                model=getattr(self.provider, "llm_model", None),
+            )
+        if not grounded:
+            answer_text = _UNGROUNDED_MESSAGE
+        return AnswerResult(
+            answer=answer_text,
+            citations=citations,
+            derived_citations=derived,
+            used_hits=[],
+            grounding="none" if grounded else "ungrounded",
+            reasoning_route=self._completion_reasoning_route(),
+        )
+
+    def _rank_specific_summaries(self, query: str, items: list[dict]) -> list[dict]:
+        """Rank summary items for a SPECIFIC question: lexical overlap plus the
+        summary-index hybrid ranking (``search_summaries``); items matching
+        neither drop."""
+        terms = self._query_terms(query)
+        search_rank: dict[tuple[str, str], int] = {}
+        searcher = getattr(self.store, "search_summaries", None)
+        if callable(searcher):
+            try:
+                results = searcher(query, k=8)
+            except Exception:  # noqa: BLE001 - ranking aid must never break chat
+                results = []
+            for pos, result in enumerate(results or []):
+                key = (str(result.get("summary_kind")), str(result.get("summary_id")))
+                search_rank.setdefault(key, pos)
+        scored: list[tuple[int, int, int, dict]] = []
+        for position, item in enumerate(items):
+            haystack = item.get("text", "").casefold()
+            overlap = sum(1 for term in terms if term in haystack)
+            rank = search_rank.get(
+                (str(item.get("summary_kind")), str(item.get("summary_id")))
+            )
+            if overlap <= 0 and rank is None:
+                continue
+            scored.append((-overlap, rank if rank is not None else 10_000, position, item))
+        scored.sort()
+        return [item for _neg, _rank, _pos, item in scored]
+
+    def _semantic_summary_candidates(
+        self, query: str, *, semantic: bool
+    ) -> list[dict]:
+        """Summary-index candidates for the no-window semantic path (hasattr-
+        guarded; failures degrade to occurrence-only retrieval)."""
+        searcher = getattr(self.store, "search_summaries", None)
+        if not callable(searcher):
+            return []
+        try:
+            results = searcher(query, k=4, semantic=semantic)
+        except Exception:  # noqa: BLE001 - summary merge must never break chat
+            return []
+        return [r for r in (results or []) if str(r.get("text") or "").strip()]
 
     def _can_answer_from_day_memory(self, window: tuple[float, float]) -> bool:
         if not hasattr(self.store, "ensure_day_memory"):
@@ -1618,7 +1899,21 @@ class RAG:
     def _answer_scoped_specific(
         self, query: str, window: tuple[float, float], route: str
     ) -> AnswerResult:
-        """Answer a specific question from rows hard-scoped to a time window."""
+        """Answer a specific question from rows hard-scoped to a time window.
+
+        Multi-day windows try SUMMARY context first (ranked by lexical overlap
+        + the summary-index hybrid search), falling back to raw-row sampling
+        when fewer than two summary items match — raw chunks stay the detail
+        path.
+        """
+        if self._is_multiday_window(window):
+            ranked = self._rank_specific_summaries(
+                query, self._summary_context_items(window)
+            )
+            if len(ranked) >= 2:
+                return self._answer_from_summary_context(
+                    query, ranked[: self.max_context], route=route, synthesis=False
+                )
         rows, deduped, dropped_self = self._prepared_window_rows(window)
         if not rows:
             emit_retrieval_empty(
@@ -1656,12 +1951,13 @@ class RAG:
         raw = self.provider.complete(messages, json_schema=_RESPONSE_SCHEMA)
         latency_s = time.perf_counter() - t0
         answer_text, claimed_ids = self._parse_response(raw)
-        citations = self._validate_citations(claimed_ids, context)
-        grounded = len(citations) > 0
+        citations, derived = self._validate_citations(claimed_ids, context)
+        grounded = bool(citations or derived)
         if debug_level() is not None:
             emit_grounding_trace(
                 route=route, raw=raw, answer_text=answer_text,
-                claimed_ids=claimed_ids, citations=citations, context=context,
+                claimed_ids=claimed_ids,
+                citations=list(citations) + list(derived), context=context,
                 retrieval={
                     "rows": len(rows), "deduped": len(deduped),
                     "dropped_self": dropped_self,
@@ -1676,9 +1972,9 @@ class RAG:
         if not grounded:
             answer_text = _UNGROUNDED_MESSAGE
         return AnswerResult(
-            answer=answer_text, citations=citations,
-            used_hits=[i.hit for i in context],
-            grounding="occurrence" if grounded else "ungrounded",
+            answer=answer_text, citations=citations, derived_citations=derived,
+            used_hits=[i.hit for i in context if i.hit is not None],
+            grounding="none" if grounded else "ungrounded",
             reasoning_route=self._completion_reasoning_route(),
         )
 
@@ -1855,7 +2151,9 @@ class RAG:
 
     # -- retrieval / dedup ----------------------------------------------------
 
-    def _assemble_context(self, hits: list[SearchHit]) -> list[_ContextItem]:
+    def _assemble_context(
+        self, hits: list[SearchHit], summary_results: list[dict] | None = None
+    ) -> list[_ContextItem]:
         """Dedupe hits at the chunk level and assign stable source ids.
 
         Retrieval and citations are chunk-level: two *distinct* chunks of
@@ -1870,12 +2168,60 @@ class RAG:
         boilerplate capture can't crowd out the answer. The highest-ranked hit
         per chunk/text wins (input order is rank order). Output is capped at
         ``max_context``.
+
+        ``summary_results`` (Phase E1, semantic path): summary-index hits are
+        merged via RRF ACROSS the two rankings and may take at most
+        ``_SEMANTIC_SUMMARY_SLOTS`` slots. Empty/absent keeps the historical
+        occurrence-only behavior byte-identical.
         """
+        candidates: list[tuple[str, object]]
+        if summary_results:
+            occ_ranking: list[str] = []
+            occ_seen: set[str] = set()
+            by_chunk: dict[str, SearchHit] = {}
+            for hit in hits:
+                if hit.chunk_id in occ_seen:
+                    continue
+                occ_seen.add(hit.chunk_id)
+                occ_ranking.append(f"occ::{hit.chunk_id}")
+                by_chunk[hit.chunk_id] = hit
+            sum_ranking: list[str] = []
+            by_summary: dict[str, dict] = {}
+            for result in summary_results:
+                key = f"sum::{result.get('summary_kind')}::{result.get('summary_id')}"
+                if key in by_summary:
+                    continue
+                by_summary[key] = result
+                sum_ranking.append(key)
+            fused = rrf([r for r in (occ_ranking, sum_ranking) if r])
+            candidates = []
+            for fused_id, _score in fused:
+                if fused_id.startswith("occ::"):
+                    candidates.append(("occ", by_chunk[fused_id[len("occ::"):]]))
+                else:
+                    candidates.append(("sum", by_summary[fused_id]))
+        else:
+            candidates = [("occ", hit) for hit in hits]
+
         seen_chunks: set[str] = set()
         # group key -> set of normalized-text fingerprints already admitted.
         near_dupes: dict[tuple[str | None, str], set[str]] = {}
         context: list[_ContextItem] = []
-        for hit in hits:
+        summary_slots = 0
+        for kind, candidate in candidates:
+            if len(context) >= self.max_context:
+                break
+            if kind == "sum":
+                if summary_slots >= _SEMANTIC_SUMMARY_SLOTS:
+                    continue
+                summary_slots += 1
+                context.append(
+                    _ContextItem(
+                        source_id=f"S{len(context) + 1}", summary=candidate  # type: ignore[arg-type]
+                    )
+                )
+                continue
+            hit = candidate  # type: ignore[assignment]
             if hit.chunk_id in seen_chunks:
                 continue  # exact same chunk surfaced twice -> collapse.
             seen_chunks.add(hit.chunk_id)
@@ -1893,8 +2239,6 @@ class RAG:
 
             source_id = self._assign_source_id(hit, position=len(context) + 1)
             context.append(_ContextItem(source_id=source_id, hit=hit))
-            if len(context) >= self.max_context:
-                break
         return context
 
     @staticmethod
@@ -1961,37 +2305,43 @@ class RAG:
     @staticmethod
     def _validate_citations(
         claimed_ids: list[str], context: list[_ContextItem]
-    ) -> list[Citation]:
-        """Drop hallucinated ids; build occurrence-level Citations for valid ones.
+    ) -> tuple[list[Citation], list[DerivedCitation]]:
+        """Drop hallucinated ids; resolve valid ones per the item's union shape.
 
-        Only ids present in the assembled context are accepted. Each accepted id
-        is resolved to its concrete observation (app/window/ts/snippet) so the
-        answer can say *where* it came from. Order and uniqueness follow the
-        model's claim order.
+        Only ids present in the assembled context are accepted. An OCCURRENCE
+        item resolves to a :class:`Citation` (app/window/ts/snippet — unchanged
+        behavior); a SUMMARY item resolves to a :class:`DerivedCitation` typed
+        per kind (``block_summary`` / ``week_memory``) carrying the summary's
+        stored typed refs. Returns ``(citations, derived_citations)``; order and
+        uniqueness follow the model's claim order within each list.
         """
         by_id: dict[str, _ContextItem] = {
             item.source_id: item for item in context if item.source_id
         }
         citations: list[Citation] = []
+        derived: list[DerivedCitation] = []
         emitted: set[str] = set()
         for cid in claimed_ids:
             item = by_id.get(cid)
             if item is None or cid in emitted:
                 continue  # hallucinated or duplicate -> rejected
             emitted.add(cid)
-            obs = item.hit.observation
-            assert obs is not None  # by_id only holds items with a real observation
-            citations.append(
-                Citation(
-                    observation_id=obs.id,
-                    chunk_id=item.hit.chunk_id,
-                    app=obs.app,
-                    window=obs.window,
-                    ts=obs.ts,
-                    snippet=_truncate(item.hit.text, _SNIPPET_LEN),
+            if item.hit is not None:
+                obs = item.hit.observation
+                assert obs is not None  # occurrence labels require an observation
+                citations.append(
+                    Citation(
+                        observation_id=obs.id,
+                        chunk_id=item.hit.chunk_id,
+                        app=obs.app,
+                        window=obs.window,
+                        ts=obs.ts,
+                        snippet=_truncate(item.hit.text, _SNIPPET_LEN),
+                    )
                 )
-            )
-        return citations
+            else:
+                derived.append(_summary_derived_citation(item, index=len(derived) + 1))
+        return citations, derived
 
 
 def _meta_label(app: str | None, window: str | None) -> str:
@@ -2003,6 +2353,69 @@ def _meta_label(app: str | None, window: str | None) -> str:
     parts = [_neutralize(p) for p in (app, window) if p]
     parts = [p for p in parts if p]
     return f" ({' / '.join(parts)})" if parts else ""
+
+
+def _normalize_block_summary(item: dict) -> dict:
+    """Normalize a ``block_summaries`` row into the summary context payload."""
+    return {
+        "summary_kind": "block",
+        "summary_id": str(item.get("id") or ""),
+        "text": str(item.get("summary_text") or ""),
+        "start_ts": item.get("start_ts"),
+        "end_ts": item.get("end_ts"),
+        "local_date": item.get("local_date"),
+        "source_refs": item.get("source_refs") or [],
+    }
+
+
+def _normalize_week_memory(week: dict) -> dict | None:
+    """Normalize a week ``day_memories`` row into the summary context payload."""
+    payload = week.get("payload") or {}
+    text = str(payload.get("digest_text") or "").strip()
+    if not text:
+        return None
+    window = payload.get("window") or {}
+    return {
+        "summary_kind": "week",
+        "summary_id": str(week.get("id") or ""),
+        "text": text,
+        "start_ts": window.get("start"),
+        "end_ts": window.get("end"),
+        "local_date": week.get("local_date"),
+        "source_refs": week.get("source_refs") or [],
+    }
+
+
+def _summary_derived_citation(item: _ContextItem, *, index: int) -> DerivedCitation:
+    """Build the typed DerivedCitation for a cited summary context item."""
+    summary = item.summary or {}
+    kind = str(summary.get("summary_kind") or "block")
+    refs = [
+        {"source_kind": str(r.get("source_kind")), "source_id": str(r.get("source_id"))}
+        for r in (summary.get("source_refs") or [])
+        if r.get("source_kind") and r.get("source_id")
+    ]
+    observation_ids = sorted(
+        {r["source_id"] for r in refs if r["source_kind"] == "observation"}
+    )
+    if kind == "week":
+        cite_type = "week_memory"
+        label = f"Week digest {summary.get('local_date')}"
+    else:
+        cite_type = "block_summary"
+        start = _clock(summary.get("start_ts")) or "?"
+        end = _clock(summary.get("end_ts")) or "?"
+        label = f"Block summary {start}-{end}"
+    return DerivedCitation(
+        index=index,
+        source_id=str(summary.get("summary_id") or ""),
+        type=cite_type,
+        label=label,
+        snippet=_truncate(item.text, _SNIPPET_LEN),
+        derived_from=observation_ids[:12],
+        derived_from_total=len(refs) or len(observation_ids),
+        derived_from_refs=refs,
+    )
 
 
 def build_rag_messages(
@@ -2018,11 +2431,12 @@ def build_rag_messages(
     """
     blocks: list[str] = []
     for item in context:
-        obs = item.hit.observation
-        app = obs.app if obs is not None else None
-        window = obs.window if obs is not None else None
-        meta = _meta_label(app, window)
-        snippet = _neutralize(_truncate(item.hit.text, _CONTEXT_LEN))
+        # Union-aware: occurrence items render their (neutralized) app/window
+        # label; summary items render OUR OWN kind + time label, e.g.
+        # "(block summary 09:10-11:40)" / "(week digest 2026-06-22)". Summary
+        # text is derived from captured content, so it is neutralized too.
+        meta = item.meta_line()
+        snippet = _neutralize(_truncate(item.text, _CONTEXT_LEN))
         blocks.append(f"{_SOURCE_HEADER}{item.source_id}]{meta}\n{snippet}")
 
     context_payload = "\n\n".join(blocks)

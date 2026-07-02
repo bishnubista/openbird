@@ -2135,3 +2135,57 @@ def test_ensure_day_memory_cache_hit_updates_after_llm_assignment(tmp_path):
         }
     finally:
         store.close()
+
+
+# -- compose_week_answer (Phase E1) --------------------------------------------------
+
+
+def test_compose_week_answer_empty_without_cached_prose():
+    from openbird.day_memory import compose_week_answer
+
+    day_entries = [("2026-06-22", {"payload": {"coverage": {"observations": 3},
+                                               "metrics": {"active_seconds": 600.0}}}, [])]
+    text, citations, has_prose = compose_week_answer([], day_entries)
+    assert (text, citations, has_prose) == ("", [], False)
+
+
+def test_compose_week_answer_digest_narrative_totals_and_renumbering():
+    from openbird.day_memory import compose_week_answer
+
+    week = {
+        "id": "wk1",
+        "local_date": "2026-06-22",
+        "source_count": 2,
+        "source_refs": [
+            {"source_kind": "summary", "source_id": "bs1"},
+            {"source_kind": "summary", "source_id": "bs2"},
+        ],
+        "payload": {"digest_text": "A focused week on retrieval."},
+    }
+    summary = {
+        "id": "bs1",
+        "start_ts": 1_750_000_000.0,
+        "end_ts": 1_750_003_600.0,
+        "summary_text": "Wrote the vector index.",
+        "source_count": 1,
+        "source_refs": [{"source_kind": "observation", "source_id": "o1"}],
+    }
+    saved_day = {
+        "payload": {
+            "coverage": {"observations": 4},
+            "metrics": {"active_seconds": 1800.0},
+        }
+    }
+    text, citations, has_prose = compose_week_answer(
+        [week], [("2026-06-22", saved_day, [summary]), ("2026-06-23", None, [])]
+    )
+    assert has_prose is True
+    assert "Week of 2026-06-22: A focused week on retrieval." in text
+    assert "Wrote the vector index." in text
+    assert "about 30 recorded active minute(s) across 1 day(s)" in text
+    assert [c.type for c in citations] == ["week_memory", "block_summary"]
+    assert [c.index for c in citations] == [1, 2]
+    assert citations[0].derived_from_refs == week["source_refs"]
+    # Digest/narrative text is present in the ANSWER only; the citation snippet
+    # is bounded prose, not logs (privacy handled at the logging layer).
+    assert citations[1].derived_from == ["o1"]

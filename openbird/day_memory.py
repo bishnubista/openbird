@@ -912,6 +912,101 @@ def compose_day_narrative(
     return "\n".join(lines), citations
 
 
+def compose_week_answer(
+    weeks: list[dict],
+    day_entries: list[tuple[str, dict | None, list[dict]]],
+) -> tuple[str, list["DerivedCitation"], bool]:
+    """Compose stored week digests + per-day narratives + deterministic totals.
+
+    Pure helper shared by the chat cached-week route
+    (:meth:`RAG._answer_week_memory`) and ``openbird briefing --week`` so the
+    two surfaces render the SAME answer and cannot drift. ``weeks`` are stored
+    week rows (``_get_day_memory_unchecked`` shape, scope ``week``);
+    ``day_entries`` is ``(local_date, stored day memory | None, block
+    summaries)`` per covered day — STORED reads only, composition never
+    rebuilds anything.
+
+    Returns ``(text, derived_citations, has_cached_prose)``.
+    ``has_cached_prose`` is False when neither a week digest nor any per-day
+    block summary exists — chat then falls through to its summary-first model
+    path, and the briefing renders the deterministic aggregate. When True the
+    caller MUST report route ``local_cached_model_summary`` (route
+    truthfulness: the digest/narrative sentences are precomputed local-model
+    prose; no provider call happens at composition time).
+
+    Citations: each week digest contributes one ``type="week_memory"``
+    :class:`DerivedCitation` (source_id = the week row id, ``derived_from_refs``
+    = its stored summary refs); each per-day block summary contributes its
+    usual ``block_summary`` citation via :func:`compose_day_narrative`.
+    """
+    from openbird.types import DerivedCitation
+
+    parts: list[str] = []
+    citations: list[DerivedCitation] = []
+    has_prose = False
+
+    for week in weeks:
+        payload = week.get("payload") or {}
+        digest = " ".join(str(payload.get("digest_text") or "").split())
+        week_id = week.get("id")
+        if not digest or not week_id:
+            continue
+        has_prose = True
+        local_date = str(week.get("local_date") or payload.get("week_start_date"))
+        parts.append(f"Week of {local_date}: {digest}")
+        refs = [
+            {"source_kind": str(r.get("source_kind")), "source_id": str(r.get("source_id"))}
+            for r in (week.get("source_refs") or [])
+            if r.get("source_kind") and r.get("source_id")
+        ]
+        snippet = digest if len(digest) <= 240 else digest[:239].rstrip() + "…"
+        citations.append(
+            DerivedCitation(
+                index=len(citations) + 1,
+                source_id=str(week_id),
+                type="week_memory",
+                label=f"Week digest {local_date}",
+                snippet=snippet,
+                derived_from=[],
+                derived_from_total=int(week.get("source_count") or len(refs)),
+                derived_from_refs=refs,
+            )
+        )
+
+    day_lines: list[str] = []
+    total_active_seconds = 0.0
+    days_with_data = 0
+    for local_date, saved, summaries in day_entries:
+        payload = (saved or {}).get("payload") or {}
+        coverage = payload.get("coverage") or {}
+        if int(coverage.get("observations") or 0) > 0:
+            days_with_data += 1
+            total_active_seconds += float(
+                (payload.get("metrics") or {}).get("active_seconds") or 0.0
+            )
+        narrative, day_citations = compose_day_narrative(payload, summaries or [])
+        if narrative:
+            has_prose = True
+            day_lines.append(f"{local_date}:\n{narrative}")
+            for citation in day_citations:
+                citations.append(
+                    citation.model_copy(update={"index": len(citations) + 1})
+                )
+
+    if not has_prose:
+        return "", [], False
+
+    if day_lines:
+        parts.append("\n".join(day_lines))
+    if days_with_data:
+        minutes = round(total_active_seconds / 60)
+        parts.append(
+            f"Deterministic totals: about {minutes} recorded active minute(s) "
+            f"across {days_with_data} day(s) with stored day memories."
+        )
+    return "\n\n".join(parts), citations, True
+
+
 def _fmt_clock(ts: float) -> str:
     """Local HH:MM for narrative windows."""
     return dt.datetime.fromtimestamp(ts).strftime("%H:%M")

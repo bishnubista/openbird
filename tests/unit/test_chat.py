@@ -2218,3 +2218,56 @@ def test_day_answer_store_without_summary_reader_stays_deterministic():
     """A store lacking block_summaries_for_date keeps the deterministic route."""
     chatter = RAG(StubStore([]), BoomLLM())
     assert chatter._day_block_summaries("2026-06-13") == []
+
+
+# -- Phase E1: cached week answers over the public chat contract --------------------
+
+
+def test_cached_week_answer_public_dict_carries_typed_week_citation():
+    """`chat --json` / menu-bar contract: the cached week route serializes the
+    week_memory derived citation with typed provenance, and no provider call
+    happens (BoomLLM raises on complete)."""
+    now = dt.datetime(2026, 6, 25, 15, 0).timestamp()  # a Thursday
+    window = (now - 3 * 86_400.0, now)
+
+    class WeekStore(StubStore):
+        def time_range_text(self, start, end, *, max_chars=2000, source=None):
+            return []
+
+        def week_memories_overlapping(self, start, end):
+            return [
+                {
+                    "id": "wk1",
+                    "local_date": "2026-06-22",
+                    "source_scope": "week",
+                    "extractor_version": "week-memory-v1",
+                    "generated_at": now,
+                    "source_count": 1,
+                    "summary_ids": ["bs1"],
+                    "source_refs": [
+                        {"source_kind": "summary", "source_id": "bs1"}
+                    ],
+                    "payload": {
+                        "week_start_date": "2026-06-22",
+                        "digest_text": "Shipped the summary index this week.",
+                        "member_fingerprint": "mf",
+                        "window": {"start": start, "end": end},
+                    },
+                }
+            ]
+
+    chatter = RAG(WeekStore([]), BoomLLM())
+    chatter._now = lambda: now
+    result = chatter.answer("summarize my week", window=window)
+    public = result.to_public_dict()
+    assert public["grounded"] is True
+    assert public["grounding"] == "derived"
+    assert public["reasoning_route"] == "local_cached_model_summary"
+    assert public["citations"] == []
+    [cite] = public["derived_citations"]
+    assert cite["type"] == "week_memory"
+    assert cite["source_id"] == "wk1"
+    assert cite["derived_from_refs"] == [
+        {"source_kind": "summary", "source_id": "bs1"}
+    ]
+    assert "Shipped the summary index this week." in public["answer"]
