@@ -742,6 +742,12 @@ def _multiday_window() -> tuple[float, float]:
     return NOW - 3 * _DAY, NOW
 
 
+def _week_window() -> tuple[float, float]:
+    # Week-shaped (>= 6 days): the cached week digest is gated to explicit
+    # week-recap intents with windows of at least this span.
+    return NOW - 7 * _DAY, NOW
+
+
 def _day_memory_for(ts: float, *, active_seconds=1800.0):
     return {
         "id": f"dm-{_date_of(ts)}",
@@ -758,7 +764,7 @@ def test_cached_week_answer_is_terminal_and_provider_free():
     """Digest present -> composed cached answer; ZERO provider calls (raising
     stub), route local_cached_model_summary, typed week_memory + block_summary
     derived citations with full provenance."""
-    window = _multiday_window()
+    window = _week_window()
     b1 = _block(1, ts=NOW - 2 * _DAY, text="Refactored the capture daemon.",
                 date=_date_of(NOW - 2 * _DAY))
     store = SummaryStore(
@@ -807,7 +813,7 @@ def test_no_digest_but_day_summaries_still_cached_terminal():
     """Fallback ladder: no digest but per-day block summaries exist -> STILL the
     provider-free cached composition (narrative lines + totals), mirroring the
     cached day path."""
-    window = _multiday_window()
+    window = _week_window()
     blocks = [
         _block(1, ts=NOW - 2.5 * _DAY, text="Worked on schema migrations.",
                date=_date_of(NOW - 2.5 * _DAY)),

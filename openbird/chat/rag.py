@@ -719,10 +719,13 @@ class RAG:
             if deterministic is not None:
                 return deterministic
             if self._is_synthesis_query(query):
-                if self._is_multiday_window(window):
+                if self._is_week_recap(query, window):
                     # Terminal cached week answer (no provider call); returns
                     # None when neither a week digest nor per-day summaries
                     # exist, falling through to summary-first _answer_temporal.
+                    # Gated exactly like the intent path: a generic synthesis
+                    # question with an explicit multi-day window must not be
+                    # served a generic (possibly out-of-window) week digest.
                     week_answer = self._answer_week_memory(query, window)
                     if week_answer is not None:
                         return week_answer

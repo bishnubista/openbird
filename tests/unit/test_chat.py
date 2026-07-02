@@ -2228,7 +2228,9 @@ def test_cached_week_answer_public_dict_carries_typed_week_citation():
     week_memory derived citation with typed provenance, and no provider call
     happens (BoomLLM raises on complete)."""
     now = dt.datetime(2026, 6, 25, 15, 0).timestamp()  # a Thursday
-    window = (now - 3 * 86_400.0, now)
+    # Week-shaped window: the cached digest is gated to explicit week-recap
+    # intents WITH >= 6-day windows (a 3-day window must fall through).
+    window = (now - 7 * 86_400.0, now)
 
     class WeekStore(StubStore):
         def time_range_text(self, start, end, *, max_chars=2000, source=None):
@@ -2271,3 +2273,29 @@ def test_cached_week_answer_public_dict_carries_typed_week_citation():
         {"source_kind": "summary", "source_id": "bs1"}
     ]
     assert "Shipped the summary index this week." in public["answer"]
+
+
+def test_explicit_window_generic_synthesis_never_gets_week_digest():
+    """Codex round-2 regression: the explicit-window path is gated exactly like
+    the intent path — a generic synthesis question with a multi-day window must
+    NOT be served the cached week digest (it would be generic and can carry
+    out-of-window content)."""
+    now = dt.datetime(2026, 6, 25, 15, 0).timestamp()
+    window = (now - 7 * 86_400.0, now)
+    calls = {"weeks": 0}
+
+    class WeekStore(StubStore):
+        def time_range_text(self, start, end, *, max_chars=2000, source=None):
+            return []
+
+        def week_memories_overlapping(self, start, end):
+            calls["weeks"] += 1
+            return []
+
+    chatter = RAG(WeekStore([]), BoomLLM())
+    chatter._now = lambda: now
+    result = chatter.answer("what should I follow up on?", window=window)
+    # The TERMINAL cached-digest answer is gated off for generic synthesis
+    # (the week reader MAY still be consulted for model context — that path
+    # respects the window and the question).
+    assert result.reasoning_route != "local_cached_model_summary"
