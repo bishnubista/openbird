@@ -794,3 +794,365 @@ def test_save_block_summary_rejects_zero_refs(store):
             summary_text="orphan prose", model="m", extractor_version="v",
             observation_ids=[], span_ids=[],
         )
+
+
+# --------------------------------------------------------------------------- #
+# Summary index (Phase E1)                                                    #
+# --------------------------------------------------------------------------- #
+
+
+def _saved_block(store, *, key="k1", fingerprint="f1", start=1000.0,
+                 text="Reviewed the openbird retrieval design and citations."):
+    span_id = store.open_span(
+        epoch_id="e", start_ts=start, end_ts=start + 900.0, bundle_id="b",
+        detail_tier=1,
+    )
+    return store.save_block_summary(
+        local_date="2026-06-29", block_key=key, block_fingerprint=fingerprint,
+        start_ts=start, end_ts=start + 900.0, dominant_bundle="b", level=None,
+        summary_text=text, model="m", extractor_version="block-summary-v1",
+        observation_ids=[], span_ids=[span_id],
+    )
+
+
+def test_stats_week_scope_split_and_summary_index_count(store):
+    import json as _json
+
+    store.conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) "
+        "VALUES ('d1', '2026-06-29', 'capture', 'v9', 1.0, '{}', 0)"
+    )
+    saved = _saved_block(store)
+    store.conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) VALUES ('w1', '2026-06-29', "
+        "'week', 'week-memory-v1', 1.0, ?, 1)",
+        (_json.dumps({"digest_text": "d", "member_fingerprint": "wf"}),),
+    )
+    store.conn.execute(
+        "INSERT INTO day_memory_source_refs VALUES ('w1', 'summary', ?)",
+        (saved["id"],),
+    )
+    store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    stats = store.stats()
+    # Week rows are NOT counted as day memories (verification scripts parse
+    # day_memories as the DAY count); they get their own key.
+    assert stats["day_memories"] == 1
+    assert stats["week_memories"] == 1
+    assert stats["summary_index_entries"] == 1
+
+
+def test_index_summary_replaces_stale_entries_and_chunks_long_text(store):
+    saved = _saved_block(store)
+    n = store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    assert n == 1
+    assert store.summary_index_state() == {("block", saved["id"]): "f1"}
+
+    # Re-index under a drifted fingerprint: old entries replaced, not appended.
+    # The TOCTOU guard requires a LIVE week row whose member_fingerprint
+    # matches, so create/refresh a real one per pass (fabricated ids refuse).
+    long_text = " ".join(f"sentence number {i} about deep work." for i in range(80))
+
+    def _week(fp):
+        return store.save_week_memory(
+            week_start_date="2026-06-22",
+            payload={"member_fingerprint": fp, "digest": long_text, "model": "m"},
+            extractor_version="week-memory-v1",
+            summary_ids=[saved["id"]],
+        )
+
+    wk = _week("wf1")
+    n2 = store.index_summary(
+        summary_kind="week", summary_id=wk["id"], fingerprint="wf1", text=long_text
+    )
+    assert n2 >= 2  # ingest.chunk split the long digest into seq pieces
+    wk = _week("wf2")  # regeneration: same Monday, new fingerprint/new id
+    n3 = store.index_summary(
+        summary_kind="week", summary_id=wk["id"], fingerprint="wf2", text=long_text
+    )
+    assert n3 == n2
+    entries = store.conn.execute(
+        "SELECT COUNT(*) c FROM summary_index_entries WHERE summary_kind='week'"
+    ).fetchone()["c"]
+    assert entries == n2  # replaced in place, zero stale rows
+    assert store.summary_index_orphan_counts()["fts_orphans"] == 0
+    assert store.summary_index_orphan_counts()["vec_orphans"] == 0
+
+
+def test_summary_index_pending_reports_missing_and_stale(store):
+    import json as _json
+
+    saved = _saved_block(store)
+    pending = store.summary_index_pending(limit=32)
+    assert [(p["summary_kind"], p["summary_id"]) for p in pending] == [
+        ("block", saved["id"])
+    ]
+    store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    assert store.summary_index_pending(limit=32) == []
+
+    # Drift the block (regeneration re-keys the id), then add a never-indexed
+    # week row citing the NEW summary: both become pending, weeks first.
+    regen = _saved_block(store, key="k1", fingerprint="f2")
+    store.conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) VALUES ('w1', '2026-06-29', "
+        "'week', 'week-memory-v1', 1.0, ?, 1)",
+        (_json.dumps({"digest_text": "Week digest.", "member_fingerprint": "wf1"}),),
+    )
+    store.conn.execute(
+        "INSERT INTO day_memory_source_refs VALUES ('w1', 'summary', ?)",
+        (regen["id"],),
+    )
+    pending = store.summary_index_pending(limit=32)
+    kinds = [(p["summary_kind"], p["summary_id"], p["fingerprint"]) for p in pending]
+    assert ("week", "w1", "wf1") in kinds
+    assert ("block", regen["id"], "f2") in kinds
+    assert kinds[0][0] == "week"
+
+
+def test_search_summaries_hybrid_finds_block_and_week(store):
+    import json as _json
+
+    saved = _saved_block(
+        store, text="Debugged the sqlite vector index and citation validation."
+    )
+    store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    store.conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) VALUES ('w1', '2026-06-29', "
+        "'week', 'week-memory-v1', 1.0, ?, 1)",
+        (
+            _json.dumps(
+                {
+                    "digest_text": "A week focused on homebrew packaging release.",
+                    "member_fingerprint": "wf1",
+                    "window": {"start": 100.0, "end": 700.0},
+                }
+            ),
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO day_memory_source_refs VALUES ('w1', 'summary', ?)",
+        (saved["id"],),
+    )
+    store.index_summary(
+        summary_kind="week", summary_id="w1", fingerprint="wf1",
+        text="A week focused on homebrew packaging release.",
+    )
+
+    hits = store.search_summaries("sqlite vector citation", k=5)
+    assert hits and hits[0]["summary_kind"] == "block"
+    assert hits[0]["summary_id"] == saved["id"]
+    assert hits[0]["source_refs"]
+    assert hits[0]["start_ts"] == saved["start_ts"]
+
+    week_hits = store.search_summaries("homebrew packaging", k=5)
+    assert week_hits and week_hits[0]["summary_kind"] == "week"
+    assert week_hits[0]["summary_id"] == "w1"
+    assert week_hits[0]["start_ts"] == 100.0
+    assert week_hits[0]["source_refs"] == [
+        {"source_kind": "summary", "source_id": saved["id"]}
+    ]
+
+    assert store.search_summaries("", k=5) == []
+
+
+def test_search_summaries_drops_dead_entries(store):
+    saved = _saved_block(store, text="Prototype week rollup digest pipeline.")
+    store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    # Forbidden raw delete strands fts/vec rows; search must not resurrect them.
+    store.conn.execute("DELETE FROM block_summaries WHERE id = ?", (saved["id"],))
+    assert store.search_summaries("week rollup digest", k=5) == []
+
+
+# --------------------------------------------------------------------------- #
+# Week memories (Phase E1): day_memories rows with source_scope='week'        #
+# --------------------------------------------------------------------------- #
+
+
+def _week_payload(monday="2026-06-22", **extra):
+    payload = {
+        "week_start_date": monday,
+        "local_date": monday,
+        "digest_text": "A week spent shipping the summary index.",
+        "member_fingerprint": "mf1",
+        "as_of": 1000.0,
+        "model": "m",
+        "window": {"start": 100.0, "end": 700.0},
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_save_week_memory_roundtrip_with_typed_provenance(store):
+    saved_block = _saved_block(store)
+    week = store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(),
+        summary_ids=[saved_block["id"]],
+    )
+    assert week["local_date"] == "2026-06-22"
+    assert week["source_scope"] == "week"
+    assert week["payload"]["digest_text"].startswith("A week")
+    # Provenance shape fix: summary refs are returned (typed + summary_ids),
+    # while the legacy observation/span keys stay present and untouched.
+    assert week["summary_ids"] == [saved_block["id"]]
+    assert week["source_refs"] == [
+        {"source_kind": "summary", "source_id": saved_block["id"]}
+    ]
+    assert week["source_ids"] == []
+    assert week["span_ids"] == []
+    assert store.get_week_memory("2026-06-22") == week
+    # A chat-path day read for the same date never returns the week row.
+    assert store.get_day_memory(local_date="2026-06-22") is None
+
+
+def test_save_week_memory_refuses_zero_refs_and_non_monday(store):
+    with pytest.raises(ValueError, match="at least one summary ref"):
+        store.save_week_memory(
+            week_start_date="2026-06-22",
+            extractor_version="week-memory-v1",
+            payload=_week_payload(),
+            summary_ids=[],
+        )
+    saved_block = _saved_block(store)
+    with pytest.raises(ValueError, match="Monday"):
+        store.save_week_memory(
+            week_start_date="2026-06-23",  # a Tuesday
+            extractor_version="week-memory-v1",
+            payload=_week_payload(),
+            summary_ids=[saved_block["id"]],
+        )
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        store.save_week_memory(
+            week_start_date="junk",
+            extractor_version="week-memory-v1",
+            payload=_week_payload(),
+            summary_ids=[saved_block["id"]],
+        )
+
+
+def test_save_week_memory_unknown_summary_ref_aborts_atomically(store):
+    import sqlite3 as _sqlite3
+
+    with pytest.raises(_sqlite3.IntegrityError, match="unknown summary ref"):
+        store.save_week_memory(
+            week_start_date="2026-06-22",
+            extractor_version="week-memory-v1",
+            payload=_week_payload(),
+            summary_ids=["not-a-real-summary"],
+        )
+    # The parent insert rolled back with the failed ref insert.
+    assert store.get_week_memory("2026-06-22") is None
+
+
+def test_save_week_memory_regeneration_replaces_row_and_sweeps_index(store):
+    saved_block = _saved_block(store)
+    first = store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(),
+        summary_ids=[saved_block["id"]],
+    )
+    store.index_summary(
+        summary_kind="week", summary_id=first["id"], fingerprint="mf1",
+        text=first["payload"]["digest_text"],
+    )
+    second = store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(member_fingerprint="mf2"),
+        summary_ids=[saved_block["id"]],
+    )
+    assert second["id"] != first["id"]
+    # UNIQUE(local_date, 'week') semantics: exactly one row per week.
+    count = store.conn.execute(
+        "SELECT COUNT(*) c FROM day_memories WHERE source_scope='week'"
+    ).fetchone()["c"]
+    assert count == 1
+    # The OLD week row's index rows were swept in the same transaction.
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM summary_index_entries WHERE summary_kind='week'"
+    ).fetchone()["c"] == 0
+    assert store.summary_index_orphan_counts()["ok"] is True
+
+
+def test_week_memory_dies_with_cited_block_summary_recursively(store):
+    """delete span -> block summary (trigger) -> week row (recursive trigger)."""
+    saved_block = _saved_block(store, start=1000.0)
+    week = store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(),
+        summary_ids=[saved_block["id"]],
+    )
+    store.index_summary(
+        summary_kind="week", summary_id=week["id"], fingerprint="mf1",
+        text=week["payload"]["digest_text"],
+    )
+    deleted = store.delete(since_ts=0.0)  # production path sweeps the index too
+    assert deleted == 0  # span-backed only; no observations existed
+    assert store.get_week_memory("2026-06-22") is None
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM block_summaries"
+    ).fetchone()["c"] == 0
+    assert store.summary_index_orphan_counts()["ok"] is True
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM summary_index_entries"
+    ).fetchone()["c"] == 0
+
+
+def test_full_purge_wipes_week_memories(store):
+    saved_block = _saved_block(store)
+    store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(),
+        summary_ids=[saved_block["id"]],
+    )
+    store.delete(all=True)
+    assert store.get_week_memory("2026-06-22") is None
+    assert store.stats()["week_memories"] == 0
+
+
+def test_week_memories_overlapping_windows(store):
+    import datetime as _dt
+
+    saved_block = _saved_block(store)
+    mondays = ["2026-06-15", "2026-06-22", "2026-06-29"]
+    for monday in mondays:
+        store.save_week_memory(
+            week_start_date=monday,
+            extractor_version="week-memory-v1",
+            payload=_week_payload(monday),
+            summary_ids=[saved_block["id"]],
+        )
+
+    def ts(day: str, hour: int = 12) -> float:
+        return _dt.datetime.strptime(day, "%Y-%m-%d").replace(hour=hour).timestamp()
+
+    # A mid-week single-day window hits exactly its own week.
+    hits = store.week_memories_overlapping(ts("2026-06-24"), ts("2026-06-25"))
+    assert [w["local_date"] for w in hits] == ["2026-06-22"]
+    # A window crossing a Monday boundary hits both adjacent weeks.
+    hits = store.week_memories_overlapping(ts("2026-06-21"), ts("2026-06-23"))
+    assert [w["local_date"] for w in hits] == ["2026-06-15", "2026-06-22"]
+    # A window before all stored weeks hits nothing.
+    assert store.week_memories_overlapping(ts("2026-05-01"), ts("2026-05-02")) == []

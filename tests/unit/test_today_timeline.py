@@ -647,3 +647,145 @@ def test_briefing_cli_without_summaries_keeps_local_deterministic(
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
     assert payload["reasoning_route"] == "local_deterministic"
+
+
+# -- briefing --week + summaries list --weeks (Phase E1) -----------------------------
+
+
+class _WeekStub:
+    """Maintenance-store stub for the week briefing (STORED reads only)."""
+
+    def __init__(self, *, week=None, day_memories=None, blocks=None):
+        self.week = week
+        self.day_memories = day_memories or {}
+        self.blocks = blocks or {}
+        self.closed = False
+
+    def get_week_memory(self, monday):
+        return self.week if self.week and self.week["local_date"] == monday else None
+
+    def get_day_memory(self, *, local_date, source_scope="capture"):
+        return self.day_memories.get(local_date)
+
+    def block_summaries_for_date(self, local_date):
+        return self.blocks.get(local_date, [])
+
+    def week_memories_overlapping(self, start, end):
+        return [self.week] if self.week else []
+
+    def close(self):
+        self.closed = True
+
+
+def _monday_of_today() -> str:
+    today = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    return (today - dt.timedelta(days=today.weekday())).strftime("%Y-%m-%d")
+
+
+def _stub_week_row(monday: str) -> dict:
+    return {
+        "id": "wk1",
+        "local_date": monday,
+        "source_scope": "week",
+        "extractor_version": "week-memory-v1",
+        "generated_at": 1000.0,
+        "source_count": 1,
+        "summary_ids": ["bs1"],
+        "source_refs": [{"source_kind": "summary", "source_id": "bs1"}],
+        "payload": {
+            "week_start_date": monday,
+            "digest_text": "A week spent on the E1 retrieval layer.",
+            "member_fingerprint": "mf",
+            "model": "stub-model",
+            "window": {"start": 0.0, "end": 1.0},
+        },
+    }
+
+
+def test_briefing_week_json_composes_cached_route(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    monday = _monday_of_today()
+    stub = _WeekStub(week=_stub_week_row(monday))
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
+    monkeypatch.setattr(
+        cli,
+        "_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("week briefing must be no-model")),
+    )
+
+    res = CliRunner().invoke(cli.app, ["briefing", "--week", "--json", "--day", "0"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["week_start"] == monday
+    assert payload["reasoning_route"] == "local_cached_model_summary"
+    assert "A week spent on the E1 retrieval layer." in payload["text"]
+    [cite] = payload["derived_citations"]
+    assert cite["type"] == "week_memory"
+    assert cite["source_id"] == "wk1"
+    assert cite["derived_from_refs"] == [
+        {"source_kind": "summary", "source_id": "bs1"}
+    ]
+    assert stub.closed is True
+
+
+def test_briefing_week_deterministic_aggregate_without_cached_prose(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    monday = _monday_of_today()
+    stub = _WeekStub(
+        day_memories={
+            monday: {
+                "payload": {
+                    "coverage": {"observations": 4},
+                    "metrics": {"active_seconds": 3600.0},
+                }
+            }
+        }
+    )
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
+
+    res = CliRunner().invoke(cli.app, ["briefing", "--week", "--json", "--day", "0"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["reasoning_route"] == "local_deterministic"
+    assert "60 recorded active minute(s) across 1 day(s)" in payload["text"]
+    assert payload["derived_citations"] == []
+
+
+def test_briefing_week_mutually_exclusive_with_model_and_signals(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    res = CliRunner().invoke(cli.app, ["briefing", "--week", "--model"])
+    assert res.exit_code == 2
+    assert "mutually exclusive" in res.output
+    res = CliRunner().invoke(cli.app, ["briefing", "--week", "--signals"])
+    assert res.exit_code == 2
+
+
+def test_summaries_list_weeks_withholds_bodies_non_interactive(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    monday = _monday_of_today()
+    stub = _WeekStub(week=_stub_week_row(monday))
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: stub)
+
+    res = CliRunner().invoke(cli.app, ["summaries", "list", "--weeks"])
+    assert res.exit_code == 0, res.output
+    assert f"week of {monday}" in res.output
+    assert "members=1" in res.output
+    assert "model=stub-model" in res.output
+    # Digest body withheld on a non-interactive stream (privacy rule).
+    assert "A week spent on the E1 retrieval layer." not in res.output
+    assert "withheld" in res.output
+
+
+def test_summaries_list_weeks_rejects_date(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    reset_settings_cache()
+    res = CliRunner().invoke(
+        cli.app, ["summaries", "list", "--weeks", "--date", "2026-06-22"]
+    )
+    assert res.exit_code == 2

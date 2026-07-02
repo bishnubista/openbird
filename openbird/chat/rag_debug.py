@@ -173,6 +173,8 @@ def emit_grounding_trace(
     refusal = int(bool(answer_text) and _REFUSAL_RE.search(answer_text) is not None)
 
     # Time span actually covered by the chosen sources (morning->evening check).
+    # Union-aware (Phase E1): summary items carry no observation and are
+    # counted separately; getattr(None, ...) keeps hit=None items filtered.
     span_s = 0.0
     chosen_ts = [
         item.hit.observation.ts
@@ -181,6 +183,9 @@ def emit_grounding_trace(
     ]
     if len(chosen_ts) >= 2:
         span_s = max(chosen_ts) - min(chosen_ts)
+    summary_items = sum(
+        1 for item in context if getattr(item, "summary", None) is not None
+    )
 
     fields = [
         f"route={route}",
@@ -196,6 +201,7 @@ def emit_grounding_trace(
         f"grounded={int(bool(citations))}",
         f"replaced={int(not citations)}",
         f"span_s={span_s:.0f}",
+        f"summary_items={summary_items}",
     ]
     if model:
         fields.append(f"model={model}")
@@ -270,6 +276,19 @@ def _emit_full(
     tokens = [_sanitize_token(c) for c in claimed_ids[:_TOKEN_MAXCOUNT]]
     logger.info("rag.grounding.full answer=%r claimed_raw=%r", answer_text, tokens)
     for item in context:
+        summary = getattr(item, "summary", None)
+        if summary is not None:
+            # Summary-backed item (Phase E1): kind + id metadata, plus the
+            # derived text (full tier already prints captured content).
+            logger.info(
+                "rag.grounding.full source=%s summary_kind=%s summary_id=%s "
+                "snippet=%r",
+                getattr(item, "source_id", ""),
+                summary.get("summary_kind"),
+                summary.get("summary_id"),
+                str(summary.get("text") or "")[:200],
+            )
+            continue
         obs = getattr(item.hit, "observation", None)
         logger.info(
             "rag.grounding.full source=%s app=%r window=%r snippet=%r",

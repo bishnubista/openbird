@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -494,6 +494,63 @@ def _apply_v5_block_summaries(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _apply_v6_summary_index(conn: sqlite3.Connection) -> None:
+    """Add the parallel summary index (Phase E1): entries + FTS + cleanup triggers.
+
+    Same idempotency contract as v4/v5: ``schema.sql`` (with the FINAL shape)
+    has already run on this connection under the schema.sql-first startup order,
+    so every object here usually exists — every statement is IF-NOT-EXISTS and
+    stays textually in lockstep with schema.sql. ``vec_summaries`` is
+    DELIBERATELY absent: it is a vec0 virtual table whose dimension comes from
+    ``Settings.embed_dim``, so it is created in ``MemoryStore._apply_schema``
+    (exactly like ``vec_chunks``), never in SQL files or this ladder.
+
+    Week rows need no DDL — they reuse ``day_memories`` with
+    ``source_scope='week'`` and the existing v5 'summary' source-ref kind.
+    """
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS summary_index_entries (
+            entry_rowid  INTEGER PRIMARY KEY,
+            summary_kind TEXT NOT NULL CHECK (summary_kind IN ('block','week')),
+            summary_id   TEXT NOT NULL,
+            seq          INTEGER NOT NULL DEFAULT 0,
+            text         TEXT NOT NULL,
+            fingerprint  TEXT NOT NULL,
+            UNIQUE(summary_kind, summary_id, seq)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_summary_index_entries_summary
+            ON summary_index_entries(summary_kind, summary_id)
+        """,
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS fts_summaries USING fts5(
+            text
+        )
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_summary_index_block_delete
+        BEFORE DELETE ON block_summaries
+        BEGIN
+            DELETE FROM summary_index_entries
+            WHERE summary_kind = 'block' AND summary_id = OLD.id;
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_summary_index_week_delete
+        BEFORE DELETE ON day_memories
+        WHEN OLD.source_scope = 'week'
+        BEGIN
+            DELETE FROM summary_index_entries
+            WHERE summary_kind = 'week' AND summary_id = OLD.id;
+        END
+        """,
+    ]
+    for statement in statements:
+        conn.execute(statement)
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
 # so migrations here only ever upgrade an existing DB from one version to the
 # next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
@@ -518,6 +575,11 @@ MIGRATIONS: list[Migration] = [
         version=5,
         description="add block summaries, taxonomy cache, summary source kind",
         apply=_apply_v5_block_summaries,
+    ),
+    Migration(
+        version=6,
+        description="add the parallel summary index (entries, FTS, cleanup triggers)",
+        apply=_apply_v6_summary_index,
     ),
 ]
 

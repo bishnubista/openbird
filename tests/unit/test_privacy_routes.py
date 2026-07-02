@@ -70,6 +70,11 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "productivity.local_facts",
         "rerank.remote",
         "routines.summary",
+        "summaries.block",
+        "summaries.week",
+        "chat.day_memory_cached_summary",
+        "chat.week_memory_cached_summary",
+        "chat.summary_grounded",
     }.issubset(routes)
 
 
@@ -610,3 +615,85 @@ def test_summaries_block_route_declares_gated_generation_and_counts_only() -> No
     assert "block_summaries_citing_deleted_sources" in deletion
     assert "day_memories_citing_deleted_summaries" in deletion
     assert "category_assignments_on_full_purge" in deletion
+
+
+def test_summaries_week_route_mirrors_block_gating_and_deletion() -> None:
+    """Phase E1 week-digest generation: same gate/egress model as summaries.block,
+    with the summary-index deletion contract pinned."""
+    route = _routes()["summaries.week"]
+
+    assert route["class"] == "local"
+    assert route["derives_from"] == ["summaries.block"]
+    assert set(route["storage"]) == {
+        "sqlite.day_memories",
+        "sqlite.summary_index_entries",
+        "sqlite.fts_summaries",
+        "sqlite.vec_summaries",
+    }
+    assert route["egress"]["default"] == "inherits_active_model_route"
+    note = route["egress"]["note"]
+    assert "battery/idle gate" in note
+    assert "CloudOptInRequired" in note
+    assert "counts + reason codes only" in note
+    assert "week_memory_ungrounded" in note
+    assert "digest_text_in_logs" in route["forbidden_fields"]
+    assert "digest_text_in_routine_output" in route["forbidden_fields"]
+    deletion = route["deletion"]["must_remove"]
+    assert "week_rows_citing_deleted_block_summaries" in deletion
+    assert "summary_index_entries_and_fts_vec_rows" in deletion
+
+
+def test_summaries_block_deletion_covers_summary_index_rows() -> None:
+    """Phase E1 extends the block deletion contract with the parallel index."""
+    route = _routes()["summaries.block"]
+    assert (
+        "summary_index_entries_and_fts_vec_rows" in route["deletion"]["must_remove"]
+    )
+
+
+def test_chat_week_memory_cached_summary_route_is_local_and_truthful() -> None:
+    """The Phase E1 cached week answer: local composition, zero answer-time
+    egress, disclosure surfaces pinned (chat + the briefing --week CLI)."""
+    route = _routes()["chat.week_memory_cached_summary"]
+
+    assert route["class"] == "local"
+    assert set(route["derives_from"]) == {
+        "chat.day_memory_cached_summary",
+        "summaries.week",
+    }
+    assert set(route["storage"]) == {"sqlite.day_memories", "sqlite.block_summaries"}
+    assert route["egress"]["default"] == "none"
+    note = route["egress"]["note"]
+    assert "no provider call" in note
+    assert "no embedding request" in note
+    assert "stored_week_digest_prose" in route["captured_fields"]
+    assert "derived_citation_typed_source_refs" in route["captured_fields"]
+    assert "captured_text" in route["forbidden_fields"]
+    assert set(route["truth_surface"]) == {
+        "cli.chat_json.reasoning_route",
+        "app.ChatResult.routeLabel",
+        "cli.briefing_week",
+    }
+
+
+def test_chat_summary_grounded_route_documents_summary_prose_egress() -> None:
+    """Fresh completions over cached summary prose: the prose egresses ONLY
+    under the active model route with cloud opt-in (same class as
+    retrieved_chunks) — the route documents that honestly."""
+    route = _routes()["chat.summary_grounded"]
+
+    assert route["class"] == "unknown"
+    assert set(route["derives_from"]) == {
+        "summaries.block",
+        "summaries.week",
+        "chat.local",
+        "chat.remote",
+    }
+    assert route["egress"]["default"] == "inherits_active_model_route"
+    assert set(route["egress"]["inherited_from"]) == {"chat.local", "chat.remote"}
+    warning = route["egress"]["warning"]
+    assert "cloud opt-in" in warning
+    assert "retrieved_chunks" in warning
+    assert "stored_block_summary_prose_fenced" in route["captured_fields"]
+    assert "stored_week_digest_prose_fenced" in route["captured_fields"]
+    assert "cli.CLOUD_ACTIVE" in route["truth_surface"]

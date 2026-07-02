@@ -1458,3 +1458,335 @@ def test_recursive_triggers_pragma_verified_and_raises_on_silent_noop(tmp_path):
 
     with pytest.raises(RuntimeError, match="recursive_triggers"):
         _enable_recursive_triggers(_NoOpPragmaConn())
+
+
+# --------------------------------------------------------------------------- #
+# v6: parallel summary index (Phase E1)                                       #
+# --------------------------------------------------------------------------- #
+
+_V6_OBJECTS = [
+    ("table", "summary_index_entries"),
+    ("table", "fts_summaries"),
+    ("trigger", "trg_summary_index_block_delete"),
+    ("trigger", "trg_summary_index_week_delete"),
+    ("index", "idx_summary_index_entries_summary"),
+]
+
+
+def _make_v5_shaped_db(path) -> sqlite3.Connection:
+    """Build a realistic v5-stamped DB (pre-E1 shape) from current schema.sql."""
+    conn = _make_v1_shaped_db(path)
+    conn.execute("DROP TRIGGER IF EXISTS trg_summary_index_block_delete")
+    conn.execute("DROP TRIGGER IF EXISTS trg_summary_index_week_delete")
+    conn.execute("DROP TABLE IF EXISTS fts_summaries")
+    conn.execute("DROP TABLE IF EXISTS summary_index_entries")
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    return conn
+
+
+def _open_store(tmp_path, name="v6.db"):
+    return MemoryStore(
+        db_path=str(tmp_path / name),
+        settings=Settings(data_dir=tmp_path, embed_dim=64),
+        provider=FakeProvider(embed_dim=64),
+    )
+
+
+def _seed_indexed_block(store, *, ts=1000.0, block_key="k1", fingerprint="f1",
+                        text="Worked on the openbird summary index design."):
+    """Seed span+obs -> block summary via the PRODUCTION API, then index it."""
+    obs = store.add_observation("alpha bravo captured work text", source="capture", ts=ts)
+    span_id = store.open_span(
+        epoch_id="e", start_ts=ts, end_ts=ts + 900.0, bundle_id="b", detail_tier=1
+    )
+    summary = store.save_block_summary(
+        local_date="2026-06-29",
+        block_key=block_key,
+        block_fingerprint=fingerprint,
+        start_ts=ts,
+        end_ts=ts + 900.0,
+        dominant_bundle="b",
+        level=None,
+        summary_text=text,
+        model="m",
+        extractor_version="block-summary-v1",
+        observation_ids=[obs.id],
+        span_ids=[span_id],
+    )
+    store.index_summary(
+        summary_kind="block",
+        summary_id=summary["id"],
+        fingerprint=fingerprint,
+        text=text,
+    )
+    return summary
+
+
+def _seed_indexed_week(store, summary_id, *, week_id="wk1", monday="2026-06-29"):
+    """Seed a week row citing ``summary_id`` (raw seed: save_week_memory ships in
+    the E1 week commit) and index its digest."""
+    payload = json.dumps(
+        {
+            "digest_text": "Week digest about openbird design work.",
+            "member_fingerprint": "wf1",
+            "week_start_date": monday,
+            "window": {"start": 0.0, "end": 604800.0},
+        }
+    )
+    store.conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) VALUES (?, ?, 'week', "
+        "'week-memory-v1', 1.0, ?, 1)",
+        (week_id, monday, payload),
+    )
+    store.conn.execute(
+        "INSERT INTO day_memory_source_refs VALUES (?, 'summary', ?)",
+        (week_id, summary_id),
+    )
+    store.index_summary(
+        summary_kind="week",
+        summary_id=week_id,
+        fingerprint="wf1",
+        text="Week digest about openbird design work.",
+    )
+    return week_id
+
+
+def _index_counts(store) -> tuple[int, int, int]:
+    e = store.conn.execute("SELECT COUNT(*) c FROM summary_index_entries").fetchone()["c"]
+    f = store.conn.execute("SELECT COUNT(*) c FROM fts_summaries").fetchone()["c"]
+    v = store.conn.execute("SELECT COUNT(*) c FROM vec_summaries").fetchone()["c"]
+    return int(e), int(f), int(v)
+
+
+def test_empty_db_ladder_reaches_v6_cleanly(tmp_path):
+    """Fresh DB: every v6 object exists exactly once and the stamp is current."""
+    s = _open_store(tmp_path, "fresh-v6.db")
+    try:
+        ver = s.conn.execute("PRAGMA user_version").fetchone()
+        assert int(next(iter(ver.values()))) == SCHEMA_VERSION == 6
+        for kind, name in _V6_OBJECTS:
+            count = s.conn.execute(
+                "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()["c"]
+            assert count == 1, f"{kind} {name} count={count}"
+        # vec_summaries is Python-created (dim from settings), like vec_chunks.
+        assert s.conn.execute(
+            "SELECT COUNT(*) c FROM sqlite_master WHERE name='vec_summaries'"
+        ).fetchone()["c"] == 1
+    finally:
+        s.close()
+
+
+def test_v5_db_upgrades_to_v6_and_keeps_v5_triggers(tmp_path):
+    """v5 -> v6 under the schema.sql-first startup order; v5 trigger SQL intact."""
+    conn = _make_v5_shaped_db(tmp_path / "v5-to-v6.db")
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='summary_index_entries'"
+        ).fetchone()[0] == 0
+        conn.executescript(_SCHEMA_SQL)
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+        for kind, name in _V6_OBJECTS:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()[0]
+            assert count == 1, f"{kind} {name} count={count}"
+        # Non-regression: the v5 day-memory trigger set survived the v6 step.
+        _assert_v5_trigger_sql(conn)
+    finally:
+        conn.close()
+
+
+def test_v6_migration_is_idempotent_on_rerun(tmp_path):
+    from openbird.memory.migrations import _apply_v6_summary_index
+
+    conn = _make_v5_shaped_db(tmp_path / "v6-rerun.db")
+    try:
+        conn.executescript(_SCHEMA_SQL)
+        assert ensure_schema_version(conn) == SCHEMA_VERSION
+        _apply_v6_summary_index(conn)
+        conn.commit()
+        for kind, name in _V6_OBJECTS:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()[0]
+            assert count == 1
+    finally:
+        conn.close()
+
+
+def test_v6_ddl_lockstep_schema_and_migration(tmp_path):
+    """The migration's DDL must land the same sqlite_master text as schema.sql."""
+    fresh = _make_v1_shaped_db(tmp_path / "lockstep-fresh.db")  # schema.sql applied
+    upgraded = _make_v5_shaped_db(tmp_path / "lockstep-upgraded.db")
+    try:
+        from openbird.memory.migrations import _apply_v6_summary_index
+
+        _apply_v6_summary_index(upgraded)
+        upgraded.commit()
+        for kind, name in _V6_OBJECTS:
+            a = fresh.execute(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?", (kind, name)
+            ).fetchone()
+            b = upgraded.execute(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?", (kind, name)
+            ).fetchone()
+            assert a is not None and b is not None, f"{name} missing"
+
+            def norm(row):
+                # sqlite_master keeps the original text, comments included;
+                # lockstep means the EXECUTABLE DDL matches — strip comments.
+                import re as _re
+
+                text = _re.sub(r"--[^\n]*", "", str(row[0]))
+                return " ".join(text.split())
+
+            assert norm(a) == norm(b), f"{name}: schema.sql and migration drifted"
+    finally:
+        fresh.close()
+        upgraded.close()
+
+
+def test_block_regeneration_sweeps_dependent_week_row_zero_orphans(tmp_path):
+    """DB-CONTRACT: regenerating a block summary (same block_key) deletes the
+    dependent week row and leaves ZERO fts/vec/entry orphans."""
+    s = _open_store(tmp_path)
+    try:
+        summary = _seed_indexed_block(s)
+        _seed_indexed_week(s, summary["id"])
+        assert _index_counts(s) == (2, 2, 2)
+
+        regenerated = s.save_block_summary(
+            local_date="2026-06-29",
+            block_key="k1",  # same key -> regeneration path
+            block_fingerprint="f2",
+            start_ts=1000.0,
+            end_ts=2000.0,
+            dominant_bundle="b",
+            level=None,
+            summary_text="Regenerated block summary text.",
+            model="m",
+            extractor_version="block-summary-v1",
+            observation_ids=[],
+            span_ids=[summary["source_refs"][-1]["source_id"]]
+            if summary["source_refs"]
+            else [],
+        )
+        assert regenerated["id"] != summary["id"]
+        # The dependent week row died via the summary-delete trigger…
+        assert s.conn.execute(
+            "SELECT COUNT(*) c FROM day_memories WHERE source_scope='week'"
+        ).fetchone()["c"] == 0
+        # …and the sweep removed BOTH summaries' index rows in the same txn.
+        assert _index_counts(s) == (0, 0, 0)
+        assert s.summary_index_orphan_counts()["ok"] is True
+    finally:
+        s.close()
+
+
+def test_delete_since_sweeps_summary_index_for_blocks_and_weeks(tmp_path):
+    """DB-CONTRACT: delete(since_ts) pre-selects doomed summaries and sweeps."""
+    s = _open_store(tmp_path)
+    try:
+        summary = _seed_indexed_block(s, ts=1000.0)
+        _seed_indexed_week(s, summary["id"])
+        s.delete(since_ts=0.0)
+        assert s.conn.execute("SELECT COUNT(*) c FROM block_summaries").fetchone()["c"] == 0
+        assert s.conn.execute(
+            "SELECT COUNT(*) c FROM day_memories WHERE source_scope='week'"
+        ).fetchone()["c"] == 0
+        assert _index_counts(s) == (0, 0, 0)
+        assert s.summary_index_orphan_counts()["ok"] is True
+    finally:
+        s.close()
+
+
+def test_prune_before_ts_sweeps_summary_index(tmp_path):
+    """DB-CONTRACT: prune (delete before_ts) sweeps the index the same way."""
+    s = _open_store(tmp_path)
+    try:
+        summary = _seed_indexed_block(s, ts=1000.0)
+        _seed_indexed_week(s, summary["id"])
+        # Keep one newer observation so the prune is selective, not a purge.
+        s.add_observation("newer unrelated text", source="capture", ts=99999.0)
+        s.delete(before_ts=5000.0)
+        assert s.conn.execute("SELECT COUNT(*) c FROM block_summaries").fetchone()["c"] == 0
+        assert _index_counts(s) == (0, 0, 0)
+        assert s.summary_index_orphan_counts()["ok"] is True
+    finally:
+        s.close()
+
+
+def test_full_purge_wipes_summary_index_tables(tmp_path):
+    s = _open_store(tmp_path)
+    try:
+        summary = _seed_indexed_block(s)
+        _seed_indexed_week(s, summary["id"])
+        s.delete(all=True)
+        assert _index_counts(s) == (0, 0, 0)
+        assert s.summary_index_orphan_counts()["ok"] is True
+    finally:
+        s.close()
+
+
+def test_raw_sql_block_delete_is_detected_by_orphan_probe(tmp_path):
+    """A FORBIDDEN raw delete cleans only the plain entries (trigger) and strands
+    fts/vec rows — exactly what the integrity probe must surface."""
+    s = _open_store(tmp_path)
+    try:
+        summary = _seed_indexed_block(s)
+        s.conn.execute("DELETE FROM block_summaries WHERE id = ?", (summary["id"],))
+        counts = s.summary_index_orphan_counts()
+        assert counts["ok"] is False
+        assert counts["fts_orphans"] == 1
+        assert counts["vec_orphans"] == 1
+        assert counts["entry_orphans"] == 0  # the trigger cleaned the plain rows
+    finally:
+        s.close()
+
+
+def test_week_entry_trigger_scoped_to_week_rows_only(tmp_path):
+    """Deleting a NON-week day_memories row must not touch week index entries."""
+    s = _open_store(tmp_path)
+    try:
+        summary = _seed_indexed_block(s)
+        _seed_indexed_week(s, summary["id"])
+        s.conn.execute(
+            "INSERT INTO day_memories(id, local_date, source_scope, "
+            "extractor_version, generated_at, payload_json, source_count) "
+            "VALUES ('day1', '2026-06-29', 'capture', 'v9', 1.0, '{}', 0)"
+        )
+        s.conn.execute("DELETE FROM day_memories WHERE id = 'day1'")
+        assert _index_counts(s) == (2, 2, 2)
+        assert s.summary_index_orphan_counts()["ok"] is True
+    finally:
+        s.close()
+
+
+def test_check_summary_index_orphans_raw_open(tmp_path):
+    """The raw-open probe used by `openbird data integrity` reports counts and
+    never raises; a clean DB is ok, a violated DB reports the orphan line."""
+    from openbird.memory.store import check_summary_index_orphans
+
+    db = str(tmp_path / "probe.db")
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    s = MemoryStore(db_path=db, settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        summary = _seed_indexed_block(s)
+        s.conn.execute("DELETE FROM block_summaries WHERE id = ?", (summary["id"],))
+    finally:
+        s.close()
+
+    result = check_summary_index_orphans(db, settings=settings)
+    assert result["ok"] is False
+    assert result["counts"]["fts_orphans"] == 1
+    assert any("summary-index-orphans" in p for p in result["problems"])
+
+    missing = check_summary_index_orphans(str(tmp_path / "missing dir" / "x.db"),
+                                          settings=settings)
+    assert missing["ok"] is False or missing["counts"] is None

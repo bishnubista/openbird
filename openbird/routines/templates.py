@@ -583,10 +583,10 @@ def _run_block_summaries(store: object, provider: object, *, now: float) -> str:
     """Runner body for the ``block-summaries`` builtin (metadata-only output).
 
     Delegates to :func:`openbird.summaries.run_block_summaries` (battery/idle
-    gate, bounded batch, taxonomy fallback) and returns the counts line ONLY —
-    summary bodies stay inside the encrypted memory DB, so this text is safe
-    for the plaintext-fallback routine store, ``null_deliverer`` logs, and
-    launchd stderr.
+    gate, bounded batch, week rollups + summary indexing, taxonomy fallback)
+    and returns the counts line ONLY — summary/digest bodies stay inside the
+    encrypted memory DB, so this text is safe for the plaintext-fallback
+    routine store, ``null_deliverer`` logs, and launchd stderr.
     """
     from openbird.config import get_settings
     from openbird.summaries import format_counts_line, run_block_summaries
