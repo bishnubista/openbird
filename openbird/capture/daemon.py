@@ -186,7 +186,9 @@ _SUPERVISOR_SELECT_TIMEOUT = 0.2
 # older one-shot helper binaries, which predate typing entirely. Unknown or
 # non-string ``type`` values are treated as capture frames (fail-safe: the
 # strictest path — they then pass through redaction and are rejected if empty).
-_EVENT_TYPES = frozenset({"capture", "afk_transition", "heartbeat", "system"})
+_EVENT_TYPES = frozenset(
+    {"capture", "afk_transition", "heartbeat", "system", "app_changed"}
+)
 
 # Closed vocabularies for helper-supplied enum-ish metadata. These strings can
 # reach logs, so they are sanitized against a closed set — a helper bug can
@@ -258,9 +260,11 @@ class CaptureStats:
     rejected: int = 0
     errors: int = 0
     # Typed stream-event counters (Phase A). ``heartbeats`` counts liveness-only
-    # events (heartbeat + system); ``afk_transitions`` counts AFK state flips.
+    # events (heartbeat + system); ``afk_transitions`` counts AFK state flips;
+    # ``span_markers`` counts app_changed boundary markers (Phase B).
     heartbeats: int = 0
     afk_transitions: int = 0
+    span_markers: int = 0
 
     def _with(self, **delta: int) -> "CaptureStats":
         return CaptureStats(
@@ -271,6 +275,7 @@ class CaptureStats:
             errors=self.errors + delta.get("errors", 0),
             heartbeats=self.heartbeats + delta.get("heartbeats", 0),
             afk_transitions=self.afk_transitions + delta.get("afk_transitions", 0),
+            span_markers=self.span_markers + delta.get("span_markers", 0),
         )
 
     def _add(self, other: "CaptureStats") -> "CaptureStats":
@@ -283,6 +288,7 @@ class CaptureStats:
             errors=self.errors + other.errors,
             heartbeats=self.heartbeats + other.heartbeats,
             afk_transitions=self.afk_transitions + other.afk_transitions,
+            span_markers=self.span_markers + other.span_markers,
         )
 
 
@@ -350,6 +356,7 @@ def parse_event(line: str) -> dict | None:
         except (TypeError, ValueError):
             idle_val = None
         seq = raw.get("seq")
+        app = raw.get("app")
         return {
             "type": event_type,
             "ts": ts_val,
@@ -358,6 +365,9 @@ def parse_event(line: str) -> dict | None:
             "idle_seconds": idle_val,
             "seq": seq if isinstance(seq, int) else None,
             "kind": kind if isinstance(kind, str) and kind in _SYSTEM_KINDS else None,
+            # app_changed boundary markers carry the bundle id (identity
+            # metadata, not content); other typed events never do.
+            "app": app if event_type == "app_changed" and isinstance(app, str) else None,
         }
 
     trigger = raw.get("trigger")
@@ -677,6 +687,8 @@ class CaptureDaemon:
             # ``kind`` was sanitized against the closed vocabulary at parse time.
             logger.debug("capture: system event kind=%s", event.get("kind"))
             return stats._with(heartbeats=1)
+        if event_type == "app_changed":
+            return stats._with(span_markers=1)
         # heartbeat: pure liveness.
         return stats._with(heartbeats=1)
 

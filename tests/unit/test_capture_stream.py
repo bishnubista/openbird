@@ -322,3 +322,30 @@ def test_health_daemon_block_states(allow_settings, tmp_path):
     path.write_text('{"updated_at": NaN}')
     health = build_capture_health(settings=allow_settings, generated_at=1000.0)
     assert health["daemon"] == {"state": "unknown"}
+
+
+# ---------------------------------------------------------------------------
+# app_changed boundary markers (Phase B)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_app_changed_carries_bundle_only():
+    from openbird.capture.daemon import parse_event
+
+    e = parse_event(json.dumps({"type": "app_changed", "ts": 5.0, "app": "com.x.y"}))
+    assert e is not None
+    assert e["type"] == "app_changed"
+    assert e["app"] == "com.x.y"
+    # Never content-bearing fields.
+    for forbidden in ("window", "url", "text"):
+        assert forbidden not in e
+
+
+def test_app_changed_counted_not_ingested(allow_settings):
+    daemon, store = _daemon(allow_settings, "pass")
+    stats = daemon.run_lines(
+        [json.dumps({"type": "app_changed", "ts": 1.0, "app": "com.x.y"})]
+    )
+    assert stats.span_markers == 1
+    assert stats.ingested == 0
+    assert store.calls == []
