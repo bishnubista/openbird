@@ -164,6 +164,52 @@ _SUPERVISOR_TOKEN_MAX = 256
 _SUPERVISOR_SELECT_TIMEOUT = 0.2
 
 
+# Typed stream-event vocabulary (Phase A, event-driven capture). A line without
+# a ``type`` field is a capture frame — that is the back-compat contract with
+# older one-shot helper binaries, which predate typing entirely. Unknown or
+# non-string ``type`` values are treated as capture frames (fail-safe: the
+# strictest path — they then pass through redaction and are rejected if empty).
+_EVENT_TYPES = frozenset({"capture", "afk_transition", "heartbeat", "system"})
+
+# Closed vocabularies for helper-supplied enum-ish metadata. These strings can
+# reach logs, so they are sanitized against a closed set — a helper bug can
+# never route free text (which could embed content) into a log line.
+_CAPTURE_TRIGGERS = frozenset(
+    {
+        "app_activated",
+        "window_changed",
+        "title_changed",
+        "focus_changed",
+        "typing_pause",
+        "idle_tick",
+        "force_ceiling",
+        "return_from_afk",
+        "startup",
+    }
+)
+_SYSTEM_KINDS = frozenset(
+    {"will_sleep", "did_wake", "screen_locked", "screen_unlocked"}
+)
+
+
+def _finite_ts(value: object, fallback: float | None = None) -> float:
+    """Return a FINITE timestamp from an untrusted value (shared guard).
+
+    JSON permits ``NaN``/``Infinity`` literals and ``float('nan')`` does not
+    raise, so a malformed helper ``ts`` could otherwise poison liveness math,
+    session clocks, or time-range ordering. Non-finite or unparseable values
+    fall back to ``fallback`` (wall-clock now when omitted). Used by the
+    capture-ingest clock, typed-event dispatch, and liveness bookkeeping.
+    """
+    try:
+        parsed = float(value) if value is not None else None  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = None
+    if parsed is None or not math.isfinite(parsed):
+        return time.time() if fallback is None else fallback
+    return parsed
+
+
 class IngestSink(Protocol):
     """Minimal structural type the daemon needs from a memory store.
 
@@ -193,6 +239,10 @@ class CaptureStats:
     coalesced: int = 0
     rejected: int = 0
     errors: int = 0
+    # Typed stream-event counters (Phase A). ``heartbeats`` counts liveness-only
+    # events (heartbeat + system); ``afk_transitions`` counts AFK state flips.
+    heartbeats: int = 0
+    afk_transitions: int = 0
 
     def _with(self, **delta: int) -> "CaptureStats":
         return CaptureStats(
@@ -201,6 +251,8 @@ class CaptureStats:
             coalesced=self.coalesced + delta.get("coalesced", 0),
             rejected=self.rejected + delta.get("rejected", 0),
             errors=self.errors + delta.get("errors", 0),
+            heartbeats=self.heartbeats + delta.get("heartbeats", 0),
+            afk_transitions=self.afk_transitions + delta.get("afk_transitions", 0),
         )
 
     def _add(self, other: "CaptureStats") -> "CaptureStats":
@@ -211,6 +263,8 @@ class CaptureStats:
             coalesced=self.coalesced + other.coalesced,
             rejected=self.rejected + other.rejected,
             errors=self.errors + other.errors,
+            heartbeats=self.heartbeats + other.heartbeats,
+            afk_transitions=self.afk_transitions + other.afk_transitions,
         )
 
 
@@ -236,8 +290,14 @@ def parse_event(line: str) -> dict | None:
     """Parse one helper JSON line into a normalized event dict.
 
     Returns ``None`` for blank lines or malformed JSON (a metadata-only warning
-    is logged — never the offending text). On success returns a dict with keys
-    ``app, window, url, text, ts, incognito`` (missing optionals defaulted).
+    is logged — never the offending text). Stream-mode helpers emit *typed*
+    events (``type`` in :data:`_EVENT_TYPES`); a line without ``type`` — or with
+    an unknown/non-string one — is a capture frame (back-compat with one-shot
+    helpers, and fail-safe: unknown types go through the strictest path).
+
+    Capture frames return the classic shape ``app, window, url, text, ts,
+    incognito`` plus ``type="capture"`` and a sanitized optional ``trigger``.
+    Non-capture events return metadata-only dicts (never window/URL/text).
     """
     line = line.strip()
     if not line:
@@ -252,11 +312,39 @@ def parse_event(line: str) -> dict | None:
         logger.warning("capture: helper line was not a JSON object; dropping")
         return None
 
+    event_type = raw.get("type")
+    if not isinstance(event_type, str) or event_type not in _EVENT_TYPES:
+        event_type = "capture"
+
     ts = raw.get("ts")
     try:
         ts_val = float(ts) if ts is not None else None
     except (TypeError, ValueError):
         ts_val = None
+
+    if event_type != "capture":
+        # Metadata-only events: sanitize every enum-ish field against a closed
+        # vocabulary (these values can reach logs; free text must not).
+        kind = raw.get("kind")
+        idle = raw.get("idle_seconds")
+        try:
+            idle_val = float(idle) if idle is not None else None
+        except (TypeError, ValueError):
+            idle_val = None
+        seq = raw.get("seq")
+        return {
+            "type": event_type,
+            "ts": ts_val,
+            "afk": bool(raw.get("afk", False)),
+            "paused": bool(raw.get("paused", False)),
+            "idle_seconds": idle_val,
+            "seq": seq if isinstance(seq, int) else None,
+            "kind": kind if isinstance(kind, str) and kind in _SYSTEM_KINDS else None,
+        }
+
+    trigger = raw.get("trigger")
+    if not isinstance(trigger, str) or trigger not in _CAPTURE_TRIGGERS:
+        trigger = None
 
     def _str_or_none(value: object) -> str | None:
         """Accept only strings for free-text fields; coerce anything else to None."""
@@ -268,6 +356,8 @@ def parse_event(line: str) -> dict | None:
     text_val = text if isinstance(text, str) else ""
 
     return {
+        "type": "capture",
+        "trigger": trigger,
         "app": _str_or_none(raw.get("app")),
         "window": _str_or_none(raw.get("window")),
         "url": _str_or_none(raw.get("url")),
@@ -330,6 +420,10 @@ class CaptureDaemon:
         self._session_id: str | None = None
         self._session_app: str | None = None
         self._session_last_ts: float | None = None
+        # AFK state mirrored from helper afk_transition events (stream mode).
+        # Metadata only; used for diagnostics/liveness, never gates ingestion
+        # (the helper already suppresses captures while AFK at the source).
+        self._afk = False
         self._stderr_thread: threading.Thread | None = None
         # Safe, content-free error counter for the whole-data-path privacy gate:
         # store/embed failures bump this instead of emitting tracebacks that
@@ -353,19 +447,10 @@ class CaptureDaemon:
     def _event_clock(ts: object) -> float:
         """Return a FINITE comparison/storage timestamp from an untrusted ts.
 
-        JSON permits ``NaN``/``Infinity`` literals and ``float('nan')`` does not
-        raise, so a malformed helper ``ts`` could otherwise poison the session
-        clock (every later finite comparison against NaN is False, freezing
-        segmentation) and corrupt time-range ordering in storage. Non-finite or
-        unparseable values fall back to wall-clock now.
+        Delegates to the shared :func:`_finite_ts` guard (see its docstring for
+        the NaN/Infinity rationale). Kept as a method for existing callers/tests.
         """
-        try:
-            value = float(ts) if ts is not None else None
-        except (TypeError, ValueError):
-            value = None
-        if value is None or not math.isfinite(value):
-            return time.time()
-        return value
+        return _finite_ts(ts)
 
     @staticmethod
     def _signature(
@@ -435,6 +520,9 @@ class CaptureDaemon:
         metadata-only ``reason`` code.
         """
         stats = stats._with(received=1)
+        event_type = event.get("type", "capture")
+        if event_type != "capture" and event_type in _EVENT_TYPES:
+            return self._handle_typed_event(event_type, event, stats)
         if self.is_paused():
             self._reset_coalescing()
             logger.debug("capture: rejected event reason=paused")
@@ -543,6 +631,31 @@ class CaptureDaemon:
                 ",".join(matched),
             )
         return stats._with(ingested=1)
+
+    def _handle_typed_event(
+        self, event_type: str, event: dict, stats: CaptureStats
+    ) -> CaptureStats:
+        """Handle a metadata-only stream event (never ingests content).
+
+        ``afk_transition`` flips the mirrored AFK state and resets coalescing —
+        the first frame after a return from AFK must be stored even if its
+        content is unchanged, so "resumed at HH:MM" is visible on the timeline.
+        ``heartbeat`` and ``system`` are liveness-only. All logging here is
+        reason-code metadata; the event dicts carry no window/URL/text by
+        construction (see :func:`parse_event`).
+        """
+        if event_type == "afk_transition":
+            afk = bool(event.get("afk", False))
+            self._afk = afk
+            self._reset_coalescing()
+            logger.debug("capture: afk_transition afk=%s", afk)
+            return stats._with(afk_transitions=1)
+        if event_type == "system":
+            # ``kind`` was sanitized against the closed vocabulary at parse time.
+            logger.debug("capture: system event kind=%s", event.get("kind"))
+            return stats._with(heartbeats=1)
+        # heartbeat: pure liveness.
+        return stats._with(heartbeats=1)
 
     # -- stream drivers -------------------------------------------------------
 
