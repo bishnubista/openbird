@@ -425,9 +425,10 @@ def test_packaged_helper_probe_merges_capture_and_audio_helpers(tmp_path):
     def runner(path):
         calls.append(path.name)
         if path == capture:
-            return {"accessibility": "passed"}
+            # Phase C2: the capture helper owns SCK, so ITS report carries
+            # screen_recording (alongside accessibility).
+            return {"accessibility": "passed", "screen_recording": "passed"}
         return {
-            "screen_recording": "passed",
             "microphone": "denied",
             "system_audio": "passed",
         }
@@ -444,6 +445,48 @@ def test_packaged_helper_probe_merges_capture_and_audio_helpers(tmp_path):
     assert probe("system_audio") == GRANT_PASSED
     # Each helper is executed once and cached across capability lookups.
     assert calls == ["capture-helper", "audio-helper"]
+
+
+def test_screen_recording_routes_to_capture_helper_only(tmp_path):
+    # Split routing (Phase C2): screen_recording is consumed from the CAPTURE
+    # helper's report; the audio helper is never even executed for it — and a
+    # stale screen_recording field in the audio report is ignored.
+    capture = tmp_path / "capture-helper"
+    audio = tmp_path / "audio-helper"
+    calls = []
+
+    def runner(path):
+        calls.append(path.name)
+        if path == capture:
+            return {"accessibility": "passed", "screen_recording": "failed"}
+        return {"screen_recording": "passed"}  # stale audio field: must be ignored
+
+    probe = _packaged_helper_probe(
+        capture_helper=capture, audio_helper=audio, runner=runner
+    )
+    assert probe is not None
+    assert probe("screen_recording") == GRANT_FAILED  # the CAPTURE helper's verdict
+    assert calls == ["capture-helper"]  # audio helper untouched
+
+
+def test_mic_and_system_audio_stay_on_audio_helper(tmp_path):
+    capture = tmp_path / "capture-helper"
+    audio = tmp_path / "audio-helper"
+    calls = []
+
+    def runner(path):
+        calls.append(path.name)
+        if path == capture:
+            return {"accessibility": "passed", "screen_recording": "passed"}
+        return {"microphone": "passed", "system_audio": "failed"}
+
+    probe = _packaged_helper_probe(
+        capture_helper=capture, audio_helper=audio, runner=runner
+    )
+    assert probe is not None
+    assert probe("microphone") == GRANT_PASSED
+    assert probe("system_audio") == GRANT_FAILED
+    assert calls == ["audio-helper"]  # capture helper untouched
 
 
 def test_packaged_helper_probe_unavailable_without_helper_env(monkeypatch):
@@ -487,13 +530,18 @@ def test_helper_grant_subprocess_failure_surfaces_probe_error(tmp_path):
 
     res = check_macos_capabilities(system="Darwin", helper_probe=probe)
     assert res["accessibility"] == GRANT_UNKNOWN
+    # screen_recording routes to the (broken) CAPTURE helper too (Phase C2).
+    assert res["screen_recording"] == GRANT_UNKNOWN
     assert res["probe_error"] == "RuntimeError"
     assert "probe was unavailable or failed" in res["note"]
 
+    # The healthy audio helper still answers its own capabilities.
+    assert probe("microphone") == GRANT_PASSED
     # Cached helper failures should re-raise the original exception type.
-    assert probe("screen_recording") == GRANT_PASSED
     with pytest.raises(RuntimeError):
         probe("accessibility")
+    with pytest.raises(RuntimeError):
+        probe("screen_recording")
 
 
 def test_packaged_helper_probe_partial_helper_reports_unavailable(tmp_path):

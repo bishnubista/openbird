@@ -219,6 +219,12 @@ _SYSTEM_KINDS = frozenset(
         # on_system(None, ts) is a no-op — zero back-compat risk.
         "mic_started",
         "mic_stopped",
+        # OCR fallback availability edges (Phase C2): the helper's Screen
+        # Recording preflight reading at startup + observed flips. Metadata
+        # only; feeds the liveness sidecar's ocr_state. Same back-compat
+        # argument as mic_*: old daemons coerce unknown kinds to None.
+        "ocr_available",
+        "ocr_unavailable",
     }
 )
 
@@ -277,6 +283,9 @@ class CaptureStats:
     heartbeats: int = 0
     afk_transitions: int = 0
     span_markers: int = 0
+    # Ingested capture frames whose text came from the OCR fallback (Phase C2,
+    # ``ocr: true`` on the frame). A subset of ``ingested`` — metadata only.
+    ocr_captures: int = 0
 
     def _with(self, **delta: int) -> "CaptureStats":
         return CaptureStats(
@@ -288,6 +297,7 @@ class CaptureStats:
             heartbeats=self.heartbeats + delta.get("heartbeats", 0),
             afk_transitions=self.afk_transitions + delta.get("afk_transitions", 0),
             span_markers=self.span_markers + delta.get("span_markers", 0),
+            ocr_captures=self.ocr_captures + delta.get("ocr_captures", 0),
         )
 
     def _add(self, other: "CaptureStats") -> "CaptureStats":
@@ -301,6 +311,7 @@ class CaptureStats:
             heartbeats=self.heartbeats + other.heartbeats,
             afk_transitions=self.afk_transitions + other.afk_transitions,
             span_markers=self.span_markers + other.span_markers,
+            ocr_captures=self.ocr_captures + other.ocr_captures,
         )
 
 
@@ -407,6 +418,11 @@ def parse_event(line: str) -> dict | None:
         "text": text_val,
         "ts": ts_val,
         "incognito": bool(raw.get("incognito", False)),
+        # Phase C2: the helper stamps ocr:true on frames whose text came from
+        # the OCR fallback. Sanitized strictly (only JSON true counts; absent
+        # or any non-bool -> False); drives only the ocr_captures counter —
+        # never policy.
+        "ocr": raw.get("ocr") is True,
     }
 
 
@@ -467,6 +483,11 @@ class CaptureDaemon:
         # Metadata only; used for diagnostics/liveness, never gates ingestion
         # (the helper already suppresses captures while AFK at the source).
         self._afk = False
+        # OCR fallback availability mirrored from helper ocr_available /
+        # ocr_unavailable system events (Phase C2). Metadata only; surfaces in
+        # the liveness sidecar for capture-health. None = never reported
+        # (OCR not opted in, or an old helper).
+        self._ocr_state: str | None = None
         # Span tracker (Phase B): turns the typed event stream into
         # activity_spans rows. Only wired when the sink exposes the span API,
         # so lightweight test fakes keep working unchanged.
@@ -585,6 +606,11 @@ class CaptureDaemon:
         text = event.get("text")
         ts = event.get("ts")
         incognito = bool(event.get("incognito", False))
+        # OCR-fallback provenance flag (Phase C2). Counter-only: the ingest
+        # path below is IDENTICAL for OCR and AX text (redact.apply ->
+        # normalize -> volatility -> scrub -> truncate -> scrub_metadata) —
+        # the no-bypass guarantee, asserted by test, not by new code.
+        ocr = event.get("ocr") is True
         event_at = self._event_clock(ts)
 
         # Span resolution is EVENT-SCOPED and runs for EVERY frame — including
@@ -708,7 +734,7 @@ class CaptureDaemon:
                 app,
                 ",".join(matched),
             )
-        return stats._with(ingested=1)
+        return stats._with(ingested=1, ocr_captures=1 if ocr else 0)
 
     def _handle_typed_event(
         self, event_type: str, event: dict, stats: CaptureStats
@@ -737,6 +763,12 @@ class CaptureDaemon:
                 # Mic edges route to the tracker's meeting machinery (Phase
                 # C1); sleep/lock force-close stays in on_system.
                 self._span_tracker.on_mic(kind == "mic_started", ts)
+            elif kind in ("ocr_available", "ocr_unavailable"):
+                # OCR availability edges (Phase C2) feed the liveness sidecar
+                # only — spans are unaffected (metadata, not a boundary).
+                self._ocr_state = (
+                    "available" if kind == "ocr_available" else "unavailable"
+                )
             else:
                 self._span_tracker.on_system(kind, ts)
             logger.debug("capture: system event kind=%s", kind)
@@ -845,6 +877,18 @@ class CaptureDaemon:
                 "--min-gap",
                 str(getattr(s, "capture_min_gap_seconds", 1.0)),
             ]
+            # Opt-in OCR fallback (Phase C2): STREAM-ONLY — the helper's
+            # per-app throttle needs process-lifetime state a one-shot spawn
+            # cannot hold. Passed only when apps are opted in, mirroring
+            # --capture-urls, so an un-opted helper never touches SCK.
+            ocr_apps = list(getattr(s, "capture_ocr_apps", None) or [])
+            if ocr_apps:
+                extra += [
+                    "--ocr-apps",
+                    ",".join(ocr_apps),
+                    "--ocr-min-interval",
+                    str(getattr(s, "capture_ocr_min_interval_seconds", 30.0)),
+                ]
         return argv + extra
 
     def _spawn(self, *, stream: bool = False) -> subprocess.Popen[str]:
@@ -1028,6 +1072,10 @@ class CaptureDaemon:
             # background-LLM gate. getattr-guarded so bare NullSpanTracker
             # stand-ins (tests) stay valid.
             "meeting": bool(getattr(self._span_tracker, "meeting_live", False)),
+            # OCR fallback availability (Phase C2): "available" /
+            # "unavailable" from the helper's preflight edges, None when
+            # never reported. Metadata only; capture-health renders it.
+            "ocr_state": self._ocr_state,
         }
         path = self._liveness_path()
         tmp = path.with_name(path.name + ".tmp")

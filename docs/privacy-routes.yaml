@@ -55,6 +55,45 @@ routes:
       - app.dataDeletionCommandRow
       - preflight.privacy
 
+  - id: capture.ocr_window
+    class: local
+    source: Swift helper — SCScreenshotManager window still + on-device Vision OCR (opt-in per app)
+    derives_from:
+      - capture.active_window
+    captured_fields:
+      - bundle_id
+      - window_title_sanitized_before_storage
+      - recognized_text_scrubbed_before_storage
+      - timestamp
+    pixels: held in memory only — the CGImage never persists to disk and is never logged (helper file-header invariant); only recognized text leaves the helper, over the same private pipe as AX text
+    storage:
+      - sqlite.observations
+      - sqlite.content_blobs
+      - sqlite.chunks
+      - sqlite.fts_chunks
+      - sqlite.vec_chunks
+    egress:
+      default: none
+      inherited_by:
+        - chat.remote
+        - routines.summary
+    enforcement:
+      boundary: Swift helper OcrGate — per-app opt-in after the allowlist gate; CGPreflightScreenCaptureAccess only (never prompts); mic-hot suppressed; per-app throttled
+      failure_mode: fail_closed
+    deletion:
+      command: openbird data purge/prune
+      must_remove:
+        - observations
+        - orphaned_content_blobs
+        - orphaned_chunks
+        - fts_rows
+        - vector_rows
+    truth_surface:
+      - app.capture_state
+      - app.deep_capture_section
+      - app.dataDeletionCommandRow
+      - preflight.privacy
+
   - id: capture.pause
     class: local
     source: capture.paused sidecar

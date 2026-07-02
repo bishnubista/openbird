@@ -3056,13 +3056,27 @@ def data_capture_health(
     table.add_column("App")
     table.add_column("State")
     table.add_column("Quality")
+    table.add_column("OCR")
     table.add_column("Recent", justify="right")
     table.add_column("Total", justify="right")
+    # Daemon-level OCR availability (Phase C2): the helper's Screen Recording
+    # preflight edges, via the liveness sidecar. None = never reported.
+    daemon_ocr_state = payload.get("daemon", {}).get("ocr_state")
     for row in payload["apps"]:
+        if row.get("ocr") == "opted_in":
+            # Opted-in row: combine with the daemon state — available /
+            # unavailable when reported, honest "unknown" otherwise.
+            if daemon_ocr_state in ("available", "unavailable"):
+                ocr_cell = f"ocr_{daemon_ocr_state}"
+            else:
+                ocr_cell = "unknown"
+        else:
+            ocr_cell = "-"
         table.add_row(
             row["bundle_id"],
             row["effective_state"],
             row["quality"],
+            ocr_cell,
             str(row["recent_observations"]),
             str(row["total_observations"]),
         )

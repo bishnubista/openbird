@@ -285,9 +285,10 @@ def test_liveness_sidecar_written_and_metadata_only(allow_settings, tmp_path):
     # Metadata only: no content-bearing keys, and no captured text anywhere.
     assert set(payload) == {
         "updated_at", "last_event_ts", "last_capture_ts", "mode", "afk",
-        "heartbeat_seq", "meeting",
+        "heartbeat_seq", "meeting", "ocr_state",
     }
     assert payload["meeting"] is False  # a metadata BIT, off by default
+    assert payload["ocr_state"] is None  # never reported in this run
     assert "hello from stream" not in path.read_text()
     # No stray temp file left behind (atomic rename).
     assert not (tmp_path / (LIVENESS_FILENAME + ".tmp")).exists()
@@ -365,6 +366,61 @@ def test_app_changed_counted_not_ingested(allow_settings):
     assert stats.span_markers == 1
     assert stats.ingested == 0
     assert store.calls == []
+
+
+# ---------------------------------------------------------------------------
+# OCR fallback plumbing (Phase C2): system kinds -> liveness ocr_state
+# ---------------------------------------------------------------------------
+
+
+def test_parse_system_accepts_ocr_kinds():
+    from openbird.capture.daemon import parse_event
+
+    for kind in ("ocr_available", "ocr_unavailable"):
+        e = parse_event(json.dumps({"type": "system", "ts": 5.0, "kind": kind}))
+        assert e is not None and e["type"] == "system"
+        assert e["kind"] == kind
+
+
+def test_ocr_system_events_record_liveness_ocr_state(allow_settings, tmp_path):
+    daemon, store = _daemon(allow_settings, "pass")
+
+    stats = daemon.run_lines(
+        [json.dumps({"type": "system", "ts": 1.0, "kind": "ocr_available"})]
+    )
+    assert stats.heartbeats == 1  # liveness credit, nothing ingested
+    assert store.calls == []
+    daemon._write_liveness(
+        mode="stream", last_event_ts=1.0, last_capture_ts=None, heartbeat_seq=0
+    )
+    payload = json.loads((tmp_path / LIVENESS_FILENAME).read_text())
+    assert payload["ocr_state"] == "available"
+
+    # A revocation flip overwrites it.
+    daemon.run_lines(
+        [json.dumps({"type": "system", "ts": 2.0, "kind": "ocr_unavailable"})]
+    )
+    daemon._write_liveness(
+        mode="stream", last_event_ts=2.0, last_capture_ts=None, heartbeat_seq=1
+    )
+    payload = json.loads((tmp_path / LIVENESS_FILENAME).read_text())
+    assert payload["ocr_state"] == "unavailable"
+
+
+def test_health_daemon_block_passes_through_ocr_state(allow_settings, tmp_path):
+    path = tmp_path / LIVENESS_FILENAME
+    path.write_text(json.dumps({
+        "updated_at": 995.0, "mode": "stream", "ocr_state": "available",
+    }))
+    health = build_capture_health(settings=allow_settings, generated_at=1000.0)
+    assert health["daemon"]["ocr_state"] == "available"
+
+    # Closed pair: junk values are sanitized to None (never rendered raw).
+    path.write_text(json.dumps({
+        "updated_at": 995.0, "mode": "stream", "ocr_state": "definitely-on",
+    }))
+    health = build_capture_health(settings=allow_settings, generated_at=1000.0)
+    assert health["daemon"]["ocr_state"] is None
 
 
 # ---------------------------------------------------------------------------

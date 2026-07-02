@@ -147,6 +147,25 @@ def test_capture_pause_is_enforced_at_helper_boundary() -> None:
     assert route["enforcement"]["failure_mode"] == "fail_closed"
 
 
+def test_capture_ocr_window_route_is_local_and_pixel_free() -> None:
+    route = _routes()["capture.ocr_window"]
+
+    assert route["class"] == "local"
+    assert route["derives_from"] == ["capture.active_window"]
+    # The load-bearing privacy claims: text is scrubbed BEFORE storage and
+    # pixels are transient (never persisted or logged).
+    assert "recognized_text_scrubbed_before_storage" in route["captured_fields"]
+    assert "never persists" in route["pixels"]
+    assert route["egress"]["default"] == "none"
+    assert route["enforcement"]["failure_mode"] == "fail_closed"
+    assert "never prompts" in route["enforcement"]["boundary"]
+    assert "app.deep_capture_section" in route["truth_surface"]
+    # Same storage/deletion contract as the AX capture route.
+    ax = _routes()["capture.active_window"]
+    assert route["storage"] == ax["storage"]
+    assert route["deletion"] == ax["deletion"]
+
+
 def test_deep_brain_ask_inherits_active_model_route() -> None:
     route = _routes()["deep_brain.ask"]
 

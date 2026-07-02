@@ -132,6 +132,31 @@ def test_capture_health_marks_dangerous_and_self_capture_blocked(tmp_path):
     }
 
 
+def test_capture_health_marks_opted_in_ocr_rows(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        allowlist=["com.microsoft.teams2", "com.apple.mail"],
+        blocklist=[],
+        capture_ocr_apps=["com.microsoft.teams2"],
+    )
+
+    report = build_capture_health(
+        settings=settings,
+        activity_by_app={},
+        generated_at=200.0,
+        paused=False,
+    )
+
+    by_app = {row["bundle_id"]: row for row in report["apps"]}
+    # Opted-in rows carry the additive marker; others carry NO ocr key at all.
+    assert by_app["com.microsoft.teams2"]["ocr"] == "opted_in"
+    assert "ocr" not in by_app["com.apple.mail"]
+    assert report["ocr_apps_count"] == 1
+    # No sidecar in this test dir -> daemon availability is honestly unknown
+    # (the CLI table renders opted-in rows as "unknown" in that case).
+    assert report["daemon"] == {"state": "unknown"}
+
+
 def test_capture_app_activity_reads_only_metadata(tmp_path, fake_provider):
     settings = Settings(data_dir=tmp_path, embed_dim=768)
     store = MemoryStore(settings=settings, provider=fake_provider)
@@ -219,9 +244,11 @@ def test_capture_health_cli_json_is_metadata_only(tmp_path, fake_provider, monke
         "paused",
         "allowlist_count",
         "blocklist_count",
+        "ocr_apps_count",
         "daemon",
         "apps",
     }
+    assert payload["ocr_apps_count"] == 0
     # No daemon running in this test -> no sidecar -> unknown, never "ok".
     assert payload["daemon"] == {"state": "unknown"}
     assert payload["allowlist_count"] == 1

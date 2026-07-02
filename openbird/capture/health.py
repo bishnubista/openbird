@@ -123,6 +123,7 @@ def _daemon_liveness(*, settings: Settings, now: float) -> dict[str, Any]:
     age = now - updated_at
     state = "ok" if 0 <= age <= _DAEMON_STALE_AFTER_SECONDS else "stale"
     seq = raw.get("heartbeat_seq")
+    ocr_state = raw.get("ocr_state")
     return {
         "state": state,
         "updated_at": updated_at,
@@ -132,6 +133,9 @@ def _daemon_liveness(*, settings: Settings, now: float) -> dict[str, Any]:
         "last_event_ts": _finite(raw.get("last_event_ts")),
         "last_capture_ts": _finite(raw.get("last_capture_ts")),
         "heartbeat_seq": seq if isinstance(seq, int) else None,
+        # OCR fallback availability (Phase C2): sanitized against the closed
+        # pair; None = never reported (OCR off / old daemon / old sidecar).
+        "ocr_state": ocr_state if ocr_state in ("available", "unavailable") else None,
     }
 
 
@@ -154,6 +158,10 @@ def build_capture_health(
     if paused is None:
         paused = Path(settings.data_dir, "capture.paused").exists()
 
+    # OCR opt-in set (Phase C2); getattr-guarded for injected test Settings
+    # that predate the field. Matching uses the same allow/block grammar.
+    ocr_apps = list(getattr(settings, "capture_ocr_apps", None) or [])
+
     apps: list[dict[str, Any]] = []
     for bundle_id in _health_row_app_ids(settings=settings, activity_by_app=activity_by_app):
         activity = activity_by_app.get(bundle_id, {})
@@ -162,27 +170,31 @@ def build_capture_health(
         last_ts = activity.get("last_captured_ts")
         coverage = adapters.coverage_for(bundle_id)
         policy = _policy_for_app(bundle_id, settings)
-        apps.append(
-            {
-                "bundle_id": bundle_id,
-                "policy": policy,
-                "effective_state": _effective_state(
-                    policy=policy,
-                    total_observations=total,
-                    recent_observations=recent,
-                ),
-                "quality": _quality(
-                    policy_capture=bool(policy["capture"]),
-                    coverage=coverage,
-                    total_observations=total,
-                    recent_observations=recent,
-                ),
-                "coverage": coverage,
-                "total_observations": total,
-                "recent_observations": recent,
-                "last_captured_ts": last_ts,
-            }
-        )
+        row: dict[str, Any] = {
+            "bundle_id": bundle_id,
+            "policy": policy,
+            "effective_state": _effective_state(
+                policy=policy,
+                total_observations=total,
+                recent_observations=recent,
+            ),
+            "quality": _quality(
+                policy_capture=bool(policy["capture"]),
+                coverage=coverage,
+                total_observations=total,
+                recent_observations=recent,
+            ),
+            "coverage": coverage,
+            "total_observations": total,
+            "recent_observations": recent,
+            "last_captured_ts": last_ts,
+        }
+        # Additive key on OPTED-IN rows only (Phase C2). The daemon-level
+        # availability (ocr_state above) is combined with this at render
+        # time — see the capture-health CLI table.
+        if ocr_apps and redact._bundle_matches_any(bundle_id, ocr_apps):
+            row["ocr"] = "opted_in"
+        apps.append(row)
 
     return {
         "generated_at": now,
@@ -190,6 +202,7 @@ def build_capture_health(
         "paused": bool(paused),
         "allowlist_count": len(settings.allowlist),
         "blocklist_count": len(settings.blocklist),
+        "ocr_apps_count": len(ocr_apps),
         # Daemon liveness from the metadata-only sidecar (additive block;
         # Swift's JSONDecoder ignores unknown keys, and the Python consumers
         # key into it explicitly).
