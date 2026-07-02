@@ -123,7 +123,11 @@ def _daemon_liveness(*, settings: Settings, now: float) -> dict[str, Any]:
     age = now - updated_at
     state = "ok" if 0 <= age <= _DAEMON_STALE_AFTER_SECONDS else "stale"
     seq = raw.get("heartbeat_seq")
-    ocr_state = raw.get("ocr_state")
+    # OCR fallback availability (Phase C2): sanitized against the closed pair
+    # AND gated on daemon FRESHNESS — a stale sidecar's "available" is a dead
+    # daemon's old claim, and the design budget says never report ok off a
+    # stale timestamp. None = never reported / OCR off / old daemon / stale.
+    ocr_state = raw.get("ocr_state") if state == "ok" else None
     return {
         "state": state,
         "updated_at": updated_at,
@@ -133,8 +137,6 @@ def _daemon_liveness(*, settings: Settings, now: float) -> dict[str, Any]:
         "last_event_ts": _finite(raw.get("last_event_ts")),
         "last_capture_ts": _finite(raw.get("last_capture_ts")),
         "heartbeat_seq": seq if isinstance(seq, int) else None,
-        # OCR fallback availability (Phase C2): sanitized against the closed
-        # pair; None = never reported (OCR off / old daemon / old sidecar).
         "ocr_state": ocr_state if ocr_state in ("available", "unavailable") else None,
     }
 

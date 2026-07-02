@@ -733,6 +733,11 @@ func captureFrontmost(
             // that landed during the AX walk must also stop the screenshot.
             if skipIfPaused(pauseFile) { return }
             // COMBINED budget: AX + OCR <= combinedDeadlineSeconds total.
+            // The deadline races the CANCELLABLE pre-image (SCK) phase only;
+            // once pixels exist the bridge waits out the synchronous Vision
+            // pass (bounded, sub-second typical) so the image scope closes
+            // before this capture returns — worst case documented in
+            // OcrBridge.swift.
             let elapsed = Double(
                 DispatchTime.now().uptimeNanoseconds - captureStart.uptimeNanoseconds
             ) / 1_000_000_000.0
@@ -755,9 +760,13 @@ func captureFrontmost(
             case .skipped(let reason):
                 diag("ocr: skipped_\(reason)")
             case .timeout:
-                // The throttle slot was consumed at decision time, so this
-                // cannot retry-storm; the cancelled task's late result is
-                // owned (dropped) by the bridge's closed generation box.
+                // The acquire (pre-image) phase timed out: the task was
+                // cancelled and a late-acquired image is dropped UNREAD by
+                // the bridge's closed generation box. Once pixels exist the
+                // bridge never times out — it waits for the synchronous
+                // Vision pass so the image cannot outlive this capture (see
+                // OcrBridge.swift). The throttle slot was consumed at
+                // decision time, so this cannot retry-storm.
                 diag("ocr: skipped_ocr_timeout")
             }
         }

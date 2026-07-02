@@ -366,12 +366,18 @@ time facts read from spans; sessions remain a content-grouping concept.
   Vision ships on `VNRecognizeTextRequest` (`.accurate`, auto language) ONLY; the
   macOS-26 `RecognizeDocumentsRequest` branch is deferred until the toolchain gate
   has CI coverage.
-- **Semaphore bridge with late-completion ownership** (`OcrBridge`, unit-tested with
-  a fake HAL): the SCK/Vision work runs in a retained cancellable `Task`; the walk
-  queue blocks at most the OCR share of a COMBINED AX+OCR ≤ 4s per-capture budget
-  (OCR gets `min(2.5s, remaining)`); on timeout the task is cancelled and a per-call
-  generation box is closed so a late result can never mutate state, be emitted, or
-  bleed into a later capture. `CGPreflightScreenCaptureAccess` only — the helper
+- **Two-phase semaphore bridge with late-completion ownership** (`OcrBridge`,
+  unit-tested with fake HALs): the HAL is split at the PIXEL boundary. The async
+  ACQUIRE phase (SCK window lookup + still) runs in a retained cancellable `Task`
+  raced against the OCR share of a COMBINED AX+OCR ≤ 4s per-capture budget (OCR gets
+  `min(2.5s, remaining)`); on timeout the task is cancelled and a per-call generation
+  box is closed, so a late-acquired image is dropped UNREAD — never recognized,
+  never emitted, never bleeding into a later capture. The synchronous RECOGNIZE
+  phase (Vision) is NEVER abandoned: cancellation cannot interrupt
+  `VNImageRequestHandler.perform`, so the bridge waits for the pass to finish and
+  the image scope to close before returning (scope-bound pixel invariant; worst-case
+  walk-queue occupancy is `deadline + one sub-second-typical .accurate pass`,
+  documented in OcrBridge.swift). `CGPreflightScreenCaptureAccess` only — the helper
   never prompts; the grant flow lives in the mac-app (deep-capture section, stating
   the three costs: Screen Recording permission, monthly re-auth nag, permanent
   orange indicator).

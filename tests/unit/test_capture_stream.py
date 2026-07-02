@@ -423,6 +423,28 @@ def test_health_daemon_block_passes_through_ocr_state(allow_settings, tmp_path):
     assert health["daemon"]["ocr_state"] is None
 
 
+def test_stale_sidecar_never_claims_ocr_available(allow_settings, tmp_path):
+    # Review regression: a DEAD daemon's old sidecar still carries its last
+    # ocr_state. Freshness gates the claim — a stale sidecar's "available"
+    # must surface as None (rendered "unknown" for opted-in rows), never as a
+    # live OCR pipeline.
+    path = tmp_path / LIVENESS_FILENAME
+    path.write_text(json.dumps({
+        "updated_at": 100.0, "mode": "stream", "ocr_state": "available",
+    }))
+    health = build_capture_health(settings=allow_settings, generated_at=1000.0)
+    assert health["daemon"]["state"] == "stale"
+    assert health["daemon"]["ocr_state"] is None
+
+    # Same for a future-dated (negative-age) sidecar — not "ok", not trusted.
+    path.write_text(json.dumps({
+        "updated_at": 5000.0, "mode": "stream", "ocr_state": "available",
+    }))
+    health = build_capture_health(settings=allow_settings, generated_at=1000.0)
+    assert health["daemon"]["state"] == "stale"
+    assert health["daemon"]["ocr_state"] is None
+
+
 # ---------------------------------------------------------------------------
 # Spans end-to-end through the daemon (Phase B)
 # ---------------------------------------------------------------------------

@@ -1,13 +1,24 @@
-// OCRCapture — the ScreenCaptureKit + Vision mechanism behind the `OcrHAL`
-// seam (Phase C2). Mechanism only: all gating (opt-in, TCC, mic-hot, throttle)
-// happened upstream in OcrGate, and the timeout/cancellation/late-completion
-// ownership lives in OcrBridge (CaptureHelperCore) where it is unit-tested.
+// OCRCapture — the ScreenCaptureKit + Vision mechanism behind the two-phase
+// `OcrHAL` seam (Phase C2). Mechanism only: all gating (opt-in, TCC, mic-hot,
+// throttle) happened upstream in OcrGate, and the timeout/cancellation/
+// late-completion ownership lives in OcrBridge (CaptureHelperCore) where it
+// is unit-tested.
 //
-// FILE-HEADER INVARIANT — pixels are transient: the captured `CGImage` never
-// leaves `recognizeFrontWindow`'s scope, is never written to disk, stderr,
-// argv, env, or any log, and is released when the function returns. Only the
-// RECOGNIZED TEXT crosses out of this file, and it flows solely to the private
-// stdout pipe through the exact path AX text takes (scrubbed daemon-side).
+// FILE-HEADER INVARIANT — pixels are transient: the captured `CGImage` is
+// handed to the bridge as an `OcrImageHandle` whose only strong references
+// live inside ONE `OcrBridge.recognize(pid:axTitle:timeout:)` stack frame
+// (the bridge WAITS for `recognize(image:)` to finish before returning, and
+// drops a late-acquired handle unread). It is never written to disk, stderr,
+// argv, env, or any log, never retained by this type, and is released when
+// that frame unwinds. Only the RECOGNIZED TEXT crosses out of this file, and
+// it flows solely to the private stdout pipe through the exact path AX text
+// takes (scrubbed daemon-side).
+//
+// Phase split (review revision): `acquireImage` is the async, cancellable
+// pre-pixel phase the bridge races against its deadline; `recognize(image:)`
+// is the synchronous Vision phase the bridge never abandons — cancellation
+// cannot interrupt `VNImageRequestHandler.perform`, so abandoning it would
+// let pixels outlive the capture return.
 //
 // TCC honesty: this file only ever runs after `CGPreflightScreenCaptureAccess`
 // returned true (OcrGate's tcc gate). Nothing here prompts; if the grant was
@@ -39,7 +50,13 @@ func makeOcrHAL() -> OcrHAL {
 
 /// macOS 13 stub (package floor is .v13; SCScreenshotManager needs 14).
 final class UnavailableOcrHAL: OcrHAL {
-    func recognizeFrontWindow(pid: Int32, axTitle: String?) async -> OcrHALOutcome {
+    func acquireImage(pid: Int32, axTitle: String?) async -> OcrAcquireOutcome {
+        .unavailable(reason: "ocr_unavailable")
+    }
+
+    func recognize(image: OcrImageHandle) -> OcrHALOutcome {
+        // Unreachable (acquire never yields an image on this OS); keep the
+        // fail-closed reason code anyway.
         .unavailable(reason: "ocr_unavailable")
     }
 }
@@ -47,7 +64,9 @@ final class UnavailableOcrHAL: OcrHAL {
 @available(macOS 14.0, *)
 final class ScreenCaptureKitOcrHAL: OcrHAL {
 
-    func recognizeFrontWindow(pid: Int32, axTitle: String?) async -> OcrHALOutcome {
+    /// Phase 1 — async and cancellation-observing (the ONLY phase the bridge
+    /// may abandon on timeout): window enumeration + one window-scoped still.
+    func acquireImage(pid: Int32, axTitle: String?) async -> OcrAcquireOutcome {
         do {
             // Enumerate on-screen windows and pick the target app's front
             // window: same pid, standard layer (0), preferring an exact
@@ -77,27 +96,36 @@ final class ScreenCaptureKitOcrHAL: OcrHAL {
             config.height = max(1, Int(window.frame.height) * 2)
             let image = try await SCScreenshotManager.captureImage(
                 contentFilter: filter, configuration: config)
-            // Last cancellation point before the synchronous Vision pass (a
-            // cancelled task's eventual result is dropped by OcrBridge's
-            // closed generation box either way).
-            try Task.checkCancellation()
-            return recognizeText(in: image)
+            // The handle's lifetime is owned by the bridge from here: either
+            // recognized synchronously within the same capture, or — if this
+            // completion lost the deadline race — dropped unread and released
+            // immediately by the closed generation box.
+            return .image(OcrImageHandle(image))
         } catch is CancellationError {
             return .unavailable(reason: "ocr_error")
         } catch {
             // Reason code only — the error description could embed a window
-            // title. The CGImage (if any) died with this scope.
+            // title. Any transient pixels died with this scope.
             return .unavailable(reason: "ocr_error")
         }
     }
 
-    /// On-device Vision OCR over the transient window still. Synchronous by
-    /// Vision's design; bounded by OcrBridge's wall budget at the call site.
-    private func recognizeText(in image: CGImage) -> OcrHALOutcome {
+    /// Phase 2 — on-device Vision OCR over the transient window still.
+    /// Synchronous by Vision's design and NEVER abandoned by the bridge, so
+    /// the image cannot outlive the capture return (worst case documented in
+    /// OcrBridge.swift: one sub-second-typical `.accurate` pass).
+    func recognize(image: OcrImageHandle) -> OcrHALOutcome {
+        // CF-type check (a plain `as?` on a CoreFoundation type is rejected
+        // by the compiler as always-succeeding): fail closed on a handle
+        // that does not actually wrap a CGImage.
+        guard CFGetTypeID(image.value as CFTypeRef) == CGImage.typeID else {
+            return .unavailable(reason: "ocr_error")
+        }
+        let cgImage = image.value as! CGImage
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.automaticallyDetectsLanguage = true
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         do {
             try handler.perform([request])
         } catch {

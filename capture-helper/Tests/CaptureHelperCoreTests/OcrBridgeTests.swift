@@ -1,28 +1,50 @@
-// OcrBridgeTests — fake-HAL tests for the cancellable async-in-sync bridge.
+// OcrBridgeTests — fake-HAL tests for the two-phase cancellable bridge.
 //
-// The consensus invariants proven here:
-//   * a hung HAL times out WITHIN the deadline (the walk queue is released on
-//     time — walkInFlight cannot be held for the HAL's full duration);
-//   * the timed-out task is actually cancelled;
-//   * a LATE completion is owned by the closed generation box: it is never
-//     delivered, and it cannot bleed into a subsequent recognize() call.
+// The consensus + review invariants proven here:
+//   * a hung ACQUIRE phase times out WITHIN the deadline (the walk queue is
+//     released on time — walkInFlight cannot be held for the HAL's full
+//     duration) and the task is actually cancelled;
+//   * a LATE acquire completion is owned by the closed generation box: its
+//     image is dropped UNREAD (never recognized), never delivered, and cannot
+//     bleed into a subsequent recognize() call;
+//   * SCOPE-BOUND PIXELS (the reviewed HIGH finding): once an image exists,
+//     the bridge WAITS for the synchronous recognize phase — which
+//     cancellation cannot interrupt — so the bridge never returns while the
+//     HAL still holds pixels, even when recognition blows past the deadline.
 
 import Foundation
 import XCTest
 @testable import CaptureHelperCore
 
-/// A controllable fake HAL: blocks until the test releases it, then returns
-/// the next scripted outcome (one per call). Records whether cancellation was
-/// observed.
-private final class GateFakeHAL: OcrHAL, @unchecked Sendable {
+/// Immediate fake for the happy/skip paths.
+private struct ImmediateHAL: OcrHAL {
+    let acquire: OcrAcquireOutcome
+    let recognized: OcrHALOutcome
+
+    func acquireImage(pid: Int32, axTitle: String?) async -> OcrAcquireOutcome {
+        acquire
+    }
+
+    func recognize(image: OcrImageHandle) -> OcrHALOutcome {
+        recognized
+    }
+}
+
+/// A controllable acquire-phase fake: blocks until the test releases it, then
+/// returns the scripted outcome. Records cancellation observations and
+/// whether recognize() was ever reached.
+private final class HungAcquireHAL: OcrHAL, @unchecked Sendable {
     private let lock = NSLock()
     private var _release = false
     private var _sawCancellation = false
-    private var _completions = 0
-    private var outcomes: [OcrHALOutcome]
+    private var _acquireCompletions = 0
+    private var _recognizeCalls = 0
+    let acquireOutcome: OcrAcquireOutcome
+    let recognizeOutcome: OcrHALOutcome
 
-    init(outcomes: [OcrHALOutcome]) {
-        self.outcomes = outcomes
+    init(acquireOutcome: OcrAcquireOutcome, recognizeOutcome: OcrHALOutcome) {
+        self.acquireOutcome = acquireOutcome
+        self.recognizeOutcome = recognizeOutcome
     }
 
     var sawCancellation: Bool {
@@ -30,9 +52,14 @@ private final class GateFakeHAL: OcrHAL, @unchecked Sendable {
         return _sawCancellation
     }
 
-    var completions: Int {
+    var acquireCompletions: Int {
         lock.lock(); defer { lock.unlock() }
-        return _completions
+        return _acquireCompletions
+    }
+
+    var recognizeCalls: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _recognizeCalls
     }
 
     func release() {
@@ -50,66 +77,111 @@ private final class GateFakeHAL: OcrHAL, @unchecked Sendable {
         return _release
     }
 
-    private func complete() -> OcrHALOutcome {
+    private func completeAcquire() -> OcrAcquireOutcome {
         lock.lock(); defer { lock.unlock() }
-        _completions += 1
-        return outcomes.isEmpty ? .unavailable(reason: "ocr_error") : outcomes.removeFirst()
+        _acquireCompletions += 1
+        return acquireOutcome
     }
 
-    func recognizeFrontWindow(pid: Int32, axTitle: String?) async -> OcrHALOutcome {
-        // Spin-with-sleep until released (observing cancellation like the real
-        // SCK/Vision awaits do at their suspension points).
+    func acquireImage(pid: Int32, axTitle: String?) async -> OcrAcquireOutcome {
+        // Spin-with-sleep until released (observing cancellation like the
+        // real SCK awaits do at their suspension points).
         while !released() {
             noteCancellationIfCancelled(Task.isCancelled)
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         noteCancellationIfCancelled(Task.isCancelled)
-        return complete()
+        return completeAcquire()
+    }
+
+    func recognize(image: OcrImageHandle) -> OcrHALOutcome {
+        lock.lock(); _recognizeCalls += 1; lock.unlock()
+        return recognizeOutcome
     }
 }
 
-/// Immediate fake for the happy/skip paths.
-private struct ImmediateFakeHAL: OcrHAL {
-    let outcome: OcrHALOutcome
-    func recognizeFrontWindow(pid: Int32, axTitle: String?) async -> OcrHALOutcome {
-        outcome
+/// The 'pixel retained' regression fake: acquire yields an image instantly;
+/// recognize marks the pixels as live, then blocks NON-COOPERATIVELY
+/// (Thread.sleep — like Vision's synchronous perform, it ignores task
+/// cancellation) well past the bridge deadline before releasing them.
+private final class SlowVisionHAL: OcrHAL, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _pixelRetained = false
+    let visionSeconds: TimeInterval
+
+    init(visionSeconds: TimeInterval) {
+        self.visionSeconds = visionSeconds
+    }
+
+    var pixelRetained: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _pixelRetained
+    }
+
+    func acquireImage(pid: Int32, axTitle: String?) async -> OcrAcquireOutcome {
+        .image(OcrImageHandle("fake pixels"))
+    }
+
+    func recognize(image: OcrImageHandle) -> OcrHALOutcome {
+        lock.lock(); _pixelRetained = true; lock.unlock()
+        Thread.sleep(forTimeInterval: visionSeconds)  // non-cooperative, like Vision
+        lock.lock(); _pixelRetained = false; lock.unlock()
+        return .text("slow vision")
     }
 }
 
 final class OcrBridgeTests: XCTestCase {
 
     func testTextOutcomePassesThrough() {
-        let bridge = OcrBridge(hal: ImmediateFakeHAL(outcome: .text("recognized")))
+        let bridge = OcrBridge(hal: ImmediateHAL(
+            acquire: .image(OcrImageHandle("px")), recognized: .text("recognized")))
         XCTAssertEqual(
             bridge.recognize(pid: 1, axTitle: nil, timeout: 2.0),
             .text("recognized"))
     }
 
-    func testUnavailableOutcomeBecomesSkippedReason() {
-        let bridge = OcrBridge(hal: ImmediateFakeHAL(outcome: .unavailable(reason: "ocr_no_window")))
+    func testAcquireUnavailableBecomesSkippedReason() {
+        let bridge = OcrBridge(hal: ImmediateHAL(
+            acquire: .unavailable(reason: "ocr_no_window"),
+            recognized: .text("never reached")))
         XCTAssertEqual(
             bridge.recognize(pid: 1, axTitle: nil, timeout: 2.0),
             .skipped(reason: "ocr_no_window"))
     }
 
+    func testRecognizeUnavailableBecomesSkippedReason() {
+        let bridge = OcrBridge(hal: ImmediateHAL(
+            acquire: .image(OcrImageHandle("px")),
+            recognized: .unavailable(reason: "ocr_empty")))
+        XCTAssertEqual(
+            bridge.recognize(pid: 1, axTitle: nil, timeout: 2.0),
+            .skipped(reason: "ocr_empty"))
+    }
+
     func testNonPositiveTimeoutIsAnImmediateTimeout() {
         // The combined AX+OCR budget can be exhausted before OCR starts; the
         // bridge must not launch work it cannot wait for.
-        let bridge = OcrBridge(hal: ImmediateFakeHAL(outcome: .text("never")))
+        let bridge = OcrBridge(hal: ImmediateHAL(
+            acquire: .image(OcrImageHandle("px")), recognized: .text("never")))
         XCTAssertEqual(bridge.recognize(pid: 1, axTitle: nil, timeout: 0), .timeout)
     }
 
-    func testHungHalTimesOutWithinDeadlineAndIsCancelled() {
-        let hal = GateFakeHAL(outcomes: [.text("late text")])
+    // MARK: acquire phase — deadline-raced and cancellable
+
+    func testHungAcquireTimesOutWithinDeadlineAndIsCancelled() {
+        let hal = HungAcquireHAL(
+            acquireOutcome: .unavailable(reason: "ocr_error"),
+            recognizeOutcome: .text("never"))
         let bridge = OcrBridge(hal: hal)
 
         let start = DispatchTime.now()
         let outcome = bridge.recognize(pid: 1, axTitle: nil, timeout: 0.2)
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
 
-        // Deadline honored: the caller (walk queue) is released promptly —
-        // this IS the walkInFlight-releases-within-deadline guarantee, since
-        // dispatchCapture clears the flag as soon as captureFrontmost returns.
+        // Deadline honored for the PRE-IMAGE phase: the caller (walk queue)
+        // is released promptly — this IS the walkInFlight-releases-within-
+        // deadline guarantee, since dispatchCapture clears the flag as soon
+        // as captureFrontmost returns.
         XCTAssertEqual(outcome, .timeout)
         XCTAssertLessThan(elapsed, 1.0)
 
@@ -123,27 +195,53 @@ final class OcrBridgeTests: XCTestCase {
         hal.release()  // let the task finish (late) — nothing may be delivered
     }
 
-    func testLateCompletionIsNeverDeliveredAndCannotPolluteNextCall() {
-        // Call 1 will complete LATE with "stale text"; call 2 (post-release)
-        // completes immediately with its own distinct outcome.
-        let hal = GateFakeHAL(outcomes: [.text("stale text"), .text("second call")])
+    func testLateAcquiredImageIsDroppedUnreadAndCannotPolluteNextCall() {
+        // Call 1's acquire completes LATE with an image; the closed box must
+        // drop it WITHOUT ever recognizing it (a late image never reaches the
+        // Vision phase — pixel + content invariant in one).
+        let hal = HungAcquireHAL(
+            acquireOutcome: .image(OcrImageHandle("stale pixels")),
+            recognizeOutcome: .text("stale text"))
         let bridge = OcrBridge(hal: hal)
 
-        // First call times out while the fake is still hung.
+        // First call times out while the fake acquire is still hung.
         XCTAssertEqual(bridge.recognize(pid: 1, axTitle: nil, timeout: 0.1), .timeout)
+        XCTAssertEqual(hal.recognizeCalls, 0)
 
-        // Release the stale task NOW so it completes "late" and wait for it.
+        // Release the stale acquire NOW so it completes "late" and wait.
         hal.release()
         let deadline = Date().addingTimeInterval(2.0)
-        while hal.completions == 0 && Date() < deadline {
+        while hal.acquireCompletions == 0 && Date() < deadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
-        XCTAssertEqual(hal.completions, 1, "late task never completed")
+        XCTAssertEqual(hal.acquireCompletions, 1, "late acquire never completed")
+        // The late image was dropped unread: recognize was NEVER invoked.
+        XCTAssertEqual(hal.recognizeCalls, 0)
 
         // A second call on the SAME bridge gets a fresh generation box and
-        // ITS OWN result — the first call's stale text can never surface.
+        // ITS OWN result — the stale first call can never surface through it.
         XCTAssertEqual(
             bridge.recognize(pid: 1, axTitle: nil, timeout: 2.0),
-            .text("second call"))
+            .text("stale text"))
+        XCTAssertEqual(hal.recognizeCalls, 1)  // recognized ITS OWN image, once
+    }
+
+    // MARK: recognize phase — scope-bound pixels (the reviewed HIGH finding)
+
+    func testBridgeWaitsOutNonCooperativeVisionSoPixelsNeverOutliveReturn() {
+        // Regression: recognize enters a 'pixel retained' phase and blocks
+        // non-cooperatively far past the acquire deadline. The bridge must
+        // NOT return while that flag is true — it waits for the image scope
+        // to close and returns the real result, deadline notwithstanding.
+        let hal = SlowVisionHAL(visionSeconds: 0.4)
+        let bridge = OcrBridge(hal: hal)
+
+        let start = DispatchTime.now()
+        let outcome = bridge.recognize(pid: 1, axTitle: nil, timeout: 0.1)
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+
+        XCTAssertEqual(outcome, .text("slow vision"))  // waited, no .timeout
+        XCTAssertGreaterThanOrEqual(elapsed, 0.4)      // for the WHOLE pass
+        XCTAssertFalse(hal.pixelRetained)              // pixels dead at return
     }
 }
