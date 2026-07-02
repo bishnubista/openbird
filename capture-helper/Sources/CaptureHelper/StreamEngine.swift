@@ -55,6 +55,17 @@ private struct SystemStreamEvent: Encodable {
     let kind: String
 }
 
+/// Pre-debounce app-boundary marker (Phase B spans): emitted the instant the
+/// frontmost app changes, BEFORE the capture debounce settles, so span
+/// boundaries are exact even when a fast A->B->A switch coalesces away B's
+/// capture frame. Tier-safe by construction: bundle id only (from
+/// NSRunningApplication — no AX call, no title, no URL, no text).
+private struct AppChangedEvent: Encodable {
+    var type = "app_changed"
+    let ts: Double
+    let app: String?
+}
+
 // MARK: - Locked POSIX emitter (EPIPE-aware)
 
 /// Serializes ALL stream-mode stdout writes (walk queue vs main run loop) and
@@ -244,6 +255,12 @@ final class StreamEngine {
             guard let self else { return }
             if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
                 as? NSRunningApplication {
+                // Span boundary marker FIRST (pre-debounce, exact timing),
+                // then the debounced content trigger.
+                self.emitter.emit(
+                    AppChangedEvent(
+                        ts: Date().timeIntervalSince1970,
+                        app: app.bundleIdentifier))
                 self.rebuildAXObserver(pid: app.processIdentifier)
             }
             self.onTrigger(.appActivated)

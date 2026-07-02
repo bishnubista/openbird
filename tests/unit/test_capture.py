@@ -2425,3 +2425,102 @@ def test_capture_exits_reindex_required_on_cohort_mismatch(tmp_path, monkeypatch
     assert res.exit_code == CAPTURE_EXIT_REINDEX_REQUIRED, res.output
     assert "reindex" in res.output.lower()
     reset_settings_cache()
+
+
+# ---------------------------------------------------------------------------
+# classify_policy — structural span-tier classification (Phase B)
+# ---------------------------------------------------------------------------
+
+
+def _span_settings(**kw):
+    import tempfile
+
+    defaults = {"allowlist": ["com.apple.mail"], "blocklist": []}
+    defaults.update(kw)
+    defaults.setdefault("data_dir", tempfile.mkdtemp(prefix="openbird-span-policy-"))
+    return Settings(**defaults)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "tier", "reason"),
+    [
+        # Structural gates, in evaluation order.
+        ({"app": "com.apple.mail", "window": None, "paused": True}, 0, "paused"),
+        ({"app": "ai.openbird.openbird", "window": None}, 0, "self_capture"),
+        ({"app": "ai.openbird.openbird.capture-helper", "window": None}, 0, "self_capture"),
+        ({"app": None, "window": None}, 0, "not_allowlisted"),  # unknown app fails closed
+        ({"app": "com.other.app", "window": None}, 0, "not_allowlisted"),
+        ({"app": "com.apple.mail", "window": None}, 1, None),
+        ({"app": "com.apple.mail", "window": "Inbox — incognito"}, 0, "private"),
+        ({"app": "com.apple.mail", "window": None, "incognito": True}, 0, "private"),
+    ],
+)
+def test_classify_policy_structural_cases(kwargs, tier, reason):
+    got = redact.classify_policy(settings=_span_settings(), **kwargs)
+    assert (got.tier, got.reason) == (tier, reason)
+
+
+def test_classify_policy_blocklist_subtracts_and_dangerous_backstop():
+    s = _span_settings(
+        allowlist=["com.apple.mail", "com.1password.1password", "com.apple.Terminal"],
+        blocklist=["com.apple.Terminal"],
+    )
+    assert redact.classify_policy(app="com.apple.Terminal", window=None, settings=s) == redact.PolicyClass(0, "blocklisted")
+    # Dangerous backstop coarsens even a (mis)allowlisted vault.
+    assert redact.classify_policy(app="com.1password.1password", window=None, settings=s) == redact.PolicyClass(0, "dangerous")
+
+
+def test_classify_policy_glob_and_regex_entries():
+    s = _span_settings(allowlist=["glob:com.acme.*", "re:org\\.example\\..+"])
+    assert redact.classify_policy(app="com.acme.editor", window=None, settings=s).tier == 1
+    assert redact.classify_policy(app="org.example.tool", window=None, settings=s).tier == 1
+    assert redact.classify_policy(app="com.acmeister.x", window=None, settings=s).reason == "not_allowlisted"
+
+
+def test_classify_policy_empty_allowlist_captures_nothing():
+    s = _span_settings(allowlist=[])
+    assert redact.classify_policy(app="com.apple.mail", window=None, settings=s) == redact.PolicyClass(0, "not_allowlisted")
+
+
+def test_classify_policy_reasons_are_closed_enum():
+    # Every reachable reason must be in the canonical set (DB CHECK depends on it).
+    cases = [
+        {"app": "com.apple.mail", "window": None, "paused": True},
+        {"app": "ai.openbird.openbird", "window": None},
+        {"app": "com.other", "window": None},
+        {"app": "com.apple.mail", "window": "private browsing"},
+    ]
+    s = _span_settings(blocklist=["com.blocked"])
+    cases.append({"app": "com.blocked", "window": None})
+    for kw in cases:
+        got = redact.classify_policy(settings=s, **kw)
+        if got.tier == 0:
+            assert got.reason in redact.SPAN_REASONS
+
+
+def test_classify_policy_decide_invariant():
+    # Structural agreement: with non-empty text, decide().capture is True IFF
+    # classify_policy (not paused) returns tier 1. With empty text, decide says
+    # no_text while classify_policy still returns the structural tier.
+    s = _span_settings(blocklist=["com.blocked"])
+    apps = [
+        ("com.apple.mail", None),
+        ("com.other", None),
+        ("com.blocked", None),
+        ("ai.openbird.openbird", None),
+        ("com.apple.mail", "Inbox — InPrivate"),
+        (None, None),
+    ]
+    for app, window in apps:
+        cls = redact.classify_policy(app=app, window=window, settings=s)
+        d_text = redact.decide(app=app, window=window, text="hello", settings=s)
+        assert d_text.capture is (cls.tier == 1), (app, window)
+        d_empty = redact.decide(app=app, window=window, text="", settings=s)
+        assert d_empty.reason == "no_text"
+
+
+def test_classify_policy_never_reads_text():
+    import inspect
+
+    # Contract guard: the signature has no text parameter at all.
+    assert "text" not in inspect.signature(redact.classify_policy).parameters

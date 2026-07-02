@@ -27,6 +27,10 @@ class Observation(BaseModel):
     url: str | None = None
     session_id: str | None = None
     source: str
+    # Activity span this occurrence was captured within (v4; event-scoped
+    # assignment by the capture daemon). Nullable: non-capture sources and
+    # span-store failures ingest with no span link.
+    span_id: str | None = None
 
 
 class ContentBlob(BaseModel):

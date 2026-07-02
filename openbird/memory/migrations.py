@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -130,6 +130,144 @@ def _apply_v3_reasoning_send_ledger(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _apply_v4_activity_spans(conn: sqlite3.Connection) -> None:
+    """Add activity spans + typed day-memory source refs (Phase B).
+
+    IDEMPOTENCY IS LOAD-BEARING: ``schema.sql`` executes BEFORE the ladder and
+    a fresh DB is stamped v1 (its tables exist by then) and walks v2->v3->v4 —
+    so most objects here were usually ALREADY created by schema.sql (their
+    definitions must stay textually in lockstep), and the v2 migration will
+    have just re-created the OLD day_memory_sources table this step drops.
+    Every statement is therefore IF-NOT-EXISTS / guarded / IF-EXISTS.
+    """
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS activity_spans (
+            span_id      TEXT PRIMARY KEY,
+            epoch_id     TEXT NOT NULL,
+            start_ts     REAL NOT NULL,
+            end_ts       REAL NOT NULL,
+            bundle_id    TEXT,
+            app          TEXT,
+            detail_tier  INTEGER NOT NULL CHECK (detail_tier IN (0, 1)),
+            window       TEXT,
+            url_host     TEXT,
+            identity_key TEXT,
+            afk          INTEGER NOT NULL DEFAULT 0,
+            meeting      INTEGER NOT NULL DEFAULT 0,
+            reason       TEXT CHECK (reason IN ('not_allowlisted','blocklisted',
+                                                'dangerous','private','paused',
+                                                'self_capture')),
+            CHECK (end_ts >= start_ts),
+            CHECK ((detail_tier = 0 AND window IS NULL AND url_host IS NULL
+                    AND identity_key IS NULL AND reason IS NOT NULL)
+                OR (detail_tier = 1 AND reason IS NULL))
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_activity_spans_start ON activity_spans(start_ts)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_spans_end ON activity_spans(end_ts)",
+        """
+        CREATE INDEX IF NOT EXISTS idx_activity_spans_bundle
+            ON activity_spans(bundle_id, start_ts)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS day_memory_source_refs (
+            day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,
+            source_kind   TEXT NOT NULL CHECK (source_kind IN ('observation','span')),
+            source_id     TEXT NOT NULL,
+            PRIMARY KEY (day_memory_id, source_kind, source_id)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_day_memory_source_refs_source
+            ON day_memory_source_refs(source_kind, source_id)
+        """,
+    ]
+    for statement in statements:
+        conn.execute(statement)
+
+    # observations.span_id: ALTER has no IF NOT EXISTS, so guard via table_info.
+    # (On a fresh DB schema.sql already created the column; on an upgrading DB
+    # this ALTER adds it. ADD COLUMN with a REFERENCES clause is legal because
+    # the column's default is NULL.)
+    if "span_id" not in _table_columns(conn, "observations"):
+        conn.execute(
+            "ALTER TABLE observations ADD COLUMN span_id TEXT "
+            "REFERENCES activity_spans(span_id) ON DELETE SET NULL"
+        )
+    # This index lives ONLY here (never in schema.sql): schema.sql runs before
+    # the ladder, where a pre-v4 observations table has no span_id column yet.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_observations_span ON observations(span_id)"
+    )
+
+    # Backfill typed refs from the legacy observation-only junction, then drop
+    # it (guarded: a DB whose v2 ran under an OLD build has it; a fresh DB's v2
+    # just re-created it empty; either way it is gone after this step).
+    legacy = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'day_memory_sources'"
+    ).fetchone()
+    if legacy is not None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO day_memory_source_refs
+                (day_memory_id, source_kind, source_id)
+            SELECT day_memory_id, 'observation', observation_id
+            FROM day_memory_sources
+            """
+        )
+    conn.execute("DROP TRIGGER IF EXISTS trg_day_memory_observation_delete")
+    conn.execute("DROP TABLE IF EXISTS day_memory_sources")
+
+    # Integrity + invalidation triggers (textually in lockstep with schema.sql).
+    triggers = [
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_refs_obs_exists
+        BEFORE INSERT ON day_memory_source_refs
+        WHEN NEW.source_kind = 'observation'
+            AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'day_memory_source_refs: unknown observation ref');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_refs_span_exists
+        BEFORE INSERT ON day_memory_source_refs
+        WHEN NEW.source_kind = 'span'
+            AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.source_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'day_memory_source_refs: unknown span ref');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_observation_delete
+        BEFORE DELETE ON observations
+        BEGIN
+            DELETE FROM day_memories
+            WHERE id IN (
+                SELECT day_memory_id
+                FROM day_memory_source_refs
+                WHERE source_kind = 'observation' AND source_id = OLD.id
+            );
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_span_delete
+        BEFORE DELETE ON activity_spans
+        BEGIN
+            DELETE FROM day_memories
+            WHERE id IN (
+                SELECT day_memory_id
+                FROM day_memory_source_refs
+                WHERE source_kind = 'span' AND source_id = OLD.span_id
+            );
+        END
+        """,
+    ]
+    for statement in triggers:
+        conn.execute(statement)
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
 # so migrations here only ever upgrade an existing DB from one version to the
 # next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
@@ -144,6 +282,11 @@ MIGRATIONS: list[Migration] = [
         version=3,
         description="add redacted reasoning send ledger",
         apply=_apply_v3_reasoning_send_ledger,
+    ),
+    Migration(
+        version=4,
+        description="add activity spans + typed day-memory source refs",
+        apply=_apply_v4_activity_spans,
     ),
 ]
 

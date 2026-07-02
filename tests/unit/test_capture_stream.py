@@ -322,3 +322,115 @@ def test_health_daemon_block_states(allow_settings, tmp_path):
     path.write_text('{"updated_at": NaN}')
     health = build_capture_health(settings=allow_settings, generated_at=1000.0)
     assert health["daemon"] == {"state": "unknown"}
+
+
+# ---------------------------------------------------------------------------
+# app_changed boundary markers (Phase B)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_app_changed_carries_bundle_only():
+    from openbird.capture.daemon import parse_event
+
+    e = parse_event(json.dumps({"type": "app_changed", "ts": 5.0, "app": "com.x.y"}))
+    assert e is not None
+    assert e["type"] == "app_changed"
+    assert e["app"] == "com.x.y"
+    # Never content-bearing fields.
+    for forbidden in ("window", "url", "text"):
+        assert forbidden not in e
+
+
+def test_app_changed_counted_not_ingested(allow_settings):
+    daemon, store = _daemon(allow_settings, "pass")
+    stats = daemon.run_lines(
+        [json.dumps({"type": "app_changed", "ts": 1.0, "app": "com.x.y"})]
+    )
+    assert stats.span_markers == 1
+    assert stats.ingested == 0
+    assert store.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Spans end-to-end through the daemon (Phase B)
+# ---------------------------------------------------------------------------
+
+
+class SpanCapableStore(FakeStore):
+    """FakeStore + the span API, so the real SpanTracker engages."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.spans: dict[str, dict] = {}
+        self._n = 0
+
+    def add_observation(self, text, *, span_id=None, **kw):
+        obs = super().add_observation(text, **kw)
+        self.calls[-1]["span_id"] = span_id
+        return obs
+
+    def open_span(self, **kw) -> str:
+        self._n += 1
+        sid = f"span{self._n}"
+        self.spans[sid] = dict(kw)
+        return sid
+
+    def extend_span(self, span_id, end_ts):
+        row = self.spans[span_id]
+        row["end_ts"] = max(row["end_ts"], end_ts)
+
+    def close_span(self, span_id, end_ts):
+        row = self.spans[span_id]
+        row["end_ts"] = max(row["start_ts"], end_ts)
+
+
+def _span_daemon(settings):
+    store = SpanCapableStore()
+    daemon = CaptureDaemon(
+        store, settings=settings,
+        helper_cmd=("true",), require_signed_helper=False,
+    )
+    return daemon, store
+
+
+def test_blocked_app_frames_yield_coarse_span_no_content(allow_settings):
+    daemon, store = _span_daemon(allow_settings)
+    # Metadata-only frames as the helper emits for non-allowlisted apps —
+    # plus a hostile window title that must NOT reach the span.
+    lines = [
+        json.dumps({"app": "com.other.app", "window": "SECRET", "url": None,
+                    "text": "", "ts": 100.0, "incognito": False}),
+        json.dumps({"app": "com.other.app", "window": "SECRET", "url": None,
+                    "text": "", "ts": 102.0, "incognito": False}),
+    ]
+    stats = daemon.run_lines(lines)
+    assert stats.ingested == 0  # no content stored (empty text rejected)
+    assert len(store.spans) == 1  # but the TIME is tracked
+    row = next(iter(store.spans.values()))
+    assert row["detail_tier"] == 0
+    assert row["reason"] == "not_allowlisted"
+    assert row["window"] is None and row["url_host"] is None
+    assert "SECRET" not in json.dumps(row)
+
+
+def test_observation_carries_its_frames_span_id(allow_settings):
+    daemon, store = _span_daemon(allow_settings)
+    daemon.run_lines([
+        json.dumps({"app": "com.apple.mail", "window": "Inbox", "url": None,
+                    "text": "hello world", "ts": 100.0, "incognito": False}),
+    ])
+    assert len(store.calls) == 1
+    span_id = store.calls[0]["span_id"]
+    assert span_id in store.spans
+    assert store.spans[span_id]["detail_tier"] == 1
+
+
+def test_allowlisted_empty_ax_yields_tier1_span_without_observation(allow_settings):
+    daemon, store = _span_daemon(allow_settings)
+    stats = daemon.run_lines([
+        json.dumps({"app": "com.apple.mail", "window": "Inbox", "url": None,
+                    "text": "", "ts": 100.0, "incognito": False}),
+    ])
+    assert stats.ingested == 0 and stats.rejected == 1
+    assert len(store.spans) == 1
+    assert next(iter(store.spans.values()))["detail_tier"] == 1

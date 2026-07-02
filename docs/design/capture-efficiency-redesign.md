@@ -4,7 +4,10 @@ Status: reviewed to consensus (Codex adversarial review, 3 rounds → approve, 2
 Date: 2026-07-01
 Accepted low-risk tradeoffs (from review): helper/Python policy parity needs tests
 during implementation; Phase B's migration picks the concrete storage shape for
-tier-1 identity keys.
+tier-1 identity keys. (Resolved in Phase B: a nullable `identity_key TEXT` column,
+part of the merge identity tuple and the tier-0 CHECK; EXTRACTION of file/repo/
+document identities is explicitly deferred to a later phase — the column is always
+NULL in Phase B.)
 Goal: help the user be productive and give **detailed, trustworthy analysis of how time
 on the MacBook was spent** — while making capture cheaper, not heavier.
 
@@ -207,12 +210,32 @@ title-bearing design a naive spans table would imply: "45 min in Ghostty
   at its last-heartbeat wall time, never at "now" — before any merging resumes
   (equivalently: each process run has a restart epoch, and heartbeats never merge
   across epochs). A supervisor restart can therefore never mis-extend a stale span.
+  (Amended during Phase B plan review: the boundary applies to every process whose
+  MONOTONIC CLOCK OR SCHEDULER STATE feeds span merging. In stream mode that is
+  both the daemon and the persistent helper — each `run_persistent` cycle is a new
+  epoch. In the poll/one-shot fallback the helper is a stateless sampler carrying
+  no clock or cadence state between 2-second spawns; the daemon's continuous
+  monotonic clock is the only merge clock, so the DAEMON PROCESS is the epoch unit
+  there — per-spawn epochs would forbid all merging and make the fallback useless.)
 - Span boundaries debounce **independently** of content capture: a 300 ms app-switch
   settle delays the *text* capture, but the span boundary is recorded at the switch
   event itself, so fast A→B→A switching inside the debounce window still yields
   correct (small) spans.
 - Semantics: spans measure **frontmost-app time on the active display** — not
   multi-display visibility, not audio/background activity. Document this in the UI.
+
+- **`app_changed` boundary markers** (added in Phase B plan review): the helper
+  emits `{type: "app_changed", ts, app}` the instant the frontmost app changes,
+  BEFORE the capture debounce settles — span boundaries stay exact (the span
+  start is backdated to the marker) even when a fast A→B→A switch coalesces B's
+  capture frame away entirely (the middle app gets a real small span). Bundle id
+  only — no AX call, no titles; old daemons parse the unknown type as a capture
+  frame and reject it as `no_text` (harmless).
+- **Prune rule** (tightened in Phase B plan review): retention (`before_ts`)
+  deletes any span that BEGAN before the cutoff ENTIRELY — never truncated,
+  never retained — so no span data from the pruned window survives and the
+  span-delete invalidation trigger always fires; purge-of-recent (`since_ts`)
+  deletes any span touching the purged window.
 
 **Join model**: spans are first-class. Observations gain a nullable `span_id` column,
 and assignment is **event-scoped, not lookup-scoped**: the daemon resolves the span ID

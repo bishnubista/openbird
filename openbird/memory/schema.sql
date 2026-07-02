@@ -18,7 +18,14 @@ CREATE TABLE IF NOT EXISTS content_blobs (
 );
 
 -- One row per occurrence (never deduped). The same window seen 50 times = 50
--- observations referencing 1 blob.
+-- observations referencing 1 blob. ``span_id`` (v4) links an observation to the
+-- activity span it was captured within (event-scoped assignment; nullable —
+-- spans are ground-truth time, observations are content occurrences).
+--
+-- NOTE: idx_observations_span is created ONLY by the v4 migration, never here:
+-- schema.sql runs BEFORE the migration ladder, and on a pre-v4 DB this table
+-- already exists without span_id, so an index definition here would raise
+-- "no such column" before the ladder could add it.
 CREATE TABLE IF NOT EXISTS observations (
     id           TEXT PRIMARY KEY,
     content_hash TEXT NOT NULL REFERENCES content_blobs(content_hash) ON DELETE CASCADE,
@@ -27,12 +34,45 @@ CREATE TABLE IF NOT EXISTS observations (
     window       TEXT,
     url          TEXT,
     session_id   TEXT,
-    source       TEXT NOT NULL
+    source       TEXT NOT NULL,
+    span_id      TEXT REFERENCES activity_spans(span_id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_observations_ts      ON observations(ts);
 CREATE INDEX IF NOT EXISTS idx_observations_hash    ON observations(content_hash);
 CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
+
+-- Heartbeat-merged activity spans (v4): ground-truth "app X was frontmost from
+-- t1 to t2" rows, two-tier by the STRUCTURAL policy classification
+-- (redact.classify_policy). Tier 0 (coarse) carries NO window/url_host/
+-- identity_key — enforced here by CHECK and again in Python (open_span).
+-- Wall-clock timestamps are storage only; merge deadlines are monotonic and
+-- never persisted. epoch_id scopes merging to one process lifetime.
+CREATE TABLE IF NOT EXISTS activity_spans (
+    span_id      TEXT PRIMARY KEY,
+    epoch_id     TEXT NOT NULL,
+    start_ts     REAL NOT NULL,
+    end_ts       REAL NOT NULL,
+    bundle_id    TEXT,               -- NULL only for reason='paused' spans
+    app          TEXT,               -- reserved (localized name); NULL for now
+    detail_tier  INTEGER NOT NULL CHECK (detail_tier IN (0, 1)),
+    window       TEXT,               -- tier 1 only (scrubbed); NULL if untitled
+    url_host     TEXT,               -- tier 1 only; host only; opt-in
+    identity_key TEXT,               -- tier 1 only; per-app identity (file path/
+                                     -- repo/document); extraction deferred
+    afk          INTEGER NOT NULL DEFAULT 0,
+    meeting      INTEGER NOT NULL DEFAULT 0,  -- Phase C
+    reason       TEXT CHECK (reason IN ('not_allowlisted','blocklisted','dangerous',
+                                        'private','paused','self_capture')),
+    CHECK (end_ts >= start_ts),
+    CHECK ((detail_tier = 0 AND window IS NULL AND url_host IS NULL
+            AND identity_key IS NULL AND reason IS NOT NULL)
+        OR (detail_tier = 1 AND reason IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_spans_start  ON activity_spans(start_ts);
+CREATE INDEX IF NOT EXISTS idx_activity_spans_end    ON activity_spans(end_ts);
+CREATE INDEX IF NOT EXISTS idx_activity_spans_bundle ON activity_spans(bundle_id, start_ts);
 
 -- Globally-deduped retrievable chunks, addressed by SHA-256 of their *normalized
 -- chunk text* (not the parent window). A unique chunk is stored,
@@ -86,27 +126,64 @@ CREATE TABLE IF NOT EXISTS day_memories (
     UNIQUE(local_date, source_scope)
 );
 
-CREATE TABLE IF NOT EXISTS day_memory_sources (
-    day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,
-    observation_id TEXT NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
-    PRIMARY KEY(day_memory_id, observation_id)
-);
-
 CREATE INDEX IF NOT EXISTS idx_day_memories_date_scope
     ON day_memories(local_date, source_scope);
-CREATE INDEX IF NOT EXISTS idx_day_memory_sources_observation
-    ON day_memory_sources(observation_id);
+
+-- Typed derived-artifact citations (v4; replaces the observation-only
+-- day_memory_sources, which this file deliberately no longer defines — the v4
+-- migration backfills and drops it on upgraded DBs; NO DROP statements here).
+-- source_kind types the citation so day memories can cite spans as well as
+-- observations; integrity is enforced by the BEFORE INSERT triggers below
+-- (typed refs cannot use a single FK).
+CREATE TABLE IF NOT EXISTS day_memory_source_refs (
+    day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,
+    source_kind   TEXT NOT NULL CHECK (source_kind IN ('observation','span')),
+    source_id     TEXT NOT NULL,
+    PRIMARY KEY (day_memory_id, source_kind, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_day_memory_source_refs_source
+    ON day_memory_source_refs(source_kind, source_id);
+
+-- Insert-time integrity per source_kind: a derived row must never cite a
+-- missing source (typo/stale IDs fail loudly, in the same transaction).
+CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_refs_obs_exists
+BEFORE INSERT ON day_memory_source_refs
+WHEN NEW.source_kind = 'observation'
+    AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.source_id)
+BEGIN
+    SELECT RAISE(ABORT, 'day_memory_source_refs: unknown observation ref');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_refs_span_exists
+BEFORE INSERT ON day_memory_source_refs
+WHEN NEW.source_kind = 'span'
+    AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.source_id)
+BEGIN
+    SELECT RAISE(ABORT, 'day_memory_source_refs: unknown span ref');
+END;
 
 -- Use BEFORE DELETE so the junction row is still present when the trigger reads
--- it; SQLite FK cascades would remove day_memory_sources before an AFTER trigger.
-CREATE TRIGGER IF NOT EXISTS trg_day_memory_observation_delete
+-- it; SQLite FK cascades would remove the refs before an AFTER trigger.
+CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_observation_delete
 BEFORE DELETE ON observations
 BEGIN
     DELETE FROM day_memories
     WHERE id IN (
         SELECT day_memory_id
-        FROM day_memory_sources
-        WHERE observation_id = OLD.id
+        FROM day_memory_source_refs
+        WHERE source_kind = 'observation' AND source_id = OLD.id
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_span_delete
+BEFORE DELETE ON activity_spans
+BEGIN
+    DELETE FROM day_memories
+    WHERE id IN (
+        SELECT day_memory_id
+        FROM day_memory_source_refs
+        WHERE source_kind = 'span' AND source_id = OLD.span_id
     );
 END;
 

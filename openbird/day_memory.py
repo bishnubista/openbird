@@ -15,14 +15,14 @@ import json
 import re
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
 from openbird.types import Observation
 from openbird.reasoning_ledger import packet_payload_audit
 
-EXTRACTOR_VERSION = "day-memory-v6"
+EXTRACTOR_VERSION = "day-memory-v7"
 _UNGROUNDED_PRODUCTIVITY_COACH_ANSWER = (
     "I could not ground productivity coaching in the local facts packet."
 )
@@ -52,6 +52,7 @@ _MODEL_STRIPPED_LOCAL_ID_KEYS = {
     "session_id",
     "session_ids",
     "session_refs",
+    "span_ids",
 }
 
 _BROWSER_APPS = {
@@ -99,6 +100,8 @@ class DayMemoryBuild:
 
     payload: dict
     source_ids: list[str]
+    # Activity spans the payload's span_metrics were computed from (Phase B).
+    span_ids: list[str] = field(default_factory=list)
 
 
 def local_date_for_window(start_ts: float) -> str:
@@ -116,8 +119,14 @@ def build_day_memory(
     gap_seconds: float = 300.0,
     source_fingerprint: dict | None = None,
     as_of: float | None = None,
+    spans: list[dict] | None = None,
 ) -> DayMemoryBuild:
-    """Build a deterministic, no-model day-memory payload."""
+    """Build a deterministic, no-model day-memory payload.
+
+    ``spans`` (activity_spans rows overlapping the window, Phase B) add the
+    measured-time ``span_metrics`` block; every metric there is computed from
+    span ground truth and cited via the build's ``span_ids``.
+    """
     ordered = sorted(rows, key=lambda item: _observation_sort_key(item[0]))
     source_ids = [obs.id for obs, _ in ordered]
     sessions = _build_sessions(ordered)
@@ -177,7 +186,133 @@ def build_day_memory(
         },
         "entities": entities,
     }
-    return DayMemoryBuild(payload=payload, source_ids=source_ids)
+    span_ids: list[str] = []
+    if spans is not None:
+        metrics, span_ids = _span_metrics(spans, start_ts=start_ts, end_ts=end_ts)
+        payload["span_metrics"] = metrics
+        payload["span_fingerprint"] = span_fingerprint_for_spans(spans)
+    return DayMemoryBuild(payload=payload, source_ids=source_ids, span_ids=span_ids)
+
+
+# -- span-derived measured time (Phase B) -------------------------------------
+
+# Focus-block extraction over spans: maximal runs of non-AFK spans with small
+# inter-span gaps and low app diversity, long enough to mean sustained work.
+_SPAN_FOCUS_MAX_GAP = 60.0
+_SPAN_FOCUS_MAX_BUNDLES = 2
+_SPAN_FOCUS_MIN_SECONDS = 600.0
+
+
+def span_fingerprint_for_spans(spans: list[dict]) -> dict:
+    """Freshness fingerprint over span extents.
+
+    Includes ``end_ts`` so an EXTENDED span invalidates a cached day memory —
+    extension fires no delete trigger, so freshness must catch it here.
+    """
+    import hashlib
+
+    items = sorted((str(s.get("span_id")), float(s.get("end_ts") or 0.0)) for s in spans)
+    digest = hashlib.sha256(repr(items).encode()).hexdigest()[:16]
+    return {"span_count": len(items), "ids_hash": digest}
+
+
+def _clip_seconds(span: dict, start_ts: float, end_ts: float) -> tuple[float, float, float]:
+    s = max(float(span.get("start_ts") or 0.0), start_ts)
+    e = min(float(span.get("end_ts") or 0.0), end_ts)
+    return s, e, max(0.0, e - s)
+
+
+def _span_metrics(
+    spans: list[dict], *, start_ts: float, end_ts: float
+) -> tuple[dict, list[str]]:
+    """Deterministic measured-time metrics from activity spans (no model)."""
+    span_ids: list[str] = []
+    time_by_app: Counter[str] = Counter()
+    time_by_reason: Counter[str] = Counter()
+    time_by_hour: Counter[str] = Counter()
+    afk_seconds = 0.0
+    paused_seconds = 0.0
+    active: list[tuple[float, float, str, str]] = []  # (s, e, bundle, span_id)
+
+    for span in sorted(spans, key=lambda x: float(x.get("start_ts") or 0.0)):
+        s, e, seconds = _clip_seconds(span, start_ts, end_ts)
+        if seconds <= 0:
+            continue
+        span_id = str(span.get("span_id"))
+        span_ids.append(span_id)
+        reason = span.get("reason")
+        if reason == "paused":
+            # Paused dominates (matching classify_policy's structural order):
+            # a paused+AFK span is PAUSED time, not AFK time. It is neither
+            # active nor app-attributable — time_by_reason/paused_seconds
+            # only, never per-app time, hour buckets, or focus blocks.
+            time_by_reason["paused"] += seconds
+            paused_seconds += seconds
+            continue
+        if span.get("afk"):
+            afk_seconds += seconds
+            continue
+        if reason:
+            time_by_reason[str(reason)] += seconds
+        bundle = span.get("bundle_id") or "(untracked)"
+        time_by_app[bundle] += seconds
+        # Split the span's active time at local hour boundaries.
+        cursor = s
+        while cursor < e:
+            hour_start = dt.datetime.fromtimestamp(cursor).replace(
+                minute=0, second=0, microsecond=0
+            )
+            next_hour = (hour_start + dt.timedelta(hours=1)).timestamp()
+            segment_end = min(e, next_hour)
+            time_by_hour[hour_start.strftime("%H:00")] += segment_end - cursor
+            cursor = segment_end
+        active.append((s, e, bundle, span_id))
+
+    # Focus blocks: contiguous non-AFK runs (gap < 60s, <= 2 distinct bundles,
+    # >= 10 min total).
+    focus_blocks: list[dict] = []
+    run: list[tuple[float, float, str, str]] = []
+
+    def _flush_run() -> None:
+        if not run:
+            return
+        block_start, block_end = run[0][0], run[-1][1]
+        bundles = Counter(item[2] for item in run)
+        if (
+            block_end - block_start >= _SPAN_FOCUS_MIN_SECONDS
+            and len(bundles) <= _SPAN_FOCUS_MAX_BUNDLES
+        ):
+            focus_blocks.append(
+                {
+                    "start": block_start,
+                    "end": block_end,
+                    "seconds": round(block_end - block_start, 3),
+                    "dominant_bundle": bundles.most_common(1)[0][0],
+                    "span_ids": [item[3] for item in run],
+                }
+            )
+
+    for item in active:
+        if run and (
+            item[0] - run[-1][1] >= _SPAN_FOCUS_MAX_GAP
+            or len({x[2] for x in (*run, item)}) > _SPAN_FOCUS_MAX_BUNDLES
+        ):
+            _flush_run()
+            run = []
+        run.append(item)
+    _flush_run()
+
+    metrics = {
+        "span_time_by_app": _round_counter(time_by_app),
+        "span_time_by_reason": _round_counter(time_by_reason),
+        "span_time_by_hour": _round_counter(time_by_hour),
+        "afk_seconds": round(afk_seconds, 3),
+        "paused_seconds": round(paused_seconds, 3),
+        "active_span_seconds": round(sum(time_by_app.values()), 3),
+        "span_focus_blocks": focus_blocks,
+        "span_coverage": {"span_count": len(span_ids)},
+    }
+    return metrics, span_ids
 
 
 def saved_day_memory_with_day_offset(saved: dict, day_offset: int) -> dict:
@@ -210,9 +345,19 @@ def build_productivity_report(
     ]
     category_sources = _category_sources_from_blocks(focus_blocks)
 
-    active_seconds = float(metrics.get("active_seconds") or 0.0)
+    # Duration basis: spans are MEASURED time (Phase B ground truth); the
+    # legacy observation metrics are sample/coalesce-derived estimates. Prefer
+    # spans whenever the payload carries them; keep the legacy value as the
+    # fallback so pre-v7 memories keep rendering.
+    span_metrics = payload.get("span_metrics") or {}
+    has_spans = bool(span_metrics.get("span_coverage", {}).get("span_count"))
+    if has_spans:
+        active_seconds = float(span_metrics.get("active_span_seconds") or 0.0)
+    else:
+        active_seconds = float(metrics.get("active_seconds") or 0.0)
     context_switch_count = int(metrics.get("context_switch_count") or 0)
     facts = {
+        "duration_basis": "spans" if has_spans else "observations",
         "active_seconds": round(active_seconds, 3),
         "active_minutes": round(active_seconds / 60.0, 1),
         "context_switch_count": context_switch_count,
@@ -229,6 +374,14 @@ def build_productivity_report(
         ),
         "longest_focus_block": _longest_focus_block(focus_blocks),
     }
+    if has_spans:
+        facts["afk_minutes"] = round(
+            float(span_metrics.get("afk_seconds") or 0.0) / 60.0, 1
+        )
+        facts["paused_minutes"] = round(
+            float(span_metrics.get("paused_seconds") or 0.0) / 60.0, 1
+        )
+    span_focus_blocks = list(span_metrics.get("span_focus_blocks") or [])
     coach_ready_packet = {
         "local_date": payload.get("local_date") or saved.get("local_date"),
         "source_scope": payload.get("source_scope") or saved.get("source_scope"),
@@ -236,6 +389,9 @@ def build_productivity_report(
         "facts": _without_source_ids(facts),
         "category_sources": [_without_source_ids(item) for item in category_sources],
         "focus_blocks": [_without_source_ids(item) for item in focus_blocks[:12]],
+        "span_focus_blocks": [
+            _without_source_ids(item) for item in span_focus_blocks[:12]
+        ],
         "source_count": (
             saved.get("source_count")
             or payload.get("coverage", {}).get("observations", 0)
@@ -254,6 +410,7 @@ def build_productivity_report(
             "facts": facts,
             "category_sources": category_sources,
             "focus_blocks": focus_blocks,
+            "span_focus_blocks": span_focus_blocks,
             "coach_ready_packet": coach_ready_packet,
         },
     }

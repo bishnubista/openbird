@@ -1670,3 +1670,194 @@ def test_productivity_cli_rejects_negative_day(monkeypatch, tmp_path):
         reset_settings_cache()
 
     assert res.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# span_metrics (Phase B): measured time from activity spans
+# ---------------------------------------------------------------------------
+
+
+def _span(sid, start, end, *, bundle="com.apple.mail", afk=0, reason=None):
+    return {
+        "span_id": sid, "start_ts": start, "end_ts": end,
+        "bundle_id": bundle, "afk": afk, "reason": reason, "detail_tier": 1,
+    }
+
+
+def test_span_metrics_time_accounting_and_afk():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        _span("s1", 1000.0, 1600.0),                       # 600s mail
+        _span("s2", 1600.0, 1900.0, bundle="com.apple.Terminal",
+              reason="blocklisted"),                        # 300s coarse
+        _span("s3", 1900.0, 2500.0, afk=1),                # 600s AFK
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    m = built.payload["span_metrics"]
+    assert m["span_time_by_app"]["com.apple.mail"] == 600.0
+    assert m["span_time_by_app"]["com.apple.Terminal"] == 300.0
+    assert m["span_time_by_reason"]["blocklisted"] == 300.0
+    assert m["afk_seconds"] == 600.0
+    assert m["active_span_seconds"] == 900.0
+    assert built.span_ids == ["s1", "s2", "s3"]
+    assert built.payload["span_fingerprint"]["span_count"] == 3
+
+
+def test_span_metrics_clip_to_window():
+    from openbird.day_memory import build_day_memory
+
+    spans = [_span("s1", 0.0, 200.0)]  # only [100, 200] is inside the window
+    built = build_day_memory(
+        [], start_ts=100.0, end_ts=1000.0, day_offset=0, spans=spans
+    )
+    assert built.payload["span_metrics"]["span_time_by_app"]["com.apple.mail"] == 100.0
+
+
+def test_span_metrics_hour_splitting():
+    import datetime as dt
+
+    from openbird.day_memory import build_day_memory
+
+    # A span straddling a local hour boundary splits between the two hours.
+    base = dt.datetime(2026, 1, 5, 9, 50, 0)
+    start = base.timestamp()
+    end = (base + dt.timedelta(minutes=20)).timestamp()
+    built = build_day_memory(
+        [], start_ts=start - 100, end_ts=end + 100, day_offset=0,
+        spans=[_span("s1", start, end)],
+    )
+    by_hour = built.payload["span_metrics"]["span_time_by_hour"]
+    assert by_hour["09:00"] == 600.0
+    assert by_hour["10:00"] == 600.0
+
+
+def test_span_focus_blocks_rules():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        # A 15-minute two-app run with small gaps -> one block.
+        _span("s1", 1000.0, 1400.0),
+        _span("s2", 1430.0, 1900.0, bundle="com.apple.notes"),
+        # A >60s gap breaks the run; the next span alone is too short.
+        _span("s3", 2200.0, 2400.0),
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    blocks = built.payload["span_metrics"]["span_focus_blocks"]
+    assert len(blocks) == 1
+    assert blocks[0]["span_ids"] == ["s1", "s2"]
+    assert blocks[0]["seconds"] == 900.0
+
+
+def test_span_fingerprint_changes_on_extension():
+    from openbird.day_memory import span_fingerprint_for_spans
+
+    a = [_span("s1", 0.0, 100.0)]
+    b = [_span("s1", 0.0, 150.0)]  # same span, extended
+    assert span_fingerprint_for_spans(a) != span_fingerprint_for_spans(b)
+
+
+def test_no_spans_omits_block():
+    from openbird.day_memory import build_day_memory
+
+    built = build_day_memory([], start_ts=0.0, end_ts=1.0, day_offset=0)
+    assert "span_metrics" not in built.payload
+    assert built.span_ids == []
+
+
+def test_paused_spans_are_not_active_time():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        _span("s1", 1000.0, 1600.0),  # 600s real work
+        {"span_id": "s2", "start_ts": 1600.0, "end_ts": 2600.0,
+         "bundle_id": None, "afk": 0, "reason": "paused", "detail_tier": 0},
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    m = built.payload["span_metrics"]
+    assert m["active_span_seconds"] == 600.0  # paused 1000s NOT counted
+    assert m["paused_seconds"] == 1000.0
+    assert m["span_time_by_reason"]["paused"] == 1000.0
+    assert "(untracked)" not in m["span_time_by_app"]
+    # Paused time can never form/extend a focus block.
+    for block in m["span_focus_blocks"]:
+        assert "s2" not in block["span_ids"]
+    # Hour buckets carry only the active 600s.
+    assert sum(m["span_time_by_hour"].values()) == 600.0
+
+
+def test_paused_afk_span_counts_as_paused_not_afk():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        {"span_id": "s1", "start_ts": 1000.0, "end_ts": 1500.0,
+         "bundle_id": None, "afk": 1, "reason": "paused", "detail_tier": 0},
+    ]
+    m = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    ).payload["span_metrics"]
+    # Paused dominates: 500s is PAUSED time, never AFK or active.
+    assert m["paused_seconds"] == 500.0
+    assert m["afk_seconds"] == 0.0
+    assert m["active_span_seconds"] == 0.0
+    assert m["span_time_by_reason"]["paused"] == 500.0
+
+
+def test_productivity_report_prefers_span_ground_truth():
+    from openbird.day_memory import build_day_memory, build_productivity_report
+
+    spans = [
+        _span("s1", 1000.0, 1600.0),
+        _span("s2", 1700.0, 2000.0, afk=1),
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    saved = {
+        "payload": built.payload,
+        "local_date": built.payload.get("local_date"),
+        "source_scope": "capture",
+        "source_count": 0,
+        "generated_at": 0.0,
+    }
+    report = build_productivity_report(saved)
+    facts = report["productivity"]["facts"]
+    assert facts["duration_basis"] == "spans"
+    assert facts["active_seconds"] == 600.0
+    assert facts["afk_minutes"] == 5.0
+    # Coach packet never carries local span ids.
+    packet = report["productivity"]["coach_ready_packet"]
+    assert "span_ids" not in json_dumps_all_keys(packet)
+
+
+def json_dumps_all_keys(value) -> set:
+    keys: set = set()
+
+    def walk(v):
+        if isinstance(v, dict):
+            for k, item in v.items():
+                keys.add(k)
+                walk(item)
+        elif isinstance(v, list):
+            for item in v:
+                walk(item)
+
+    walk(value)
+    return keys
+
+
+def test_productivity_report_legacy_fallback_without_spans():
+    from openbird.day_memory import build_day_memory, build_productivity_report
+
+    built = build_day_memory([], start_ts=0.0, end_ts=1.0, day_offset=0)
+    saved = {"payload": built.payload, "local_date": "2026-01-01",
+             "source_scope": "capture", "source_count": 0, "generated_at": 0.0}
+    facts = build_productivity_report(saved)["productivity"]["facts"]
+    assert facts["duration_basis"] == "observations"
+    assert "afk_minutes" not in facts
