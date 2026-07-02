@@ -845,10 +845,28 @@ class MemoryStore:
             self.conn.rollback()
             raise
 
-    # There is deliberately NO open/closed status column: the tracker is the
-    # single writer, and a crash leaves end_ts at the last flush — which IS the
-    # correct closed value (never "now"). Closing == a final extend.
-    close_span = extend_span
+    def close_span(self, span_id: str, end_ts: float) -> None:
+        """Set a span's FINAL end (set-exact, floored at start_ts).
+
+        Unlike :meth:`extend_span` (monotone MAX for stale mid-span updates),
+        closing may TRUNCATE: an AFK boundary is backdated to when input
+        actually stopped, which can precede a flushed end_ts (idle-tick frames
+        captured after the user left). There is deliberately NO open/closed
+        status column: the tracker is the single writer, and a crash leaves
+        end_ts at the last flush — which is the correct closed value (never
+        "now").
+        """
+        try:
+            self._begin()
+            self.conn.execute(
+                "UPDATE activity_spans SET end_ts = MAX(start_ts, ?) "
+                "WHERE span_id = ?",
+                (float(end_ts), span_id),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def spans_in_range(self, start_ts: float, end_ts: float) -> list[dict]:
         """Return spans OVERLAPPING [start_ts, end_ts], ordered by start."""

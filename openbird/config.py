@@ -268,6 +268,9 @@ class Settings:
     capture_idle_tick_seconds: float = 5.0  # backstop poll cadence; [5, 10]
     capture_force_ceiling_seconds: float = 60.0  # max capture gap; >= max(gap, tick)
     capture_min_gap_seconds: float = 1.0  # hard floor between captures; >= 1
+    # Span merge pulsetime (Phase B). 0 = derive from the idle tick
+    # (max(2*tick+5, 15)); explicit values clamp to [5, ceiling].
+    capture_span_pulsetime_seconds: float = 0.0
 
     # Optional cross-encoder reranker (between RRF fusion and MMR). DISABLED by
     # default: an empty rerank_model is a no-op, so search behavior is unchanged.
@@ -335,6 +338,23 @@ class Settings:
             default=60.0,
             lo=max(self.capture_min_gap_seconds, self.capture_idle_tick_seconds),
         )
+        # Span pulsetime: 0 means "derive"; explicit values are clamped into
+        # [5, ceiling] (a pulsetime above the ceiling would merge across gaps
+        # the ceiling is required to split).
+        try:
+            pulse = float(self.capture_span_pulsetime_seconds)
+        except (TypeError, ValueError):
+            pulse = 0.0
+        if not math.isfinite(pulse) or pulse <= 0:
+            self.capture_span_pulsetime_seconds = 0.0
+        else:
+            self.capture_span_pulsetime_seconds = _clamp_setting(
+                "capture_span_pulsetime_seconds",
+                pulse,
+                default=0.0,
+                lo=5.0,
+                hi=self.capture_force_ceiling_seconds,
+            )
         self.data_dir = Path(self.data_dir).expanduser()
         if self.db_path is None:
             self.db_path = str(self.data_dir / "openbird.db")
@@ -395,6 +415,7 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "capture_idle_tick_seconds": 5.0,
     "capture_force_ceiling_seconds": 60.0,
     "capture_min_gap_seconds": 1.0,
+    "capture_span_pulsetime_seconds": 0.0,
     "embed_dim": 768,
     "llm_timeout": 60.0,
     "embed_timeout": 30.0,

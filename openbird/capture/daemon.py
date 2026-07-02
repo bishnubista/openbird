@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Protocol
 
 from openbird.capture import adapters, redact, volatility
+from openbird.capture.spans import NullSpanTracker, SpanTracker
 from openbird.config import Settings, get_settings
 from openbird.types import Observation
 
@@ -455,6 +456,13 @@ class CaptureDaemon:
         # Metadata only; used for diagnostics/liveness, never gates ingestion
         # (the helper already suppresses captures while AFK at the source).
         self._afk = False
+        # Span tracker (Phase B): turns the typed event stream into
+        # activity_spans rows. Only wired when the sink exposes the span API,
+        # so lightweight test fakes keep working unchanged.
+        if hasattr(store, "open_span"):
+            self._span_tracker = SpanTracker(store, self.settings)
+        else:
+            self._span_tracker = NullSpanTracker()
         # Whether the helper binary supports --stream. Optimistic until proven
         # otherwise: a helper that EOFs rc=0 without EVER emitting a heartbeat
         # is an old one-shot binary that ignored the flag — we then downgrade
@@ -559,10 +567,6 @@ class CaptureDaemon:
         event_type = event.get("type", "capture")
         if event_type != "capture" and event_type in _EVENT_TYPES:
             return self._handle_typed_event(event_type, event, stats)
-        if self.is_paused():
-            self._reset_coalescing()
-            logger.debug("capture: rejected event reason=paused")
-            return stats._with(rejected=1)
 
         app = event.get("app")
         window = event.get("window")
@@ -570,6 +574,28 @@ class CaptureDaemon:
         text = event.get("text")
         ts = event.get("ts")
         incognito = bool(event.get("incognito", False))
+        event_at = self._event_clock(ts)
+
+        # Span resolution is EVENT-SCOPED and runs for EVERY frame — including
+        # ones the content policy rejects below (a blocked terminal still gets
+        # its coarse time span; that is the whole point of the spans layer).
+        # The tracker applies classify_policy internally, so tier/reason are
+        # decided structurally, never from text.
+        paused = self.is_paused()
+        span_id = self._span_tracker.on_frame(
+            app=app,
+            window=window,
+            url=url,
+            incognito=incognito,
+            paused=paused,
+            afk=self._afk,
+            ts=event_at,
+        )
+
+        if paused:
+            self._reset_coalescing()
+            logger.debug("capture: rejected event reason=paused")
+            return stats._with(rejected=1)
 
         decision, scrubbed = redact.apply(
             app=app,
@@ -608,7 +634,6 @@ class CaptureDaemon:
         safe_window, safe_url, title_rules = redact.scrub_metadata(
             window=window, url=url
         )
-        event_at = self._event_clock(ts)
         # Advance the episodic-session clock for EVERY accepted frame (before the
         # coalesce check), so continuity holds even across coalesced heartbeats.
         session_id = self._session_for(app, event_at)
@@ -623,6 +648,11 @@ class CaptureDaemon:
             return stats._with(coalesced=1)
 
         try:
+            # span_id is passed ONLY when a span was resolved: sinks without
+            # the span API (NullSpanTracker path — e.g. minimal test fakes)
+            # never see the kwarg, so their add_observation signature is
+            # unchanged.
+            span_kwargs = {"span_id": span_id} if span_id is not None else {}
             self.store.add_observation(
                 normalized,
                 app=app,
@@ -631,6 +661,7 @@ class CaptureDaemon:
                 session_id=session_id,
                 source=self.source,
                 ts=event_at,
+                **span_kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - isolate one bad event from the loop
             # Some store/embed layers raise exceptions whose
@@ -680,19 +711,28 @@ class CaptureDaemon:
         reason-code metadata; the event dicts carry no window/URL/text by
         construction (see :func:`parse_event`).
         """
+        ts = _finite_ts(event.get("ts"))
         if event_type == "afk_transition":
             afk = bool(event.get("afk", False))
             self._afk = afk
             self._reset_coalescing()
+            self._span_tracker.on_afk_transition(afk=afk, ts=ts)
             logger.debug("capture: afk_transition afk=%s", afk)
             return stats._with(afk_transitions=1)
         if event_type == "system":
             # ``kind`` was sanitized against the closed vocabulary at parse time.
+            self._span_tracker.on_system(event.get("kind"), ts)
             logger.debug("capture: system event kind=%s", event.get("kind"))
             return stats._with(heartbeats=1)
         if event_type == "app_changed":
+            self._span_tracker.on_app_changed(event.get("app"), ts)
             return stats._with(span_markers=1)
-        # heartbeat: pure liveness.
+        # heartbeat: pure liveness (and the paused/afk pulse for spans).
+        self._span_tracker.on_heartbeat(
+            afk=bool(event.get("afk", False)),
+            paused=bool(event.get("paused", False)),
+            ts=ts,
+        )
         return stats._with(heartbeats=1)
 
     # -- stream drivers -------------------------------------------------------
@@ -997,6 +1037,9 @@ class CaptureDaemon:
             and raise :class:`HelperExitError` ("stalled").
         """
         stop = stop_event or threading.Event()
+        # Restart epoch: a new helper process means a new scheduler/monotonic
+        # context — spans never merge across helper lifetimes.
+        self._span_tracker.begin_epoch()
         proc = self._spawn(stream=True)
         stats = CaptureStats()
         # Bounded: if ingest wedges (e.g. a stuck embed call), the reader
@@ -1326,8 +1369,11 @@ class CaptureDaemon:
             # On EVERY exit path (clean stop, max_cycles, circuit-breaker raise,
             # HelperUnavailable raise): set stop so an armed watcher abandons its
             # select/read wait, then best-effort join it. The watcher is a daemon
-            # thread, so this never blocks process exit regardless.
+            # thread, so this never blocks process exit regardless. The open
+            # span closes at its last-event time — a daemon stop is a span
+            # boundary (never leave a logically-open span behind).
             stop.set()
+            self._span_tracker.close_open()
             self._join_supervisor(supervisor_thread)
         logger.info("capture supervisor: stopped (cycles=%d)", cycles)
         return total
