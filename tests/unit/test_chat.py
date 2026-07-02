@@ -2338,3 +2338,69 @@ def test_summary_context_requires_week_containment():
         (monday.timestamp() - 3600.0, monday.timestamp() + 8 * 86_400.0)
     )
     assert any("OUT OF WINDOW WEEK PROSE" in (i.get("text") or "") for i in items)
+
+
+# -- entity-ledger completion answers over the REAL store (Phase E2) ---------------
+
+
+def test_entity_completion_end_to_end_over_real_store(mem_settings, fake_provider):
+    """Full round-trip: v7 ledger rows -> terminal deterministic answer with
+    entity_evidence citations; the provider is never called."""
+    store = MemoryStore(db_path=":memory:", settings=mem_settings,
+                        provider=fake_provider)
+    try:
+        obs = store.add_observation(
+            "This pull request was merged", source="capture", ts=1_700_000_000.0,
+            window="Merge PR #12 · bbista/openbird",
+            url="https://github.com/bbista/openbird/pull/12",
+        )
+        entity = store.upsert_entity(
+            "repo", "bbista/openbird", seen_ts=obs.ts,
+            source_kind="observation", source_id=obs.id,
+        )
+        store.set_entity_aliases(entity["id"], ["openbird"])
+        store.add_entity_evidence(
+            entity["id"], ts=obs.ts, kind="pr_merged",
+            source_kind="observation", source_id=obs.id,
+            detail="github:bbista/openbird#12",
+        )
+        llm = FakeLLM({"answer": "MUST NOT BE USED", "citations": []})
+        result = RAG(store, llm).answer("did I finish openbird?")
+
+        assert llm.last_messages is None  # zero provider calls
+        assert result.reasoning_route == "local_deterministic"
+        assert result.grounding == "derived"
+        assert result.grounded is True
+        assert "PR merged (github:bbista/openbird#12)" in result.answer
+        evidence_citation = result.derived_citations[0]
+        assert evidence_citation.type == "entity_evidence"
+        assert evidence_citation.derived_from == [obs.id]
+        assert evidence_citation.derived_from_refs == [
+            {"source_kind": "observation", "source_id": obs.id}
+        ]
+        # The public dict keeps the typed refs (UI contract).
+        public = result.to_public_dict()
+        assert public["derived_citations"][0]["type"] == "entity_evidence"
+    finally:
+        store.close()
+
+
+def test_entity_completion_zero_match_keeps_content_query_on_semantic(
+    mem_settings, fake_provider
+):
+    """A completion-shaped CONTENT query with no matching entity must reach the
+    normal semantic path (the ledger never eats content queries)."""
+    store = MemoryStore(db_path=":memory:", settings=mem_settings,
+                        provider=fake_provider)
+    try:
+        store.add_observation(
+            "long-form article about distributed consensus to finish reading",
+            source="capture", ts=1_700_000_000.0, window="Reading list",
+        )
+        llm = FakeLLM({"answer": "you were reading the consensus article",
+                       "citations": ["S1"]})
+        result = RAG(store, llm).answer("did I finish reading that article?")
+        assert llm.last_messages is not None  # semantic path ran the provider
+        assert result.reasoning_route in ("local_model", "cloud_reasoning_active", None)
+    finally:
+        store.close()
