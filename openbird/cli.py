@@ -51,6 +51,9 @@ app = typer.Typer(
 )
 
 routine_app = typer.Typer(help="Manage and run scheduled routines.", no_args_is_help=True)
+summaries_app = typer.Typer(
+    help="Build and inspect idle-time block summaries.", no_args_is_help=True
+)
 eval_app = typer.Typer(help="Run local eval harnesses.", no_args_is_help=True)
 day_memory_app = typer.Typer(
     help="Build and inspect deterministic daily memory artifacts.",
@@ -61,6 +64,7 @@ deep_brain_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(routine_app, name="routine")
+app.add_typer(summaries_app, name="summaries")
 app.add_typer(eval_app, name="eval")
 app.add_typer(day_memory_app, name="day-memory")
 app.add_typer(deep_brain_app, name="deep-brain")
@@ -2252,6 +2256,98 @@ def routine_uninstall(
             "failed; the running job may persist until logout or a manual unload."
         )
         raise typer.Exit(code=1)
+
+
+# --------------------------------------------------------------------------- #
+# summaries (Phase D block summaries)                                         #
+# --------------------------------------------------------------------------- #
+
+
+def _parse_local_date(value: str) -> tuple[float, float]:
+    """Return the [start, end] bounds of a local ``YYYY-MM-DD`` day."""
+    try:
+        day = _dt.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        _err_console.print(f"[red]Invalid --date:[/] expected YYYY-MM-DD, got {value!r}")
+        raise typer.Exit(code=2) from exc
+    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + _dt.timedelta(days=1) - _dt.timedelta(microseconds=1)
+    return start.timestamp(), end.timestamp()
+
+
+@summaries_app.command("build")
+def summaries_build(
+    date: Optional[str] = typer.Option(
+        None, "--date", help="Local day to build (YYYY-MM-DD); default: trailing lookback."
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Bypass the battery/idle gate and the settle delay (NEVER the cloud gate).",
+    ),
+) -> None:
+    """Build block summaries on demand (same bounded runner the routine uses).
+
+    Output is counts + reason codes only — summary bodies stay in the encrypted
+    memory DB (`openbird summaries list` shows them interactively).
+    """
+    from openbird.summaries import format_counts_line, run_block_summaries
+
+    window = _parse_local_date(date) if date else None
+    provider = _provider()
+    store = _store(provider=provider)
+    try:
+        counts = run_block_summaries(
+            store,
+            provider,
+            now=time.time(),
+            settings=get_settings(),
+            force=force,
+            window=window,
+        )
+    finally:
+        store.close()
+    _console.print(f"[green]block summaries:[/] {format_counts_line(counts)}")
+
+
+@summaries_app.command("list")
+def summaries_list(
+    date: Optional[str] = typer.Option(
+        None, "--date", help="Local day to list (YYYY-MM-DD); default: today."
+    ),
+) -> None:
+    """List stored block summaries for one local day.
+
+    Summary text (derived sensitive) is printed ONLY on an interactive
+    terminal; a piped/captured invocation gets metadata (times, model, source
+    counts) so summary bodies never land in logs or scrollback files.
+    """
+    local_date = date or _dt.date.today().isoformat()
+    if date:
+        _parse_local_date(date)  # validate format
+    store = _store_maintenance()
+    try:
+        rows = store.block_summaries_for_date(local_date)
+    finally:
+        store.close()
+    if not rows:
+        _console.print(f"[yellow]No block summaries stored for {local_date}.[/]")
+        return
+    interactive = sys.stdout.isatty()
+    for row in rows:
+        header = (
+            f"{_fmt_ts(row['start_ts'])} -> {_fmt_ts(row['end_ts'])} "
+            f"bundle={row.get('dominant_bundle') or '-'} "
+            f"level={row.get('level') or '-'} sources={row.get('source_count', 0)} "
+            f"model={row.get('model')}"
+        )
+        _console.print(f"[bold]{escape(header)}[/]")
+        if interactive:
+            _console.print(f"  {escape(str(row.get('summary_text') or ''))}")
+    if not interactive:
+        _console.print(
+            f"[dim]{len(rows)} summary bodies withheld (non-interactive output).[/]"
+        )
 
 
 # --------------------------------------------------------------------------- #

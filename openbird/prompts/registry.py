@@ -20,6 +20,7 @@ _FEATURE_MODULES: tuple[str, ...] = (
     "openbird.routines.templates",
     "openbird.meetings.transcribe",
     "openbird.signals.classifier",
+    "openbird.summaries",
     "openbird.taxonomy",
 )
 _loaded = False

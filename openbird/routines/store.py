@@ -96,6 +96,13 @@ ERROR_CODE_DELIVERY = "DELIVERY_EXCEPTION"
 # occurrence they freed.
 _FREED_FOR_RETRY = (ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_DELIVERY)
 
+# Content-safe marker recorded (in the ``error_code`` column, on a DONE row —
+# it is an outcome annotation, not an error) when a missed occurrence was
+# settled by a coalesced catch-up run instead of executing itself: its work was
+# covered by the representative run's trailing-window rescan. Rows carrying it
+# are terminal and anchor the catch-up grid normally.
+CODE_COALESCED = "COALESCED"
+
 # Content-safe error code recorded when an occurrence has burned through its
 # retry budget (see ``DEFAULT_MAX_ATTEMPTS``). Unlike the freed-for-retry codes
 # above, this is a *settled* terminal failure: the grid key is kept (not
@@ -665,6 +672,25 @@ class RoutineStore:
                     )
         return self.get(run_id)
 
+    def mark_coalesced(self, routine: str, scheduled_ts: float) -> RoutineRun | None:
+        """Settle one missed occurrence as covered by a coalesced catch-up run.
+
+        Claims the occurrence's grid key and immediately finishes it as
+        ``done`` with the metadata-only :data:`CODE_COALESCED` marker (no
+        output body — nothing was generated for THIS occurrence; the
+        representative run's trailing-window rescan covered its work). Callers
+        (see ``RoutineScheduler._fire_coalesced``) invoke this ONLY AFTER the
+        representative run succeeded, so a failed catch-up never marks
+        occurrences terminal before the work actually happened. Returns
+        ``None`` when the occurrence was already claimed elsewhere.
+        """
+        run = self.claim(routine, scheduled_ts)
+        if run is None:
+            return None
+        return self.finish(
+            run.id, status=STATUS_DONE, output=None, error_code=CODE_COALESCED
+        )
+
     # -- reads ----------------------------------------------------------------
 
     def get(self, run_id: str) -> RoutineRun:
@@ -887,6 +913,7 @@ __all__ = [
     "STATUS_DONE",
     "STATUS_ERROR",
     "STATUS_MISSED",
+    "CODE_COALESCED",
     "ERROR_CODE_LEASE_EXPIRED",
     "ERROR_CODE_DELIVERY",
     "ERROR_CODE_MAX_ATTEMPTS",

@@ -110,6 +110,10 @@ class Routine:
     ``runner(store, provider, now) -> str`` produces the text to deliver. For
     built-in templates this is :meth:`RoutineTemplate.run`; custom routines may
     supply any compatible callable.
+
+    ``coalesce_catchup`` marks a routine whose runner already scans a trailing
+    window: startup catch-up runs ONE representative occurrence (the newest
+    missed) instead of replaying every missed hour (see :meth:`run_missed`).
     """
 
     name: str
@@ -117,6 +121,7 @@ class Routine:
     interval: float
     runner: Callable[..., str]
     last_anchor: float | None = field(default=None)
+    coalesce_catchup: bool = False
 
 
 class RoutineScheduler:
@@ -177,11 +182,14 @@ class RoutineScheduler:
         interval: float,
         *,
         runner: Callable[..., str] | None = None,
+        coalesce_catchup: bool = False,
     ) -> Routine:
         """Register a routine = (name, prompt, interval).
 
         If ``runner`` is omitted and ``name`` matches a built-in template, that
         template's :meth:`run` is used. Otherwise ``runner`` is required.
+        ``coalesce_catchup`` opts the routine into single-run startup catch-up
+        (only valid for runners that rescan a trailing window themselves).
 
         Raises:
             ValueError: If ``interval`` is non-positive, the name is already
@@ -200,8 +208,17 @@ class RoutineScheduler:
                     f"no runner given and no built-in template named {name!r}"
                 )
             resolved = template.run
+            coalesce_catchup = coalesce_catchup or bool(
+                getattr(template, "coalesce_catchup", False)
+            )
 
-        routine = Routine(name=name, prompt=prompt, interval=interval, runner=resolved)
+        routine = Routine(
+            name=name,
+            prompt=prompt,
+            interval=interval,
+            runner=resolved,
+            coalesce_catchup=coalesce_catchup,
+        )
         self._routines[name] = routine
         return routine
 
@@ -212,6 +229,7 @@ class RoutineScheduler:
             template.prompt,
             template.interval,
             runner=template.run,
+            coalesce_catchup=bool(getattr(template, "coalesce_catchup", False)),
         )
 
     @property
@@ -362,16 +380,57 @@ class RoutineScheduler:
             )
             if missed:
                 logger.info(
-                    "catch-up: name=%s missed=%d lookback=%s",
+                    "catch-up: name=%s missed=%d lookback=%s coalesce=%s",
                     name,
                     len(missed),
                     "none" if lookback is None else f"{lookback:.0f}s",
+                    routine.coalesce_catchup,
                 )
+            if missed and routine.coalesce_catchup:
+                run = self._fire_coalesced(name, missed)
+                if run is not None:
+                    completed.append(run)
+                continue
             for scheduled_ts in missed:
                 run = self.fire(name, scheduled_ts=scheduled_ts)
                 if run is not None:
                     completed.append(run)
         return completed
+
+    def _fire_coalesced(self, name: str, missed: list[float]) -> RoutineRun | None:
+        """Run ONE representative missed occurrence, then settle the rest.
+
+        Retry-safe ordering (never a storm, never stranded terminal rows): the
+        REPRESENTATIVE (newest missed) goes through the normal claim/run
+        lifecycle FIRST; only after it SUCCEEDS are the remaining missed
+        occurrences marked coalesced/done (metadata-only). On runner/delivery
+        failure — or a lost claim race — the unrun occurrences stay unclaimed,
+        so the next startup retries exactly one coalesced run.
+        """
+        representative = missed[-1]
+        run = self.fire(name, scheduled_ts=representative)
+        succeeded = run is not None and run.status == store_mod.STATUS_DONE
+        if succeeded:
+            settled = 0
+            for scheduled_ts in missed[:-1]:
+                if self.run_store.mark_coalesced(name, scheduled_ts) is not None:
+                    settled += 1
+            logger.info(
+                "catch-up coalesced: name=%s representative_ts=%.0f settled=%d",
+                name,
+                representative,
+                settled,
+            )
+        else:
+            logger.warning(
+                "catch-up coalesce deferred: name=%s representative_ts=%.0f "
+                "remaining=%d (representative did not complete; occurrences "
+                "left unclaimed for retry)",
+                name,
+                representative,
+                len(missed) - 1,
+            )
+        return run
 
     # -- live scheduling ------------------------------------------------------
 

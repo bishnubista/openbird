@@ -272,6 +272,21 @@ class Settings:
     # (max(2*tick+5, 15)); explicit values clamp to [5, ceiling].
     capture_span_pulsetime_seconds: float = 0.0
 
+    # Idle-time block summaries (Phase D). Generated ONLY by the routines-daemon
+    # worker / the on-demand `openbird summaries build` — never the capture or
+    # chat paths. Env: OPENBIRD_BLOCK_SUMMARIES_*, OPENBIRD_TAXONOMY_LLM_BATCH_LIMIT.
+    block_summaries_enabled: bool = True
+    # Max blocks summarized per runner invocation (bounds each hourly firing AND
+    # the single coalesced catch-up run after downtime).
+    block_summaries_batch_limit: int = 8
+    # Only blocks that ENDED at least this long ago are summarizable (a still-
+    # growing block would churn regenerations).
+    block_summaries_settle_seconds: float = 900.0
+    # Trailing window the runner rescans for new/changed blocks.
+    block_summaries_lookback_days: float = 3.0
+    # Max uncategorized identities classified per runner invocation.
+    taxonomy_llm_batch_limit: int = 5
+
     # Optional cross-encoder reranker (between RRF fusion and MMR). DISABLED by
     # default: an empty rerank_model is a no-op, so search behavior is unchanged.
     # When set (e.g. "bge-reranker-v2-m3"), search reorders the fused candidates by
@@ -416,6 +431,11 @@ _COERCE_DEFAULTS: dict[str, object] = {
     "capture_force_ceiling_seconds": 60.0,
     "capture_min_gap_seconds": 1.0,
     "capture_span_pulsetime_seconds": 0.0,
+    "block_summaries_enabled": True,
+    "block_summaries_batch_limit": 8,
+    "block_summaries_settle_seconds": 900.0,
+    "block_summaries_lookback_days": 3.0,
+    "taxonomy_llm_batch_limit": 5,
     "embed_dim": 768,
     "llm_timeout": 60.0,
     "embed_timeout": 30.0,

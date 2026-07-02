@@ -209,11 +209,9 @@ def build_day_memory(
 
 # -- span-derived measured time (Phase B) -------------------------------------
 
-# Focus-block extraction over spans: maximal runs of non-AFK spans with small
-# inter-span gaps and low app diversity, long enough to mean sustained work.
-_SPAN_FOCUS_MAX_GAP = 60.0
-_SPAN_FOCUS_MAX_BUNDLES = 2
-_SPAN_FOCUS_MIN_SECONDS = 600.0
+# Focus-block extraction (gap/diversity/min-length rules) lives in
+# openbird.summaries.compute_span_blocks — the SINGLE source of block
+# boundaries shared with the Phase D block summarizer; _span_metrics calls it.
 # Cap on the uncategorized-identity fallback queue surfaced in span_metrics.
 _UNCATEGORIZED_IDENTITY_LIMIT = 8
 
@@ -255,7 +253,6 @@ def _span_metrics(
     identity_seconds: Counter[str] = Counter()
     afk_seconds = 0.0
     paused_seconds = 0.0
-    active: list[tuple[float, float, str, str]] = []  # (s, e, bundle, span_id)
 
     for span in sorted(spans, key=lambda x: float(x.get("start_ts") or 0.0)):
         s, e, seconds = _clip_seconds(span, start_ts, end_ts)
@@ -303,41 +300,23 @@ def _span_metrics(
             segment_end = min(e, next_hour)
             time_by_hour[hour_start.strftime("%H:00")] += segment_end - cursor
             cursor = segment_end
-        active.append((s, e, bundle, span_id))
 
     # Focus blocks: contiguous non-AFK runs (gap < 60s, <= 2 distinct bundles,
-    # >= 10 min total).
-    focus_blocks: list[dict] = []
-    run: list[tuple[float, float, str, str]] = []
+    # >= 10 min total). Boundaries come from the SHARED extractor so the block
+    # summarizer and these metrics can never disagree (lazy import: summaries
+    # imports day_memory helpers at module level, so this side stays lazy).
+    from openbird.summaries import compute_span_blocks
 
-    def _flush_run() -> None:
-        if not run:
-            return
-        block_start, block_end = run[0][0], run[-1][1]
-        bundles = Counter(item[2] for item in run)
-        if (
-            block_end - block_start >= _SPAN_FOCUS_MIN_SECONDS
-            and len(bundles) <= _SPAN_FOCUS_MAX_BUNDLES
-        ):
-            focus_blocks.append(
-                {
-                    "start": block_start,
-                    "end": block_end,
-                    "seconds": round(block_end - block_start, 3),
-                    "dominant_bundle": bundles.most_common(1)[0][0],
-                    "span_ids": [item[3] for item in run],
-                }
-            )
-
-    for item in active:
-        if run and (
-            item[0] - run[-1][1] >= _SPAN_FOCUS_MAX_GAP
-            or len({x[2] for x in (*run, item)}) > _SPAN_FOCUS_MAX_BUNDLES
-        ):
-            _flush_run()
-            run = []
-        run.append(item)
-    _flush_run()
+    focus_blocks = [
+        {
+            "start": block.start_ts,
+            "end": block.end_ts,
+            "seconds": round(block.end_ts - block.start_ts, 3),
+            "dominant_bundle": block.dominant_bundle,
+            "span_ids": list(block.span_ids),
+        }
+        for block in compute_span_blocks(spans, start_ts=start_ts, end_ts=end_ts)
+    ]
 
     metrics = {
         "span_time_by_app": _round_counter(time_by_app),
