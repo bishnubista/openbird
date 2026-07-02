@@ -249,12 +249,20 @@ private func collectText(
     // the secure-field invariant: a password field's value/title is never even
     // asked for, let alone read.
     if skipIfPaused(pauseFile) { return }
-    let meta = axBatch(
+    guard let meta = axBatch(
         element,
         [kAXRoleAttribute as String, kAXSubroleAttribute as String],
         budget: budget)
+    else {
+        // FAIL CLOSED: if role/subrole cannot be read at all, we cannot prove
+        // the node is non-sensitive, so its value/title are never requested
+        // and its subtree is skipped. (Per-attribute absence inside a
+        // successful batch is different — placeholders yield nil strings and
+        // the node is judged on what IS present.)
+        return
+    }
     if budget.expired { return }
-    if isSensitiveMeta(role: meta?[0] as? String, subrole: meta?[1] as? String) {
+    if isSensitiveMeta(role: meta[0] as? String, subrole: meta[1] as? String) {
         budget.sensitiveSkipped += 1
         return
     }
