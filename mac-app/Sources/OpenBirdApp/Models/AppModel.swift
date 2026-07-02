@@ -1218,6 +1218,7 @@ final class AppModel: ObservableObject {
         service.setAllowlist(updated)
         allowlist = service.allowlist()
         lastActionMessage = "Added \(trimmed) to capture allowlist."
+        applyPolicyChangeToRunningCapture()
         Task { await refreshCaptureHealth() }
     }
 
@@ -1225,7 +1226,37 @@ final class AppModel: ObservableObject {
         service.setAllowlist(allowlist.filter { $0 != bundleID })
         allowlist = service.allowlist()
         lastActionMessage = "Removed \(bundleID) from capture allowlist."
+        applyPolicyChangeToRunningCapture()
         Task { await refreshCaptureHealth() }
+    }
+
+    /// A running daemon reads policy at spawn time only, so an allowlist edit
+    /// must cycle the app-launched daemon (bounded stop -> respawn) or, for an
+    /// external daemon we must not touch, say so honestly instead of letting
+    /// the old policy keep capturing (a removed app would otherwise still be
+    /// recorded until the next manual restart).
+    private func applyPolicyChangeToRunningCapture() {
+        guard captureRunning else { return }  // policy applies on next start
+        Task {
+            let outcome = await service.restartCaptureForPolicyChange(
+                onExit: { [weak self] code in
+                    Task { @MainActor in
+                        await self?.handleCaptureExit(code: code)
+                    }
+                }
+            )
+            switch outcome {
+            case .restarted:
+                lastActionMessage += " Capture restarted with the updated policy."
+            case .externalDaemon:
+                lastActionMessage += " Restart your capture daemon to apply it."
+            case .failed:
+                lastActionMessage += " Restarting capture failed — stop and start capture to apply."
+            case .notRunning:
+                break
+            }
+            captureRunning = service.isCaptureRunning()
+        }
     }
 
     func runningAppSuggestions() -> [String] {

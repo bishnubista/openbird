@@ -1221,6 +1221,59 @@ final class OpenBirdService: @unchecked Sendable {
         _ = stopHelperProcesses()
     }
 
+    /// Outcome of a policy-change capture restart (honest, never pretends).
+    enum PolicyRestartOutcome: Equatable {
+        case restarted        // app-launched daemon cycled under the new policy
+        case notRunning       // nothing running; new policy applies on next start
+        case externalDaemon   // an external daemon runs — we must not touch it
+        case failed           // bounded stop or respawn failed
+    }
+
+    /// Restart the APP-LAUNCHED capture daemon so a policy edit (allowlist/
+    /// blocklist/URL toggle) actually reaches it — a running daemon reads
+    /// policy at spawn time only, so without this a removed app keeps being
+    /// captured under stale policy.
+    ///
+    /// BOUNDED, never fire-and-forget: terminate the app-launched daemon and
+    /// WAIT (up to `timeout`) for its exit before spawning the replacement —
+    /// overlapping daemons double-capture. If only an EXTERNAL (user-started)
+    /// daemon exists, do NOT pretend a restart happened: return
+    /// `.externalDaemon` so the UI can say "restart your capture daemon to
+    /// apply" instead of claiming success. On the daemon side, every restart
+    /// begins a new span epoch, so the old-policy span closes at the restart
+    /// boundary by construction.
+    func restartCaptureForPolicyChange(
+        timeout: TimeInterval = 5.0,
+        onExit: (@Sendable (Int32) -> Void)? = nil
+    ) async -> PolicyRestartOutcome {
+        guard let proc = captureProcess, proc.isRunning else {
+            // No app-launched daemon. Clean up any stale handle, then report
+            // honestly: an external daemon is the user's to restart.
+            captureProcess = nil
+            try? captureSupervisorPipe?.close()
+            captureSupervisorPipe = nil
+            if Self.realExternalLoopDaemonRunning() {
+                return .externalDaemon
+            }
+            return .notRunning
+        }
+        // Deliberate restart: detach the UI exit handler so this planned stop
+        // is not surfaced as a crash, then terminate and wait (bounded).
+        proc.terminationHandler = nil
+        proc.terminate()
+        let deadline = Date().addingTimeInterval(timeout)
+        while proc.isRunning, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if proc.isRunning {
+            return .failed  // never spawn a second daemon over a live one
+        }
+        captureProcess = nil
+        try? captureSupervisorPipe?.close()
+        captureSupervisorPipe = nil
+        return startCapture(onExit: onExit) ? .restarted : .failed
+    }
+
     /// Terminate ONLY the capture daemon this app launched (no pkill), so quitting
     /// the app never orphans a long-running `openbird capture --loop` child. Kept
     /// distinct from `stopCapture()` so app-quit cleanup does not also kill a
