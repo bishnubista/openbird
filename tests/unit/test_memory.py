@@ -794,3 +794,175 @@ def test_save_block_summary_rejects_zero_refs(store):
             summary_text="orphan prose", model="m", extractor_version="v",
             observation_ids=[], span_ids=[],
         )
+
+
+# --------------------------------------------------------------------------- #
+# Summary index (Phase E1)                                                    #
+# --------------------------------------------------------------------------- #
+
+
+def _saved_block(store, *, key="k1", fingerprint="f1", start=1000.0,
+                 text="Reviewed the openbird retrieval design and citations."):
+    span_id = store.open_span(
+        epoch_id="e", start_ts=start, end_ts=start + 900.0, bundle_id="b",
+        detail_tier=1,
+    )
+    return store.save_block_summary(
+        local_date="2026-06-29", block_key=key, block_fingerprint=fingerprint,
+        start_ts=start, end_ts=start + 900.0, dominant_bundle="b", level=None,
+        summary_text=text, model="m", extractor_version="block-summary-v1",
+        observation_ids=[], span_ids=[span_id],
+    )
+
+
+def test_stats_week_scope_split_and_summary_index_count(store):
+    import json as _json
+
+    store.conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) "
+        "VALUES ('d1', '2026-06-29', 'capture', 'v9', 1.0, '{}', 0)"
+    )
+    saved = _saved_block(store)
+    store.conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) VALUES ('w1', '2026-06-29', "
+        "'week', 'week-memory-v1', 1.0, ?, 1)",
+        (_json.dumps({"digest_text": "d", "member_fingerprint": "wf"}),),
+    )
+    store.conn.execute(
+        "INSERT INTO day_memory_source_refs VALUES ('w1', 'summary', ?)",
+        (saved["id"],),
+    )
+    store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    stats = store.stats()
+    # Week rows are NOT counted as day memories (verification scripts parse
+    # day_memories as the DAY count); they get their own key.
+    assert stats["day_memories"] == 1
+    assert stats["week_memories"] == 1
+    assert stats["summary_index_entries"] == 1
+
+
+def test_index_summary_replaces_stale_entries_and_chunks_long_text(store):
+    saved = _saved_block(store)
+    n = store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    assert n == 1
+    assert store.summary_index_state() == {("block", saved["id"]): "f1"}
+
+    # Re-index under a drifted fingerprint: old entries replaced, not appended.
+    long_text = " ".join(f"sentence number {i} about deep work." for i in range(80))
+    n2 = store.index_summary(
+        summary_kind="week", summary_id="wk9", fingerprint="wf1", text=long_text
+    )
+    assert n2 >= 2  # ingest.chunk split the long digest into seq pieces
+    n3 = store.index_summary(
+        summary_kind="week", summary_id="wk9", fingerprint="wf2", text=long_text
+    )
+    assert n3 == n2
+    entries = store.conn.execute(
+        "SELECT COUNT(*) c FROM summary_index_entries WHERE summary_kind='week'"
+    ).fetchone()["c"]
+    assert entries == n2  # replaced in place, zero stale rows
+    assert store.summary_index_orphan_counts()["fts_orphans"] == 0
+    assert store.summary_index_orphan_counts()["vec_orphans"] == 0
+
+
+def test_summary_index_pending_reports_missing_and_stale(store):
+    import json as _json
+
+    saved = _saved_block(store)
+    pending = store.summary_index_pending(limit=32)
+    assert [(p["summary_kind"], p["summary_id"]) for p in pending] == [
+        ("block", saved["id"])
+    ]
+    store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    assert store.summary_index_pending(limit=32) == []
+
+    # Drift the block (regeneration re-keys the id), then add a never-indexed
+    # week row citing the NEW summary: both become pending, weeks first.
+    regen = _saved_block(store, key="k1", fingerprint="f2")
+    store.conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) VALUES ('w1', '2026-06-29', "
+        "'week', 'week-memory-v1', 1.0, ?, 1)",
+        (_json.dumps({"digest_text": "Week digest.", "member_fingerprint": "wf1"}),),
+    )
+    store.conn.execute(
+        "INSERT INTO day_memory_source_refs VALUES ('w1', 'summary', ?)",
+        (regen["id"],),
+    )
+    pending = store.summary_index_pending(limit=32)
+    kinds = [(p["summary_kind"], p["summary_id"], p["fingerprint"]) for p in pending]
+    assert ("week", "w1", "wf1") in kinds
+    assert ("block", regen["id"], "f2") in kinds
+    assert kinds[0][0] == "week"
+
+
+def test_search_summaries_hybrid_finds_block_and_week(store):
+    import json as _json
+
+    saved = _saved_block(
+        store, text="Debugged the sqlite vector index and citation validation."
+    )
+    store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    store.conn.execute(
+        "INSERT INTO day_memories(id, local_date, source_scope, extractor_version, "
+        "generated_at, payload_json, source_count) VALUES ('w1', '2026-06-29', "
+        "'week', 'week-memory-v1', 1.0, ?, 1)",
+        (
+            _json.dumps(
+                {
+                    "digest_text": "A week focused on homebrew packaging release.",
+                    "member_fingerprint": "wf1",
+                    "window": {"start": 100.0, "end": 700.0},
+                }
+            ),
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO day_memory_source_refs VALUES ('w1', 'summary', ?)",
+        (saved["id"],),
+    )
+    store.index_summary(
+        summary_kind="week", summary_id="w1", fingerprint="wf1",
+        text="A week focused on homebrew packaging release.",
+    )
+
+    hits = store.search_summaries("sqlite vector citation", k=5)
+    assert hits and hits[0]["summary_kind"] == "block"
+    assert hits[0]["summary_id"] == saved["id"]
+    assert hits[0]["source_refs"]
+    assert hits[0]["start_ts"] == saved["start_ts"]
+
+    week_hits = store.search_summaries("homebrew packaging", k=5)
+    assert week_hits and week_hits[0]["summary_kind"] == "week"
+    assert week_hits[0]["summary_id"] == "w1"
+    assert week_hits[0]["start_ts"] == 100.0
+    assert week_hits[0]["source_refs"] == [
+        {"source_kind": "summary", "source_id": saved["id"]}
+    ]
+
+    assert store.search_summaries("", k=5) == []
+
+
+def test_search_summaries_drops_dead_entries(store):
+    saved = _saved_block(store, text="Prototype week rollup digest pipeline.")
+    store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text=saved["summary_text"],
+    )
+    # Forbidden raw delete strands fts/vec rows; search must not resurrect them.
+    store.conn.execute("DELETE FROM block_summaries WHERE id = ?", (saved["id"],))
+    assert store.search_summaries("week rollup digest", k=5) == []

@@ -306,6 +306,60 @@ BEGIN
     );
 END;
 
+-- Parallel summary index (v6, Phase E1): retrievable derived-narrative entries
+-- for block summaries and week digests. DELIBERATELY separate from the
+-- occurrence model (chunks/observations) — summary prose must never
+-- double-count as captured activity in time-range scans, and chunk_hash is
+-- content-addressed/globally deduped so summary text cannot share that table.
+-- ``text`` is DERIVED SENSITIVE (distilled from captured content): it lives
+-- only in this encrypted DB and is never logged.
+--
+-- DELETION CONTRACT (API-enforced): the two BEFORE DELETE triggers below clean
+-- the PLAIN table only — SQLite triggers cannot write virtual tables, so the
+-- paired fts_summaries/vec_summaries rows are removed by
+-- MemoryStore._sweep_summary_index_for_blocks IN THE SAME TRANSACTION, BEFORE
+-- the source delete fires these triggers. Raw SQL deletes against
+-- block_summaries or week-scope day_memories rows outside the MemoryStore
+-- APIs (delete()/prune()/save_block_summary()/save_week_memory()) are
+-- FORBIDDEN: they would strand fts/vec orphans. `openbird data integrity`
+-- carries an orphan-count probe as the safety net.
+CREATE TABLE IF NOT EXISTS summary_index_entries (
+    entry_rowid  INTEGER PRIMARY KEY,          -- mirrored into fts/vec rowids
+    summary_kind TEXT NOT NULL CHECK (summary_kind IN ('block','week')),
+    summary_id   TEXT NOT NULL,
+    seq          INTEGER NOT NULL DEFAULT 0,   -- ingest.chunk() piece order
+    text         TEXT NOT NULL,                -- DERIVED SENSITIVE: never logged
+    fingerprint  TEXT NOT NULL,                -- staleness probe (block_fingerprint /
+                                               -- member_fingerprint)
+    UNIQUE(summary_kind, summary_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_summary_index_entries_summary
+    ON summary_index_entries(summary_kind, summary_id);
+
+-- FTS5 over summary-entry text; rowid mirrors summary_index_entries.entry_rowid.
+-- vec_summaries (vec0) is created in Python (store._apply_schema) because its
+-- dimension comes from Settings.embed_dim, exactly like vec_chunks.
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_summaries USING fts5(
+    text
+);
+
+-- Entry cleanup on source deletion (plain table only; see the contract above).
+CREATE TRIGGER IF NOT EXISTS trg_summary_index_block_delete
+BEFORE DELETE ON block_summaries
+BEGIN
+    DELETE FROM summary_index_entries
+    WHERE summary_kind = 'block' AND summary_id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_summary_index_week_delete
+BEFORE DELETE ON day_memories
+WHEN OLD.source_scope = 'week'
+BEGIN
+    DELETE FROM summary_index_entries
+    WHERE summary_kind = 'week' AND summary_id = OLD.id;
+END;
+
 -- Redacted audit metadata for remote reasoning packet send attempts. This table
 -- intentionally stores counts and a packet-content hash only — never raw
 -- question text, answer text, packet JSON, snippets, window titles, URLs,

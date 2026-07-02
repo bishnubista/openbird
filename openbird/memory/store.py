@@ -9,6 +9,18 @@ Data model:
 *chunk* level, embeds each unique chunk once, and indexes it in both FTS and the
 vector table. ``search`` fuses vector + BM25 with RRF, then dedups with MMR, and
 resolves every hit back to a concrete observation for occurrence-aware citations.
+
+SUMMARY-INDEX DELETION CONTRACT (v6, Phase E1): ``summary_index_entries`` +
+``fts_summaries`` + ``vec_summaries`` mirror derived block-summary / week-digest
+prose for retrieval. SQLite triggers clean only the plain entries table (virtual
+tables cannot be written from triggers), so every PRODUCTION deletion path MUST
+go through the MemoryStore APIs — ``delete()``/``prune()``,
+``save_block_summary()`` regeneration, and ``save_week_memory()`` regeneration —
+which call :meth:`MemoryStore._sweep_summary_index_for_blocks` (or the pair-level
+sweep) in the SAME transaction, BEFORE the source delete fires the entry-cleanup
+triggers. Raw SQL deletes against ``block_summaries`` or week-scope
+``day_memories`` rows outside these APIs are FORBIDDEN: they strand fts/vec
+orphans. ``openbird data integrity`` reports orphan counts as the safety net.
 """
 
 from __future__ import annotations
@@ -260,6 +272,13 @@ class MemoryStore:
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0("
             f"chunk_rowid INTEGER PRIMARY KEY, embedding FLOAT[{self.embed_dim}])"
         )
+        # Summary-index vectors (v6): created here, not in schema.sql or the
+        # migration ladder, because the dimension comes from Settings.embed_dim —
+        # exactly like vec_chunks.
+        self.conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_summaries USING vec0("
+            f"entry_rowid INTEGER PRIMARY KEY, embedding FLOAT[{self.embed_dim}])"
+        )
         ensure_schema_version(self.conn)
 
     def _begin(self) -> None:
@@ -285,21 +304,28 @@ class MemoryStore:
                 (cohort,),
             )
         elif row["value"] != cohort:
-            # Tolerate a cohort change ONLY when the store holds no vectors (e.g.
-            # after a full purge): there is nothing to mix, so adopt the new
-            # provider's cohort. Otherwise refuse to mix incompatible embeddings.
+            # Tolerate a cohort change ONLY when the store holds no vectors AT
+            # ALL — chunk vectors AND summary-index vectors (e.g. after a full
+            # purge): there is nothing to mix, so adopt the new provider's
+            # cohort. Otherwise refuse to mix incompatible embeddings.
             vec_count = self.conn.execute(
-                "SELECT COUNT(*) AS c FROM vec_chunks"
+                "SELECT (SELECT COUNT(*) FROM vec_chunks) "
+                "+ (SELECT COUNT(*) FROM vec_summaries) AS c"
             ).fetchone()["c"]
             if vec_count == 0:
-                # Adopt the new cohort AND rebuild the vector table at the new
-                # provider's dimension — the old vec_chunks was created FLOAT[old]
+                # Adopt the new cohort AND rebuild BOTH vector tables at the new
+                # provider's dimension — the old tables were created FLOAT[old]
                 # and CREATE ... IF NOT EXISTS would otherwise keep the stale dim,
                 # breaking inserts when the dimension changed.
                 self.conn.execute("DROP TABLE IF EXISTS vec_chunks")
                 self.conn.execute(
                     f"CREATE VIRTUAL TABLE vec_chunks USING vec0("
                     f"chunk_rowid INTEGER PRIMARY KEY, embedding FLOAT[{self.embed_dim}])"
+                )
+                self.conn.execute("DROP TABLE IF EXISTS vec_summaries")
+                self.conn.execute(
+                    f"CREATE VIRTUAL TABLE vec_summaries USING vec0("
+                    f"entry_rowid INTEGER PRIMARY KEY, embedding FLOAT[{self.embed_dim}])"
                 )
                 self.conn.execute(
                     "UPDATE embedding_meta SET value = ? WHERE key = 'cohort_key'",
@@ -1228,6 +1254,13 @@ class MemoryStore:
         unique_spans = sorted(set(span_ids))
         try:
             self._begin()
+            # Deletion contract: sweep the OLD row's summary-index rows (and any
+            # dependent week row's — the delete below trigger-deletes weeks
+            # citing it) BEFORE the source delete fires the entry triggers.
+            old_rows = self.conn.execute(
+                "SELECT id FROM block_summaries WHERE block_key = ?", (block_key,)
+            ).fetchall()
+            self._sweep_summary_index_for_blocks([r["id"] for r in old_rows])
             self.conn.execute(
                 "DELETE FROM block_summaries WHERE block_key = ?", (block_key,)
             )
@@ -1337,6 +1370,302 @@ class MemoryStore:
         except Exception:
             self.conn.rollback()
             raise
+
+    # -- summary index (Phase E1) -----------------------------------------------
+
+    def _sweep_summary_index_pairs(self, pairs: list[tuple[str, str]]) -> None:
+        """Delete index rows (entries + fts + vec) for ``(kind, id)`` pairs.
+
+        MUST run inside an already-open write transaction, BEFORE the source
+        delete fires the plain-table cleanup triggers — this is the API half of
+        the summary-index deletion contract (triggers cannot write the fts/vec
+        virtual tables). Deleting the entries here as well is idempotent: the
+        trigger's later DELETE simply finds nothing.
+        """
+        for kind, summary_id in pairs:
+            rows = self.conn.execute(
+                "SELECT entry_rowid FROM summary_index_entries "
+                "WHERE summary_kind = ? AND summary_id = ?",
+                (kind, summary_id),
+            ).fetchall()
+            for r in rows:
+                rid = int(r["entry_rowid"])
+                self.conn.execute("DELETE FROM fts_summaries WHERE rowid = ?", (rid,))
+                self.conn.execute(
+                    "DELETE FROM vec_summaries WHERE entry_rowid = ?", (rid,)
+                )
+            self.conn.execute(
+                "DELETE FROM summary_index_entries "
+                "WHERE summary_kind = ? AND summary_id = ?",
+                (kind, summary_id),
+            )
+
+    def _sweep_summary_index_for_blocks(self, doomed_block_ids: list[str]) -> None:
+        """Sweep index rows for doomed block summaries AND their dependent weeks.
+
+        Covers the CASCADE: deleting a block summary trigger-deletes any week
+        row citing it (``trg_day_memory_source_summary_delete``), whose OWN
+        index rows would otherwise orphan — so this sweeps (i) ``('block', id)``
+        for every doomed block id and (ii) ``('week', week_row_id)`` for every
+        week-scope ``day_memories`` row holding a summary ref to any doomed
+        block. MUST run inside the caller's open transaction, before the
+        source deletes. Shared by ``delete()``/``prune()``,
+        ``save_block_summary()`` regeneration, and (transitively) week-row
+        replacement.
+        """
+        doomed = sorted({str(i) for i in doomed_block_ids if i})
+        if not doomed:
+            return
+        placeholders = ",".join("?" for _ in doomed)
+        week_rows = self.conn.execute(
+            "SELECT DISTINCT d.id AS id FROM day_memories d "
+            "JOIN day_memory_source_refs r ON r.day_memory_id = d.id "
+            "WHERE d.source_scope = 'week' AND r.source_kind = 'summary' "
+            f"AND r.source_id IN ({placeholders})",
+            doomed,
+        ).fetchall()
+        pairs = [("block", block_id) for block_id in doomed]
+        pairs += [("week", str(r["id"])) for r in week_rows]
+        self._sweep_summary_index_pairs(pairs)
+
+    def summary_index_state(self) -> dict[tuple[str, str], str]:
+        """Return ``(summary_kind, summary_id) -> fingerprint`` for indexed rows.
+
+        One fingerprint per summary (all seq pieces of one summary share it);
+        cheap pending-work probe for the indexing runner.
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT summary_kind, summary_id, fingerprint "
+            "FROM summary_index_entries"
+        ).fetchall()
+        return {
+            (r["summary_kind"], r["summary_id"]): r["fingerprint"] for r in rows
+        }
+
+    def summary_index_pending(self, *, limit: int = 32) -> list[dict]:
+        """Return stored summaries whose index rows are missing or stale.
+
+        Weeks first (few, high leverage), then block summaries newest-first;
+        bounded by ``limit``. Each item carries ``summary_kind``, ``summary_id``,
+        ``fingerprint`` (the CURRENT source fingerprint), and ``text`` — the
+        caller re-indexes via :meth:`index_summary`. Never logs the text.
+        """
+        state = self.summary_index_state()
+        pending: list[dict] = []
+
+        week_rows = self.conn.execute(
+            "SELECT id, payload_json FROM day_memories "
+            "WHERE source_scope = 'week' ORDER BY local_date DESC"
+        ).fetchall()
+        for row in week_rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError):
+                continue
+            text = str(payload.get("digest_text") or "").strip()
+            fingerprint = str(payload.get("member_fingerprint") or "")
+            if not text or not fingerprint:
+                continue
+            if state.get(("week", row["id"])) == fingerprint:
+                continue
+            pending.append(
+                {
+                    "summary_kind": "week",
+                    "summary_id": row["id"],
+                    "fingerprint": fingerprint,
+                    "text": text,
+                }
+            )
+
+        block_rows = self.conn.execute(
+            "SELECT id, block_fingerprint, summary_text FROM block_summaries "
+            "ORDER BY generated_at DESC, id"
+        ).fetchall()
+        for row in block_rows:
+            text = str(row["summary_text"] or "").strip()
+            if not text:
+                continue
+            if state.get(("block", row["id"])) == row["block_fingerprint"]:
+                continue
+            pending.append(
+                {
+                    "summary_kind": "block",
+                    "summary_id": row["id"],
+                    "fingerprint": row["block_fingerprint"],
+                    "text": text,
+                }
+            )
+
+        return pending[: max(0, int(limit))]
+
+    def index_summary(
+        self, *, summary_kind: str, summary_id: str, fingerprint: str, text: str
+    ) -> int:
+        """(Re)index one summary's text: entries + FTS + vectors. Returns pieces.
+
+        Two-phase like :meth:`add_observation`: the embedding provider call runs
+        OUTSIDE the write lock, then a short transaction deletes any stale index
+        rows for this summary (all three tables, honoring the deletion contract)
+        and inserts the fresh ones. Long week digests are split with
+        ``ingest.chunk``; ``seq`` preserves piece order. Embedding is
+        egress-bearing under a remote embed route — callers must sit behind the
+        provider's cloud gate (they do: the routines pass / summaries build).
+        """
+        if summary_kind not in ("block", "week"):
+            raise ValueError(f"unknown summary_kind: {summary_kind!r}")
+        pieces = [ctext for _span, ctext in ingest.chunk(text)]
+        pieces = [p for p in pieces if p.strip()]
+        if not pieces:
+            return 0
+        vectors = self.provider.embed(pieces)
+        packed = [_serialize_f32(v) for v in vectors]
+        try:
+            self._begin()
+            self._sweep_summary_index_pairs([(summary_kind, summary_id)])
+            for seq, (piece, vector) in enumerate(zip(pieces, packed)):
+                cur = self.conn.execute(
+                    "INSERT INTO summary_index_entries("
+                    "summary_kind, summary_id, seq, text, fingerprint"
+                    ") VALUES (?, ?, ?, ?, ?)",
+                    (summary_kind, summary_id, seq, piece, fingerprint),
+                )
+                rid = int(cur.lastrowid)
+                self.conn.execute(
+                    "INSERT INTO fts_summaries(rowid, text) VALUES (?, ?)",
+                    (rid, piece),
+                )
+                self.conn.execute(
+                    "INSERT INTO vec_summaries(entry_rowid, embedding) VALUES (?, ?)",
+                    (rid, vector),
+                )
+            self.conn.commit()
+            return len(pieces)
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def search_summaries(self, query: str, k: int = 6, *, semantic: bool = True) -> list[dict]:
+        """Hybrid search over the summary index: BM25 + vector, RRF-fused.
+
+        Returns at most ``k`` dicts ``{summary_kind, summary_id, text, score,
+        start_ts, end_ts, local_date, source_refs}`` resolved back to the live
+        ``block_summaries`` / week ``day_memories`` rows (dead entries resolve
+        to nothing and drop). ``search()`` itself is untouched — the occurrence
+        retrieval model stays pure; merging happens in RAG. Embedding failures
+        degrade to BM25-only ranking, mirroring :meth:`search`.
+        """
+        if not query.strip():
+            return []
+        pool = max(k * 5, 20)
+        rankings: list[list[str]] = []
+
+        match = self._fts_query(query)
+        if match:
+            rows = self.conn.execute(
+                "SELECT rowid FROM fts_summaries WHERE fts_summaries MATCH ? "
+                "ORDER BY bm25(fts_summaries) LIMIT ?",
+                (match, pool),
+            ).fetchall()
+            if rows:
+                rankings.append([str(r["rowid"]) for r in rows])
+
+        if semantic:
+            try:
+                vector = self.provider.embed([query])[0]
+                rows = self.conn.execute(
+                    "SELECT entry_rowid FROM vec_summaries WHERE embedding MATCH ? "
+                    "ORDER BY distance LIMIT ?",
+                    (_serialize_f32(vector), pool),
+                ).fetchall()
+            except Exception as exc:  # noqa: BLE001 - embedding failure must not break search
+                _log_vector_skip(type(exc).__name__)
+            else:
+                if rows:
+                    rankings.append([str(r["entry_rowid"]) for r in rows])
+
+        if not rankings:
+            return []
+
+        fused = rrf(rankings)
+        results: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for rowid, score in fused:
+            entry = self.conn.execute(
+                "SELECT summary_kind, summary_id FROM summary_index_entries "
+                "WHERE entry_rowid = ?",
+                (int(rowid),),
+            ).fetchone()
+            if entry is None:
+                continue
+            key = (entry["summary_kind"], entry["summary_id"])
+            if key in seen:
+                continue  # best-ranked piece of a multi-piece summary wins
+            seen.add(key)
+            resolved = self._resolve_summary_result(key[0], key[1], score)
+            if resolved is not None:
+                results.append(resolved)
+            if len(results) >= k:
+                break
+        return results
+
+    def _resolve_summary_result(
+        self, summary_kind: str, summary_id: str, score: float
+    ) -> dict | None:
+        """Resolve one indexed summary back to its live source row."""
+        if summary_kind == "block":
+            item = self._block_summary_by_id(summary_id)
+            if item is None:
+                return None
+            return {
+                "summary_kind": "block",
+                "summary_id": summary_id,
+                "text": item["summary_text"],
+                "score": float(score),
+                "start_ts": item["start_ts"],
+                "end_ts": item["end_ts"],
+                "local_date": item["local_date"],
+                "source_refs": item["source_refs"],
+            }
+        row = self.conn.execute(
+            "SELECT * FROM day_memories WHERE id = ? AND source_scope = 'week'",
+            (summary_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            return None
+        window = payload.get("window") or {}
+        refs = self.conn.execute(
+            "SELECT source_kind, source_id FROM day_memory_source_refs "
+            "WHERE day_memory_id = ? ORDER BY source_kind, source_id",
+            (summary_id,),
+        ).fetchall()
+        return {
+            "summary_kind": "week",
+            "summary_id": summary_id,
+            "text": str(payload.get("digest_text") or ""),
+            "score": float(score),
+            "start_ts": window.get("start"),
+            "end_ts": window.get("end"),
+            "local_date": row["local_date"],
+            "source_refs": [
+                {"source_kind": r["source_kind"], "source_id": r["source_id"]}
+                for r in refs
+            ],
+        }
+
+    def summary_index_orphan_counts(self) -> dict:
+        """Count summary-index rows violating the deletion contract (probe).
+
+        Returns counts of (a) fts/vec rows without a ``summary_index_entries``
+        row and (b) entries without a live source summary. Non-zero counts mean
+        a production path bypassed the sweep APIs — `openbird data integrity`
+        surfaces them so contract violations are detected instead of silently
+        degrading search. Counts only; never summary text.
+        """
+        return _summary_index_orphan_counts(self.conn)
 
     # -- reasoning send ledger ------------------------------------------------
 
@@ -1512,6 +1841,12 @@ class MemoryStore:
                 cur.execute("DELETE FROM block_summaries")
                 cur.execute("DELETE FROM block_summary_source_refs")
                 cur.execute("DELETE FROM category_assignments")
+                # The summary index mirrors derived-sensitive prose — wipe all
+                # three tables explicitly (triggers cannot clean the virtual
+                # fts/vec tables).
+                cur.execute("DELETE FROM summary_index_entries")
+                cur.execute("DELETE FROM fts_summaries")
+                cur.execute("DELETE FROM vec_summaries")
                 cur.execute("DELETE FROM reasoning_send_ledger")
                 cur.execute("DELETE FROM observations")
                 cur.execute("DELETE FROM activity_spans")
@@ -1547,6 +1882,23 @@ class MemoryStore:
             ).fetchall()
             count = len(victims)
             affected_hashes = {r["content_hash"] for r in victims}
+            # Deletion contract (v6): the observation/span deletes below cascade
+            # through the recursive trigger chain into block summaries and week
+            # rows, whose fts/vec index rows the triggers CANNOT clean. Pre-
+            # select the doomed block-summary ids (sources intersecting the
+            # victim set) and sweep their index rows — including dependent week
+            # rows' — in this same transaction, BEFORE the source deletes.
+            doomed_summaries = cur.execute(
+                "SELECT DISTINCT summary_id FROM block_summary_source_refs "
+                "WHERE (source_kind = 'observation' AND source_id IN "
+                f"  (SELECT id FROM observations WHERE {where})) "
+                "OR (source_kind = 'span' AND source_id IN "
+                f"  (SELECT span_id FROM activity_spans WHERE {span_where}))",
+                (param, param),
+            ).fetchall()
+            self._sweep_summary_index_for_blocks(
+                [r["summary_id"] for r in doomed_summaries]
+            )
             cur.execute(f"DELETE FROM observations WHERE {where}", (param,))
             # Span deletion fires trg_day_memory_source_span_delete, which
             # invalidates any day memory citing a deleted span; observations
@@ -1676,12 +2028,28 @@ class MemoryStore:
         cohort_row = self.conn.execute(
             "SELECT value FROM embedding_meta WHERE key = 'cohort_key'"
         ).fetchone()
+        # ``day_memories`` deliberately EXCLUDES week-scope rows: verification
+        # scripts (script/verify_ask_app.sh, script/beta_rehearsal.py) parse it
+        # as the DAY count, so existing consumers stay truthful; week rows are
+        # reported separately under ``week_memories``.
+        day_count = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS c FROM day_memories WHERE source_scope != 'week'"
+            ).fetchone()["c"]
+        )
+        week_count = int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS c FROM day_memories WHERE source_scope = 'week'"
+            ).fetchone()["c"]
+        )
         return {
             "observations": count("observations"),
             "blobs": count("content_blobs"),
             "chunks": count("chunks"),
             "vectors": count("vec_chunks"),
-            "day_memories": count("day_memories"),
+            "day_memories": day_count,
+            "week_memories": week_count,
+            "summary_index_entries": count("summary_index_entries"),
             "activity_spans": count("activity_spans"),
             "block_summaries": count("block_summaries"),
             "category_assignments": count("category_assignments"),
@@ -1754,6 +2122,118 @@ def _integrity_result(rows) -> dict:
     return {"ok": ok, "problems": [] if ok else problems}
 
 
+def _scalar_count(row) -> int:
+    """Read one COUNT(*) value regardless of row_factory (dict or tuple)."""
+    if row is None:
+        return 0
+    value = next(iter(row.values())) if isinstance(row, dict) else row[0]
+    return int(value or 0)
+
+
+def _summary_index_orphan_counts(conn) -> dict:
+    """Compute the summary-index orphan counts over an open connection.
+
+    Works with either row_factory (MemoryStore's dict rows or a raw tuple
+    connection). Counts only; never summary text.
+    """
+    fts_orphans = _scalar_count(
+        conn.execute(
+            "SELECT COUNT(*) FROM fts_summaries "
+            "WHERE rowid NOT IN (SELECT entry_rowid FROM summary_index_entries)"
+        ).fetchone()
+    )
+    vec_orphans = _scalar_count(
+        conn.execute(
+            "SELECT COUNT(*) FROM vec_summaries "
+            "WHERE entry_rowid NOT IN (SELECT entry_rowid FROM summary_index_entries)"
+        ).fetchone()
+    )
+    entry_orphans = _scalar_count(
+        conn.execute(
+            "SELECT COUNT(*) FROM summary_index_entries e "
+            "WHERE (e.summary_kind = 'block' AND NOT EXISTS "
+            "  (SELECT 1 FROM block_summaries b WHERE b.id = e.summary_id)) "
+            "OR (e.summary_kind = 'week' AND NOT EXISTS "
+            "  (SELECT 1 FROM day_memories d WHERE d.id = e.summary_id "
+            "   AND d.source_scope = 'week'))"
+        ).fetchone()
+    )
+    return {
+        "fts_orphans": fts_orphans,
+        "vec_orphans": vec_orphans,
+        "entry_orphans": entry_orphans,
+        "ok": fts_orphans == 0 and vec_orphans == 0 and entry_orphans == 0,
+    }
+
+
+def check_summary_index_orphans(
+    db_path: str,
+    *,
+    settings=None,
+    opener=None,
+) -> dict:
+    """Raw-open probe for summary-index orphans (``openbird data integrity``).
+
+    Mirrors :func:`check_database_integrity`'s never-raise contract: open
+    failures and query errors become findings, and a pre-v6 DB (tables absent)
+    is a clean skip (``{"ok": True, "counts": None}``). Reports counts only.
+    """
+    import sqlite3
+
+    def _default_opener():
+        from openbird.storage.crypto import open_encrypted_db
+
+        return open_encrypted_db(db_path, settings=settings)
+
+    try:
+        conn = (opener or _default_opener)()
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must report, not crash
+        return {
+            "ok": False,
+            "counts": None,
+            "problems": [f"cannot-open: {type(exc).__name__}"],
+        }
+    try:
+        tables = {
+            str(_scalar_name(row))
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+                "('summary_index_entries', 'fts_summaries', 'vec_summaries')"
+            ).fetchall()
+        }
+        if not {"summary_index_entries", "fts_summaries", "vec_summaries"} <= tables:
+            # Pre-v6 DB, or an upgraded DB not yet opened by MemoryStore (which
+            # creates vec_summaries): nothing to probe.
+            return {"ok": True, "counts": None, "problems": []}
+        counts = _summary_index_orphan_counts(conn)
+        problems: list[str] = []
+        if not counts["ok"]:
+            problems.append(
+                "summary-index-orphans: "
+                f"fts={counts['fts_orphans']} vec={counts['vec_orphans']} "
+                f"entries={counts['entry_orphans']}"
+            )
+        return {"ok": counts["ok"], "counts": counts, "problems": problems}
+    except sqlite3.DatabaseError as exc:
+        return {
+            "ok": False,
+            "counts": None,
+            "problems": [f"check-failed: {type(exc).__name__}"],
+        }
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _scalar_name(row) -> object:
+    """Read one single-column value regardless of row_factory."""
+    if isinstance(row, dict):
+        return next(iter(row.values()))
+    return row[0]
+
+
 def check_database_integrity(
     db_path: str,
     *,
@@ -1792,4 +2272,9 @@ def check_database_integrity(
             pass
 
 
-__all__ = ["EmbeddingCohortMismatch", "MemoryStore", "check_database_integrity"]
+__all__ = [
+    "EmbeddingCohortMismatch",
+    "MemoryStore",
+    "check_database_integrity",
+    "check_summary_index_orphans",
+]

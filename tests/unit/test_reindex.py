@@ -253,3 +253,96 @@ def test_routine_run_cli_renders_reindex_hint_on_cohort_mismatch(env, monkeypatc
     assert "openbird reindex" in result.output
     assert "Embedding model changed" in result.output
     assert not isinstance(result.exception, EmbeddingCohortMismatch)
+
+
+# --------------------------------------------------------------------------- #
+# Summary index (Phase E1): cohort counts BOTH vec tables; reindex rebuilds both
+# --------------------------------------------------------------------------- #
+
+
+def _seed_summary_index(settings: Settings, provider) -> str:
+    """Store + index one block summary (span-backed, no chunks touched)."""
+    store = MemoryStore(settings=settings, provider=provider)
+    try:
+        span_id = store.open_span(
+            epoch_id="e", start_ts=1000.0, end_ts=1900.0, bundle_id="b",
+            detail_tier=1,
+        )
+        saved = store.save_block_summary(
+            local_date="2026-06-29", block_key="k1", block_fingerprint="f1",
+            start_ts=1000.0, end_ts=1900.0, dominant_bundle="b", level=None,
+            summary_text="Worked on the openbird summary retrieval index.",
+            model="m", extractor_version="block-summary-v1",
+            observation_ids=[], span_ids=[span_id],
+        )
+        store.index_summary(
+            summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+            text=saved["summary_text"],
+        )
+        return saved["id"]
+    finally:
+        store.close()
+
+
+def test_cohort_mismatch_raises_when_only_vec_summaries_populated(env):
+    # Adoption must count vec_summaries too: a store whose ONLY vectors are
+    # summary-index embeddings is still a populated cohort.
+    settings = Settings(data_dir=env, embed_dim=768)
+    _seed_summary_index(settings, _FakeProvider(embed_dim=768, tag="old"))
+
+    with pytest.raises(EmbeddingCohortMismatch):
+        MemoryStore(settings=settings, provider=_FakeProvider(768, "new"))
+
+
+def test_reindex_rebuilds_both_vec_tables(env, monkeypatch):
+    settings = Settings(data_dir=env, embed_dim=768)
+    old = _FakeProvider(embed_dim=768, tag="old")
+    assert _populate(settings, old) == 5
+    _seed_summary_index(settings, old)
+
+    new_provider = _FakeProvider(embed_dim=512, tag="new")
+    monkeypatch.setattr(cli, "_provider", lambda: new_provider)
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(data_dir=env, embed_dim=512))
+
+    res = CliRunner().invoke(cli.app, ["reindex", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "1 summary" in res.output
+
+    store = MemoryStore(
+        settings=Settings(data_dir=env, embed_dim=512),
+        provider=_FakeProvider(512, "new"),
+    )
+    try:
+        stats = store.stats()
+        assert stats["vectors"] == 5
+        assert stats["summary_index_entries"] == 1
+        vec = store.conn.execute("SELECT COUNT(*) c FROM vec_summaries").fetchone()["c"]
+        assert int(vec) == 1  # re-embedded into the rebuilt FLOAT[512] table
+        assert stats["cohort_key"] == new_provider.cohort_key()
+        # The re-embedded summary is retrievable under the new cohort.
+        hits = store.search_summaries("summary retrieval index", k=3)
+        assert hits and hits[0]["summary_kind"] == "block"
+    finally:
+        store.close()
+
+
+def test_reindex_rollback_preserves_summary_vectors(env, monkeypatch):
+    settings = Settings(data_dir=env, embed_dim=768)
+    old = _FakeProvider(embed_dim=768, tag="old")
+    _populate(settings, old)
+    _seed_summary_index(settings, old)
+
+    failing = _FailingProvider(embed_dim=768, tag="old", fail_after=1)
+    monkeypatch.setattr(cli, "_provider", lambda: failing)
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(data_dir=env, embed_dim=768))
+
+    res = CliRunner().invoke(cli.app, ["reindex", "--yes", "--force", "--batch-size", "2"])
+    assert res.exit_code == 1
+    assert "rolled back" in res.output
+
+    store = MemoryStore(settings=settings, provider=_FakeProvider(768, "old"))
+    try:
+        vec = store.conn.execute("SELECT COUNT(*) c FROM vec_summaries").fetchone()["c"]
+        assert int(vec) == 1  # the old summary vector survived the rollback
+    finally:
+        store.close()

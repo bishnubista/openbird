@@ -2875,20 +2875,36 @@ def data_integrity(
         False, "--quick", help="Faster quick_check (skips some cross-page/index checks)."
     ),
 ) -> None:
-    """Verify the on-disk database is not corrupt (SQLite integrity check)."""
+    """Verify the on-disk database is not corrupt (SQLite integrity check).
+
+    Also probes the summary-index deletion contract (Phase E1): counts of
+    fts/vec rows without a ``summary_index_entries`` row and entries without a
+    live summary. Non-zero counts mean a code path bypassed the sweep APIs.
+    """
     # Open the DB raw (not via MemoryStore) so a corrupt DB — exactly what this
     # command diagnoses — is reported rather than crashing in schema/migrations.
-    from openbird.memory.store import check_database_integrity
+    from openbird.memory.store import (
+        check_database_integrity,
+        check_summary_index_orphans,
+    )
 
     settings = get_settings()
     result = check_database_integrity(settings.db_path, settings=settings, quick=quick)
-    if result["ok"]:
+    orphans = check_summary_index_orphans(settings.db_path, settings=settings)
+    ok = result["ok"] and orphans["ok"]
+    if ok:
         _console.print("[green]integrity: ok[/]")
+        counts = orphans.get("counts")
+        if counts is not None:
+            _console.print(
+                "[green]summary index: ok[/] "
+                f"(fts_orphans=0 vec_orphans=0 entry_orphans=0)"
+            )
     else:
         _console.print("[red]integrity: PROBLEMS DETECTED[/]")
-        for problem in result["problems"]:
+        for problem in result["problems"] + orphans["problems"]:
             _console.print(f"  - {problem}")
-    raise typer.Exit(code=0 if result["ok"] else 1)
+    raise typer.Exit(code=0 if ok else 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -2964,6 +2980,10 @@ def reindex(
             "ORDER BY rowid_int"
         ).fetchall()
         total = len(chunk_rows)
+        summary_rows = conn.execute(
+            "SELECT entry_rowid, text FROM summary_index_entries ORDER BY entry_rowid"
+        ).fetchall()
+        summary_total = len(summary_rows)
 
         if current_cohort == new_cohort and not force:
             _console.print(
@@ -2974,7 +2994,7 @@ def reindex(
 
         _console.print(
             f"Reindex: [cyan]{current_cohort or '(none)'}[/] -> [cyan]{new_cohort}[/] "
-            f"· {total} chunk(s) · dim={new_dim}"
+            f"· {total} chunk(s) · {summary_total} summary entr(ies) · dim={new_dim}"
         )
         if not yes:
             if not sys.stdin.isatty():
@@ -3001,6 +3021,15 @@ def reindex(
                 f"chunk_rowid INTEGER PRIMARY KEY, embedding FLOAT[{new_dim}])"
             )
 
+            # The summary index shares the embedding cohort — rebuild its vec
+            # table at the new dimension too, in the SAME transaction, so both
+            # vector tables always carry one cohort (or roll back together).
+            conn.execute("DROP TABLE IF EXISTS vec_summaries")
+            conn.execute(
+                f"CREATE VIRTUAL TABLE vec_summaries USING vec0("
+                f"entry_rowid INTEGER PRIMARY KEY, embedding FLOAT[{new_dim}])"
+            )
+
             done = 0
             with _progress_columns() as progress:
                 task = progress.add_task("Embedding chunks", total=total) if total else None
@@ -3015,6 +3044,25 @@ def reindex(
                     done += len(batch)
                     if task is not None:
                         progress.update(task, completed=done)
+
+                stask = (
+                    progress.add_task("Embedding summaries", total=summary_total)
+                    if summary_total
+                    else None
+                )
+                sdone = 0
+                for start in range(0, summary_total, max(1, batch_size)):
+                    batch = summary_rows[start : start + max(1, batch_size)]
+                    vectors = provider.embed([r["text"] for r in batch])
+                    for row, vec in zip(batch, vectors):
+                        conn.execute(
+                            "INSERT INTO vec_summaries(entry_rowid, embedding) "
+                            "VALUES (?, ?)",
+                            (int(row["entry_rowid"]), _serialize_f32(vec)),
+                        )
+                    sdone += len(batch)
+                    if stask is not None:
+                        progress.update(stask, completed=sdone)
 
             # Adopt the new cohort only after every vector is in place.
             if current_cohort is None:
@@ -3039,7 +3087,8 @@ def reindex(
         conn.close()
 
     _console.print(
-        f"[green]Reindexed[/] {total} chunk(s) under cohort {new_cohort} (dim={new_dim})."
+        f"[green]Reindexed[/] {total} chunk(s) and {summary_total} summary "
+        f"entr(ies) under cohort {new_cohort} (dim={new_dim})."
     )
 
 
