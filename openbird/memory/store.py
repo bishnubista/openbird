@@ -161,6 +161,13 @@ def _serialize_f32(vector: list[float]) -> bytes:
     return struct.pack(f"<{len(vector)}f", *vector)
 
 
+def _dt_date_from_iso(value: str):
+    """Parse a strict ``YYYY-MM-DD`` local date (raises ValueError otherwise)."""
+    import datetime as _dt
+
+    return _dt.datetime.strptime(value, "%Y-%m-%d").date()
+
+
 class MemoryStore:
     """SQLite-backed hybrid (FTS5 + sqlite-vec) personal memory."""
 
@@ -1187,7 +1194,15 @@ class MemoryStore:
     def _get_day_memory_unchecked(
         self, *, local_date: str, source_scope: str = "capture"
     ) -> dict | None:
-        """Return a stored day memory without checking source freshness."""
+        """Return a stored day memory without checking source freshness.
+
+        Provenance shape (Phase E1): this shared reader used to DROP
+        ``source_kind='summary'`` refs (it mapped only observation/span kinds),
+        so a week row would come back without the provenance its answer path
+        needs. It now also returns ``summary_ids`` and a full typed
+        ``source_refs`` list (all kinds) while keeping the legacy
+        ``source_ids``/``span_ids`` keys untouched.
+        """
         row = self.conn.execute(
             "SELECT * FROM day_memories WHERE local_date = ? AND source_scope = ?",
             (local_date, source_scope),
@@ -1213,8 +1228,136 @@ class MemoryStore:
             "span_ids": [
                 r["source_id"] for r in ref_rows if r["source_kind"] == "span"
             ],
+            "summary_ids": [
+                r["source_id"] for r in ref_rows if r["source_kind"] == "summary"
+            ],
+            "source_refs": [
+                {"source_kind": r["source_kind"], "source_id": r["source_id"]}
+                for r in ref_rows
+            ],
             "payload": json.loads(row["payload_json"]),
         }
+
+    # -- week memories (Phase E1) -----------------------------------------------
+
+    def save_week_memory(
+        self,
+        *,
+        week_start_date: str,
+        extractor_version: str,
+        payload: dict,
+        summary_ids: list[str],
+        generated_at: float | None = None,
+    ) -> dict:
+        """Persist one week digest as a ``day_memories`` row with scope ``week``.
+
+        Week rows reuse the day-memory storage: ``local_date`` is the ISO week's
+        MONDAY (``YYYY-MM-DD``) and ``source_scope='week'`` — the existing
+        ``UNIQUE(local_date, source_scope)`` gives per-week uniqueness for free.
+        Refs are SUMMARY-KIND ONLY (the member block-summary ids the digest
+        actually cited); an empty ref list is REFUSED in Python (mirroring
+        ``save_block_summary``) because derived-sensitive prose with no typed
+        refs would have no invalidation path.
+
+        Regeneration runs in a single transaction: the OLD week row's
+        summary-index rows are swept FIRST (deletion contract — the row delete
+        below fires the entry-cleanup trigger, which cannot clean fts/vec),
+        then the old row is deleted and the new parent + refs inserted.
+        ``payload`` (digest text, member_fingerprint, window, ...) is derived
+        sensitive; this method logs nothing.
+        """
+        try:
+            parsed = _dt_date_from_iso(week_start_date)
+        except ValueError as exc:
+            raise ValueError(
+                f"week_start_date must be YYYY-MM-DD, got {week_start_date!r}"
+            ) from exc
+        if parsed.weekday() != 0:
+            raise ValueError(
+                f"week_start_date must be a Monday, got {week_start_date!r}"
+            )
+        unique_summary_ids = sorted({str(i) for i in summary_ids if i})
+        if not unique_summary_ids:
+            raise ValueError("week memory requires at least one summary ref")
+        week_id = uuid.uuid4().hex
+        generated = time.time() if generated_at is None else generated_at
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        try:
+            self._begin()
+            old_rows = self.conn.execute(
+                "SELECT id FROM day_memories "
+                "WHERE local_date = ? AND source_scope = 'week'",
+                (week_start_date,),
+            ).fetchall()
+            self._sweep_summary_index_pairs(
+                [("week", r["id"]) for r in old_rows]
+            )
+            self.conn.execute(
+                "DELETE FROM day_memories "
+                "WHERE local_date = ? AND source_scope = 'week'",
+                (week_start_date,),
+            )
+            self.conn.execute(
+                "INSERT INTO day_memories("
+                "id, local_date, source_scope, extractor_version, generated_at, "
+                "payload_json, source_count"
+                ") VALUES (?, ?, 'week', ?, ?, ?, ?)",
+                (
+                    week_id,
+                    week_start_date,
+                    extractor_version,
+                    generated,
+                    payload_json,
+                    len(unique_summary_ids),
+                ),
+            )
+            self.conn.executemany(
+                "INSERT INTO day_memory_source_refs("
+                "day_memory_id, source_kind, source_id) VALUES (?, 'summary', ?)",
+                [(week_id, i) for i in unique_summary_ids],
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        saved = self.get_week_memory(week_start_date)
+        if saved is None:  # pragma: no cover - insert above would have raised
+            raise RuntimeError("week memory row was not inserted")
+        return saved
+
+    def get_week_memory(self, week_start_date: str) -> dict | None:
+        """Return the stored week digest for a Monday date, or ``None``."""
+        return self._get_day_memory_unchecked(
+            local_date=week_start_date, source_scope="week"
+        )
+
+    def week_memories_overlapping(self, start_ts: float, end_ts: float) -> list[dict]:
+        """Return week rows whose local Mon..Sun window overlaps [start_ts, end_ts].
+
+        Week rows are few (one per ISO week), so this reads them all and
+        filters by the local-time window derived from each row's Monday
+        ``local_date`` (inclusive end at the following Monday minus a tick,
+        mirroring the day-window convention).
+        """
+        import datetime as _dt
+
+        rows = self.conn.execute(
+            "SELECT local_date FROM day_memories WHERE source_scope = 'week' "
+            "ORDER BY local_date",
+        ).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            try:
+                monday = _dt.datetime.strptime(row["local_date"], "%Y-%m-%d")
+            except ValueError:
+                continue
+            week_start = monday.timestamp()
+            week_end = (monday + _dt.timedelta(days=7)).timestamp() - 1e-6
+            if week_start <= float(end_ts) and week_end >= float(start_ts):
+                item = self.get_week_memory(row["local_date"])
+                if item is not None:
+                    out.append(item)
+        return out
 
     # -- block summaries + taxonomy cache (Phase D) -----------------------------
 

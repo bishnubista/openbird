@@ -966,3 +966,180 @@ def test_search_summaries_drops_dead_entries(store):
     # Forbidden raw delete strands fts/vec rows; search must not resurrect them.
     store.conn.execute("DELETE FROM block_summaries WHERE id = ?", (saved["id"],))
     assert store.search_summaries("week rollup digest", k=5) == []
+
+
+# --------------------------------------------------------------------------- #
+# Week memories (Phase E1): day_memories rows with source_scope='week'        #
+# --------------------------------------------------------------------------- #
+
+
+def _week_payload(monday="2026-06-22", **extra):
+    payload = {
+        "week_start_date": monday,
+        "local_date": monday,
+        "digest_text": "A week spent shipping the summary index.",
+        "member_fingerprint": "mf1",
+        "as_of": 1000.0,
+        "model": "m",
+        "window": {"start": 100.0, "end": 700.0},
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_save_week_memory_roundtrip_with_typed_provenance(store):
+    saved_block = _saved_block(store)
+    week = store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(),
+        summary_ids=[saved_block["id"]],
+    )
+    assert week["local_date"] == "2026-06-22"
+    assert week["source_scope"] == "week"
+    assert week["payload"]["digest_text"].startswith("A week")
+    # Provenance shape fix: summary refs are returned (typed + summary_ids),
+    # while the legacy observation/span keys stay present and untouched.
+    assert week["summary_ids"] == [saved_block["id"]]
+    assert week["source_refs"] == [
+        {"source_kind": "summary", "source_id": saved_block["id"]}
+    ]
+    assert week["source_ids"] == []
+    assert week["span_ids"] == []
+    assert store.get_week_memory("2026-06-22") == week
+    # A chat-path day read for the same date never returns the week row.
+    assert store.get_day_memory(local_date="2026-06-22") is None
+
+
+def test_save_week_memory_refuses_zero_refs_and_non_monday(store):
+    with pytest.raises(ValueError, match="at least one summary ref"):
+        store.save_week_memory(
+            week_start_date="2026-06-22",
+            extractor_version="week-memory-v1",
+            payload=_week_payload(),
+            summary_ids=[],
+        )
+    saved_block = _saved_block(store)
+    with pytest.raises(ValueError, match="Monday"):
+        store.save_week_memory(
+            week_start_date="2026-06-23",  # a Tuesday
+            extractor_version="week-memory-v1",
+            payload=_week_payload(),
+            summary_ids=[saved_block["id"]],
+        )
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        store.save_week_memory(
+            week_start_date="junk",
+            extractor_version="week-memory-v1",
+            payload=_week_payload(),
+            summary_ids=[saved_block["id"]],
+        )
+
+
+def test_save_week_memory_unknown_summary_ref_aborts_atomically(store):
+    import sqlite3 as _sqlite3
+
+    with pytest.raises(_sqlite3.IntegrityError, match="unknown summary ref"):
+        store.save_week_memory(
+            week_start_date="2026-06-22",
+            extractor_version="week-memory-v1",
+            payload=_week_payload(),
+            summary_ids=["not-a-real-summary"],
+        )
+    # The parent insert rolled back with the failed ref insert.
+    assert store.get_week_memory("2026-06-22") is None
+
+
+def test_save_week_memory_regeneration_replaces_row_and_sweeps_index(store):
+    saved_block = _saved_block(store)
+    first = store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(),
+        summary_ids=[saved_block["id"]],
+    )
+    store.index_summary(
+        summary_kind="week", summary_id=first["id"], fingerprint="mf1",
+        text=first["payload"]["digest_text"],
+    )
+    second = store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(member_fingerprint="mf2"),
+        summary_ids=[saved_block["id"]],
+    )
+    assert second["id"] != first["id"]
+    # UNIQUE(local_date, 'week') semantics: exactly one row per week.
+    count = store.conn.execute(
+        "SELECT COUNT(*) c FROM day_memories WHERE source_scope='week'"
+    ).fetchone()["c"]
+    assert count == 1
+    # The OLD week row's index rows were swept in the same transaction.
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM summary_index_entries WHERE summary_kind='week'"
+    ).fetchone()["c"] == 0
+    assert store.summary_index_orphan_counts()["ok"] is True
+
+
+def test_week_memory_dies_with_cited_block_summary_recursively(store):
+    """delete span -> block summary (trigger) -> week row (recursive trigger)."""
+    saved_block = _saved_block(store, start=1000.0)
+    week = store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(),
+        summary_ids=[saved_block["id"]],
+    )
+    store.index_summary(
+        summary_kind="week", summary_id=week["id"], fingerprint="mf1",
+        text=week["payload"]["digest_text"],
+    )
+    deleted = store.delete(since_ts=0.0)  # production path sweeps the index too
+    assert deleted == 0  # span-backed only; no observations existed
+    assert store.get_week_memory("2026-06-22") is None
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM block_summaries"
+    ).fetchone()["c"] == 0
+    assert store.summary_index_orphan_counts()["ok"] is True
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM summary_index_entries"
+    ).fetchone()["c"] == 0
+
+
+def test_full_purge_wipes_week_memories(store):
+    saved_block = _saved_block(store)
+    store.save_week_memory(
+        week_start_date="2026-06-22",
+        extractor_version="week-memory-v1",
+        payload=_week_payload(),
+        summary_ids=[saved_block["id"]],
+    )
+    store.delete(all=True)
+    assert store.get_week_memory("2026-06-22") is None
+    assert store.stats()["week_memories"] == 0
+
+
+def test_week_memories_overlapping_windows(store):
+    import datetime as _dt
+
+    saved_block = _saved_block(store)
+    mondays = ["2026-06-15", "2026-06-22", "2026-06-29"]
+    for monday in mondays:
+        store.save_week_memory(
+            week_start_date=monday,
+            extractor_version="week-memory-v1",
+            payload=_week_payload(monday),
+            summary_ids=[saved_block["id"]],
+        )
+
+    def ts(day: str, hour: int = 12) -> float:
+        return _dt.datetime.strptime(day, "%Y-%m-%d").replace(hour=hour).timestamp()
+
+    # A mid-week single-day window hits exactly its own week.
+    hits = store.week_memories_overlapping(ts("2026-06-24"), ts("2026-06-25"))
+    assert [w["local_date"] for w in hits] == ["2026-06-22"]
+    # A window crossing a Monday boundary hits both adjacent weeks.
+    hits = store.week_memories_overlapping(ts("2026-06-21"), ts("2026-06-23"))
+    assert [w["local_date"] for w in hits] == ["2026-06-15", "2026-06-22"]
+    # A window before all stored weeks hits nothing.
+    assert store.week_memories_overlapping(ts("2026-05-01"), ts("2026-05-02")) == []
