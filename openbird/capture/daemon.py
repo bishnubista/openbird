@@ -1230,7 +1230,24 @@ class CaptureDaemon:
                     if self._capture_mode() == "persistent":
                         total = total._add(self.run_persistent(stop_event=stop))
                     else:
-                        total = total._add(self.run(stop_event=stop))
+                        cycle_stats = self.run(stop_event=stop)
+                        total = total._add(cycle_stats)
+                        # Keep the liveness sidecar current in poll mode too:
+                        # after an old-binary downgrade the last stream-mode
+                        # flush would otherwise go stale within 30s and
+                        # capture-health would report a healthy polling daemon
+                        # as "stale". Poll cycles are near-instant, so cycle
+                        # wall-clock stands in for the event time — but only
+                        # when the cycle actually received events (honest
+                        # nulls otherwise). Metadata only.
+                        now = time.time()
+                        got_events = cycle_stats.received > 0
+                        self._write_liveness(
+                            mode="oneshot",
+                            last_event_ts=now if got_events else None,
+                            last_capture_ts=now if got_events else None,
+                            heartbeat_seq=None,
+                        )
                 except HelperUnavailableError:
                     # Missing signed bundle is permanent, not transient: don't retry.
                     raise

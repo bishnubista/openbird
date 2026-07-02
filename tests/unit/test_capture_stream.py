@@ -228,6 +228,22 @@ def test_run_forever_downgrade_continues_polling(allow_settings):
     assert len(store.calls) >= 1  # first ingests; later ones may coalesce
 
 
+def test_downgraded_polling_daemon_keeps_liveness_fresh(allow_settings, tmp_path):
+    # Regression (Codex diff review): after the old-binary downgrade, poll
+    # cycles must keep writing the sidecar — otherwise the last stream-mode
+    # flush goes stale within 30s and health calls a healthy daemon "stale".
+    daemon, _ = _daemon(allow_settings, OLD_BINARY_SCRIPT)
+    daemon.run_forever(poll_interval=0.05, max_cycles=3)
+    assert daemon._stream_supported is False
+
+    payload = json.loads((tmp_path / LIVENESS_FILENAME).read_text())
+    assert payload["mode"] == "oneshot"
+    # The sidecar was just written by the final poll cycle: health sees ok.
+    health = build_capture_health(settings=allow_settings)
+    assert health["daemon"]["state"] == "ok"
+    assert health["daemon"]["mode"] == "oneshot"
+
+
 def test_stream_args_only_in_stream_spawn(allow_settings):
     daemon, _ = _daemon(allow_settings, "pass")
     poll_argv = daemon._resolve_helper()
