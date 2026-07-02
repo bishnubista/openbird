@@ -435,3 +435,17 @@ def test_capture_timing_env_override_clamped(monkeypatch):
         assert s.capture_min_gap_seconds == 1.0
     finally:
         reset_settings_cache()
+
+
+def test_capture_timing_env_typo_never_blocks_startup(monkeypatch):
+    # Clamp-never-reject extends to PARSING: a non-numeric env value falls
+    # back to the default instead of raising during settings construction.
+    monkeypatch.setenv("OPENBIRD_CAPTURE_IDLE_TICK_SECONDS", "abc")
+    monkeypatch.setenv("OPENBIRD_CAPTURE_FORCE_CEILING_SECONDS", "")
+    reset_settings_cache()
+    try:
+        s = get_settings()
+        assert s.capture_idle_tick_seconds == 5.0
+        assert s.capture_force_ceiling_seconds == 60.0
+    finally:
+        reset_settings_cache()

@@ -362,6 +362,15 @@ def _coerce(name: str, raw: str, default: object) -> object:
     ):
         return raw.strip().lower() in ("1", "true", "yes", "on")
     if isinstance(default, float) or name in ("llm_timeout", "embed_timeout"):
+        if name.startswith("capture_") and name.endswith("_seconds"):
+            # Clamp-never-reject knobs: a typo'd env value must not prevent
+            # settings construction (capture must not fail to start over a
+            # tuning knob). NaN routes through _clamp_setting's invalid->
+            # default path in __post_init__, which logs the reason code.
+            try:
+                return float(raw)
+            except ValueError:
+                return float("nan")
         return float(raw)
     if isinstance(default, int) and not isinstance(default, bool):
         return int(raw)
