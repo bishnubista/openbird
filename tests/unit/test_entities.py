@@ -763,3 +763,43 @@ def test_reopened_loop_resolves_again_and_counts_unresolved_meanwhile(
     assert resolutions[0]["source_id"] == obs4.id  # newest cites the new close
     store.set_entity_status(entity["id"], "dormant")
     assert _dormant_entities_with_unresolved_loops(store) == 0
+
+
+def test_same_pass_reopened_loop_gets_its_own_resolution(store, mem_settings):
+    # Codex round-2 regression: loop t1 -> close t2 -> reopened loop t3 ->
+    # close t4, ALL present before one aggregation pass: both resolutions must
+    # be minted in that single pass (per-loop dedup, not per-detail).
+    from openbird.entities import run_entity_aggregation
+
+    ent = store.upsert_entity("repo", "owner/repo", seen_ts=1000.0)
+    detail = "github:owner/repo#7"
+
+    def loop(ts, obs_text="open loop source row"):
+        obs = store.add_observation(f"{obs_text} at {ts}", source="capture", ts=ts)
+        store.add_entity_evidence(
+            ent["id"], ts=ts, kind="open_loop",
+            source_kind="observation", source_id=obs.id, detail=detail,
+        )
+        return obs
+
+    def close(ts):
+        obs = store.add_observation(
+            f"Closed owner/repo#7 at {ts}", source="capture", ts=ts
+        )
+        store.add_entity_evidence(
+            ent["id"], ts=ts, kind="ticket_closed",
+            source_kind="observation", source_id=obs.id, detail=detail,
+        )
+
+    loop(1000.0)  # t1
+    close(2000.0)  # t2
+    loop(3000.0)  # t3 (reopened)
+    close(4000.0)  # t4
+    counts = run_entity_aggregation(store, now=10_000.0, settings=mem_settings)
+    assert counts["loops_resolved"] == 2
+    resolutions = [
+        e for e in store.entity_evidence_for(ent["id"])
+        if e["kind"] == "open_loop_resolved"
+    ]
+    assert len(resolutions) == 2
+    assert sorted(float(e["ts"]) for e in resolutions) == [2000.0, 4000.0]

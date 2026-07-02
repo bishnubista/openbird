@@ -560,12 +560,21 @@ def _resolve_open_loops(run: _Run) -> None:
     ``detail`` key and a LATER ``ts`` — never loop-text similarity. The
     resolution row cites the RESOLVING source (earliest such completion).
     """
-    seen: set[tuple[str, str]] = set()
+    # Dedup key includes the LOOP timestamp: each open-loop row resolves
+    # independently, so a reopened loop whose earlier incarnation was already
+    # resolved still gets ITS OWN resolution in the same pass (deduping by
+    # (entity, detail) alone left the reopened loop falsely unresolved until
+    # the next run when all candidates were present at once).
+    seen: set[tuple[str, str, float]] = set()
     for cand in run.store.entity_open_loop_candidates():
-        pair = (str(cand["entity_id"]), str(cand["detail"]))
-        if pair in seen:
-            continue  # keep the earliest resolving row per loop
-        seen.add(pair)
+        key = (
+            str(cand["entity_id"]),
+            str(cand["detail"]),
+            float(cand["loop_ts"]),
+        )
+        if key in seen:
+            continue  # keep the earliest resolving row per loop occurrence
+        seen.add(key)
         inserted = run.evidence(
             str(cand["entity_id"]), ts=float(cand["resolved_ts"]),
             kind="open_loop_resolved", source_kind=str(cand["source_kind"]),
