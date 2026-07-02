@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from dataclasses import dataclass, replace, replace
+from dataclasses import dataclass, replace
 from typing import Protocol
 from urllib.parse import urlsplit
 
