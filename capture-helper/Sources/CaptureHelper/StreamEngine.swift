@@ -137,6 +137,8 @@ final class StreamEngine {
     private var observedPid: pid_t = -1
     private var signalSources: [DispatchSourceSignal] = []
     private var tickTimer: Timer?
+    /// Mic run-state monitor (Phase C1); retained for the process lifetime.
+    private var micMonitor: MicMonitor?
 
     init(
         allow: Set<String>, block: Set<String>, pauseFile: String?,
@@ -208,6 +210,20 @@ final class StreamEngine {
         // --stream (auto-downgrade to one-shot polling), and this satisfies
         // the first-data-<5s budget.
         emitHeartbeat()
+
+        // Mic run-state monitor (Phase C1): aggregate input-device run-state
+        // flips become `system` events (mic_started / mic_stopped) — the raw
+        // hardware signal only; the meeting JUDGMENT is daemon-side policy.
+        // Metadata bit, no audio read, no TCC. Stream-mode only by nature
+        // (the one-shot helper has no process to host listeners).
+        let mic = MicMonitor(
+            hal: CoreAudioMicHAL(),
+            onFlip: { [weak self] hot in
+                self?.emitSystem(hot ? "mic_started" : "mic_stopped")
+            },
+            diag: { diag($0) })
+        mic.start()
+        micMonitor = mic
 
         installWorkspaceObservers()
         if let front = NSWorkspace.shared.frontmostApplication {
