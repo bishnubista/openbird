@@ -758,7 +758,7 @@ class RAG:
             if deterministic is not None:
                 return deterministic
             if is_synthesis:
-                if self._is_multiday_window(intent_window):
+                if self._is_week_recap(query, intent_window):
                     week_answer = self._answer_week_memory(query, intent_window)
                     if week_answer is not None:
                         return week_answer
@@ -863,6 +863,13 @@ class RAG:
         if not _SYNTHESIS_RE.search(query):
             return None
         now = self._now()
+        if self._WEEK_RECAP_RE.search(query):
+            # An explicit week word ("recap my week") IS a week intent even
+            # without a temporal phrase _temporal_window recognizes: give it
+            # the full 7 days so the cached week digest (which requires a
+            # week-shaped window) can serve it — the digest path costs no
+            # model call, so the qwen3 context concern below doesn't apply.
+            return now - 7 * _DAY, now
         if _MULTIDAY_RE.search(query):
             # Multi-day synthesis ("follow up on", "been working on") spans prior
             # days but stays SHORT: a trailing few days keeps the on-device model's
@@ -997,6 +1004,26 @@ class RAG:
             # Out-of-range sentinel bounds (e.g. an "everything" test window):
             # fall back to a plain duration check.
             return (end - start) > _DAY
+
+    _WEEK_RECAP_RE = re.compile(
+        r"\b(?:my|the|this|last|past)\s+week\b|\bweekly\b", re.IGNORECASE
+    )
+
+    def _is_week_recap(self, query: str, window: tuple[float, float]) -> bool:
+        """Gate the CACHED week digest to explicit week-recap intents only.
+
+        A stored ISO-week digest may cover time OUTSIDE the asked window and
+        answers no specific question — serving it for "what should I follow up
+        on?" or an arbitrary trailing 3-day window would be generic and can
+        leak out-of-window content into the answer. Require BOTH an explicit
+        week word in the query AND a window that is week-shaped (>= 6 days):
+        everything else falls through to summary-first _answer_temporal, which
+        respects the window and the question.
+        """
+        if not self._WEEK_RECAP_RE.search(query or ""):
+            return False
+        start, end = window
+        return (end - start) >= 6 * 86400.0
 
     def _answer_week_memory(
         self, query: str, window: tuple[float, float]

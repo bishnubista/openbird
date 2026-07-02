@@ -3132,10 +3132,15 @@ def reindex(
             "ORDER BY rowid_int"
         ).fetchall()
         total = len(chunk_rows)
-        summary_rows = conn.execute(
-            "SELECT entry_rowid, text FROM summary_index_entries ORDER BY entry_rowid"
-        ).fetchall()
-        summary_total = len(summary_rows)
+        # summary_rows are (re)selected INSIDE the write transaction below —
+        # a pre-BEGIN snapshot could race a concurrent summary deletion and
+        # re-insert vectors for dead entries (zero-orphan contract). This
+        # pre-count exists only for the early-exit/progress sizing.
+        summary_total = int(
+            conn.execute(
+                "SELECT COUNT(*) c FROM summary_index_entries"
+            ).fetchone()["c"]
+        )
 
         if current_cohort == new_cohort and not force:
             _console.print(
@@ -3165,6 +3170,13 @@ def reindex(
             # could not roll back — destroying the old vectors. With BEGIN, a mid-
             # reindex embed failure rolls back the drop+rebuild atomically.
             conn.execute("BEGIN")
+            # Transactional snapshot (see comment above): entries read under
+            # the write lock cannot be deleted before their vectors land.
+            summary_rows = conn.execute(
+                "SELECT entry_rowid, text FROM summary_index_entries "
+                "ORDER BY entry_rowid"
+            ).fetchall()
+            summary_total = len(summary_rows)
             # Rebuild the vector table at the (possibly new) dimension. CREATE ...
             # IF NOT EXISTS would keep the stale dim, so drop first.
             conn.execute("DROP TABLE IF EXISTS vec_chunks")

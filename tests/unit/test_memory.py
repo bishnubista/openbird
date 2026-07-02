@@ -856,13 +856,26 @@ def test_index_summary_replaces_stale_entries_and_chunks_long_text(store):
     assert store.summary_index_state() == {("block", saved["id"]): "f1"}
 
     # Re-index under a drifted fingerprint: old entries replaced, not appended.
+    # The TOCTOU guard requires a LIVE week row whose member_fingerprint
+    # matches, so create/refresh a real one per pass (fabricated ids refuse).
     long_text = " ".join(f"sentence number {i} about deep work." for i in range(80))
+
+    def _week(fp):
+        return store.save_week_memory(
+            week_start_date="2026-06-22",
+            payload={"member_fingerprint": fp, "digest": long_text, "model": "m"},
+            extractor_version="week-memory-v1",
+            summary_ids=[saved["id"]],
+        )
+
+    wk = _week("wf1")
     n2 = store.index_summary(
-        summary_kind="week", summary_id="wk9", fingerprint="wf1", text=long_text
+        summary_kind="week", summary_id=wk["id"], fingerprint="wf1", text=long_text
     )
     assert n2 >= 2  # ingest.chunk split the long digest into seq pieces
+    wk = _week("wf2")  # regeneration: same Monday, new fingerprint/new id
     n3 = store.index_summary(
-        summary_kind="week", summary_id="wk9", fingerprint="wf2", text=long_text
+        summary_kind="week", summary_id=wk["id"], fingerprint="wf2", text=long_text
     )
     assert n3 == n2
     entries = store.conn.execute(

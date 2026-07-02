@@ -1641,6 +1641,36 @@ class MemoryStore:
 
         return pending[: max(0, int(limit))]
 
+    def _summary_source_fingerprint(
+        self, summary_kind: str, summary_id: str
+    ) -> str | None:
+        """Return the LIVE source fingerprint for an index target, or None.
+
+        Used by :meth:`index_summary` to revalidate inside the write
+        transaction that the summary still exists with the same fingerprint
+        after the (lock-free) embedding phase.
+        """
+        if summary_kind == "block":
+            row = self.conn.execute(
+                "SELECT block_fingerprint AS fp FROM block_summaries WHERE id = ?",
+                (summary_id,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT payload_json FROM day_memories "
+                "WHERE id = ? AND source_scope = 'week'",
+                (summary_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError):
+                return None
+            fp = payload.get("member_fingerprint")
+            return str(fp) if fp is not None else None
+        return row["fp"] if row is not None else None
+
     def index_summary(
         self, *, summary_kind: str, summary_id: str, fingerprint: str, text: str
     ) -> int:
@@ -1664,6 +1694,16 @@ class MemoryStore:
         packed = [_serialize_f32(v) for v in vectors]
         try:
             self._begin()
+            # TOCTOU guard: the embed ran outside the lock, so the source may
+            # have been deleted or regenerated meanwhile. Re-validate inside
+            # the transaction; on miss/drift, sweep any stale rows and no-op —
+            # indexing a dead/stale summary would violate the zero-orphan
+            # contract the deletion APIs enforce.
+            live_fp = self._summary_source_fingerprint(summary_kind, summary_id)
+            if live_fp is None or live_fp != fingerprint:
+                self._sweep_summary_index_pairs([(summary_kind, summary_id)])
+                self.conn.commit()
+                return 0
             self._sweep_summary_index_pairs([(summary_kind, summary_id)])
             for seq, (piece, vector) in enumerate(zip(pieces, packed)):
                 cur = self.conn.execute(

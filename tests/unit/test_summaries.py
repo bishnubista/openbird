@@ -945,3 +945,45 @@ def test_counts_line_is_metadata_only_and_includes_week_fields(store, mem_settin
     assert "week_ungrounded=0" in line
     assert "indexed=2" in line
     assert secret not in line
+
+
+def test_index_summary_toctou_guard_noops_on_deleted_or_stale_source(store, mem_settings):
+    # Codex diff-review regression: the embed phase runs outside the lock, so
+    # index_summary must revalidate the source inside the transaction.
+    s1, _ = _seed_block(store)
+    obs = store.add_observation("grounding text", source="capture", ts=1100.0,
+                                span_id=s1)
+    saved = store.save_block_summary(
+        local_date="2026-01-01", block_key="k", block_fingerprint="f1",
+        start_ts=1000.0, end_ts=1900.0, dominant_bundle=None, level=None,
+        summary_text="prose", model="m", extractor_version="v",
+        observation_ids=[obs.id], span_ids=[s1],
+    )
+    # Stale fingerprint (source regenerated meanwhile): no rows written.
+    wrote = store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="STALE",
+        text="prose",
+    )
+    assert wrote == 0
+    assert store.stats()["summary_index_entries"] == 0
+    # Deleted source: no rows written either.
+    store.conn.execute("DELETE FROM block_summaries WHERE id = ?", (saved["id"],))
+    wrote = store.index_summary(
+        summary_kind="block", summary_id=saved["id"], fingerprint="f1",
+        text="prose",
+    )
+    assert wrote == 0
+    assert store.stats()["summary_index_entries"] == 0
+
+
+def test_week_recap_gate_blocks_generic_synthesis(mem_settings):
+    from openbird.chat.rag import RAG
+
+    rag = RAG.__new__(RAG)
+    # Explicit week word + week-shaped window -> cached digest allowed.
+    assert rag._is_week_recap("recap my week", (0.0, 7 * 86400.0))
+    assert rag._is_week_recap("summarize last week", (0.0, 6.5 * 86400.0))
+    # Generic synthesis question -> never the generic digest.
+    assert not rag._is_week_recap("what should I follow up on?", (0.0, 7 * 86400.0))
+    # Week word but a short window -> fall through to windowed retrieval.
+    assert not rag._is_week_recap("my week so far", (0.0, 2 * 86400.0))
