@@ -73,13 +73,16 @@ final class StreamEmitter {
     }
 
     func emit<E: Encodable>(_ event: E) {
+        // The WHOLE encode+write path is one critical section: JSONEncoder is
+        // a mutable object shared between the main run loop and the walk
+        // queue, so encoding outside the lock would be a data race.
+        lock.lock()
+        defer { lock.unlock() }
         guard var data = try? encoder.encode(event) else {
             diag("capture: encode_failed")
             return
         }
         data.append(0x0A)
-        lock.lock()
-        defer { lock.unlock() }
         data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             var offset = 0
             while offset < raw.count {
