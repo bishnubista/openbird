@@ -197,6 +197,11 @@ title-bearing design a naive spans table would imply: "45 min in Ghostty
   sleep boundary or a policy-state boundary.
 - Span extension is additionally capped by the force-capture ceiling: no heartbeat for
   > ceiling ⇒ span closes at last-heartbeat time, not at "now".
+- **Restart boundary**: monotonic deadlines are valid only within one process
+  lifetime. Helper or daemon start/restart first force-closes any span left open —
+  at its last-heartbeat wall time, never at "now" — before any merging resumes
+  (equivalently: each process run has a restart epoch, and heartbeats never merge
+  across epochs). A supervisor restart can therefore never mis-extend a stale span.
 - Span boundaries debounce **independently** of content capture: a 300 ms app-switch
   settle delays the *text* capture, but the span boundary is recorded at the switch
   event itself, so fast A→B→A switching inside the debounce window still yields
