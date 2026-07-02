@@ -666,7 +666,10 @@ actually shipped, not the sketch above:
   REAL batching bound; `time_range_text`'s max_chars caps text per row, not
   row count). The 48h overlap is a SEPARATE, equally-capped idempotent re-scan
   that never moves the cursor (no livelock when the overlap window outgrows
-  the cap). Summaries are mined by a `(generated_at, id)` cursor because
+  the cap). Spans advance their own independent `(start_ts, span_id)` cursor
+  (`spans_page` + `entity_aggregation.span_ts`/`.span_id`) with the same
+  forward/overlap semantics, so a dense span history pages forward run over
+  run. Summaries are mined by a `(generated_at, id)` cursor because
   regeneration replaces a historical row in place with a fresh `generated_at`
   — a regenerated old block is always re-mined (regression-tested).
 - **Mining is item-anchored, never blob-global**: URL-is-item allows the

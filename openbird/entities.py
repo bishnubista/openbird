@@ -50,6 +50,8 @@ logger = logging.getLogger("openbird.entities")
 #     regenerated old block forever behind the cursor.
 _OBS_TS_KEY = "entity_aggregation.obs_ts"
 _OBS_ID_KEY = "entity_aggregation.obs_id"
+_SPAN_TS_KEY = "entity_aggregation.span_ts"
+_SPAN_ID_KEY = "entity_aggregation.span_id"
 _SUMMARY_GENERATED_AT_KEY = "entity_aggregation.summary_generated_at"
 _SUMMARY_ID_KEY = "entity_aggregation.summary_id"
 
@@ -153,7 +155,7 @@ def run_entity_aggregation(store: Any, *, now: float, settings: Any) -> dict:
         return run.counts
 
     scan_floor = _scan_observations(run, limit=limit, lookback_s=lookback_s)
-    _scan_spans(run, scan_floor=scan_floor, limit=limit)
+    _scan_spans(run, limit=limit, lookback_s=lookback_s)
     _refresh_repo_aliases(store)
     _mine_summaries(run, limit=limit, lookback_s=lookback_s)
     _promote_open_loops(run, scan_floor=scan_floor)
@@ -320,23 +322,60 @@ def _mine_ticket_completions(
 # -- span scan (domain extent) ----------------------------------------------------
 
 
-def _scan_spans(run: _Run, *, scan_floor: float, limit: int) -> None:
+def _scan_spans(run: _Run, *, limit: int, lookback_s: float) -> None:
     """Domain entities from tier-1 span url_hosts (span-backed extent).
 
     Spans carry host-only metadata (no paths), so they can support domain
-    entities and their activity extent — nothing finer. Bounded by the same
-    row cap; idempotent upserts absorb window re-scans.
+    entities and their activity extent — nothing finer. INDEPENDENT
+    row-capped composite ``(start_ts, span_id)`` cursor (its own
+    ``entity_aggregation.span_ts``/``.span_id`` watermark pair), mirroring
+    the observation cursor semantics: the forward page advances the cursor
+    only through the last actually-processed row, and a SEPARATE, equally
+    row-capped 48h overlap re-scan (idempotent upserts absorb it; catches
+    still-extending spans behind the cursor) never moves it — a dense span
+    history therefore pages forward run over run instead of re-slicing the
+    earliest overlapping spans forever.
     """
-    spans = run.store.spans_in_range(scan_floor, run.now)
-    for span in spans[:limit]:
-        host = span.get("url_host")
-        if not host:
-            continue
-        end_ts = min(float(span.get("end_ts") or 0.0), run.now)
-        run.upsert(
-            "domain", str(host), seen_ts=end_ts, source_kind="span",
-            source_id=str(span.get("span_id")),
+    store = run.store
+    wm_ts_raw = store.get_kv(_SPAN_TS_KEY)
+    wm_id = str(store.get_kv(_SPAN_ID_KEY) or "")
+    first_run = wm_ts_raw is None
+    if first_run:
+        cursor_ts, cursor_id = run.now - lookback_s, ""
+    else:
+        cursor_ts, cursor_id = float(wm_ts_raw), wm_id
+
+    spans = store.spans_page(cursor_ts, cursor_id, limit=limit)
+    for span in spans:
+        _mine_span(run, span)
+    if spans:
+        last = spans[-1]
+        store.set_kv(_SPAN_TS_KEY, repr(float(last["start_ts"])))
+        store.set_kv(_SPAN_ID_KEY, str(last["span_id"]))
+
+    if not first_run:
+        overlap = store.spans_page(
+            cursor_ts - _OVERLAP_SECONDS, "", limit=limit
         )
+        for span in overlap:
+            if (float(span["start_ts"]), str(span["span_id"])) > (
+                cursor_ts,
+                cursor_id,
+            ):
+                break  # past the old cursor: the forward page owns these rows
+            _mine_span(run, span)
+
+
+def _mine_span(run: _Run, span: dict) -> None:
+    """Upsert the domain entity for ONE tier-1 span (host-only metadata)."""
+    host = span.get("url_host")
+    if not host:
+        return
+    end_ts = min(float(span.get("end_ts") or 0.0), run.now)
+    run.upsert(
+        "domain", str(host), seen_ts=end_ts, source_kind="span",
+        source_id=str(span.get("span_id")),
+    )
 
 
 # -- aliases -----------------------------------------------------------------------
@@ -393,13 +432,21 @@ def _mine_summaries(run: _Run, *, limit: int, lookback_s: float) -> None:
 
     # Match against the CURRENT ledger (names + aliases, casefolded) — the
     # observation/span phases above already upserted this run's sightings.
-    matchers: list[tuple[str, str, str, str]] = []  # (key, id, kind, name)
+    # TOKEN-BOUNDARY regexes, never bare substrings: a short alias like
+    # ``ai``/``ui``/``go`` inside an unrelated word ("maintained") near a
+    # shipped/completed verb must NOT mint completion evidence. ``(?<!\w)`` /
+    # ``(?!\w)`` lookarounds (rather than ``\b``) keep slash-containing repo
+    # names matching as a full owner/repo token even inside path/URL contexts
+    # ("github.com/owner/repo/pull/3": the surrounding "/" is a non-word
+    # char, so the lookarounds pass; "owner/repository" does not match).
+    matchers: list[tuple[re.Pattern[str], str, str]] = []  # (pattern, kind, name)
     for entity in store.list_entities():
         keys = {str(entity["name"]).casefold()}
         keys.update(str(a).casefold() for a in entity.get("aliases") or [])
         for key in keys:
             if key:
-                matchers.append((key, entity["id"], entity["kind"], entity["name"]))
+                pattern = re.compile(r"(?<!\w)" + re.escape(key) + r"(?!\w)")
+                matchers.append((pattern, entity["kind"], entity["name"]))
 
     for summary in summaries:
         text = str(summary.get("summary_text") or "")
@@ -409,8 +456,8 @@ def _mine_summaries(run: _Run, *, limit: int, lookback_s: float) -> None:
             lo = max(0, match.start() - _SHIPPED_WINDOW_CHARS)
             hi = match.end() + _SHIPPED_WINDOW_CHARS
             window_slice = folded[lo:hi]
-            for key, _entity_id, kind, name in matchers:
-                if key not in window_slice:
+            for pattern, kind, name in matchers:
+                if pattern.search(window_slice) is None:
                     continue
                 entity = run.upsert(
                     kind, name, seen_ts=ts, source_kind="summary",

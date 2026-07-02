@@ -648,3 +648,118 @@ def test_cli_briefing_reports_dormant_unresolved_loop_count_only(
     joined = " ".join(res.output.split())
     line_start = joined.index("1 dormant project(s)")
     assert "secretname" not in joined[line_start:]
+
+
+# -- Codex diff-review regressions ---------------------------------------------------
+
+
+def test_span_scan_pages_forward_with_independent_cursor(store, tmp_path):
+    """REGRESSION (Codex finding 2): more spans than the cap in one window —
+    the second run must reach the LATER spans via the independent
+    (start_ts, span_id) cursor instead of re-slicing the earliest ones."""
+    span_ids = [
+        store.open_span(
+            epoch_id="e", start_ts=NOW - 3600.0 + i, end_ts=NOW - 3000.0 + i,
+            bundle_id="b", detail_tier=1, url_host=f"host{i}.example.com",
+        )
+        for i in range(3)
+    ]
+    _run(store, tmp_path, entity_evidence_batch_limit=2)
+    assert store.get_entity(entity_id_for("domain", "host0.example.com")) is not None
+    assert store.get_entity(entity_id_for("domain", "host1.example.com")) is not None
+    assert store.get_entity(entity_id_for("domain", "host2.example.com")) is None
+    # The span cursor advanced only through the last actually-processed span.
+    assert store.get_kv("entity_aggregation.span_id") == span_ids[1]
+
+    _run(store, tmp_path, entity_evidence_batch_limit=2)
+    assert store.get_entity(entity_id_for("domain", "host2.example.com")) is not None
+    assert store.get_kv("entity_aggregation.span_id") == span_ids[2]
+
+
+def test_shipped_language_short_alias_needs_token_boundary(store, tmp_path):
+    """REGRESSION (Codex finding 3): the alias 'ai' must NOT match inside
+    'maintained' near a completion verb."""
+    store.add_observation(
+        "work on github.com/bbista/ai today", source="capture", ts=NOW - 7000.0
+    )
+    _seed_summary(store, text="Completed the maintained documentation set.")
+    _run(store, tmp_path)
+    repo = store.get_entity(entity_id_for("repo", "bbista/ai"))
+    assert repo is not None and repo["aliases"] == ["ai"]  # alias exists…
+    assert not any(  # …but minted no false completion evidence
+        r["kind"] == "shipped_language"
+        for r in store.entity_evidence_for(repo["id"])
+    )
+
+
+def test_shipped_language_repo_name_matches_inside_url_path(store, tmp_path):
+    """The full owner/repo token still matches in path/URL contexts."""
+    store.add_observation(
+        "work on github.com/bbista/openbird today", source="capture",
+        ts=NOW - 7000.0,
+    )
+    summary = _seed_summary(
+        store, text="Landed changes for github.com/bbista/openbird/pull/3."
+    )
+    _run(store, tmp_path)
+    repo_id = entity_id_for("repo", "bbista/openbird")
+    rows = [
+        r for r in store.entity_evidence_for(repo_id)
+        if r["kind"] == "shipped_language"
+    ]
+    assert rows and rows[0]["source_id"] == summary["id"]
+
+
+def test_reopened_loop_resolves_again_and_counts_unresolved_meanwhile(
+    store, tmp_path
+):
+    """REGRESSION (Codex finding 4): loop -> resolved -> REOPENED loop ->
+    later close mints a SECOND resolution; the reopened loop counts as
+    unresolved until then (answer path and briefing count alike)."""
+    from openbird.cli import _dormant_entities_with_unresolved_loops
+
+    detail = "github:bbista/openbird#7"
+    entity = store.upsert_entity("repo", "bbista/openbird", seen_ts=NOW - 5 * DAY)
+    obs1 = store.add_observation("waiting one", source="capture", ts=NOW - 5 * DAY)
+    store.add_entity_evidence(
+        entity["id"], ts=NOW - 5 * DAY, kind="open_loop",
+        source_kind="observation", source_id=obs1.id, detail=detail,
+    )
+    obs2 = store.add_observation("merge one", source="capture", ts=NOW - 4 * DAY)
+    store.add_entity_evidence(
+        entity["id"], ts=NOW - 4 * DAY, kind="pr_merged",
+        source_kind="observation", source_id=obs2.id, detail=detail,
+    )
+    counts = _run(store, tmp_path)
+    assert counts["loops_resolved"] == 1
+
+    # REOPENED: a NEW loop row for the same detail, later than the resolution.
+    obs3 = store.add_observation("reopened", source="capture", ts=NOW - 2 * DAY)
+    store.add_entity_evidence(
+        entity["id"], ts=NOW - 2 * DAY, kind="open_loop",
+        source_kind="observation", source_id=obs3.id, detail=detail,
+    )
+    counts = _run(store, tmp_path)
+    assert counts["loops_resolved"] == 0  # no completion later than the reopen
+
+    # The briefing count sees the reopened loop as unresolved…
+    store.set_entity_status(entity["id"], "dormant")
+    assert _dormant_entities_with_unresolved_loops(store) == 1
+    store.set_entity_status(entity["id"], "active")
+
+    # …until a LATER close mints a SECOND resolution row.
+    obs4 = store.add_observation("merge two", source="capture", ts=NOW - 1 * DAY)
+    store.add_entity_evidence(
+        entity["id"], ts=NOW - 1 * DAY, kind="pr_merged",
+        source_kind="observation", source_id=obs4.id, detail=detail,
+    )
+    counts = _run(store, tmp_path)
+    assert counts["loops_resolved"] == 1
+    resolutions = [
+        r for r in store.entity_evidence_for(entity["id"])
+        if r["kind"] == "open_loop_resolved"
+    ]
+    assert len(resolutions) == 2
+    assert resolutions[0]["source_id"] == obs4.id  # newest cites the new close
+    store.set_entity_status(entity["id"], "dormant")
+    assert _dormant_entities_with_unresolved_loops(store) == 0

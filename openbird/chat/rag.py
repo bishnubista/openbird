@@ -2082,27 +2082,41 @@ class RAG:
             entity["id"], limit=50
         )
         if window is not None:
+            # The window filter runs IN the store query, BEFORE its
+            # newest-first LIMIT: an older window with real completion
+            # evidence must be found even when more than ``limit`` newer rows
+            # exist — filtering the global newest-50 fetch afterwards falsely
+            # reported "no activity in that period" (a grounding-rule
+            # violation). These same windowed rows feed BOTH the evidence
+            # lines and the last-activity selection below.
             start_ts, end_ts = window
-            scoped = [r for r in rows if start_ts <= float(r["ts"]) <= end_ts]
+            scoped = self.store.entity_evidence_for(  # type: ignore[attr-defined]
+                entity["id"], limit=50, start_ts=start_ts, end_ts=end_ts
+            )
         else:
             scoped = rows
 
         completions = [
             r for r in scoped if r["kind"] in _COMPLETION_EVIDENCE_KINDS
         ]  # newest-first (store order)
-        resolved_details = {
-            r["detail"]: float(r["ts"])
-            for r in rows
-            if r["kind"] == "open_loop_resolved"
-        }
+        # A loop is resolved iff a resolution row for the SAME detail has ts
+        # LATER than THAT loop row's ts — track the LATEST resolution per
+        # detail (a reopened loop, newer than the last resolution, must show
+        # as unresolved until a later completion resolves it again).
+        resolved_latest: dict[str, float] = {}
+        for r in [*rows, *scoped]:
+            if r["kind"] != "open_loop_resolved":
+                continue
+            detail = str(r["detail"])
+            resolved_latest[detail] = max(
+                resolved_latest.get(detail, float("-inf")), float(r["ts"])
+            )
         unresolved = [
             r
             for r in scoped
             if r["kind"] == "open_loop"
-            and not (
-                r["detail"] in resolved_details
-                and resolved_details[r["detail"]] > float(r["ts"])
-            )
+            and not resolved_latest.get(str(r["detail"]), float("-inf"))
+            > float(r["ts"])
         ]
 
         citations: list[DerivedCitation] = []

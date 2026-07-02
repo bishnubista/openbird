@@ -2404,3 +2404,47 @@ def test_entity_completion_zero_match_keeps_content_query_on_semantic(
         assert result.reasoning_route in ("local_model", "cloud_reasoning_active", None)
     finally:
         store.close()
+
+
+def test_entity_completion_windowed_query_beats_row_cap(mem_settings, fake_provider):
+    """REGRESSION (Codex finding 1): an older window's completion evidence
+    must be surfaced even when >50 newer evidence rows exist — the window
+    filter runs in the store query, not over a newest-50 fetch."""
+    store = MemoryStore(db_path=":memory:", settings=mem_settings,
+                        provider=fake_provider)
+    try:
+        day = 86_400.0
+        old_ts = 1_700_000_000.0
+        old_obs = store.add_observation(
+            "merged long ago", source="capture", ts=old_ts,
+            url="https://github.com/bbista/openbird/pull/1",
+        )
+        entity = store.upsert_entity(
+            "repo", "bbista/openbird", seen_ts=old_ts,
+            source_kind="observation", source_id=old_obs.id,
+        )
+        store.set_entity_aliases(entity["id"], ["openbird"])
+        store.add_entity_evidence(
+            entity["id"], ts=old_ts, kind="pr_merged",
+            source_kind="observation", source_id=old_obs.id,
+            detail="github:bbista/openbird#1",
+        )
+        filler = store.add_observation(
+            "recent filler", source="capture", ts=old_ts + 30 * day
+        )
+        for i in range(55):  # more than the answer path's limit=50, all newer
+            store.add_entity_evidence(
+                entity["id"], ts=old_ts + 30 * day + i, kind="open_loop",
+                source_kind="observation", source_id=filler.id,
+                detail=f"github:bbista/openbird#{100 + i}",
+            )
+        llm = FakeLLM({"answer": "MUST NOT BE USED", "citations": []})
+        window = (old_ts - day, old_ts + day)
+        result = RAG(store, llm).answer("did I finish openbird?", window=window)
+
+        assert llm.last_messages is None
+        assert "no activity in that period" not in result.answer
+        assert "PR merged (github:bbista/openbird#1)" in result.answer
+        assert result.grounding == "derived"
+    finally:
+        store.close()

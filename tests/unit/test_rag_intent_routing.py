@@ -1073,11 +1073,13 @@ class FakeEntityStore(FakeTemporalStore):
                 out.append(entity)
         return out
 
-    def entity_evidence_for(self, entity_id, limit=50):
-        rows = sorted(
-            self._evidence.get(entity_id, []),
-            key=lambda r: (-float(r["ts"]), r["id"]),
-        )
+    def entity_evidence_for(self, entity_id, limit=50, *, start_ts=None, end_ts=None):
+        rows = self._evidence.get(entity_id, [])
+        if start_ts is not None:
+            rows = [r for r in rows if float(r["ts"]) >= start_ts]
+        if end_ts is not None:
+            rows = [r for r in rows if float(r["ts"]) <= end_ts]
+        rows = sorted(rows, key=lambda r: (-float(r["ts"]), r["id"]))
         return rows[:limit]
 
 
@@ -1339,3 +1341,36 @@ def test_store_without_entity_ledger_is_untouched():
     result = rag.answer("did I finish openbird?")
     assert store.search_calls == 1  # plain semantic fall-through
     assert isinstance(result.answer, str)
+
+
+def test_completion_reopened_loop_shows_unresolved_until_later_resolution():
+    """REGRESSION (Codex finding 4, answer path): per-loop timestamps — a
+    reopened loop (newer than the last resolution) is unresolved until a
+    LATER resolution exists."""
+    detail = "github:bbista/openbird#9"
+    base = [
+        _ev("ev-loop1", ts=NOW - 5 * _DAY, kind="open_loop", detail=detail),
+        _ev("ev-merge1", ts=NOW - 4 * _DAY, kind="pr_merged", detail=detail),
+        _ev("ev-res1", ts=NOW - 4 * _DAY, kind="open_loop_resolved",
+            detail=detail),
+        _ev("ev-loop2", ts=NOW - 2 * _DAY, kind="open_loop", detail=detail),
+    ]
+    store = FakeEntityStore(entities=[_entity()], evidence={"e1": list(base)})
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    # The REOPENED loop is unresolved (the old resolution predates it)…
+    assert "Still unresolved: github:bbista/openbird#9" in result.answer
+    unresolved_cites = {c.source_id for c in result.derived_citations}
+    assert "ev-loop2" in unresolved_cites
+    # …and the original (resolved) loop is NOT re-listed as unresolved.
+    assert "ev-loop1" not in unresolved_cites
+
+    # A LATER resolution clears it.
+    later = base + [
+        _ev("ev-res2", ts=NOW - 1 * _DAY, kind="open_loop_resolved",
+            detail=detail),
+    ]
+    store = FakeEntityStore(entities=[_entity()], evidence={"e1": later})
+    rag, _completer = _entity_rag(store)
+    result = rag.answer("did I finish openbird?")
+    assert "Still unresolved" not in result.answer

@@ -2565,9 +2565,11 @@ def _dormant_entities_with_unresolved_loops(store) -> int:
     """COUNT of dormant entities carrying an unresolved open loop.
 
     Metadata only (never names). hasattr-guarded so pre-v7 store stubs keep
-    working. A loop counts as resolved when an ``open_loop_resolved`` row with
-    the same exact detail key exists (resolution rows are only ever inserted
-    with a later ts, so detail membership is sufficient here).
+    working. A loop counts as resolved ONLY when an ``open_loop_resolved``
+    row with the same exact detail key has a ts LATER than THAT loop row's ts
+    — a REOPENED loop (newer than the last resolution) counts as unresolved
+    again until a later completion resolves it (per-loop timestamps, never
+    bare detail membership).
     """
     lister = getattr(store, "list_entities", None)
     if not callable(lister):
@@ -2575,9 +2577,19 @@ def _dormant_entities_with_unresolved_loops(store) -> int:
     count = 0
     for entity in lister(status="dormant"):
         rows = store.entity_evidence_for(entity["id"], limit=50)
-        resolved = {r["detail"] for r in rows if r["kind"] == "open_loop_resolved"}
+        resolved_latest: dict[str, float] = {}
+        for r in rows:
+            if r["kind"] != "open_loop_resolved":
+                continue
+            detail = str(r["detail"])
+            resolved_latest[detail] = max(
+                resolved_latest.get(detail, float("-inf")), float(r["ts"])
+            )
         if any(
-            r["kind"] == "open_loop" and r["detail"] not in resolved for r in rows
+            r["kind"] == "open_loop"
+            and not resolved_latest.get(str(r["detail"]), float("-inf"))
+            > float(r["ts"])
+            for r in rows
         ):
             count += 1
     return count

@@ -1324,3 +1324,43 @@ def test_kv_roundtrip(store):
     assert store.get_kv("entity_aggregation.obs_ts") == "123.5"
     store.set_kv("entity_aggregation.obs_ts", "456.0")
     assert store.get_kv("entity_aggregation.obs_ts") == "456.0"
+
+
+def test_entity_evidence_for_window_filter_applied_before_row_cap(store):
+    """REGRESSION (Codex finding 1): the window filter runs in SQL BEFORE the
+    newest-first LIMIT — an older window's completion evidence must be found
+    even when more than ``limit`` newer rows exist."""
+    e = store.upsert_entity("repo", "bbista/openbird", seen_ts=1000.0)
+    old_obs = store.add_observation("old merge", source="capture", ts=1000.0)
+    assert store.add_entity_evidence(
+        e["id"], ts=1000.0, kind="pr_merged", source_kind="observation",
+        source_id=old_obs.id, detail="github:bbista/openbird#1",
+    )
+    filler_obs = store.add_observation("filler", source="capture", ts=200000.0)
+    for i in range(55):  # more than the default limit=50, all newer
+        store.add_entity_evidence(
+            e["id"], ts=200000.0 + i, kind="open_loop",
+            source_kind="observation", source_id=filler_obs.id,
+            detail=f"github:bbista/openbird#{100 + i}",
+        )
+    # The global newest-50 fetch cannot see the old row…
+    assert all(float(r["ts"]) >= 200000.0 for r in store.entity_evidence_for(e["id"]))
+    # …but the WINDOWED query must.
+    windowed = store.entity_evidence_for(e["id"], start_ts=900.0, end_ts=1100.0)
+    assert [r["detail"] for r in windowed] == ["github:bbista/openbird#1"]
+    assert windowed[0]["kind"] == "pr_merged"
+
+
+def test_spans_page_row_cap_and_composite_cursor(store):
+    span_ids = [
+        store.open_span(
+            epoch_id="e", start_ts=100.0 + i, end_ts=200.0 + i, bundle_id="b",
+            detail_tier=1, url_host=f"host{i}.example.com",
+        )
+        for i in range(3)
+    ]
+    page1 = store.spans_page(0.0, "", limit=2)
+    assert [s["span_id"] for s in page1] == span_ids[:2]
+    last = page1[-1]
+    page2 = store.spans_page(float(last["start_ts"]), str(last["span_id"]), limit=10)
+    assert [s["span_id"] for s in page2] == span_ids[2:]

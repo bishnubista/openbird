@@ -2061,13 +2061,33 @@ class MemoryStore:
                 out.append(item)
         return out
 
-    def entity_evidence_for(self, entity_id: str, limit: int = 50) -> list[dict]:
-        """Return one entity's evidence rows, newest first (bounded)."""
-        rows = self.conn.execute(
-            "SELECT * FROM entity_evidence WHERE entity_id = ? "
-            "ORDER BY ts DESC, id DESC LIMIT ?",
-            (entity_id, max(0, int(limit))),
-        ).fetchall()
+    def entity_evidence_for(
+        self,
+        entity_id: str,
+        limit: int = 50,
+        *,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> list[dict]:
+        """Return one entity's evidence rows, newest first (bounded).
+
+        The optional ``[start_ts, end_ts]`` window is applied IN SQL, BEFORE
+        the newest-first LIMIT — a windowed completion answer must surface an
+        older period's evidence even when more than ``limit`` newer rows
+        exist (filtering a newest-N fetch afterwards would falsely report
+        "no activity in that period": a grounding-rule violation).
+        """
+        sql = "SELECT * FROM entity_evidence WHERE entity_id = ?"
+        params: list[object] = [entity_id]
+        if start_ts is not None:
+            sql += " AND ts >= ?"
+            params.append(float(start_ts))
+        if end_ts is not None:
+            sql += " AND ts <= ?"
+            params.append(float(end_ts))
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(max(0, int(limit)))
+        rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     def mark_dormant_entities(self, cutoff_ts: float) -> int:
@@ -2165,6 +2185,27 @@ class MemoryStore:
             out.append((self._row_to_observation(r), text))
         return out
 
+    def spans_page(
+        self, after_start_ts: float, after_id: str, *, limit: int
+    ) -> list[dict]:
+        """One ROW-CAPPED page of activity spans after a composite cursor.
+
+        ``ORDER BY start_ts ASC, span_id ASC LIMIT ?`` with a strict
+        ``(start_ts, span_id) > (after_start_ts, after_id)`` predicate — the
+        entity aggregation's INDEPENDENT span cursor (mirrors
+        :meth:`observations_text_page`): a dense span history must page
+        forward run over run instead of repeatedly re-slicing the earliest
+        overlapping spans and never reaching later span-derived domains.
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM activity_spans "
+            "WHERE (start_ts > ? OR (start_ts = ? AND span_id > ?)) "
+            "ORDER BY start_ts ASC, span_id ASC LIMIT ?",
+            (float(after_start_ts), float(after_start_ts), str(after_id),
+             max(0, int(limit))),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def block_summaries_generated_since(
         self, after_generated_at: float, after_id: str, *, limit: int
     ) -> list[dict]:
@@ -2191,9 +2232,10 @@ class MemoryStore:
         The precise resolution rule (Phase E2): an ``open_loop`` row is
         resolved iff a ``pr_merged``/``ticket_closed`` row exists on the SAME
         entity with the IDENTICAL ``detail`` key and a LATER ``ts`` — never
-        loop-text similarity. Pairs that already have an
-        ``open_loop_resolved`` row for that detail are filtered out (the
-        aggregation pass inserts exactly one per resolution; UNIQUE dedupes).
+        loop-text similarity. A loop counts as already resolved ONLY when an
+        ``open_loop_resolved`` row for that detail is LATER than THAT loop
+        row's ts — a REOPENED loop (newer than the last resolution) becomes a
+        candidate again and resolves on the next later completion.
         """
         rows = self.conn.execute(
             """
@@ -2210,6 +2252,7 @@ class MemoryStore:
                   SELECT 1 FROM entity_evidence r
                   WHERE r.entity_id = l.entity_id AND r.detail = l.detail
                     AND r.kind = 'open_loop_resolved'
+                    AND r.ts > l.ts
               )
             ORDER BY l.entity_id, l.detail, c.ts ASC
             """
