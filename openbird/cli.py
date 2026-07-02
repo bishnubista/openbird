@@ -838,6 +838,12 @@ def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> Non
         # keep working; a missing reader simply composes no narrative.
         reader = getattr(store, "block_summaries_for_date", None)
         summaries = (reader(local_date) or []) if callable(reader) else []
+        # Entity-ledger review nudge (Phase E2): a COUNT of dormant projects
+        # still carrying unresolved open loops. Count only — entity names are
+        # derived sensitive and never enter briefing text (which may be piped
+        # or stored); `openbird entities list --status dormant` shows them
+        # interactively.
+        dormant_loops = _dormant_entities_with_unresolved_loops(store)
     finally:
         store.close()
 
@@ -849,6 +855,11 @@ def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> Non
     if narrative:
         text = f"{text}\n\n{narrative}"
         reasoning_route = "local_cached_model_summary"
+    if dormant_loops:
+        text = (
+            f"{text}\n\n{dormant_loops} dormant project(s) have unresolved "
+            "open loops (see `openbird entities list --status dormant`)."
+        )
     sources, total_sources = select_briefing_sources(rows)
     if as_json:
         _console.print_json(
@@ -2548,6 +2559,28 @@ def _entity_evidence_counts(store) -> dict[str, int]:
         "SELECT entity_id, COUNT(*) AS c FROM entity_evidence GROUP BY entity_id"
     ).fetchall()
     return {r["entity_id"]: int(r["c"]) for r in rows}
+
+
+def _dormant_entities_with_unresolved_loops(store) -> int:
+    """COUNT of dormant entities carrying an unresolved open loop.
+
+    Metadata only (never names). hasattr-guarded so pre-v7 store stubs keep
+    working. A loop counts as resolved when an ``open_loop_resolved`` row with
+    the same exact detail key exists (resolution rows are only ever inserted
+    with a later ts, so detail membership is sufficient here).
+    """
+    lister = getattr(store, "list_entities", None)
+    if not callable(lister):
+        return 0
+    count = 0
+    for entity in lister(status="dormant"):
+        rows = store.entity_evidence_for(entity["id"], limit=50)
+        resolved = {r["detail"] for r in rows if r["kind"] == "open_loop_resolved"}
+        if any(
+            r["kind"] == "open_loop" and r["detail"] not in resolved for r in rows
+        ):
+            count += 1
+    return count
 
 
 @entities_app.command("list")

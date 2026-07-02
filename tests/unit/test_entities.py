@@ -605,3 +605,46 @@ def test_cli_data_integrity_includes_entity_probe(tmp_path, monkeypatch):
     res = CliRunner().invoke(cli.app, ["data", "integrity"])
     assert res.exit_code == 0, res.output
     assert "entity ledger: ok" in res.output
+
+
+def test_cli_briefing_reports_dormant_unresolved_loop_count_only(
+    tmp_path, monkeypatch
+):
+    """The default briefing gains ONE count-only review line — never names."""
+    import time as _time
+
+    from typer.testing import CliRunner
+
+    from openbird import cli
+
+    s = MemoryStore(
+        db_path=str(tmp_path / "briefing-entities.db"),
+        settings=Settings(data_dir=tmp_path, embed_dim=64),
+        provider=FakeProvider(embed_dim=64),
+    )
+    now = _time.time()
+    obs = s.add_observation(
+        "waiting on github.com/bbista/secretname/pull/7",
+        source="capture", ts=now - 600.0,
+    )
+    entity = s.upsert_entity(
+        "repo", "bbista/secretname", seen_ts=now - 600.0,
+        source_kind="observation", source_id=obs.id,
+    )
+    s.add_entity_evidence(
+        entity["id"], ts=now - 600.0, kind="open_loop",
+        source_kind="observation", source_id=obs.id,
+        detail="github:bbista/secretname#7",
+    )
+    s.set_entity_status(entity["id"], "dormant")
+
+    monkeypatch.setattr(cli, "_store_maintenance", lambda: s)
+    res = CliRunner().invoke(cli.app, ["briefing", "--day", "0"])
+    assert res.exit_code == 0, res.output
+    assert "1 dormant project(s) have unresolved open loops" in res.output
+    # The NEW review line itself is count-only — no entity name. (The day
+    # prose above it may echo today's captured cue text; that is the existing
+    # day-memory behavior over the seeded observation, not the ledger line.)
+    joined = " ".join(res.output.split())
+    line_start = joined.index("1 dormant project(s)")
+    assert "secretname" not in joined[line_start:]
