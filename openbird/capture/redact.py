@@ -369,6 +369,84 @@ def decide(
 
 
 # ---------------------------------------------------------------------------
+# Span policy classification (activity spans, Phase B)
+# ---------------------------------------------------------------------------
+
+#: Activity-span detail tiers. Tier 0 (coarse) stores time + bundle id + reason
+#: ONLY — no window title, no URL host, no identity keys. Tier 1 (full) stores
+#: scrubbed metadata. The tier decision is structural (never text-dependent).
+SPAN_TIER_COARSE = 0
+SPAN_TIER_FULL = 1
+
+#: Closed reason vocabulary for coarse spans (canonical snake_case enum from the
+#: design doc — prose names like "self-capture" always mean these values).
+#: These strings reach the DB and logs; nothing outside this set ever may.
+SPAN_REASONS = frozenset(
+    {
+        "not_allowlisted",
+        "blocklisted",
+        "dangerous",
+        "private",
+        "paused",
+        "self_capture",
+    }
+)
+
+
+@dataclass(frozen=True)
+class PolicyClass:
+    """Structural span-policy classification: which detail tier, and why.
+
+    ``reason`` is a :data:`SPAN_REASONS` member for tier 0 and ``None`` for
+    tier 1 (the NULL-sentinel contract — tier determines field presence).
+    """
+
+    tier: int
+    reason: str | None
+
+
+def classify_policy(
+    *,
+    app: str | None,
+    window: str | None,
+    incognito: bool = False,
+    paused: bool = False,
+    settings: Settings | None = None,
+) -> PolicyClass:
+    """Classify an activity-span's detail tier from STRUCTURAL state only.
+
+    This is deliberately NOT :func:`decide`: ``decide()`` rejects ``no_text``
+    before its structural checks, so an allowlisted app with an empty AX tree
+    would misclassify as coarse, and a private empty frame would lose its
+    correct reason. Span classification and the should-store-an-observation
+    decision are separate questions over the same structural inputs — this
+    function never looks at captured text.
+
+    Evaluation order mirrors ``decide()``'s structural gates (each step can
+    only coarsen): paused -> self_capture -> allowlist (empty/unknown app =>
+    ``not_allowlisted``, fail-closed) -> blocklist -> dangerous backstop ->
+    private/incognito. Reason values are the design doc's canonical enum —
+    note ``dangerous`` / ``private`` (vs ``decide()``'s ``dangerous_app`` /
+    ``incognito`` legacy spellings).
+    """
+    settings = settings or get_settings()
+
+    if paused:
+        return PolicyClass(SPAN_TIER_COARSE, "paused")
+    if _is_self_capture(app):
+        return PolicyClass(SPAN_TIER_COARSE, "self_capture")
+    if not _is_allowlisted(app, settings.allowlist):
+        return PolicyClass(SPAN_TIER_COARSE, "not_allowlisted")
+    if _is_blocklisted(app, settings.blocklist):
+        return PolicyClass(SPAN_TIER_COARSE, "blocklisted")
+    if _is_dangerous(app):
+        return PolicyClass(SPAN_TIER_COARSE, "dangerous")
+    if incognito or is_incognito(app, window):
+        return PolicyClass(SPAN_TIER_COARSE, "private")
+    return PolicyClass(SPAN_TIER_FULL, None)
+
+
+# ---------------------------------------------------------------------------
 # Credit-card (PAN) redaction. A plain ``{13,16}`` regex both MISSED 17-19
 # digit PANs and OVER-redacted long numeric IDs / order numbers. We instead:
 #   1. Find candidate digit sequences (13-19 digits, optional SINGLE space/dash
@@ -653,6 +731,11 @@ def apply(
 
 __all__ = [
     "RedactionDecision",
+    "PolicyClass",
+    "SPAN_REASONS",
+    "SPAN_TIER_COARSE",
+    "SPAN_TIER_FULL",
+    "classify_policy",
     "decide",
     "scrub",
     "scrub_url",
