@@ -306,6 +306,83 @@ summary as input (the Rize pattern), cached per identity key so each app/site is
 classified once. Frame outputs like littlebird (narrative + briefings), not like a
 surveillance scorecard.
 
+#### Phase D — decisions as implemented (v5 schema, `openbird/summaries.py`, `openbird/taxonomy.py`)
+
+Recording the adversarially-reviewed decisions so future phases build on what
+actually shipped, not the sketch above:
+
+- **Where summarization runs**: the ROUTINES daemon (`block-summaries` builtin,
+  hourly) plus the on-demand `openbird summaries build [--date] [--force]`. NOT
+  the capture daemon (a multi-second Ollama call would stall the single
+  event-processing thread feeding SpanTracker) and NOT `ensure_day_memory`
+  (which runs inside a `BEGIN IMMEDIATE` retry loop on the chat path — a model
+  call there would hold the writer lock). Chat NEVER generates summaries
+  synchronously; a day question composes whatever exists and degrades to the
+  deterministic answer when none do.
+- **Single block-boundary definition**: `summaries.compute_span_blocks` is the
+  focus-block run-builder lifted out of `day_memory._span_metrics`, which now
+  calls it — the summarizer and day-memory metrics can never disagree about
+  what a block is. Blocks are keyed by `sha256(sorted span_ids)` and
+  fingerprinted over `(span_id, real end_ts)` pairs: regeneration happens only
+  on fingerprint drift (a member span extended), never on a version bump alone
+  (battery). Only blocks settled ≥ 15 min (`block_summaries_settle_seconds`)
+  are summarizable; each runner pass is batch-capped.
+- **Battery/idle gate** (`should_run_background_llm`): AC power (pmset;
+  subprocess failure treated as BATTERY, fail-closed) always allows. On battery
+  a run requires the capture-liveness sidecar to be FRESH (finite
+  `0 <= now - updated_at <=` the shared 30 s staleness bound,
+  `capture.health.DAEMON_STALE_AFTER_SECONDS` — one definition, imported, never
+  duplicated) AND `afk == true`. A stale/absent/malformed/future sidecar
+  DEFERS: a stopped or wedged capture daemon must never make an ACTIVE user
+  look idle (the earlier `last_active_span_end` proxy had exactly that failure
+  mode and was dropped).
+- **Catch-up coalescing**: the `block-summaries` routine sets
+  `coalesce_catchup`; N missed hours produce exactly ONE bounded run. Ordering
+  is retry-safe: the representative (newest missed) occurrence runs through the
+  normal claim lifecycle FIRST; only after it succeeds are the remaining missed
+  occurrences marked coalesced/done (`RoutineStore.mark_coalesced`,
+  metadata-only). Failure leaves them unclaimed — never stranded `running`
+  rows, never occurrences marked terminal before the work happened.
+- **Grounding discipline**: prompt context items are S-labeled spans (metadata
+  lines) + policy-accepted observation excerpts, fenced as untrusted; the model
+  must cite. Hallucinated ids drop; ZERO valid citations ⇒ nothing is stored
+  (reason code `block_summary_ungrounded`). DB `BEFORE INSERT` triggers
+  back-stop ref integrity.
+- **Deletion cascade** (v5): `block_summary_source_refs` mirrors
+  `day_memory_source_refs`; deleting a cited observation/span trigger-deletes
+  the summary, and — with `PRAGMA recursive_triggers = ON`, set per connection,
+  READ BACK, and refused on a silent no-op — deleting a summary invalidates any
+  day memory citing it (`source_kind='summary'`, dormant until E1). Full purge
+  also wipes `category_assignments` (LLM-derived from captured content).
+- **Route truthfulness (Layer 2 re-point)**: the deterministic day answer and
+  the default briefing compose stored block summaries at ANSWER time (shared
+  `compose_day_narrative`; no provider call, no payload embedding). When (and
+  only when) summaries are composed, `reasoning_route` flips to
+  `local_cached_model_summary` — the facts stay deterministic but the narrative
+  sentences are precomputed local-model prose, and the label must say so. No
+  summaries ⇒ byte-identical `local_deterministic`. See
+  `docs/privacy-routes.yaml` (`chat.day_memory_cached_summary`,
+  `summaries.block`).
+- **Privacy**: `summary_text` is derived-sensitive — encrypted DB only, never
+  logged, never in routine output (the routine line and the runner result are
+  counts + reason codes). The taxonomy cache stores identity key + level only.
+- **Cloud gating**: the shared `LLMProvider`'s `CloudOptInRequired` enforcement
+  is the gate — no new consent flag; a cloud-opted user has opted this path in.
+  No `reasoning_send_ledger` rows (that ledger is deep-brain-packet-scoped).
+- **Taxonomy axes stay separate**: `taxonomy.py` owns the five-level JUDGMENT
+  axis; `day_memory.classify_observation` keeps its DESCRIPTIVE categories.
+  Nothing maps one onto the other (mixing description with judgment is the
+  surveillance-scorecard failure mode). Day memories (v8) carry measured
+  `span_time_by_level`, the `uncategorized_identity_seconds` fallback queue,
+  and a `taxonomy_fingerprint` so an edited `taxonomy.json` or a newly cached
+  LLM level rebuilds the cached day.
+- **Explicitly deferred to E1**: block summaries in MODEL context for
+  multi-day/`_answer_temporal` synthesis, and summary embedding/retrieval
+  (citing summaries through `_validate_citations` — E1's "index the
+  summaries"). Raw chunks remain the detail path untouched. Week rollups,
+  entity ledger (E2), OCR (C2), and any productivity-score surface stay
+  non-goals here.
+
 ### Data lifecycle — migrations, citations, prune/purge (applies to B, D, E)
 
 The current durable-invalidation model is observation-only (`day_memory_sources`
