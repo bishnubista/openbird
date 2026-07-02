@@ -1767,3 +1767,80 @@ def test_no_spans_omits_block():
     built = build_day_memory([], start_ts=0.0, end_ts=1.0, day_offset=0)
     assert "span_metrics" not in built.payload
     assert built.span_ids == []
+
+
+def test_paused_spans_are_not_active_time():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        _span("s1", 1000.0, 1600.0),  # 600s real work
+        {"span_id": "s2", "start_ts": 1600.0, "end_ts": 2600.0,
+         "bundle_id": None, "afk": 0, "reason": "paused", "detail_tier": 0},
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    m = built.payload["span_metrics"]
+    assert m["active_span_seconds"] == 600.0  # paused 1000s NOT counted
+    assert m["paused_seconds"] == 1000.0
+    assert m["span_time_by_reason"]["paused"] == 1000.0
+    assert "(untracked)" not in m["span_time_by_app"]
+    # Paused time can never form/extend a focus block.
+    for block in m["span_focus_blocks"]:
+        assert "s2" not in block["span_ids"]
+    # Hour buckets carry only the active 600s.
+    assert sum(m["span_time_by_hour"].values()) == 600.0
+
+
+def test_productivity_report_prefers_span_ground_truth():
+    from openbird.day_memory import build_day_memory, build_productivity_report
+
+    spans = [
+        _span("s1", 1000.0, 1600.0),
+        _span("s2", 1700.0, 2000.0, afk=1),
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    saved = {
+        "payload": built.payload,
+        "local_date": built.payload.get("local_date"),
+        "source_scope": "capture",
+        "source_count": 0,
+        "generated_at": 0.0,
+    }
+    report = build_productivity_report(saved)
+    facts = report["productivity"]["facts"]
+    assert facts["duration_basis"] == "spans"
+    assert facts["active_seconds"] == 600.0
+    assert facts["afk_minutes"] == 5.0
+    # Coach packet never carries local span ids.
+    packet = report["productivity"]["coach_ready_packet"]
+    assert "span_ids" not in json_dumps_all_keys(packet)
+
+
+def json_dumps_all_keys(value) -> set:
+    keys: set = set()
+
+    def walk(v):
+        if isinstance(v, dict):
+            for k, item in v.items():
+                keys.add(k)
+                walk(item)
+        elif isinstance(v, list):
+            for item in v:
+                walk(item)
+
+    walk(value)
+    return keys
+
+
+def test_productivity_report_legacy_fallback_without_spans():
+    from openbird.day_memory import build_day_memory, build_productivity_report
+
+    built = build_day_memory([], start_ts=0.0, end_ts=1.0, day_offset=0)
+    saved = {"payload": built.payload, "local_date": "2026-01-01",
+             "source_scope": "capture", "source_count": 0, "generated_at": 0.0}
+    facts = build_productivity_report(saved)["productivity"]["facts"]
+    assert facts["duration_basis"] == "observations"
+    assert "afk_minutes" not in facts

@@ -52,6 +52,7 @@ _MODEL_STRIPPED_LOCAL_ID_KEYS = {
     "session_id",
     "session_ids",
     "session_refs",
+    "span_ids",
 }
 
 _BROWSER_APPS = {
@@ -230,6 +231,7 @@ def _span_metrics(
     time_by_reason: Counter[str] = Counter()
     time_by_hour: Counter[str] = Counter()
     afk_seconds = 0.0
+    paused_seconds = 0.0
     active: list[tuple[float, float, str, str]] = []  # (s, e, bundle, span_id)
 
     for span in sorted(spans, key=lambda x: float(x.get("start_ts") or 0.0)):
@@ -241,11 +243,17 @@ def _span_metrics(
         if span.get("afk"):
             afk_seconds += seconds
             continue
-        bundle = span.get("bundle_id") or "(untracked)"
-        time_by_app[bundle] += seconds
         reason = span.get("reason")
         if reason:
             time_by_reason[str(reason)] += seconds
+        if reason == "paused":
+            # Paused time is neither active nor app-attributable: capture was
+            # off. It appears under time_by_reason/paused_seconds only — never
+            # in per-app time, hour buckets, or focus blocks.
+            paused_seconds += seconds
+            continue
+        bundle = span.get("bundle_id") or "(untracked)"
+        time_by_app[bundle] += seconds
         # Split the span's active time at local hour boundaries.
         cursor = s
         while cursor < e:
@@ -297,6 +305,7 @@ def _span_metrics(
         "span_time_by_reason": _round_counter(time_by_reason),
         "span_time_by_hour": _round_counter(time_by_hour),
         "afk_seconds": round(afk_seconds, 3),
+        "paused_seconds": round(paused_seconds, 3),
         "active_span_seconds": round(sum(time_by_app.values()), 3),
         "span_focus_blocks": focus_blocks,
         "span_coverage": {"span_count": len(span_ids)},
@@ -334,9 +343,19 @@ def build_productivity_report(
     ]
     category_sources = _category_sources_from_blocks(focus_blocks)
 
-    active_seconds = float(metrics.get("active_seconds") or 0.0)
+    # Duration basis: spans are MEASURED time (Phase B ground truth); the
+    # legacy observation metrics are sample/coalesce-derived estimates. Prefer
+    # spans whenever the payload carries them; keep the legacy value as the
+    # fallback so pre-v7 memories keep rendering.
+    span_metrics = payload.get("span_metrics") or {}
+    has_spans = bool(span_metrics.get("span_coverage", {}).get("span_count"))
+    if has_spans:
+        active_seconds = float(span_metrics.get("active_span_seconds") or 0.0)
+    else:
+        active_seconds = float(metrics.get("active_seconds") or 0.0)
     context_switch_count = int(metrics.get("context_switch_count") or 0)
     facts = {
+        "duration_basis": "spans" if has_spans else "observations",
         "active_seconds": round(active_seconds, 3),
         "active_minutes": round(active_seconds / 60.0, 1),
         "context_switch_count": context_switch_count,
@@ -353,6 +372,14 @@ def build_productivity_report(
         ),
         "longest_focus_block": _longest_focus_block(focus_blocks),
     }
+    if has_spans:
+        facts["afk_minutes"] = round(
+            float(span_metrics.get("afk_seconds") or 0.0) / 60.0, 1
+        )
+        facts["paused_minutes"] = round(
+            float(span_metrics.get("paused_seconds") or 0.0) / 60.0, 1
+        )
+    span_focus_blocks = list(span_metrics.get("span_focus_blocks") or [])
     coach_ready_packet = {
         "local_date": payload.get("local_date") or saved.get("local_date"),
         "source_scope": payload.get("source_scope") or saved.get("source_scope"),
@@ -360,6 +387,9 @@ def build_productivity_report(
         "facts": _without_source_ids(facts),
         "category_sources": [_without_source_ids(item) for item in category_sources],
         "focus_blocks": [_without_source_ids(item) for item in focus_blocks[:12]],
+        "span_focus_blocks": [
+            _without_source_ids(item) for item in span_focus_blocks[:12]
+        ],
         "source_count": (
             saved.get("source_count")
             or payload.get("coverage", {}).get("observations", 0)
@@ -378,6 +408,7 @@ def build_productivity_report(
             "facts": facts,
             "category_sources": category_sources,
             "focus_blocks": focus_blocks,
+            "span_focus_blocks": span_focus_blocks,
             "coach_ready_packet": coach_ready_packet,
         },
     }

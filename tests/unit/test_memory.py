@@ -651,3 +651,11 @@ def test_day_memory_span_refs_round_trip(store):
     # Deleting the SPAN invalidates the day memory (typed trigger).
     store.conn.execute("DELETE FROM activity_spans WHERE span_id = ?", (sid,))
     assert store.get_day_memory(local_date="2026-01-02", source_scope="capture") is None
+
+
+def test_span_id_survives_readback(store):
+    sid = _open_full_span(store)
+    store.add_observation("linked body text", source="capture", ts=105.0, span_id=sid)
+    rows = store.time_range_text(0.0, 1_000.0)
+    assert rows, "expected the observation back"
+    assert rows[0][0].span_id == sid

@@ -752,7 +752,16 @@ class MemoryStore:
 
     @staticmethod
     def _row_to_observation(row) -> Observation:
-        """Map a sqlite Row to an :class:`Observation`."""
+        """Map a sqlite Row to an :class:`Observation`.
+
+        ``span_id`` is guarded: a SELECT that predates the v4 column (or a
+        projection that omits it) must not break readback — it degrades to
+        ``None`` rather than raising.
+        """
+        try:
+            span_id = row["span_id"]
+        except (KeyError, IndexError):
+            span_id = None
         return Observation(
             id=row["id"],
             content_hash=row["content_hash"],
@@ -762,6 +771,7 @@ class MemoryStore:
             url=row["url"],
             session_id=row["session_id"],
             source=row["source"],
+            span_id=span_id,
         )
 
     # -- activity spans (Phase B) ----------------------------------------------
