@@ -953,7 +953,11 @@ class MemoryStore:
         ``BEGIN IMMEDIATE`` write lock, so concurrent readers rebuilding today's
         open day converge on one row rather than racing a stale cache.
         """
-        from openbird.day_memory import EXTRACTOR_VERSION, build_day_memory
+        from openbird.day_memory import (
+            EXTRACTOR_VERSION,
+            build_day_memory,
+            span_fingerprint_for_spans,
+        )
 
         attempts = 3
         for attempt in range(attempts):
@@ -961,6 +965,8 @@ class MemoryStore:
                 self._begin()
                 rows = self.time_range_text(start_ts, end_ts, source=source_scope)
                 fingerprint = self.day_memory_source_fingerprint_from_rows(rows)
+                spans = self.spans_in_range(start_ts, end_ts)
+                span_fp = span_fingerprint_for_spans(spans)
                 existing = self._get_day_memory_unchecked(
                     local_date=local_date, source_scope=source_scope
                 )
@@ -969,6 +975,9 @@ class MemoryStore:
                     and existing is not None
                     and existing["extractor_version"] == EXTRACTOR_VERSION
                     and existing["payload"].get("source_fingerprint") == fingerprint
+                    # Span freshness: an EXTENDED span fires no delete trigger,
+                    # so the fingerprint (which includes end_ts) catches it.
+                    and existing["payload"].get("span_fingerprint") == span_fp
                 ):
                     self.conn.commit()
                     return existing
@@ -982,6 +991,7 @@ class MemoryStore:
                     gap_seconds=self.settings.session_gap_seconds,
                     source_fingerprint=fingerprint,
                     as_of=min(end_ts, time.time()),
+                    spans=spans,
                 )
                 day_memory_id = uuid.uuid4().hex
                 generated = time.time()
@@ -989,6 +999,7 @@ class MemoryStore:
                     built.payload, ensure_ascii=False, sort_keys=True
                 )
                 unique_source_ids = sorted(set(built.source_ids))
+                unique_span_ids = sorted(set(built.span_ids))
                 self.conn.execute(
                     "DELETE FROM day_memories WHERE local_date = ? AND source_scope = ?",
                     (local_date, source_scope),
@@ -1005,7 +1016,7 @@ class MemoryStore:
                         EXTRACTOR_VERSION,
                         generated,
                         payload_json,
-                        len(unique_source_ids),
+                        len(unique_source_ids) + len(unique_span_ids),
                     ),
                 )
                 self.conn.executemany(
@@ -1014,7 +1025,8 @@ class MemoryStore:
                     [
                         (day_memory_id, "observation", obs_id)
                         for obs_id in unique_source_ids
-                    ],
+                    ]
+                    + [(day_memory_id, "span", sid) for sid in unique_span_ids],
                 )
                 self.conn.commit()
                 return self._get_day_memory_unchecked(

@@ -1670,3 +1670,100 @@ def test_productivity_cli_rejects_negative_day(monkeypatch, tmp_path):
         reset_settings_cache()
 
     assert res.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# span_metrics (Phase B): measured time from activity spans
+# ---------------------------------------------------------------------------
+
+
+def _span(sid, start, end, *, bundle="com.apple.mail", afk=0, reason=None):
+    return {
+        "span_id": sid, "start_ts": start, "end_ts": end,
+        "bundle_id": bundle, "afk": afk, "reason": reason, "detail_tier": 1,
+    }
+
+
+def test_span_metrics_time_accounting_and_afk():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        _span("s1", 1000.0, 1600.0),                       # 600s mail
+        _span("s2", 1600.0, 1900.0, bundle="com.apple.Terminal",
+              reason="blocklisted"),                        # 300s coarse
+        _span("s3", 1900.0, 2500.0, afk=1),                # 600s AFK
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    m = built.payload["span_metrics"]
+    assert m["span_time_by_app"]["com.apple.mail"] == 600.0
+    assert m["span_time_by_app"]["com.apple.Terminal"] == 300.0
+    assert m["span_time_by_reason"]["blocklisted"] == 300.0
+    assert m["afk_seconds"] == 600.0
+    assert m["active_span_seconds"] == 900.0
+    assert built.span_ids == ["s1", "s2", "s3"]
+    assert built.payload["span_fingerprint"]["span_count"] == 3
+
+
+def test_span_metrics_clip_to_window():
+    from openbird.day_memory import build_day_memory
+
+    spans = [_span("s1", 0.0, 200.0)]  # only [100, 200] is inside the window
+    built = build_day_memory(
+        [], start_ts=100.0, end_ts=1000.0, day_offset=0, spans=spans
+    )
+    assert built.payload["span_metrics"]["span_time_by_app"]["com.apple.mail"] == 100.0
+
+
+def test_span_metrics_hour_splitting():
+    import datetime as dt
+
+    from openbird.day_memory import build_day_memory
+
+    # A span straddling a local hour boundary splits between the two hours.
+    base = dt.datetime(2026, 1, 5, 9, 50, 0)
+    start = base.timestamp()
+    end = (base + dt.timedelta(minutes=20)).timestamp()
+    built = build_day_memory(
+        [], start_ts=start - 100, end_ts=end + 100, day_offset=0,
+        spans=[_span("s1", start, end)],
+    )
+    by_hour = built.payload["span_metrics"]["span_time_by_hour"]
+    assert by_hour["09:00"] == 600.0
+    assert by_hour["10:00"] == 600.0
+
+
+def test_span_focus_blocks_rules():
+    from openbird.day_memory import build_day_memory
+
+    spans = [
+        # A 15-minute two-app run with small gaps -> one block.
+        _span("s1", 1000.0, 1400.0),
+        _span("s2", 1430.0, 1900.0, bundle="com.apple.notes"),
+        # A >60s gap breaks the run; the next span alone is too short.
+        _span("s3", 2200.0, 2400.0),
+    ]
+    built = build_day_memory(
+        [], start_ts=0.0, end_ts=100_000.0, day_offset=0, spans=spans
+    )
+    blocks = built.payload["span_metrics"]["span_focus_blocks"]
+    assert len(blocks) == 1
+    assert blocks[0]["span_ids"] == ["s1", "s2"]
+    assert blocks[0]["seconds"] == 900.0
+
+
+def test_span_fingerprint_changes_on_extension():
+    from openbird.day_memory import span_fingerprint_for_spans
+
+    a = [_span("s1", 0.0, 100.0)]
+    b = [_span("s1", 0.0, 150.0)]  # same span, extended
+    assert span_fingerprint_for_spans(a) != span_fingerprint_for_spans(b)
+
+
+def test_no_spans_omits_block():
+    from openbird.day_memory import build_day_memory
+
+    built = build_day_memory([], start_ts=0.0, end_ts=1.0, day_offset=0)
+    assert "span_metrics" not in built.payload
+    assert built.span_ids == []

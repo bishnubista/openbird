@@ -15,14 +15,14 @@ import json
 import re
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
 from openbird.types import Observation
 from openbird.reasoning_ledger import packet_payload_audit
 
-EXTRACTOR_VERSION = "day-memory-v6"
+EXTRACTOR_VERSION = "day-memory-v7"
 _UNGROUNDED_PRODUCTIVITY_COACH_ANSWER = (
     "I could not ground productivity coaching in the local facts packet."
 )
@@ -99,6 +99,8 @@ class DayMemoryBuild:
 
     payload: dict
     source_ids: list[str]
+    # Activity spans the payload's span_metrics were computed from (Phase B).
+    span_ids: list[str] = field(default_factory=list)
 
 
 def local_date_for_window(start_ts: float) -> str:
@@ -116,8 +118,14 @@ def build_day_memory(
     gap_seconds: float = 300.0,
     source_fingerprint: dict | None = None,
     as_of: float | None = None,
+    spans: list[dict] | None = None,
 ) -> DayMemoryBuild:
-    """Build a deterministic, no-model day-memory payload."""
+    """Build a deterministic, no-model day-memory payload.
+
+    ``spans`` (activity_spans rows overlapping the window, Phase B) add the
+    measured-time ``span_metrics`` block; every metric there is computed from
+    span ground truth and cited via the build's ``span_ids``.
+    """
     ordered = sorted(rows, key=lambda item: _observation_sort_key(item[0]))
     source_ids = [obs.id for obs, _ in ordered]
     sessions = _build_sessions(ordered)
@@ -177,7 +185,123 @@ def build_day_memory(
         },
         "entities": entities,
     }
-    return DayMemoryBuild(payload=payload, source_ids=source_ids)
+    span_ids: list[str] = []
+    if spans is not None:
+        metrics, span_ids = _span_metrics(spans, start_ts=start_ts, end_ts=end_ts)
+        payload["span_metrics"] = metrics
+        payload["span_fingerprint"] = span_fingerprint_for_spans(spans)
+    return DayMemoryBuild(payload=payload, source_ids=source_ids, span_ids=span_ids)
+
+
+# -- span-derived measured time (Phase B) -------------------------------------
+
+# Focus-block extraction over spans: maximal runs of non-AFK spans with small
+# inter-span gaps and low app diversity, long enough to mean sustained work.
+_SPAN_FOCUS_MAX_GAP = 60.0
+_SPAN_FOCUS_MAX_BUNDLES = 2
+_SPAN_FOCUS_MIN_SECONDS = 600.0
+
+
+def span_fingerprint_for_spans(spans: list[dict]) -> dict:
+    """Freshness fingerprint over span extents.
+
+    Includes ``end_ts`` so an EXTENDED span invalidates a cached day memory —
+    extension fires no delete trigger, so freshness must catch it here.
+    """
+    import hashlib
+
+    items = sorted((str(s.get("span_id")), float(s.get("end_ts") or 0.0)) for s in spans)
+    digest = hashlib.sha256(repr(items).encode()).hexdigest()[:16]
+    return {"span_count": len(items), "ids_hash": digest}
+
+
+def _clip_seconds(span: dict, start_ts: float, end_ts: float) -> tuple[float, float, float]:
+    s = max(float(span.get("start_ts") or 0.0), start_ts)
+    e = min(float(span.get("end_ts") or 0.0), end_ts)
+    return s, e, max(0.0, e - s)
+
+
+def _span_metrics(
+    spans: list[dict], *, start_ts: float, end_ts: float
+) -> tuple[dict, list[str]]:
+    """Deterministic measured-time metrics from activity spans (no model)."""
+    span_ids: list[str] = []
+    time_by_app: Counter[str] = Counter()
+    time_by_reason: Counter[str] = Counter()
+    time_by_hour: Counter[str] = Counter()
+    afk_seconds = 0.0
+    active: list[tuple[float, float, str, str]] = []  # (s, e, bundle, span_id)
+
+    for span in sorted(spans, key=lambda x: float(x.get("start_ts") or 0.0)):
+        s, e, seconds = _clip_seconds(span, start_ts, end_ts)
+        if seconds <= 0:
+            continue
+        span_id = str(span.get("span_id"))
+        span_ids.append(span_id)
+        if span.get("afk"):
+            afk_seconds += seconds
+            continue
+        bundle = span.get("bundle_id") or "(untracked)"
+        time_by_app[bundle] += seconds
+        reason = span.get("reason")
+        if reason:
+            time_by_reason[str(reason)] += seconds
+        # Split the span's active time at local hour boundaries.
+        cursor = s
+        while cursor < e:
+            hour_start = dt.datetime.fromtimestamp(cursor).replace(
+                minute=0, second=0, microsecond=0
+            )
+            next_hour = (hour_start + dt.timedelta(hours=1)).timestamp()
+            segment_end = min(e, next_hour)
+            time_by_hour[hour_start.strftime("%H:00")] += segment_end - cursor
+            cursor = segment_end
+        active.append((s, e, bundle, span_id))
+
+    # Focus blocks: contiguous non-AFK runs (gap < 60s, <= 2 distinct bundles,
+    # >= 10 min total).
+    focus_blocks: list[dict] = []
+    run: list[tuple[float, float, str, str]] = []
+
+    def _flush_run() -> None:
+        if not run:
+            return
+        block_start, block_end = run[0][0], run[-1][1]
+        bundles = Counter(item[2] for item in run)
+        if (
+            block_end - block_start >= _SPAN_FOCUS_MIN_SECONDS
+            and len(bundles) <= _SPAN_FOCUS_MAX_BUNDLES
+        ):
+            focus_blocks.append(
+                {
+                    "start": block_start,
+                    "end": block_end,
+                    "seconds": round(block_end - block_start, 3),
+                    "dominant_bundle": bundles.most_common(1)[0][0],
+                    "span_ids": [item[3] for item in run],
+                }
+            )
+
+    for item in active:
+        if run and (
+            item[0] - run[-1][1] >= _SPAN_FOCUS_MAX_GAP
+            or len({x[2] for x in (*run, item)}) > _SPAN_FOCUS_MAX_BUNDLES
+        ):
+            _flush_run()
+            run = []
+        run.append(item)
+    _flush_run()
+
+    metrics = {
+        "span_time_by_app": _round_counter(time_by_app),
+        "span_time_by_reason": _round_counter(time_by_reason),
+        "span_time_by_hour": _round_counter(time_by_hour),
+        "afk_seconds": round(afk_seconds, 3),
+        "active_span_seconds": round(sum(time_by_app.values()), 3),
+        "span_focus_blocks": focus_blocks,
+        "span_coverage": {"span_count": len(span_ids)},
+    }
+    return metrics, span_ids
 
 
 def saved_day_memory_with_day_offset(saved: dict, day_offset: int) -> dict:
