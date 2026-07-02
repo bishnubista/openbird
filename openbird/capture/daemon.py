@@ -356,8 +356,7 @@ def parse_event(line: str) -> dict | None:
         except (TypeError, ValueError):
             idle_val = None
         seq = raw.get("seq")
-        app = raw.get("app")
-        return {
+        event = {
             "type": event_type,
             "ts": ts_val,
             "afk": bool(raw.get("afk", False)),
@@ -365,10 +364,14 @@ def parse_event(line: str) -> dict | None:
             "idle_seconds": idle_val,
             "seq": seq if isinstance(seq, int) else None,
             "kind": kind if isinstance(kind, str) and kind in _SYSTEM_KINDS else None,
-            # app_changed boundary markers carry the bundle id (identity
-            # metadata, not content); other typed events never do.
-            "app": app if event_type == "app_changed" and isinstance(app, str) else None,
         }
+        if event_type == "app_changed":
+            # Boundary markers carry the bundle id (identity metadata, not
+            # content). The key exists ONLY on this type — other typed events
+            # keep their strict no-identity key contract.
+            app = raw.get("app")
+            event["app"] = app if isinstance(app, str) else None
+        return event
 
     trigger = raw.get("trigger")
     if not isinstance(trigger, str) or trigger not in _CAPTURE_TRIGGERS:
