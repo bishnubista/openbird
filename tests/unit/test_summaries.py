@@ -481,7 +481,7 @@ def test_block_summary_messages_fence_and_label_map(store):
 
 
 def test_block_observation_rows_window_fallback_and_cap(store):
-    s1, _s2 = _seed_block(store)
+    _s1, _s2 = _seed_block(store)
     # NULL span_id but inside the window -> kept (fallback); outside -> dropped.
     inside = store.add_observation("inside window", source="capture", ts=1500.0)
     store.add_observation("outside window", source="capture", ts=5000.0)

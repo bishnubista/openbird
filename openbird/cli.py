@@ -817,7 +817,7 @@ def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> Non
         # hasattr-guarded (parity with the chat route) so simpler store stubs
         # keep working; a missing reader simply composes no narrative.
         reader = getattr(store, "block_summaries_for_date", None)
-        summaries = reader(local_date) if callable(reader) else []
+        summaries = (reader(local_date) or []) if callable(reader) else []
     finally:
         store.close()
 

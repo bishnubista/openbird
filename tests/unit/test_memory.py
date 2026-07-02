@@ -768,3 +768,13 @@ def test_category_assignment_round_trip_and_level_validation(store):
             summary_text="t", model="m", extractor_version="v",
             observation_ids=[], span_ids=[],
         )
+
+
+def test_save_block_summary_rejects_zero_refs(store):
+    with pytest.raises(ValueError, match="at least one source ref"):
+        store.save_block_summary(
+            local_date="2026-01-01", block_key="k", block_fingerprint="f",
+            start_ts=1.0, end_ts=2.0, dominant_bundle=None, level=None,
+            summary_text="orphan prose", model="m", extractor_version="v",
+            observation_ids=[], span_ids=[],
+        )

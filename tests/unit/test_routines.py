@@ -1146,7 +1146,7 @@ def test_coalesced_catchup_runs_exactly_one_bounded_invocation(run_store, clock)
         calls.append(now)
         return "summarized=0 skipped=0 ungrounded=0 classified=0 deferred_reason=none"
 
-    sched, _mem, _prov, deliveries = _make_scheduler(run_store, clock)
+    sched, _mem, _prov, _deliveries = _make_scheduler(run_store, clock)
     sched.register("coalesced", "p", 3600.0, runner=runner, coalesce_catchup=True)
     # Anchor: one settled run 7 days ago, then downtime until now.
     anchor = clock() - 7 * 24 * 3600.0

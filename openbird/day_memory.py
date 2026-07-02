@@ -16,10 +16,13 @@ import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from openbird.types import Observation
+
+if TYPE_CHECKING:  # annotation-only: avoids a runtime import cycle risk
+    from openbird.types import DerivedCitation
 from openbird.reasoning_ledger import packet_payload_audit
 
 EXTRACTOR_VERSION = "day-memory-v8"
@@ -835,7 +838,7 @@ def compose_day_narrative(
     sentences are PRECOMPUTED LOCAL-MODEL prose (generated earlier under the
     routines battery/idle gate), and the route label must disclose that.
 
-    Each narrative line is ``HH:MM–HH:MM — <summary_text>``; each summary
+    Each narrative line is ``HH:MM-HH:MM — <summary_text>``; each summary
     contributes one typed :class:`DerivedCitation` (``type="block_summary"``)
     carrying the summary's full typed source refs (``derived_from_refs``) plus
     the legacy observation-id-only ``derived_from`` for client compatibility.
@@ -853,7 +856,7 @@ def compose_day_narrative(
         if not text or not summary_id:
             continue
         window = (
-            f"{_fmt_clock(float(summary.get('start_ts') or 0.0))}–"
+            f"{_fmt_clock(float(summary.get('start_ts') or 0.0))}-"
             f"{_fmt_clock(float(summary.get('end_ts') or 0.0))}"
         )
         lines.append(f"{window} — {text}")

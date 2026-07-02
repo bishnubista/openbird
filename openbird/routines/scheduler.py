@@ -422,13 +422,24 @@ class RoutineScheduler:
                 settled,
             )
         else:
+            # A failed representative must NOT become the catch-up anchor: its
+            # terminal row would advance the grid past the older unclaimed
+            # misses (never retried). Free it for retry (bounded by the store's
+            # attempt budget); once the budget is spent it stays terminal and
+            # the grid legitimately moves on.
+            freed = False
+            if run is not None and run.status == store_mod.STATUS_ERROR:
+                try:
+                    freed = self.run_store.free_failed_attempt(run.id)
+                except KeyError:
+                    freed = False
             logger.warning(
                 "catch-up coalesce deferred: name=%s representative_ts=%.0f "
-                "remaining=%d (representative did not complete; occurrences "
-                "left unclaimed for retry)",
+                "remaining=%d freed_for_retry=%s (occurrences left unclaimed)",
                 name,
                 representative,
                 len(missed) - 1,
+                freed,
             )
         return run
 

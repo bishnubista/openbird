@@ -2126,8 +2126,9 @@ def test_day_answer_composes_block_summaries_and_flips_route(
         assert result.reasoning_route == "local_cached_model_summary"
         assert result.grounding == "derived"
         assert "Reviewed the day-memory CLI pull request." in result.answer
-        # Chronological "HH:MM–HH:MM — <text>" narrative line present.
-        assert "–" in result.answer and "—" in result.answer
+        # Chronological "HH:MM-HH:MM — <text>" narrative line present
+        # (hyphen-minus time window per lint; em dash separates the text).
+        assert "01:00-01:15 —" in result.answer
 
         block_citations = [
             c for c in result.derived_citations if c.type == "block_summary"

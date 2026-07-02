@@ -1214,6 +1214,10 @@ class MemoryStore:
         """
         if level is not None and level not in _TAXONOMY_LEVELS:
             raise ValueError(f"unknown taxonomy level: {level!r}")
+        if not observation_ids and not span_ids:
+            # Derived-sensitive prose with no typed refs would have NO
+            # invalidation path on selective source deletion — refuse it.
+            raise ValueError("block summary requires at least one source ref")
         summary_id = uuid.uuid4().hex
         generated = time.time() if generated_at is None else generated_at
         unique_obs = sorted(set(observation_ids))

@@ -598,6 +598,40 @@ class RoutineStore:
         stored_output = output if self.encryption_enabled else None
         return stored_output, output_len, output_hash
 
+    def free_failed_attempt(self, run_id: str) -> bool:
+        """Re-key a TERMINAL-ERROR run so its occurrence becomes retryable.
+
+        Used by coalesced catch-up: a failed REPRESENTATIVE must not anchor the
+        grid past the older unclaimed misses (they would never be retried).
+        Mirrors :meth:`reclaim_stale`'s re-key (``<key>#runner-failed-<id>``),
+        bounded by the same attempt budget — once ``max_attempts`` is spent the
+        row keeps its grid key (settled permanently) and this returns False.
+
+        Raises:
+            KeyError: If ``run_id`` does not exist.
+        """
+        with self._lock:
+            conn = self._conn()
+            with conn:
+                row = conn.execute(
+                    "SELECT idempotency_key, attempt, status FROM routine_runs"
+                    " WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown routine run id: {run_id!r}")
+                if row["status"] != STATUS_ERROR:
+                    return False  # only terminal errors are freeable
+                if "#" in row["idempotency_key"]:
+                    return False  # already re-keyed/freed once
+                if row["attempt"] >= self.max_attempts:
+                    return False  # budget spent: stays terminal, anchors grid
+                conn.execute(
+                    "UPDATE routine_runs SET idempotency_key = ? WHERE id = ?",
+                    (f"{row['idempotency_key']}#runner-failed-{run_id}", run_id),
+                )
+        return True
+
     def fail_delivery(
         self,
         run_id: str,

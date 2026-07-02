@@ -677,11 +677,11 @@ def format_counts_line(counts: dict) -> str:
 __all__ = [
     "Block",
     "EXTRACTOR_VERSION",
-    "SPAN_FOCUS_MAX_GAP",
     "SPAN_FOCUS_MAX_BUNDLES",
+    "SPAN_FOCUS_MAX_GAP",
     "SPAN_FOCUS_MIN_SECONDS",
-    "block_key",
     "block_fingerprint",
+    "block_key",
     "build_block_summary_messages",
     "compute_span_blocks",
     "format_counts_line",
