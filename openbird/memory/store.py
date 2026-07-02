@@ -108,6 +108,41 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # connections get this from storage.crypto.
 _BUSY_TIMEOUT_MS = 5000
 
+# The five-level activity taxonomy (v5). Mirrors the CHECK constraints on
+# block_summaries.level / category_assignments.level and taxonomy.LEVELS —
+# validated here in Python too so a bad level fails loudly before SQL.
+_TAXONOMY_LEVELS = frozenset(
+    {"focus_work", "other_work", "neutral", "personal", "distracting"}
+)
+
+
+def _enable_recursive_triggers(conn) -> None:
+    """Set ``PRAGMA recursive_triggers = ON`` and VERIFY it took effect.
+
+    The v5 deletion chain (span delete -> trigger deletes its block summary ->
+    trigger invalidates day memories citing that summary) only runs when a
+    trigger body can fire further triggers, which SQLite gates behind this
+    per-connection pragma (default OFF). Some backends silently ignore unknown
+    pragmas, and a silent no-op here would silently break the deletion-cascade
+    privacy contract — so the value is READ BACK and a mismatch RAISES at
+    startup instead of degrading.
+    """
+    conn.execute("PRAGMA recursive_triggers = ON")
+    row = conn.execute("PRAGMA recursive_triggers").fetchone()
+    value = None
+    if row is not None:
+        value = next(iter(row.values())) if isinstance(row, dict) else row[0]
+    try:
+        ok = int(value) == 1  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        ok = False
+    if not ok:
+        raise RuntimeError(
+            "PRAGMA recursive_triggers did not read back as 1; this backend "
+            "cannot enforce the derived-artifact deletion cascade. Refusing to "
+            "open the store."
+        )
+
 
 def _serialize_f32(vector: list[float]) -> bytes:
     """Pack a float vector into sqlite-vec's little-endian float32 blob format."""
@@ -207,6 +242,12 @@ class MemoryStore:
         ``no such column: ts`` (because ``CREATE TABLE IF NOT EXISTS`` skips the
         wrong-shaped table). The guard turns that into a clear migration error.
         """
+        # Load-bearing pragma (v5): the deletion chain span -> block summary ->
+        # citing day memory is trigger-fired-by-a-trigger, which SQLite only runs
+        # with recursive triggers on. Set + VERIFY before any schema/migration
+        # DDL so a backend that silently ignores the pragma cannot silently break
+        # the deletion-cascade privacy contract.
+        _enable_recursive_triggers(self.conn)
         # Reject a partial / pre-v1 / foreign legacy DB up front, before any of
         # schema.sql's column-dependent DDL (e.g. idx_observations_ts) can fail
         # with a raw OperationalError.
@@ -968,6 +1009,11 @@ class MemoryStore:
             build_day_memory,
             span_fingerprint_for_spans,
         )
+        from openbird.taxonomy import (
+            levels_for_spans,
+            load_overrides,
+            taxonomy_fingerprint,
+        )
 
         attempts = 3
         for attempt in range(attempts):
@@ -981,9 +1027,22 @@ class MemoryStore:
                 if source_scope == "capture":
                     spans = self.spans_in_range(start_ts, end_ts)
                     span_fp = span_fingerprint_for_spans(spans)
+                    # Pre-resolved identity -> level mapping (overrides + rules
+                    # + LLM cache) for the measured span_time_by_level block;
+                    # its fingerprint joins the freshness check so an edited
+                    # taxonomy.json or a new cached level rebuilds the row.
+                    overrides = load_overrides(self.settings)
+                    taxonomy_map = levels_for_spans(
+                        spans,
+                        overrides=overrides,
+                        cache=self.get_category_assignments(),
+                    )
+                    tax_fp = taxonomy_fingerprint(taxonomy_map, overrides)
                 else:
                     spans = None
                     span_fp = None
+                    taxonomy_map = None
+                    tax_fp = None
                 existing = self._get_day_memory_unchecked(
                     local_date=local_date, source_scope=source_scope
                 )
@@ -995,6 +1054,7 @@ class MemoryStore:
                     # Span freshness: an EXTENDED span fires no delete trigger,
                     # so the fingerprint (which includes end_ts) catches it.
                     and existing["payload"].get("span_fingerprint") == span_fp
+                    and existing["payload"].get("taxonomy_fingerprint") == tax_fp
                 ):
                     self.conn.commit()
                     return existing
@@ -1009,6 +1069,8 @@ class MemoryStore:
                     source_fingerprint=fingerprint,
                     as_of=min(end_ts, time.time()),
                     spans=spans,  # None outside capture scope (no span block)
+                    taxonomy=taxonomy_map,
+                    taxonomy_fingerprint=tax_fp,
                 )
                 day_memory_id = uuid.uuid4().hex
                 generated = time.time()
@@ -1123,6 +1185,154 @@ class MemoryStore:
             ],
             "payload": json.loads(row["payload_json"]),
         }
+
+    # -- block summaries + taxonomy cache (Phase D) -----------------------------
+
+    def save_block_summary(
+        self,
+        *,
+        local_date: str,
+        block_key: str,
+        block_fingerprint: str,
+        start_ts: float,
+        end_ts: float,
+        dominant_bundle: str | None,
+        level: str | None,
+        summary_text: str,
+        model: str,
+        extractor_version: str,
+        observation_ids: list[str],
+        span_ids: list[str],
+        generated_at: float | None = None,
+    ) -> dict:
+        """Persist one block summary and its typed source refs (single txn).
+
+        Regenerate semantics: any existing row for the same ``block_key`` is
+        deleted first (cascading its old refs), then the new parent + refs are
+        inserted in the same transaction. ``summary_text`` is DERIVED SENSITIVE
+        content — this method logs nothing, and callers must not log it either.
+        """
+        if level is not None and level not in _TAXONOMY_LEVELS:
+            raise ValueError(f"unknown taxonomy level: {level!r}")
+        if not observation_ids and not span_ids:
+            # Derived-sensitive prose with no typed refs would have NO
+            # invalidation path on selective source deletion — refuse it.
+            raise ValueError("block summary requires at least one source ref")
+        summary_id = uuid.uuid4().hex
+        generated = time.time() if generated_at is None else generated_at
+        unique_obs = sorted(set(observation_ids))
+        unique_spans = sorted(set(span_ids))
+        try:
+            self._begin()
+            self.conn.execute(
+                "DELETE FROM block_summaries WHERE block_key = ?", (block_key,)
+            )
+            self.conn.execute(
+                "INSERT INTO block_summaries("
+                "id, local_date, block_key, block_fingerprint, start_ts, end_ts, "
+                "dominant_bundle, level, summary_text, model, extractor_version, "
+                "generated_at, source_count"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    summary_id,
+                    local_date,
+                    block_key,
+                    block_fingerprint,
+                    float(start_ts),
+                    float(end_ts),
+                    dominant_bundle,
+                    level,
+                    summary_text,
+                    model,
+                    extractor_version,
+                    generated,
+                    len(unique_obs) + len(unique_spans),
+                ),
+            )
+            self.conn.executemany(
+                "INSERT INTO block_summary_source_refs("
+                "summary_id, source_kind, source_id) VALUES (?, ?, ?)",
+                [(summary_id, "observation", i) for i in unique_obs]
+                + [(summary_id, "span", i) for i in unique_spans],
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        saved = self._block_summary_by_id(summary_id)
+        if saved is None:  # pragma: no cover - insert above would have raised
+            raise RuntimeError("block summary row was not inserted")
+        return saved
+
+    def block_summaries_for_range(self, start_ts: float, end_ts: float) -> list[dict]:
+        """Return block summaries OVERLAPPING [start_ts, end_ts] plus their refs."""
+        rows = self.conn.execute(
+            "SELECT * FROM block_summaries WHERE start_ts <= ? AND end_ts >= ? "
+            "ORDER BY start_ts",
+            (float(end_ts), float(start_ts)),
+        ).fetchall()
+        return [self._block_summary_with_refs(dict(r)) for r in rows]
+
+    def block_summaries_for_date(self, local_date: str) -> list[dict]:
+        """Return block summaries for one local date plus their refs."""
+        rows = self.conn.execute(
+            "SELECT * FROM block_summaries WHERE local_date = ? ORDER BY start_ts",
+            (local_date,),
+        ).fetchall()
+        return [self._block_summary_with_refs(dict(r)) for r in rows]
+
+    def block_summary_keys(self) -> dict[str, str]:
+        """Return ``block_key -> block_fingerprint`` (cheap pending-work probe)."""
+        rows = self.conn.execute(
+            "SELECT block_key, block_fingerprint FROM block_summaries"
+        ).fetchall()
+        return {r["block_key"]: r["block_fingerprint"] for r in rows}
+
+    def _block_summary_by_id(self, summary_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM block_summaries WHERE id = ?", (summary_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._block_summary_with_refs(dict(row))
+
+    def _block_summary_with_refs(self, item: dict) -> dict:
+        refs = self.conn.execute(
+            "SELECT source_kind, source_id FROM block_summary_source_refs "
+            "WHERE summary_id = ? ORDER BY source_kind, source_id",
+            (item["id"],),
+        ).fetchall()
+        item["source_refs"] = [
+            {"source_kind": r["source_kind"], "source_id": r["source_id"]}
+            for r in refs
+        ]
+        return item
+
+    def get_category_assignments(self) -> dict[str, str]:
+        """Return the LLM-fallback taxonomy cache as ``identity_key -> level``."""
+        rows = self.conn.execute(
+            "SELECT identity_key, level FROM category_assignments"
+        ).fetchall()
+        return {r["identity_key"]: r["level"] for r in rows}
+
+    def save_category_assignment(self, identity_key: str, level: str, model: str) -> None:
+        """Cache one LLM-derived taxonomy level (identity key + level only)."""
+        if level not in _TAXONOMY_LEVELS:
+            raise ValueError(f"unknown taxonomy level: {level!r}")
+        try:
+            self._begin()
+            self.conn.execute(
+                "INSERT INTO category_assignments(identity_key, level, model, generated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(identity_key) DO UPDATE SET "
+                "level = excluded.level, model = excluded.model, "
+                "generated_at = excluded.generated_at",
+                (identity_key, level, model, time.time()),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     # -- reasoning send ledger ------------------------------------------------
 
@@ -1290,9 +1500,14 @@ class MemoryStore:
                 ).fetchone()["c"]
                 # Derived day memories are sensitive distilled data. Remove them
                 # explicitly before the raw observation wipe so no synthesized
-                # daily artifact survives a full purge.
+                # daily artifact survives a full purge. Block summaries and the
+                # taxonomy cache are likewise LLM-derived from captured content
+                # — a full purge wipes them too.
                 cur.execute("DELETE FROM day_memories")
                 cur.execute("DELETE FROM day_memory_source_refs")
+                cur.execute("DELETE FROM block_summaries")
+                cur.execute("DELETE FROM block_summary_source_refs")
+                cur.execute("DELETE FROM category_assignments")
                 cur.execute("DELETE FROM reasoning_send_ledger")
                 cur.execute("DELETE FROM observations")
                 cur.execute("DELETE FROM activity_spans")
@@ -1332,6 +1547,10 @@ class MemoryStore:
             # Span deletion fires trg_day_memory_source_span_delete, which
             # invalidates any day memory citing a deleted span; observations
             # referencing a deleted span get span_id NULLed by the FK.
+            # No new SQL is needed for block summaries here: the observation/
+            # span deletes above fire trg_block_summary_source_*_delete, and
+            # (recursive_triggers ON) each deleted summary in turn fires
+            # trg_day_memory_source_summary_delete for day memories citing it.
             cur.execute(f"DELETE FROM activity_spans WHERE {span_where}", (param,))
 
             # Drop blobs now orphaned (no remaining observations). FK ON DELETE
@@ -1460,6 +1679,8 @@ class MemoryStore:
             "vectors": count("vec_chunks"),
             "day_memories": count("day_memories"),
             "activity_spans": count("activity_spans"),
+            "block_summaries": count("block_summaries"),
+            "category_assignments": count("category_assignments"),
             "embed_dim": self.embed_dim,
             "cohort_key": cohort_row["value"] if cohort_row else None,
             "encryption_enabled": self.settings.encryption_enabled,

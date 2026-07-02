@@ -135,9 +135,13 @@ CREATE INDEX IF NOT EXISTS idx_day_memories_date_scope
 -- source_kind types the citation so day memories can cite spans as well as
 -- observations; integrity is enforced by the BEFORE INSERT triggers below
 -- (typed refs cannot use a single FK).
+-- ``source_kind`` gained 'summary' in v5 (a day memory may cite a block
+-- summary). SQLite cannot ALTER a CHECK, so the v5 migration REBUILDS this
+-- table on upgrading DBs; here it carries the final shape for fresh DBs (the
+-- migration's sqlite_master probe then no-ops). NO DROP statements here.
 CREATE TABLE IF NOT EXISTS day_memory_source_refs (
     day_memory_id TEXT NOT NULL REFERENCES day_memories(id) ON DELETE CASCADE,
-    source_kind   TEXT NOT NULL CHECK (source_kind IN ('observation','span')),
+    source_kind   TEXT NOT NULL CHECK (source_kind IN ('observation','span','summary')),
     source_id     TEXT NOT NULL,
     PRIMARY KEY (day_memory_id, source_kind, source_id)
 );
@@ -184,6 +188,121 @@ BEGIN
         SELECT day_memory_id
         FROM day_memory_source_refs
         WHERE source_kind = 'span' AND source_id = OLD.span_id
+    );
+END;
+
+-- Idle-time block summaries (v5, Phase D): one local-model prose summary per
+-- settled focus block. ``summary_text`` is DERIVED SENSITIVE data (distilled
+-- from captured content) — it lives only in this encrypted DB and is never
+-- logged; loggers emit counts and reason codes only.
+CREATE TABLE IF NOT EXISTS block_summaries (
+    id                TEXT PRIMARY KEY,
+    local_date        TEXT NOT NULL,
+    block_key         TEXT NOT NULL UNIQUE,   -- sha256 over the block's sorted span_ids
+    block_fingerprint TEXT NOT NULL,          -- sha256 over sorted (span_id, end_ts): staleness probe
+    start_ts          REAL NOT NULL,
+    end_ts            REAL NOT NULL,
+    dominant_bundle   TEXT,
+    level             TEXT CHECK (level IS NULL OR level IN
+                      ('focus_work','other_work','neutral','personal','distracting')),
+    summary_text      TEXT NOT NULL,          -- DERIVED SENSITIVE: never logged
+    model             TEXT NOT NULL,
+    extractor_version TEXT NOT NULL,
+    generated_at      REAL NOT NULL,
+    source_count      INTEGER NOT NULL,
+    CHECK (end_ts >= start_ts)
+);
+
+CREATE INDEX IF NOT EXISTS idx_block_summaries_date  ON block_summaries(local_date);
+CREATE INDEX IF NOT EXISTS idx_block_summaries_start ON block_summaries(start_ts);
+
+-- Typed source refs for block summaries (mirrors day_memory_source_refs):
+-- integrity is enforced by the BEFORE INSERT triggers below, deletion cascade
+-- by the BEFORE DELETE triggers on the source tables.
+CREATE TABLE IF NOT EXISTS block_summary_source_refs (
+    summary_id  TEXT NOT NULL REFERENCES block_summaries(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('observation','span')),
+    source_id   TEXT NOT NULL,
+    PRIMARY KEY (summary_id, source_kind, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_block_summary_source_refs_source
+    ON block_summary_source_refs(source_kind, source_id);
+
+-- LLM-fallback taxonomy cache ONLY (rules and user overrides are config, never
+-- cached here). Stores identity key + level + provenance metadata — no captured
+-- content. LLM-derived from captured context, so a full purge wipes it.
+CREATE TABLE IF NOT EXISTS category_assignments (
+    identity_key TEXT PRIMARY KEY,              -- 'bundle:<id>' | 'host:<host>'
+    level        TEXT NOT NULL CHECK (level IN
+                 ('focus_work','other_work','neutral','personal','distracting')),
+    model        TEXT NOT NULL,
+    generated_at REAL NOT NULL
+);
+
+-- Insert-time integrity per source_kind (mirrors the day-memory triggers): a
+-- block summary must never cite a missing source.
+CREATE TRIGGER IF NOT EXISTS trg_block_summary_source_refs_obs_exists
+BEFORE INSERT ON block_summary_source_refs
+WHEN NEW.source_kind = 'observation'
+    AND NOT EXISTS (SELECT 1 FROM observations WHERE id = NEW.source_id)
+BEGIN
+    SELECT RAISE(ABORT, 'block_summary_source_refs: unknown observation ref');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_block_summary_source_refs_span_exists
+BEFORE INSERT ON block_summary_source_refs
+WHEN NEW.source_kind = 'span'
+    AND NOT EXISTS (SELECT 1 FROM activity_spans WHERE span_id = NEW.source_id)
+BEGIN
+    SELECT RAISE(ABORT, 'block_summary_source_refs: unknown span ref');
+END;
+
+-- Deleting a cited source invalidates the derived block summary (BEFORE DELETE
+-- so the junction row is still readable, exactly like the day-memory pair).
+CREATE TRIGGER IF NOT EXISTS trg_block_summary_source_observation_delete
+BEFORE DELETE ON observations
+BEGIN
+    DELETE FROM block_summaries
+    WHERE id IN (
+        SELECT summary_id
+        FROM block_summary_source_refs
+        WHERE source_kind = 'observation' AND source_id = OLD.id
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_block_summary_source_span_delete
+BEFORE DELETE ON activity_spans
+BEGIN
+    DELETE FROM block_summaries
+    WHERE id IN (
+        SELECT summary_id
+        FROM block_summary_source_refs
+        WHERE source_kind = 'span' AND source_id = OLD.span_id
+    );
+END;
+
+-- Summary-kind integrity + invalidation for day memories. The summary-delete
+-- trigger fires when a block summary is removed DIRECTLY or by the cascade
+-- triggers above — the latter chain (span delete -> block summary delete ->
+-- day memory delete) requires PRAGMA recursive_triggers = ON, which the store
+-- sets and VERIFIES per connection before applying this schema.
+CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_refs_summary_exists
+BEFORE INSERT ON day_memory_source_refs
+WHEN NEW.source_kind = 'summary'
+    AND NOT EXISTS (SELECT 1 FROM block_summaries WHERE id = NEW.source_id)
+BEGIN
+    SELECT RAISE(ABORT, 'day_memory_source_refs: unknown summary ref');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_day_memory_source_summary_delete
+BEFORE DELETE ON block_summaries
+BEGIN
+    DELETE FROM day_memories
+    WHERE id IN (
+        SELECT day_memory_id
+        FROM day_memory_source_refs
+        WHERE source_kind = 'summary' AND source_id = OLD.id
     );
 END;
 

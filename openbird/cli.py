@@ -51,6 +51,9 @@ app = typer.Typer(
 )
 
 routine_app = typer.Typer(help="Manage and run scheduled routines.", no_args_is_help=True)
+summaries_app = typer.Typer(
+    help="Build and inspect idle-time block summaries.", no_args_is_help=True
+)
 eval_app = typer.Typer(help="Run local eval harnesses.", no_args_is_help=True)
 day_memory_app = typer.Typer(
     help="Build and inspect deterministic daily memory artifacts.",
@@ -61,6 +64,7 @@ deep_brain_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(routine_app, name="routine")
+app.add_typer(summaries_app, name="summaries")
 app.add_typer(eval_app, name="eval")
 app.add_typer(day_memory_app, name="day-memory")
 app.add_typer(deep_brain_app, name="deep-brain")
@@ -777,14 +781,24 @@ def briefing(
 
 
 def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> None:
-    """Default briefing: deterministic, no-model, local-only day-memory summary."""
+    """Default briefing: deterministic, no-model, local-only day-memory summary.
+
+    When stored block summaries exist for the day, their chronological narrative
+    is composed AFTER the facts prose via the SHARED
+    :func:`openbird.day_memory.compose_day_narrative` helper (same one the chat
+    day route uses, so the surfaces cannot drift) — and the reported
+    ``reasoning_route`` truthfully flips to ``local_cached_model_summary``: the
+    narrative is precomputed local-model prose (no provider call happens here).
+    """
     from openbird.day_memory import (
+        compose_day_narrative,
         day_memory_context,
         local_date_for_window,
         render_day_memory_prose,
     )
     from openbird.routines.templates import select_briefing_sources
 
+    local_date = local_date_for_window(start)
     store = _store_maintenance()
     try:
         # Fetch the grounding rows for the source trail, and (re)build the persisted
@@ -794,16 +808,27 @@ def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> Non
         # threading pre-fetched rows through the store API).
         rows = store.time_range_text(start, end, source="capture")
         saved = store.ensure_day_memory(
-            local_date=local_date_for_window(start),
+            local_date=local_date,
             start_ts=start,
             end_ts=end,
             day_offset=day,
             source_scope="capture",
         )
+        # hasattr-guarded (parity with the chat route) so simpler store stubs
+        # keep working; a missing reader simply composes no narrative.
+        reader = getattr(store, "block_summaries_for_date", None)
+        summaries = (reader(local_date) or []) if callable(reader) else []
     finally:
         store.close()
 
     text = render_day_memory_prose(saved.get("payload", {}))
+    reasoning_route = "local_deterministic"
+    narrative, _summary_citations = compose_day_narrative(
+        saved.get("payload", {}), summaries
+    )
+    if narrative:
+        text = f"{text}\n\n{narrative}"
+        reasoning_route = "local_cached_model_summary"
     sources, total_sources = select_briefing_sources(rows)
     if as_json:
         _console.print_json(
@@ -813,8 +838,11 @@ def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> Non
                     "start": start,
                     "end": end,
                     "text": text,
-                    # No model touched the data; the route the UI shows is truthful.
-                    "reasoning_route": "local_deterministic",
+                    # Route truthfulness: local_deterministic when no model prose
+                    # is present; local_cached_model_summary when precomputed
+                    # block-summary narrative was composed in (still no egress
+                    # and no provider call at briefing time).
+                    "reasoning_route": reasoning_route,
                     "memory_context": day_memory_context(saved),
                     "sources": sources,
                     # Full count of distinct grounding groups; > len(sources) means
@@ -2252,6 +2280,98 @@ def routine_uninstall(
             "failed; the running job may persist until logout or a manual unload."
         )
         raise typer.Exit(code=1)
+
+
+# --------------------------------------------------------------------------- #
+# summaries (Phase D block summaries)                                         #
+# --------------------------------------------------------------------------- #
+
+
+def _parse_local_date(value: str) -> tuple[float, float]:
+    """Return the [start, end] bounds of a local ``YYYY-MM-DD`` day."""
+    try:
+        day = _dt.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        _err_console.print(f"[red]Invalid --date:[/] expected YYYY-MM-DD, got {value!r}")
+        raise typer.Exit(code=2) from exc
+    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + _dt.timedelta(days=1) - _dt.timedelta(microseconds=1)
+    return start.timestamp(), end.timestamp()
+
+
+@summaries_app.command("build")
+def summaries_build(
+    date: Optional[str] = typer.Option(
+        None, "--date", help="Local day to build (YYYY-MM-DD); default: trailing lookback."
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Bypass the battery/idle gate and the settle delay (NEVER the cloud gate).",
+    ),
+) -> None:
+    """Build block summaries on demand (same bounded runner the routine uses).
+
+    Output is counts + reason codes only — summary bodies stay in the encrypted
+    memory DB (`openbird summaries list` shows them interactively).
+    """
+    from openbird.summaries import format_counts_line, run_block_summaries
+
+    window = _parse_local_date(date) if date else None
+    provider = _provider()
+    store = _store(provider=provider)
+    try:
+        counts = run_block_summaries(
+            store,
+            provider,
+            now=time.time(),
+            settings=get_settings(),
+            force=force,
+            window=window,
+        )
+    finally:
+        store.close()
+    _console.print(f"[green]block summaries:[/] {format_counts_line(counts)}")
+
+
+@summaries_app.command("list")
+def summaries_list(
+    date: Optional[str] = typer.Option(
+        None, "--date", help="Local day to list (YYYY-MM-DD); default: today."
+    ),
+) -> None:
+    """List stored block summaries for one local day.
+
+    Summary text (derived sensitive) is printed ONLY on an interactive
+    terminal; a piped/captured invocation gets metadata (times, model, source
+    counts) so summary bodies never land in logs or scrollback files.
+    """
+    local_date = date or _dt.date.today().isoformat()
+    if date:
+        _parse_local_date(date)  # validate format
+    store = _store_maintenance()
+    try:
+        rows = store.block_summaries_for_date(local_date)
+    finally:
+        store.close()
+    if not rows:
+        _console.print(f"[yellow]No block summaries stored for {local_date}.[/]")
+        return
+    interactive = sys.stdout.isatty()
+    for row in rows:
+        header = (
+            f"{_fmt_ts(row['start_ts'])} -> {_fmt_ts(row['end_ts'])} "
+            f"bundle={row.get('dominant_bundle') or '-'} "
+            f"level={row.get('level') or '-'} sources={row.get('source_count', 0)} "
+            f"model={row.get('model')}"
+        )
+        _console.print(f"[bold]{escape(header)}[/]")
+        if interactive:
+            _console.print(f"  {escape(str(row.get('summary_text') or ''))}")
+    if not interactive:
+        _console.print(
+            f"[dim]{len(rows)} summary bodies withheld (non-interactive output).[/]"
+        )
 
 
 # --------------------------------------------------------------------------- #

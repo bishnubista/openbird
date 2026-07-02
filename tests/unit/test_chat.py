@@ -2065,3 +2065,156 @@ def test_chat_cli_negative_day_exits_2():
 
     res = CliRunner().invoke(cli.app, ["chat", "q", "--day", "-1", "--json"])
     assert res.exit_code == 2
+
+
+# -- Phase D: day answers composed from facts + block summaries -----------------
+
+
+def _summary_day_store(mem_settings, fake_provider):
+    """Real store with one observation + one span on 2026-06-13."""
+    import datetime as dt
+
+    store = MemoryStore(db_path=":memory:", settings=mem_settings, provider=fake_provider)
+    start = dt.datetime(2026, 6, 13, 0, 0, 0).timestamp()
+    end = dt.datetime(2026, 6, 13, 23, 59, 59).timestamp()
+    obs = store.add_observation(
+        "Worked on https://github.com/bishnubista/openbird/pull/168 review",
+        source="capture",
+        app="com.google.Chrome",
+        window="feat(memory): add deterministic day memory CLI",
+        url="https://github.com/bishnubista/openbird/pull/168",
+        ts=start + 3600,
+    )
+    span_id = store.open_span(
+        epoch_id="e", start_ts=start + 3600, end_ts=start + 4500,
+        bundle_id="com.google.Chrome", detail_tier=1,
+    )
+    return store, obs, span_id, start, end
+
+
+def _save_day_block_summary(store, obs, span_id, start):
+    return store.save_block_summary(
+        local_date="2026-06-13",
+        block_key="k-chat",
+        block_fingerprint="f-chat",
+        start_ts=start + 3600,
+        end_ts=start + 4500,
+        dominant_bundle="com.google.Chrome",
+        level=None,
+        summary_text="Reviewed the day-memory CLI pull request.",
+        model="ollama/qwen3:8b",
+        extractor_version="block-summary-v1",
+        observation_ids=[obs.id],
+        span_ids=[span_id],
+    )
+
+
+def test_day_answer_composes_block_summaries_and_flips_route(
+    mem_settings, fake_provider
+):
+    store, obs, span_id, start, end = _summary_day_store(mem_settings, fake_provider)
+    try:
+        saved = _save_day_block_summary(store, obs, span_id, start)
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: end
+
+        result = chatter.answer("what did I work on today?", window=(start, end))
+
+        # The prose was PRECOMPUTED: zero completions at answer time.
+        assert llm.calls == 0
+        assert result.reasoning_route == "local_cached_model_summary"
+        assert result.grounding == "derived"
+        assert "Reviewed the day-memory CLI pull request." in result.answer
+        # Chronological "HH:MM-HH:MM — <text>" narrative line present
+        # (hyphen-minus time window per lint; em dash separates the text).
+        assert "01:00-01:15 —" in result.answer
+
+        block_citations = [
+            c for c in result.derived_citations if c.type == "block_summary"
+        ]
+        assert len(block_citations) == 1
+        citation = block_citations[0]
+        assert citation.source_id == saved["id"]
+        assert citation.derived_from == [obs.id]  # legacy list: observations only
+        assert citation.derived_from_refs == [
+            {"source_kind": "observation", "source_id": obs.id},
+            {"source_kind": "span", "source_id": span_id},
+        ]
+        # Indexes stay contiguous across base + summary citations.
+        assert [c.index for c in result.derived_citations] == list(
+            range(1, len(result.derived_citations) + 1)
+        )
+
+        public = result.to_public_dict()
+        assert public["reasoning_route"] == "local_cached_model_summary"
+        assert any(
+            c["type"] == "block_summary"
+            and c["derived_from_refs"]
+            == [
+                {"source_kind": "observation", "source_id": obs.id},
+                {"source_kind": "span", "source_id": span_id},
+            ]
+            for c in public["derived_citations"]
+        )
+        # Every derived citation serializes BOTH the legacy and the typed field.
+        assert all(
+            "derived_from" in c and "derived_from_refs" in c
+            for c in public["derived_citations"]
+        )
+    finally:
+        store.close()
+
+
+def test_day_answer_without_summaries_is_byte_identical_local_deterministic(
+    mem_settings, fake_provider
+):
+    store, obs, span_id, start, end = _summary_day_store(mem_settings, fake_provider)
+    try:
+        llm = BoomLLM()
+        chatter = RAG(store, llm)
+        chatter._now = lambda: end
+
+        baseline = chatter.answer("what did I work on today?", window=(start, end))
+        assert baseline.reasoning_route == "local_deterministic"
+
+        _save_day_block_summary(store, obs, span_id, start)
+        composed = chatter.answer("what did I work on today?", window=(start, end))
+        assert composed.reasoning_route == "local_cached_model_summary"
+        assert composed.answer != baseline.answer
+
+        # Remove the summary (regenerate-delete path): the answer reverts to the
+        # BYTE-IDENTICAL deterministic text and route.
+        store.conn.execute("DELETE FROM block_summaries")
+        reverted = chatter.answer("what did I work on today?", window=(start, end))
+        assert reverted.reasoning_route == "local_deterministic"
+        assert reverted.answer == baseline.answer
+        assert llm.calls == 0
+    finally:
+        store.close()
+
+
+def test_day_answer_deleted_source_summary_vanishes(mem_settings, fake_provider):
+    """Deleting a cited span trigger-deletes the summary; the answer composes
+    nothing (answer-time composition needs no freshness plumbing)."""
+    store, obs, span_id, start, end = _summary_day_store(mem_settings, fake_provider)
+    try:
+        _save_day_block_summary(store, obs, span_id, start)
+        store.conn.execute(
+            "DELETE FROM activity_spans WHERE span_id = ?", (span_id,)
+        )
+        assert store.block_summaries_for_date("2026-06-13") == []
+
+        chatter = RAG(store, BoomLLM())
+        chatter._now = lambda: end
+        result = chatter.answer("what did I work on today?", window=(start, end))
+        assert result.reasoning_route == "local_deterministic"
+        assert "Reviewed the day-memory CLI pull request." not in result.answer
+    finally:
+        store.close()
+
+
+def test_day_answer_store_without_summary_reader_stays_deterministic():
+    """A store lacking block_summaries_for_date keeps the deterministic route."""
+    chatter = RAG(StubStore([]), BoomLLM())
+    assert chatter._day_block_summaries("2026-06-13") == []

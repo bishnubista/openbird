@@ -59,6 +59,16 @@ final class TodayTimelineDecodingTests: XCTestCase {
         {"text": "Local model prose.", "reasoning_route": "local_model"}
         """)
         XCTAssertEqual(localModel?.routeLabel, "Local model")
+
+        // Phase D: deterministic day facts composed with PRECOMPUTED local-model
+        // block-summary prose must disclose the model prose — never render the
+        // plain deterministic label, and never render NO label.
+        let cachedSummary = OpenBirdService.parseBriefing("""
+        {"text": "Facts. 10:05\u{2013}11:20 \u{2014} block prose.", \
+        "reasoning_route": "local_cached_model_summary"}
+        """)
+        XCTAssertEqual(cachedSummary?.reasoningRoute, "local_cached_model_summary")
+        XCTAssertEqual(cachedSummary?.routeLabel, "Local summary (cached model prose)")
     }
 
     func testParseBriefingUnknownReasoningRouteIsNeutral() {

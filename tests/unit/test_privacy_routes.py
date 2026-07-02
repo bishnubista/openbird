@@ -562,3 +562,51 @@ def test_egress_manifest_declares_no_undeclared_optin_call_site_route() -> None:
         f"CLOUD_EGRESS_ROUTES registry. manifest={sorted(call_site_routes)} "
         f"registry={sorted(CLOUD_EGRESS_ROUTES.values())}"
     )
+
+
+def test_chat_day_memory_cached_summary_route_is_local_and_truthful() -> None:
+    """The Phase D composed-day-answer route: local, no answer-time egress, and
+    the disclosure surfaces (route field + BOTH app labels) are pinned."""
+    route = _routes()["chat.day_memory_cached_summary"]
+
+    assert route["class"] == "local"
+    assert set(route["derives_from"]) == {"chat.day_memory", "summaries.block"}
+    assert set(route["storage"]) == {"sqlite.day_memories", "sqlite.block_summaries"}
+    assert route["egress"]["default"] == "none"
+    note = route["egress"]["note"]
+    assert "no provider call" in note
+    assert "battery/idle gate" in note
+    assert "byte-identical" in note
+    assert "stored_block_summary_prose" in route["captured_fields"]
+    assert "derived_citation_typed_source_refs" in route["captured_fields"]
+    assert "captured_text" in route["forbidden_fields"]
+    # The app must label this route on BOTH surfaces (chat + briefing).
+    assert set(route["truth_surface"]) == {
+        "cli.chat_json.reasoning_route",
+        "app.ChatResult.routeLabel",
+        "app.DayBriefing.routeLabel",
+    }
+
+
+def test_summaries_block_route_declares_gated_generation_and_counts_only() -> None:
+    route = _routes()["summaries.block"]
+
+    assert route["class"] == "local"
+    assert route["derives_from"] == ["capture.active_window"]
+    assert set(route["storage"]) == {
+        "sqlite.block_summaries",
+        "sqlite.category_assignments",
+    }
+    # Generation inherits the active model route (cloud-opted users opted in);
+    # the note pins the battery/idle gate + CloudOptInRequired enforcement.
+    assert route["egress"]["default"] == "inherits_active_model_route"
+    note = route["egress"]["note"]
+    assert "battery/idle gate" in note
+    assert "CloudOptInRequired" in note
+    assert "counts + reason codes only" in note
+    assert "summary_text_in_logs" in route["forbidden_fields"]
+    assert "summary_text_in_routine_output" in route["forbidden_fields"]
+    deletion = route["deletion"]["must_remove"]
+    assert "block_summaries_citing_deleted_sources" in deletion
+    assert "day_memories_citing_deleted_summaries" in deletion
+    assert "category_assignments_on_full_purge" in deletion

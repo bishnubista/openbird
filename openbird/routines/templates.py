@@ -33,6 +33,7 @@ from openbird.types import Observation
 logger = logging.getLogger(__name__)
 
 # Interval constants (seconds).
+HOUR = 3600.0
 DAY = 86400.0
 WEEK = 7 * DAY
 
@@ -173,12 +174,25 @@ def _trailing_window(ts: float, *, span: float) -> tuple[float, float]:
 
 @dataclass(frozen=True)
 class RoutineTemplate:
-    """A read-only routine: a named time-range summary with a default cadence."""
+    """A read-only routine: a named time-range summary with a default cadence.
+
+    ``runner_fn`` (Phase D) lets a builtin supply its OWN execution body instead
+    of the time-range summarize pipeline (the ``block-summaries`` worker); it
+    must honor the same ``(store, provider, *, now) -> str`` contract and return
+    METADATA-ONLY text (the routine store may be plaintext).
+
+    ``coalesce_catchup`` marks routines whose runner already scans a trailing
+    window, so N missed occurrences after downtime need exactly ONE bounded run
+    — the scheduler's catch-up loop handles the flag (see
+    ``RoutineScheduler.run_missed``).
+    """
 
     name: str
     prompt: str
     interval: float
     window: WindowFn
+    runner_fn: Callable[..., str] | None = None
+    coalesce_catchup: bool = False
 
     def run(self, store: object, provider: object, *, now: float) -> str:
         """Execute the template and return the text to deliver.
@@ -194,6 +208,8 @@ class RoutineTemplate:
             The generated summary text. When the window is empty a deterministic
             "no activity" line is returned without calling the LLM.
         """
+        if self.runner_fn is not None:
+            return self.runner_fn(store, provider, now=now)
         start, end = self.window(now)
         return self.run_window(store, provider, start, end)
 
@@ -562,8 +578,43 @@ WEEKLY_SUMMARY = RoutineTemplate(
     window=lambda now: _trailing_window(now, span=WEEK),
 )
 
+
+def _run_block_summaries(store: object, provider: object, *, now: float) -> str:
+    """Runner body for the ``block-summaries`` builtin (metadata-only output).
+
+    Delegates to :func:`openbird.summaries.run_block_summaries` (battery/idle
+    gate, bounded batch, taxonomy fallback) and returns the counts line ONLY —
+    summary bodies stay inside the encrypted memory DB, so this text is safe
+    for the plaintext-fallback routine store, ``null_deliverer`` logs, and
+    launchd stderr.
+    """
+    from openbird.config import get_settings
+    from openbird.summaries import format_counts_line, run_block_summaries
+
+    counts = run_block_summaries(
+        store, provider, now=now, settings=get_settings()
+    )
+    return format_counts_line(counts)
+
+
+BLOCK_SUMMARIES = RoutineTemplate(
+    name="block-summaries",
+    prompt=(
+        "Generate idle-time block summaries and taxonomy assignments "
+        "(metadata-only output; bodies stay in the encrypted memory DB)."
+    ),
+    interval=HOUR,
+    # The runner scans its own trailing lookback; the window is nominal.
+    window=lambda now: _trailing_window(now, span=HOUR),
+    runner_fn=_run_block_summaries,
+    # N missed hourly occurrences after downtime need ONE bounded run — the
+    # runner already rescans the lookback; the scheduler coalesces catch-up.
+    coalesce_catchup=True,
+)
+
 BUILTIN_TEMPLATES: dict[str, RoutineTemplate] = {
-    t.name: t for t in (DAILY_BRIEFING, YESTERDAYS_WORK, WEEKLY_SUMMARY)
+    t.name: t
+    for t in (DAILY_BRIEFING, YESTERDAYS_WORK, WEEKLY_SUMMARY, BLOCK_SUMMARIES)
 }
 
 
@@ -581,8 +632,10 @@ __all__ = [
     "DAILY_BRIEFING",
     "YESTERDAYS_WORK",
     "WEEKLY_SUMMARY",
+    "BLOCK_SUMMARIES",
     "BUILTIN_TEMPLATES",
     "get_template",
+    "HOUR",
     "DAY",
     "WEEK",
 ]

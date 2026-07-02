@@ -719,6 +719,7 @@ def test_builtin_templates_present():
         "daily-briefing",
         "yesterday",
         "weekly-summary",
+        "block-summaries",
     }
 
 
@@ -1128,3 +1129,197 @@ def test_agent_plist_path_respects_home(tmp_path):
 
     p = agent_plist_path(home=tmp_path)
     assert p == tmp_path / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
+
+
+# -- Phase D: coalesced catch-up (block-summaries style routines) ---------------
+
+
+def _hourly_grid(run_store, clock, *, name="coalesced", interval=3600.0):
+    return run_store.missed_occurrences(name, interval, now=clock())
+
+
+def test_coalesced_catchup_runs_exactly_one_bounded_invocation(run_store, clock):
+    """7 days of downtime => ONE runner invocation; the rest settle as done."""
+    calls: list[float] = []
+
+    def runner(store, provider, *, now):
+        calls.append(now)
+        return "summarized=0 skipped=0 ungrounded=0 classified=0 deferred_reason=none"
+
+    sched, _mem, _prov, _deliveries = _make_scheduler(run_store, clock)
+    sched.register("coalesced", "p", 3600.0, runner=runner, coalesce_catchup=True)
+    # Anchor: one settled run 7 days ago, then downtime until now.
+    anchor = clock() - 7 * 24 * 3600.0
+    run = run_store.claim("coalesced", anchor)
+    run_store.finish(run.id, status=STATUS_DONE, output="ok")
+
+    completed = sched.run_missed(lookback=None)
+
+    assert len(calls) == 1, "coalescing must invoke the runner exactly once"
+    assert len(completed) == 1
+    assert completed[0].status == STATUS_DONE
+    # Every previously missed occurrence is now terminal (never re-fires).
+    assert _hourly_grid(run_store, clock, name="coalesced") == []
+    # The settled (non-representative) rows carry the metadata-only marker.
+    from openbird.routines.store import CODE_COALESCED
+
+    marked = run_store._conn().execute(
+        "SELECT COUNT(*) c FROM routine_runs WHERE routine='coalesced' "
+        "AND status=? AND error_code=?",
+        (STATUS_DONE, CODE_COALESCED),
+    ).fetchone()["c"]
+    assert marked == 7 * 24 - 1  # all missed hours except the representative
+
+    # Idempotent re-fire: a second catch-up finds nothing and runs nothing.
+    completed_again = sched.run_missed(lookback=None)
+    assert completed_again == []
+    assert len(calls) == 1
+
+
+def test_coalesced_catchup_failure_leaves_remaining_unclaimed(run_store, clock):
+    """A failing representative leaves the other occurrences unclaimed, and a
+    rerun still coalesces to exactly one invocation."""
+    attempts: list[float] = []
+    fail = {"on": True}
+
+    def runner(store, provider, *, now):
+        attempts.append(now)
+        if fail["on"]:
+            raise RuntimeError("summarizer exploded")
+        return "ok"
+
+    sched, _mem, _prov, _deliveries = _make_scheduler(run_store, clock)
+    sched.register("coalesced", "p", 3600.0, runner=runner, coalesce_catchup=True)
+    anchor = clock() - 6 * 3600.0
+    run = run_store.claim("coalesced", anchor)
+    run_store.finish(run.id, status=STATUS_DONE, output="ok")
+
+    completed = sched.run_missed(lookback=None)
+    assert len(attempts) == 1
+    assert completed and completed[0].status == STATUS_ERROR
+    # ONLY the representative has a new row; the unrun occurrences were never
+    # claimed and NEVER marked coalesced/done (work-before-marking ordering).
+    from openbird.routines.store import CODE_COALESCED
+
+    marked = run_store._conn().execute(
+        "SELECT COUNT(*) c FROM routine_runs WHERE routine='coalesced' "
+        "AND error_code=?",
+        (CODE_COALESCED,),
+    ).fetchone()["c"]
+    assert marked == 0
+    rows = run_store._conn().execute(
+        "SELECT COUNT(*) c FROM routine_runs WHERE routine='coalesced'"
+    ).fetchone()["c"]
+    assert rows == 2  # the anchor + the failed representative only
+
+    # Recovery at the NEXT startup: newly due occurrences still coalesce into
+    # exactly ONE runner invocation (its trailing-window rescan covers the
+    # failed window's work) — never a storm.
+    fail["on"] = False
+    clock.advance(2 * 3600.0)
+    completed = sched.run_missed(lookback=None)
+    assert len(attempts) == 2
+    assert completed and completed[0].status == STATUS_DONE
+    assert _hourly_grid(run_store, clock, name="coalesced") == []
+
+
+def test_coalesced_catchup_failed_delivery_leaves_remaining_unclaimed(run_store, clock):
+    """Delivery failure on the representative also defers the settle step."""
+    def runner(store, provider, *, now):
+        return "counts line"
+
+    def bad_deliver(name: str, text: str) -> None:
+        raise OSError("sink down")
+
+    sched = RoutineScheduler(
+        memory_store=FakeMemoryStore(),
+        provider=FakeProvider(),
+        routine_store=run_store,
+        clock=clock,
+        deliverer=bad_deliver,
+    )
+    sched.register("coalesced", "p", 3600.0, runner=runner, coalesce_catchup=True)
+    anchor = clock() - 4 * 3600.0
+    run = run_store.claim("coalesced", anchor)
+    run_store.finish(run.id, status=STATUS_DONE, output="ok")
+
+    completed = sched.run_missed(lookback=None)
+    assert completed and completed[0].status == STATUS_ERROR
+    from openbird.routines.store import CODE_COALESCED
+
+    marked = run_store._conn().execute(
+        "SELECT COUNT(*) c FROM routine_runs WHERE routine='coalesced' "
+        "AND error_code=?",
+        (CODE_COALESCED,),
+    ).fetchone()["c"]
+    assert marked == 0
+
+
+def test_non_coalescing_routines_replay_every_missed_occurrence(run_store, clock):
+    """The default path is unchanged: every missed occurrence fires."""
+    calls: list[float] = []
+
+    def runner(store, provider, *, now):
+        calls.append(now)
+        return "ok"
+
+    sched, _mem, _prov, _deliveries = _make_scheduler(run_store, clock)
+    sched.register("plain", "p", 3600.0, runner=runner)
+    anchor = clock() - 4 * 3600.0
+    run = run_store.claim("plain", anchor)
+    run_store.finish(run.id, status=STATUS_DONE, output="ok")
+
+    sched.run_missed(lookback=None)
+    assert len(calls) == 4
+
+
+def test_block_summaries_template_registered_with_coalesce_flag(run_store, clock):
+    template = templates.BUILTIN_TEMPLATES["block-summaries"]
+    assert template.interval == templates.HOUR
+    assert template.coalesce_catchup is True
+    sched, _mem, _prov, _deliveries = _make_scheduler(run_store, clock)
+    routine = sched.register_template(template)
+    assert routine.coalesce_catchup is True
+
+
+def test_block_summaries_template_run_returns_counts_only(monkeypatch):
+    """The routine output line is metadata-only (safe for plaintext stores/logs)."""
+    from openbird import summaries as summaries_mod
+
+    seen: dict = {}
+
+    def fake_run(store, provider, *, now, settings, force=False, window=None):
+        seen["now"] = now
+        return {
+            "summarized": 3,
+            "skipped": 1,
+            "ungrounded": 0,
+            "classified": 2,
+            "deferred_reason": None,
+        }
+
+    monkeypatch.setattr(summaries_mod, "run_block_summaries", fake_run)
+    template = templates.BUILTIN_TEMPLATES["block-summaries"]
+    out = template.run(FakeMemoryStore(), FakeProvider(), now=123.0)
+    assert seen["now"] == 123.0
+    assert out == (
+        "summarized=3 skipped=1 ungrounded=0 classified=2 deferred_reason=none"
+    )
+
+
+def test_block_summaries_template_deferred_output_is_reason_code(monkeypatch):
+    from openbird import summaries as summaries_mod
+
+    def fake_run(store, provider, *, now, settings, force=False, window=None):
+        return {
+            "summarized": 0,
+            "skipped": 0,
+            "ungrounded": 0,
+            "classified": 0,
+            "deferred_reason": "battery_user_active",
+        }
+
+    monkeypatch.setattr(summaries_mod, "run_block_summaries", fake_run)
+    template = templates.BUILTIN_TEMPLATES["block-summaries"]
+    out = template.run(FakeMemoryStore(), FakeProvider(), now=1.0)
+    assert "deferred_reason=battery_user_active" in out

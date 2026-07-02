@@ -659,3 +659,122 @@ def test_span_id_survives_readback(store):
     rows = store.time_range_text(0.0, 1_000.0)
     assert rows, "expected the observation back"
     assert rows[0][0].span_id == sid
+
+
+# -- block summaries + taxonomy cache (Phase D / v5) ---------------------------
+
+
+def _save_test_block_summary(store, *, span_ids, observation_ids=(), key="k1",
+                             fingerprint="f1", text="worked on the memory schema"):
+    return store.save_block_summary(
+        local_date="2026-01-01",
+        block_key=key,
+        block_fingerprint=fingerprint,
+        start_ts=100.0,
+        end_ts=200.0,
+        dominant_bundle="com.apple.mail",
+        level=None,
+        summary_text=text,
+        model="ollama/qwen3:8b",
+        extractor_version="block-summary-v1",
+        observation_ids=list(observation_ids),
+        span_ids=list(span_ids),
+    )
+
+
+def test_save_block_summary_round_trip_with_typed_refs(store):
+    sid = _open_full_span(store)
+    obs = store.add_observation("body", source="capture", ts=105.0, span_id=sid)
+    saved = _save_test_block_summary(store, span_ids=[sid], observation_ids=[obs.id])
+    assert saved["block_key"] == "k1"
+    assert saved["summary_text"] == "worked on the memory schema"
+    assert saved["source_count"] == 2
+    assert {(r["source_kind"], r["source_id"]) for r in saved["source_refs"]} == {
+        ("observation", obs.id),
+        ("span", sid),
+    }
+    assert store.block_summary_keys() == {"k1": "f1"}
+    by_date = store.block_summaries_for_date("2026-01-01")
+    assert len(by_date) == 1 and by_date[0]["id"] == saved["id"]
+    by_range = store.block_summaries_for_range(150.0, 300.0)
+    assert len(by_range) == 1 and by_range[0]["id"] == saved["id"]
+    assert store.block_summaries_for_range(300.0, 400.0) == []
+
+
+def test_save_block_summary_regenerates_same_block_key(store):
+    sid = _open_full_span(store)
+    _save_test_block_summary(store, span_ids=[sid], fingerprint="f1", text="one")
+    saved = _save_test_block_summary(store, span_ids=[sid], fingerprint="f2", text="two")
+    rows = store.block_summaries_for_date("2026-01-01")
+    assert len(rows) == 1
+    assert rows[0]["id"] == saved["id"]
+    assert rows[0]["block_fingerprint"] == "f2"
+    assert rows[0]["summary_text"] == "two"
+
+
+def test_block_summary_ref_integrity_rejects_unknown_sources(store):
+    import pytest as _pytest
+
+    with _pytest.raises(Exception, match="unknown span ref"):
+        _save_test_block_summary(store, span_ids=["missing-span"])
+    with _pytest.raises(Exception, match="unknown observation ref"):
+        _save_test_block_summary(store, span_ids=[], observation_ids=["missing-obs"])
+    # The failed transaction rolled back — no parent row survived.
+    assert store.block_summary_keys() == {}
+
+
+def test_block_summary_deleted_when_cited_span_deleted(store):
+    sid = _open_full_span(store)
+    _save_test_block_summary(store, span_ids=[sid])
+    store.conn.execute("DELETE FROM activity_spans WHERE span_id = ?", (sid,))
+    assert store.block_summaries_for_date("2026-01-01") == []
+    assert store.conn.execute(
+        "SELECT COUNT(*) c FROM block_summary_source_refs"
+    ).fetchone()["c"] == 0
+
+
+def test_block_summary_deleted_when_cited_observation_deleted(store):
+    obs = store.add_observation("cited body", source="capture", ts=105.0)
+    _save_test_block_summary(store, span_ids=[], observation_ids=[obs.id])
+    store.delete(since_ts=100.0)
+    assert store.block_summaries_for_date("2026-01-01") == []
+
+
+def test_full_wipe_clears_block_summaries_and_taxonomy_cache(store):
+    sid = _open_full_span(store)
+    _save_test_block_summary(store, span_ids=[sid])
+    store.save_category_assignment("bundle:com.apple.mail", "other_work", "m")
+    assert store.stats()["block_summaries"] == 1
+    assert store.stats()["category_assignments"] == 1
+    store.delete(all=True)
+    assert store.stats()["block_summaries"] == 0
+    assert store.stats()["category_assignments"] == 0
+    assert store.block_summary_keys() == {}
+    assert store.get_category_assignments() == {}
+
+
+def test_category_assignment_round_trip_and_level_validation(store):
+    import pytest as _pytest
+
+    store.save_category_assignment("host:github.com", "focus_work", "m")
+    store.save_category_assignment("host:github.com", "other_work", "m2")  # upsert
+    assert store.get_category_assignments() == {"host:github.com": "other_work"}
+    with _pytest.raises(ValueError, match="unknown taxonomy level"):
+        store.save_category_assignment("host:x.com", "productive", "m")
+    with _pytest.raises(ValueError, match="unknown taxonomy level"):
+        store.save_block_summary(
+            local_date="2026-01-01", block_key="bad", block_fingerprint="f",
+            start_ts=0.0, end_ts=1.0, dominant_bundle=None, level="productive",
+            summary_text="t", model="m", extractor_version="v",
+            observation_ids=[], span_ids=[],
+        )
+
+
+def test_save_block_summary_rejects_zero_refs(store):
+    with pytest.raises(ValueError, match="at least one source ref"):
+        store.save_block_summary(
+            local_date="2026-01-01", block_key="k", block_fingerprint="f",
+            start_ts=1.0, end_ts=2.0, dominant_bundle=None, level=None,
+            summary_text="orphan prose", model="m", extractor_version="v",
+            observation_ids=[], span_ids=[],
+        )

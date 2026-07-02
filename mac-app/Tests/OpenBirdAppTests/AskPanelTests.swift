@@ -69,6 +69,16 @@ final class ChatResultRouteTests: XCTestCase {
             from: Data(#"{"answer":"ok","grounded":true,"citations":[],"reasoning_route":"cloud_reasoning_active"}"#.utf8)
         )
         XCTAssertEqual(cloud.routeLabel, "Cloud reasoning active")
+
+        // Phase D: a day answer composed with precomputed block-summary prose
+        // must carry the cached-model disclosure label — the app must never
+        // show this route as plain "Local only" or with no label at all.
+        let cachedSummary = try JSONDecoder().decode(
+            ChatResult.self,
+            from: Data(#"{"answer":"ok","grounded":true,"citations":[],"reasoning_route":"local_cached_model_summary"}"#.utf8)
+        )
+        XCTAssertEqual(cachedSummary.reasoningRoute, "local_cached_model_summary")
+        XCTAssertEqual(cachedSummary.routeLabel, "Local summary (cached model prose)")
     }
 
     func testDecodeChatResultUnknownRouteHasNoLabel() throws {

@@ -85,6 +85,11 @@ class DerivedCitation(BaseModel):
     This is intentionally separate from :class:`Citation`: aggregate facts such
     as "42 minutes coding" do not live inside one occurrence, so they must carry
     an explicit source set instead of pretending to be an occurrence excerpt.
+
+    ``derived_from`` remains the legacy observation-id-only list for client
+    compatibility; ``derived_from_refs`` (Phase D) is the TYPED source list
+    (``{"source_kind": "observation"|"span", "source_id": ...}``) so derived
+    artifacts backed by spans (block summaries) carry their full provenance.
     """
 
     index: int
@@ -94,6 +99,7 @@ class DerivedCitation(BaseModel):
     snippet: str
     derived_from: list[str]
     derived_from_total: int
+    derived_from_refs: list[dict] = Field(default_factory=list)
 
 
 class RoutineRun(BaseModel):

@@ -300,6 +300,11 @@ struct ChatResult: Codable, Equatable {
             return "Cloud reasoning active"
         case "local_model":
             return "Local model"
+        case "local_cached_model_summary":
+            // Deterministic day facts composed with PRECOMPUTED local-model
+            // block-summary prose (no provider call at answer time). Route
+            // truthfulness: this must never display as plain "Local only".
+            return "Local summary (cached model prose)"
         default:
             return nil
         }
@@ -365,6 +370,12 @@ struct DayBriefing: Codable, Equatable {
             return "Cloud reasoning active"
         case "local_model":
             return "Local model"
+        case "local_cached_model_summary":
+            // The briefing composed precomputed block-summary prose (generated
+            // earlier by the local model under the routines idle gate) into the
+            // deterministic day facts — disclose the model prose, never show
+            // the plain deterministic label for it.
+            return "Local summary (cached model prose)"
         default:
             return nil
         }

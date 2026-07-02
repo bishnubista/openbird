@@ -16,13 +16,16 @@ import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from openbird.types import Observation
+
+if TYPE_CHECKING:  # annotation-only: avoids a runtime import cycle risk
+    from openbird.types import DerivedCitation
 from openbird.reasoning_ledger import packet_payload_audit
 
-EXTRACTOR_VERSION = "day-memory-v7"
+EXTRACTOR_VERSION = "day-memory-v8"
 _UNGROUNDED_PRODUCTIVITY_COACH_ANSWER = (
     "I could not ground productivity coaching in the local facts packet."
 )
@@ -120,12 +123,21 @@ def build_day_memory(
     source_fingerprint: dict | None = None,
     as_of: float | None = None,
     spans: list[dict] | None = None,
+    taxonomy: dict | None = None,
+    taxonomy_fingerprint: str | None = None,
 ) -> DayMemoryBuild:
     """Build a deterministic, no-model day-memory payload.
 
     ``spans`` (activity_spans rows overlapping the window, Phase B) add the
     measured-time ``span_metrics`` block; every metric there is computed from
     span ground truth and cited via the build's ``span_ids``.
+
+    ``taxonomy`` (Phase D) is a PRE-RESOLVED ``identity_key -> level`` mapping
+    (overrides + rules + LLM cache, built by the caller — see
+    :func:`openbird.taxonomy.levels_for_spans`); when given, ``span_metrics``
+    gains the measured ``span_time_by_level`` breakdown and the
+    ``uncategorized_identity_seconds`` fallback queue, and the payload carries
+    ``taxonomy_fingerprint`` so an edited mapping invalidates the cached row.
     """
     ordered = sorted(rows, key=lambda item: _observation_sort_key(item[0]))
     source_ids = [obs.id for obs, _ in ordered]
@@ -188,19 +200,23 @@ def build_day_memory(
     }
     span_ids: list[str] = []
     if spans is not None:
-        metrics, span_ids = _span_metrics(spans, start_ts=start_ts, end_ts=end_ts)
+        metrics, span_ids = _span_metrics(
+            spans, start_ts=start_ts, end_ts=end_ts, taxonomy=taxonomy
+        )
         payload["span_metrics"] = metrics
         payload["span_fingerprint"] = span_fingerprint_for_spans(spans)
+        if taxonomy is not None and taxonomy_fingerprint is not None:
+            payload["taxonomy_fingerprint"] = taxonomy_fingerprint
     return DayMemoryBuild(payload=payload, source_ids=source_ids, span_ids=span_ids)
 
 
 # -- span-derived measured time (Phase B) -------------------------------------
 
-# Focus-block extraction over spans: maximal runs of non-AFK spans with small
-# inter-span gaps and low app diversity, long enough to mean sustained work.
-_SPAN_FOCUS_MAX_GAP = 60.0
-_SPAN_FOCUS_MAX_BUNDLES = 2
-_SPAN_FOCUS_MIN_SECONDS = 600.0
+# Focus-block extraction (gap/diversity/min-length rules) lives in
+# openbird.summaries.compute_span_blocks — the SINGLE source of block
+# boundaries shared with the Phase D block summarizer; _span_metrics calls it.
+# Cap on the uncategorized-identity fallback queue surfaced in span_metrics.
+_UNCATEGORIZED_IDENTITY_LIMIT = 8
 
 
 def span_fingerprint_for_spans(spans: list[dict]) -> dict:
@@ -223,16 +239,23 @@ def _clip_seconds(span: dict, start_ts: float, end_ts: float) -> tuple[float, fl
 
 
 def _span_metrics(
-    spans: list[dict], *, start_ts: float, end_ts: float
+    spans: list[dict], *, start_ts: float, end_ts: float, taxonomy: dict | None = None
 ) -> tuple[dict, list[str]]:
     """Deterministic measured-time metrics from activity spans (no model)."""
+    from openbird.taxonomy import (
+        LLM_FALLBACK_MIN_SECONDS,
+        bundle_key,
+        host_key,
+    )
+
     span_ids: list[str] = []
     time_by_app: Counter[str] = Counter()
     time_by_reason: Counter[str] = Counter()
     time_by_hour: Counter[str] = Counter()
+    time_by_level: Counter[str] = Counter()
+    identity_seconds: Counter[str] = Counter()
     afk_seconds = 0.0
     paused_seconds = 0.0
-    active: list[tuple[float, float, str, str]] = []  # (s, e, bundle, span_id)
 
     for span in sorted(spans, key=lambda x: float(x.get("start_ts") or 0.0)):
         s, e, seconds = _clip_seconds(span, start_ts, end_ts)
@@ -256,6 +279,20 @@ def _span_metrics(
             time_by_reason[str(reason)] += seconds
         bundle = span.get("bundle_id") or "(untracked)"
         time_by_app[bundle] += seconds
+        if taxonomy is not None:
+            # Measured level time (Phase D): host level outranks bundle level;
+            # unresolved identities pool under "uncategorized". Paused/AFK time
+            # was already excluded above — only active seconds are judged.
+            host = span.get("url_host")
+            raw_bundle = span.get("bundle_id")
+            level = taxonomy.get(host_key(str(host))) if host else None
+            if level is None and raw_bundle:
+                level = taxonomy.get(bundle_key(str(raw_bundle)))
+            time_by_level[level or "uncategorized"] += seconds
+            if raw_bundle:
+                identity_seconds[bundle_key(str(raw_bundle))] += seconds
+            if host:
+                identity_seconds[host_key(str(host))] += seconds
         # Split the span's active time at local hour boundaries.
         cursor = s
         while cursor < e:
@@ -266,41 +303,23 @@ def _span_metrics(
             segment_end = min(e, next_hour)
             time_by_hour[hour_start.strftime("%H:00")] += segment_end - cursor
             cursor = segment_end
-        active.append((s, e, bundle, span_id))
 
     # Focus blocks: contiguous non-AFK runs (gap < 60s, <= 2 distinct bundles,
-    # >= 10 min total).
-    focus_blocks: list[dict] = []
-    run: list[tuple[float, float, str, str]] = []
+    # >= 10 min total). Boundaries come from the SHARED extractor so the block
+    # summarizer and these metrics can never disagree (lazy import: summaries
+    # imports day_memory helpers at module level, so this side stays lazy).
+    from openbird.summaries import compute_span_blocks
 
-    def _flush_run() -> None:
-        if not run:
-            return
-        block_start, block_end = run[0][0], run[-1][1]
-        bundles = Counter(item[2] for item in run)
-        if (
-            block_end - block_start >= _SPAN_FOCUS_MIN_SECONDS
-            and len(bundles) <= _SPAN_FOCUS_MAX_BUNDLES
-        ):
-            focus_blocks.append(
-                {
-                    "start": block_start,
-                    "end": block_end,
-                    "seconds": round(block_end - block_start, 3),
-                    "dominant_bundle": bundles.most_common(1)[0][0],
-                    "span_ids": [item[3] for item in run],
-                }
-            )
-
-    for item in active:
-        if run and (
-            item[0] - run[-1][1] >= _SPAN_FOCUS_MAX_GAP
-            or len({x[2] for x in (*run, item)}) > _SPAN_FOCUS_MAX_BUNDLES
-        ):
-            _flush_run()
-            run = []
-        run.append(item)
-    _flush_run()
+    focus_blocks = [
+        {
+            "start": block.start_ts,
+            "end": block.end_ts,
+            "seconds": round(block.end_ts - block.start_ts, 3),
+            "dominant_bundle": block.dominant_bundle,
+            "span_ids": list(block.span_ids),
+        }
+        for block in compute_span_blocks(spans, start_ts=start_ts, end_ts=end_ts)
+    ]
 
     metrics = {
         "span_time_by_app": _round_counter(time_by_app),
@@ -312,6 +331,22 @@ def _span_metrics(
         "span_focus_blocks": focus_blocks,
         "span_coverage": {"span_count": len(span_ids)},
     }
+    if taxonomy is not None:
+        metrics["span_time_by_level"] = _round_counter(time_by_level)
+        # The idle-time worker's queue: identities with enough measured active
+        # time to be worth an LLM call but no resolved level yet. Bounded and
+        # deterministically ordered (most time first, then key).
+        pending = sorted(
+            (
+                (key, seconds)
+                for key, seconds in identity_seconds.items()
+                if seconds >= LLM_FALLBACK_MIN_SECONDS and key not in taxonomy
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )[:_UNCATEGORIZED_IDENTITY_LIMIT]
+        metrics["uncategorized_identity_seconds"] = {
+            key: round(seconds, 3) for key, seconds in pending
+        }
     return metrics, span_ids
 
 
@@ -763,11 +798,95 @@ def render_day_memory_prose(payload: dict) -> str:
         top = sorted(categories.items(), key=lambda kv: (-float(kv[1]), kv[0]))[:3]
         labels = ", ".join(f"{name} ({round(float(seconds) / 60)}m)" for name, seconds in top)
         pieces.append(f"Recorded time by category: {labels}.")
+    # Measured taxonomy time (Phase D): one DESCRIPTIVE sentence — narrative
+    # framing of where the measured minutes went, never a productivity score.
+    levels = (payload.get("span_metrics") or {}).get("span_time_by_level") or {}
+    named = sorted(
+        (
+            (name, float(seconds))
+            for name, seconds in levels.items()
+            if name != "uncategorized" and float(seconds) > 0
+        ),
+        key=lambda kv: (-kv[1], kv[0]),
+    )[:3]
+    if named:
+        from openbird.taxonomy import LEVEL_LABELS
+
+        labels = ", ".join(
+            f"{LEVEL_LABELS.get(name, name)} ({round(seconds / 60)}m)"
+            for name, seconds in named
+        )
+        pieces.append(f"Measured span time leaned toward {labels}.")
     loops = payload.get("open_loops", [])[:3]
     if loops:
         labels = ", ".join(str(item.get("title") or item.get("cue")) for item in loops)
         pieces.append(f"Detected follow-up/open-loop cues: {labels}.")
     return " ".join(pieces)
+
+
+def compose_day_narrative(
+    payload: dict, summaries: list[dict]
+) -> tuple[str, list["DerivedCitation"]]:
+    """Compose stored block summaries into a chronological day narrative.
+
+    Pure helper shared by the chat/Ask deterministic day route and the CLI
+    ``briefing`` default path so the two surfaces render the SAME narrative and
+    cannot drift. Returns ``("", [])`` when no usable summary exists — callers
+    then keep the byte-identical deterministic answer and its
+    ``local_deterministic`` route label. When non-empty, the caller MUST flip
+    its ``reasoning_route`` to ``local_cached_model_summary``: the narrative
+    sentences are PRECOMPUTED LOCAL-MODEL prose (generated earlier under the
+    routines battery/idle gate), and the route label must disclose that.
+
+    Each narrative line is ``HH:MM-HH:MM — <summary_text>``; each summary
+    contributes one typed :class:`DerivedCitation` (``type="block_summary"``)
+    carrying the summary's full typed source refs (``derived_from_refs``) plus
+    the legacy observation-id-only ``derived_from`` for client compatibility.
+    Composition happens at ANSWER time (never embedded into the day-memory
+    payload) so a trigger-deleted summary vanishes with no freshness plumbing.
+    """
+    from openbird.types import DerivedCitation
+
+    del payload  # narrative depends only on the stored summaries today
+    lines: list[str] = []
+    citations: list[DerivedCitation] = []
+    for summary in sorted(summaries, key=lambda s: float(s.get("start_ts") or 0.0)):
+        text = " ".join(str(summary.get("summary_text") or "").split())
+        summary_id = summary.get("id")
+        if not text or not summary_id:
+            continue
+        window = (
+            f"{_fmt_clock(float(summary.get('start_ts') or 0.0))}-"
+            f"{_fmt_clock(float(summary.get('end_ts') or 0.0))}"
+        )
+        lines.append(f"{window} — {text}")
+        refs = [
+            {"source_kind": str(r.get("source_kind")), "source_id": str(r.get("source_id"))}
+            for r in (summary.get("source_refs") or [])
+            if r.get("source_kind") and r.get("source_id")
+        ]
+        observation_ids = sorted(
+            {r["source_id"] for r in refs if r["source_kind"] == "observation"}
+        )
+        snippet = text if len(text) <= 240 else text[:239].rstrip() + "…"
+        citations.append(
+            DerivedCitation(
+                index=len(citations) + 1,
+                source_id=str(summary_id),
+                type="block_summary",
+                label=f"Block summary {window}",
+                snippet=snippet,
+                derived_from=observation_ids[:12],
+                derived_from_total=int(summary.get("source_count") or len(refs)),
+                derived_from_refs=refs,
+            )
+        )
+    return "\n".join(lines), citations
+
+
+def _fmt_clock(ts: float) -> str:
+    """Local HH:MM for narrative windows."""
+    return dt.datetime.fromtimestamp(ts).strftime("%H:%M")
 
 
 def day_memory_context(saved: dict) -> dict:

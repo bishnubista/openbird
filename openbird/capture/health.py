@@ -17,8 +17,12 @@ DEFAULT_RECENT_WINDOW_SECONDS = 24 * 60 * 60
 # ~10s by an eventing daemon (see daemon._LIVENESS_WRITE_INTERVAL), so a
 # sidecar older than 3x that gap means the daemon is gone or wedged. Per the
 # design budget: NEVER report "ok" off a stale timestamp; an absent/unreadable
-# sidecar is "unknown", never ok.
-_DAEMON_STALE_AFTER_SECONDS = 30.0
+# sidecar is "unknown", never ok. Public (SHARED, single definition): the
+# battery/idle gate in openbird.summaries imports it so both consumers agree on
+# what "fresh" means — never duplicate the number.
+DAEMON_STALE_AFTER_SECONDS = 30.0
+# Back-compat alias for the pre-Phase-D private name.
+_DAEMON_STALE_AFTER_SECONDS = DAEMON_STALE_AFTER_SECONDS
 
 
 def _policy_for_app(bundle_id: str, settings: Settings) -> dict[str, Any]:
@@ -194,4 +198,8 @@ def build_capture_health(
     }
 
 
-__all__ = ["DEFAULT_RECENT_WINDOW_SECONDS", "build_capture_health"]
+__all__ = [
+    "DAEMON_STALE_AFTER_SECONDS",
+    "DEFAULT_RECENT_WINDOW_SECONDS",
+    "build_capture_health",
+]
