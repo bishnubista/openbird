@@ -515,6 +515,87 @@ The product must answer two distinct query classes; they need different machiner
    narratives instead of fishing through raw capture chunks. Temporal routing already
    parses "last week"; widen it to route long windows to summary-first retrieval.
 
+#### Phase E1 — decisions as implemented (v6 schema, week rollup + summary indexing)
+
+Recording the adversarially-reviewed decisions so E2 builds on what actually
+shipped, not the sketch above:
+
+- **Week storage — NO `week_memories` table**: one row per ISO week in the
+  existing `day_memories` table with `local_date` = the week's MONDAY and
+  `source_scope='week'`. `UNIQUE(local_date, source_scope)` gives per-week
+  uniqueness for free, and the dormant v5
+  `trg_day_memory_source_summary_delete` trigger gives deletion-cascade
+  invalidation (block summary regenerated/deleted → citing week row dies,
+  recursively through the verified span→summary chain). Week refs are
+  SUMMARY-KIND ONLY; `save_week_memory` refuses zero refs in Python (mirroring
+  `save_block_summary`) and the v5 insert-integrity trigger backstops unknown
+  ids. The shared day-memory reader now returns `summary_ids` + a full typed
+  `source_refs` list (legacy `source_ids`/`span_ids` untouched).
+- **Freshness — fingerprint the stable substrate**: `member_fingerprint =
+  sha256(sorted (block_key, block_fingerprint) pairs)`, never day-memory ids
+  (day rows churn). Removals/regenerations self-heal via the delete trigger;
+  ADDITIONS are caught by fingerprint drift at the next routine pass. Past
+  weeks regenerate on drift only; the CURRENT week additionally waits
+  `week_rollup_min_interval_seconds` (default 21600) since the last generation
+  — a live week must not burn a model call every hour. A version bump alone
+  never regenerates (battery rule); an unknown/incompatible stored version
+  lazily upgrades once. `WEEK_EXTRACTOR_VERSION = "week-memory-v1"`.
+- **Generation — model reduce in the SAME routines pass**: `_summarize_week`
+  runs inside `run_block_summaries` (same battery/idle/meeting gate, same
+  catch-up coalescing, routine name unchanged). The prompt mirrors the block
+  prompt exactly (same FenceSpec, S-labels, JSON schema; persona key
+  `week_summary`); context = per-day METADATA header lines + one fenced line
+  per member block summary (capped at 60, longest preferred). Labels map ONLY
+  to block-summary ids; ZERO valid citations ⇒ nothing stored
+  (`week_memory_ungrounded`). Routine output stays counts-only
+  (`weeks= week_ungrounded= indexed=`).
+- **Summary indexing — parallel index tables, NOT synthetic observations**
+  (the riskiest decision, deliberate): `summary_index_entries` +
+  `fts_summaries` + `vec_summaries` (v6, `SCHEMA_VERSION = 6`; the vec table
+  is created in `_apply_schema` at `Settings.embed_dim`, like `vec_chunks`).
+  Rejected: (a) synthetic observations corrupt the occurrence model everywhere
+  `source` is unfiltered — summary prose would double-count as activity in
+  every temporal answer; (c) a `source_kind` on chunks collides with
+  content-addressed global dedup and yields uncitable hits. Day-facts prose is
+  deliberately NOT indexed (regenerated deterministically, churns on every
+  fingerprint drift); block summaries are the compact grounded narrative
+  layer.
+- **Deletion is an API-ENFORCED contract**: SQLite triggers clean only the
+  plain entries table (virtual tables cannot be written from triggers), so
+  every production deletion path — `delete()`/`prune()` (pre-selected doomed
+  ids), `save_block_summary` regeneration, `save_week_memory` regeneration —
+  sweeps the fts/vec rows for doomed `('block', id)` AND dependent
+  `('week', week_row_id)` rows in the SAME transaction, BEFORE the source
+  delete. Raw SQL deletes against `block_summaries`/week rows outside these
+  APIs are FORBIDDEN (documented in the store module + schema); `openbird
+  data integrity` carries an orphan-count probe as the safety net. The
+  embedding cohort counts BOTH vec tables (adoption rebuilds both); `openbird
+  reindex` re-embeds summary entries in the same transaction. `stats()` keeps
+  `day_memories` as the DAY count (verification scripts parse it) and adds
+  `week_memories` + `summary_index_entries`.
+- **Retrieval — summary-first for multi-day questions**: `_ContextItem` is an
+  explicit occurrence/summary UNION; `_validate_citations` returns
+  `(citations, derived)` and derived-only grounding passes the gate. The
+  terminal cached week answer (synthesis + multi-day window) composes stored
+  digests + per-day narratives + deterministic totals with NO provider call
+  (route `local_cached_model_summary`; shared `compose_week_answer`, also the
+  `openbird briefing --week` renderer). Below it, multi-day
+  `_answer_temporal`/`_answer_scoped_specific` build MODEL context from block
+  summaries + week digests (raw-row fallback under 2 items; raw chunks stay
+  the detail path); fresh completions keep their truthful `local_model`/
+  `cloud_reasoning_active` route — what changes is what egresses
+  (`chat.summary_grounded`). The semantic (no-window) path RRF-merges
+  `search_summaries` hits capped at 2 of the context slots. No regex changes.
+- **Privacy**: digest/summary text lives ONLY in the encrypted DB (derived
+  sensitive), never in logs or routine output; `docs/privacy-routes.yaml`
+  gains `summaries.week`, `chat.week_memory_cached_summary`, and
+  `chat.summary_grounded`, and `summaries.block`'s deletion contract now
+  includes the index rows. Cloud gating remains `CloudOptInRequired` at
+  provider construction — no new consent flag. Surfacing: `openbird briefing
+  --week`, `openbird summaries list --weeks` (digest bodies interactive-only),
+  and `summaries build` covers weeks + indexing automatically via the shared
+  runner.
+
 **Entity/state — "have I completed project X?"** A state judgment, not a time query.
 Requires an **entity ledger** built on Phase B's stable identity keys:
 

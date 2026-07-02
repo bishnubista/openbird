@@ -194,6 +194,60 @@ routes:
       - app.ChatResult.routeLabel
       - app.DayBriefing.routeLabel
 
+  - id: chat.week_memory_cached_summary
+    class: local
+    source: cached week answer composed from the stored week digest, per-day block-summary narratives, and deterministic totals from stored day memories
+    derives_from:
+      - chat.day_memory_cached_summary
+      - summaries.week
+    captured_fields:
+      - stored_week_digest_prose
+      - stored_block_summary_prose
+      - deterministic_day_totals
+      - week_memory_derived_citations
+      - derived_citation_typed_source_refs
+    forbidden_fields:
+      - captured_text
+      - raw_window_title
+      - raw_url
+      - raw_title
+    storage:
+      - sqlite.day_memories
+      - sqlite.block_summaries
+    egress:
+      default: none
+      note: answer-time local composition — no provider call and no embedding request; the digest/narrative prose was generated EARLIER by the local-route model under the routines battery/idle gate (summaries.week / summaries.block). Absent cached prose the query falls through to chat.summary_grounded or the raw-row paths, which report their own routes.
+    truth_surface:
+      - cli.chat_json.reasoning_route
+      - app.ChatResult.routeLabel
+      - cli.briefing_week
+
+  - id: chat.summary_grounded
+    class: unknown
+    source: fresh model completion for multi-day questions grounded in cached derived summary prose (block summaries + overlapping week digests) instead of raw rows
+    derives_from:
+      - summaries.block
+      - summaries.week
+      - chat.local
+      - chat.remote
+    captured_fields:
+      - user_question
+      - stored_block_summary_prose_fenced
+      - stored_week_digest_prose_fenced
+      - derived_citations
+    storage:
+      - local_db_for_retrieval_only
+    egress:
+      default: inherits_active_model_route
+      inherited_from:
+        - chat.local
+        - chat.remote
+      warning: cached derived-sensitive summary prose enters the completion prompt and leaves this machine only under the active model route with cloud opt-in — same class as retrieved_chunks
+    truth_surface:
+      - cli.chat_json.reasoning_route
+      - app.ChatResult.routeLabel
+      - cli.CLOUD_ACTIVE
+
   - id: summaries.block
     class: local
     source: idle-time routines worker summarizing settled focus blocks over spans and policy-accepted observations
@@ -224,6 +278,42 @@ routes:
         - block_summaries_citing_deleted_sources
         - day_memories_citing_deleted_summaries
         - category_assignments_on_full_purge
+        - summary_index_entries_and_fts_vec_rows
+    truth_surface:
+      - cli.summaries_list
+      - routine_run_output
+
+  - id: summaries.week
+    class: local
+    source: idle-time routines worker reducing a week's stored block-summary narratives into one digest (day_memories row with source_scope='week')
+    derives_from:
+      - summaries.block
+    captured_fields:
+      - per_day_metadata_header_lines
+      - block_summary_prose_fenced
+      - generated_week_digest_prose
+      - validated_summary_kind_citations
+      - member_fingerprint
+    forbidden_fields:
+      - digest_text_in_logs
+      - digest_text_in_routine_output
+      - summary_text_in_logs
+    storage:
+      - sqlite.day_memories
+      - sqlite.summary_index_entries
+      - sqlite.fts_summaries
+      - sqlite.vec_summaries
+    egress:
+      default: inherits_active_model_route
+      inherited_from:
+        - chat.local
+        - chat.remote
+      note: generation runs ONLY under the battery/idle gate in the routines daemon (or explicit `openbird summaries build`); the shared LLMProvider's CloudOptInRequired enforcement is the cloud gate — a cloud-opted user has opted this path in. Zero valid citations means nothing is stored (week_memory_ungrounded). Routine output and logs carry counts + reason codes only; digest/summary text never logged.
+    deletion:
+      command: openbird data purge/prune
+      must_remove:
+        - week_rows_citing_deleted_block_summaries
+        - summary_index_entries_and_fts_vec_rows
     truth_surface:
       - cli.summaries_list
       - routine_run_output

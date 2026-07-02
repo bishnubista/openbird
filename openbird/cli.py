@@ -732,6 +732,12 @@ def briefing(
         "--signals",
         help="Use the experimental high-signal local classifier instead of broad prose.",
     ),
+    week: bool = typer.Option(
+        False,
+        "--week",
+        help="Render the WEEK overview (stored week digest + per-day narratives, "
+        "local composition only) for the week containing the selected --day.",
+    ),
 ) -> None:
     """Generate a grounded day briefing.
 
@@ -742,14 +748,19 @@ def briefing(
     ``--model`` is the explicit opt-in escape hatch for model-written prose via the
     configured provider over an exclusion-filtered distilled day packet; a remote
     model still requires the cloud opt-in enforced at provider construction.
-    ``--signals`` is the separate experimental local classifier path. ``--model``
-    and ``--signals`` are mutually exclusive.
+    ``--signals`` is the separate experimental local classifier path. ``--week``
+    renders the week overview from STORED artifacts only (route
+    ``local_cached_model_summary`` when cached prose is composed, else the
+    deterministic aggregate). ``--model``, ``--signals``, and ``--week`` are
+    mutually exclusive.
     """
     if day < 0:
         _err_console.print("[red]--day must be >= 0.[/]")
         raise typer.Exit(code=2)
-    if model and signals:
-        _err_console.print("[red]--model and --signals are mutually exclusive.[/]")
+    if sum(1 for flag in (model, signals, week) if flag) > 1:
+        _err_console.print(
+            "[red]--model, --signals, and --week are mutually exclusive.[/]"
+        )
         raise typer.Exit(code=2)
     if not model and _has_cli_cloud_exclusions(
         exclude_app, exclude_source, exclude_observation_id
@@ -759,6 +770,10 @@ def briefing(
             "Use --model, or omit the exclusion flags for the local briefing.[/]"
         )
         raise typer.Exit(code=2)
+
+    if week:
+        _briefing_week(day, as_json=as_json)
+        return
 
     start, end = _day_window(day)
     if signals:
@@ -848,6 +863,98 @@ def _briefing_local(day: int, start: float, end: float, *, as_json: bool) -> Non
                     # Full count of distinct grounding groups; > len(sources) means
                     # the trail was capped (UI shows "N of M"), never silent.
                     "sources_total": total_sources,
+                }
+            )
+        )
+        return
+    _console.print(text)
+
+
+def _briefing_week(day: int, *, as_json: bool) -> None:
+    """Week briefing: STORED artifacts only, composed locally (never a model call).
+
+    Renders the stored week digest + per-day block-summary narrative lines +
+    deterministic totals via the SHARED :func:`openbird.day_memory.compose_week_answer`
+    helper (same one the chat cached-week route uses, so the surfaces cannot
+    drift). Route truthfulness: ``local_cached_model_summary`` when cached
+    model prose was composed; otherwise a deterministic aggregate over stored
+    day memories with ``local_deterministic``. Nothing is rebuilt and no
+    provider is called.
+    """
+    from openbird.day_memory import compose_week_answer
+
+    target = _dt.datetime.fromtimestamp(time.time() - day * 86_400.0).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    monday_dt = target - _dt.timedelta(days=target.weekday())
+    monday = monday_dt.strftime("%Y-%m-%d")
+    start = monday_dt.timestamp()
+    end = (monday_dt + _dt.timedelta(days=7)).timestamp() - 1e-6
+
+    store = _store_maintenance()
+    try:
+        week_row = store.get_week_memory(monday)
+        day_entries = []
+        for offset in range(7):
+            local_date = (monday_dt + _dt.timedelta(days=offset)).strftime("%Y-%m-%d")
+            saved = store.get_day_memory(local_date=local_date)
+            summaries = store.block_summaries_for_date(local_date)
+            day_entries.append((local_date, saved, summaries))
+    finally:
+        store.close()
+
+    weeks = [week_row] if week_row else []
+    text, citations, has_prose = compose_week_answer(weeks, day_entries)
+    if has_prose:
+        reasoning_route = "local_cached_model_summary"
+    else:
+        # Deterministic aggregate over whatever stored day memories exist.
+        reasoning_route = "local_deterministic"
+        total_seconds = 0.0
+        days_with_data = 0
+        for _local_date, saved, _summaries in day_entries:
+            payload = (saved or {}).get("payload") or {}
+            if int((payload.get("coverage") or {}).get("observations") or 0) > 0:
+                days_with_data += 1
+                total_seconds += float(
+                    (payload.get("metrics") or {}).get("active_seconds") or 0.0
+                )
+        if days_with_data:
+            text = (
+                f"Week of {monday}: about {round(total_seconds / 60)} recorded "
+                f"active minute(s) across {days_with_data} day(s) with stored "
+                "day memories. No week digest or block summaries are stored "
+                "yet; they are generated by the idle-time routines pass."
+            )
+        else:
+            text = (
+                f"No stored memories for the week of {monday} yet. Summaries "
+                "are generated by the idle-time routines pass (or `openbird "
+                "summaries build`)."
+            )
+
+    if as_json:
+        _console.print_json(
+            json.dumps(
+                {
+                    "week_start": monday,
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                    "reasoning_route": reasoning_route,
+                    "derived_citations": [
+                        {
+                            "index": c.index,
+                            "source_id": c.source_id,
+                            "type": c.type,
+                            "label": c.label,
+                            "snippet": c.snippet,
+                            "derived_from": c.derived_from,
+                            "derived_from_total": c.derived_from_total,
+                            "derived_from_refs": c.derived_from_refs,
+                        }
+                        for c in citations
+                    ],
                 }
             )
         )
@@ -2318,8 +2425,10 @@ def summaries_build(
 ) -> None:
     """Build block summaries on demand (same bounded runner the routine uses).
 
-    Output is counts + reason codes only — summary bodies stay in the encrypted
-    memory DB (`openbird summaries list` shows them interactively).
+    The shared runner also covers the week-rollup and summary-index steps
+    automatically (Phase E1). Output is counts + reason codes only — summary
+    and digest bodies stay in the encrypted memory DB (`openbird summaries
+    list` / `list --weeks` shows them interactively).
     """
     from openbird.summaries import format_counts_line, run_block_summaries
 
@@ -2345,13 +2454,26 @@ def summaries_list(
     date: Optional[str] = typer.Option(
         None, "--date", help="Local day to list (YYYY-MM-DD); default: today."
     ),
+    weeks: bool = typer.Option(
+        False,
+        "--weeks",
+        help="List stored WEEK digests (newest first) instead of a day's "
+        "block summaries.",
+    ),
 ) -> None:
-    """List stored block summaries for one local day.
+    """List stored block summaries for one local day (or week digests).
 
-    Summary text (derived sensitive) is printed ONLY on an interactive
+    Summary/digest text (derived sensitive) is printed ONLY on an interactive
     terminal; a piped/captured invocation gets metadata (times, model, source
     counts) so summary bodies never land in logs or scrollback files.
     """
+    if weeks:
+        if date:
+            _err_console.print("[red]--weeks lists all stored week digests; "
+                               "--date applies only to block summaries.[/]")
+            raise typer.Exit(code=2)
+        _summaries_list_weeks()
+        return
     local_date = date or _dt.date.today().isoformat()
     if date:
         _parse_local_date(date)  # validate format
@@ -2377,6 +2499,36 @@ def summaries_list(
     if not interactive:
         _console.print(
             f"[dim]{len(rows)} summary bodies withheld (non-interactive output).[/]"
+        )
+
+
+def _summaries_list_weeks() -> None:
+    """List stored week digests (same interactive-only body-printing rule)."""
+    store = _store_maintenance()
+    try:
+        # Week rows are few (one per ISO week); a wide finite overlap window
+        # returns them all, ordered by Monday date.
+        rows = store.week_memories_overlapping(0.0, time.time() + 366 * 86_400.0)
+    finally:
+        store.close()
+    if not rows:
+        _console.print("[yellow]No week digests stored yet.[/]")
+        return
+    interactive = sys.stdout.isatty()
+    for row in reversed(rows):  # newest first
+        payload = row.get("payload") or {}
+        header = (
+            f"week of {row.get('local_date')} "
+            f"members={len(row.get('summary_ids') or [])} "
+            f"model={payload.get('model') or '-'} "
+            f"generated={_fmt_ts(row.get('generated_at'))}"
+        )
+        _console.print(f"[bold]{escape(header)}[/]")
+        if interactive:
+            _console.print(f"  {escape(str(payload.get('digest_text') or ''))}")
+    if not interactive:
+        _console.print(
+            f"[dim]{len(rows)} digest bodies withheld (non-interactive output).[/]"
         )
 
 
