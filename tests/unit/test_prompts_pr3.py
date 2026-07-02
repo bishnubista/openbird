@@ -192,6 +192,7 @@ def test_all_prompts_registered():
     registry.ensure_loaded()
     # ``rag_synthesis`` is the synthesis-intent answering persona (separate,
     # independently-overridable prompt) used by the time-range scan.
+    # ``taxonomy`` is the Phase D idle-time identity classifier prompt.
     assert set(registry.keys()) == {
-        "rag", "rag_synthesis", "routine", "meeting", "signal"
+        "rag", "rag_synthesis", "routine", "meeting", "signal", "taxonomy"
     }
