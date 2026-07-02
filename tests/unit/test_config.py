@@ -380,44 +380,44 @@ def test_total_memory_bytes_never_raises():
 # ---------------------------------------------------------------------------
 
 
-def test_capture_timing_defaults():
-    s = Settings(data_dir="/tmp/openbird-test-config")
+def test_capture_timing_defaults(tmp_path):
+    s = Settings(data_dir=str(tmp_path))
     assert s.capture_afk_threshold_seconds == 150.0
     assert s.capture_idle_tick_seconds == 5.0
     assert s.capture_force_ceiling_seconds == 60.0
     assert s.capture_min_gap_seconds == 1.0
 
 
-def test_capture_idle_tick_clamped_to_legal_range():
-    lo = Settings(data_dir="/tmp/openbird-test-config", capture_idle_tick_seconds=0.01)
+def test_capture_idle_tick_clamped_to_legal_range(tmp_path):
+    lo = Settings(data_dir=str(tmp_path), capture_idle_tick_seconds=0.01)
     assert lo.capture_idle_tick_seconds == 5.0
-    hi = Settings(data_dir="/tmp/openbird-test-config", capture_idle_tick_seconds=99.0)
+    hi = Settings(data_dir=str(tmp_path), capture_idle_tick_seconds=99.0)
     assert hi.capture_idle_tick_seconds == 10.0
 
 
-def test_capture_min_gap_floor_is_one_second():
-    s = Settings(data_dir="/tmp/openbird-test-config", capture_min_gap_seconds=0.01)
+def test_capture_min_gap_floor_is_one_second(tmp_path):
+    s = Settings(data_dir=str(tmp_path), capture_min_gap_seconds=0.01)
     assert s.capture_min_gap_seconds == 1.0
 
 
-def test_capture_afk_threshold_floor():
-    s = Settings(data_dir="/tmp/openbird-test-config", capture_afk_threshold_seconds=1.0)
+def test_capture_afk_threshold_floor(tmp_path):
+    s = Settings(data_dir=str(tmp_path), capture_afk_threshold_seconds=1.0)
     assert s.capture_afk_threshold_seconds == 30.0
 
 
-def test_capture_ceiling_cross_field_floor():
+def test_capture_ceiling_cross_field_floor(tmp_path):
     # Ceiling below both the floor and the tick must be raised to their max.
     s = Settings(
-        data_dir="/tmp/openbird-test-config",
+        data_dir=str(tmp_path),
         capture_idle_tick_seconds=8.0,
         capture_force_ceiling_seconds=2.0,
     )
     assert s.capture_force_ceiling_seconds == 8.0
 
 
-def test_capture_timing_nonfinite_falls_back_to_default():
+def test_capture_timing_nonfinite_falls_back_to_default(tmp_path):
     s = Settings(
-        data_dir="/tmp/openbird-test-config",
+        data_dir=str(tmp_path),
         capture_idle_tick_seconds=float("nan"),
         capture_force_ceiling_seconds=float("inf"),
     )

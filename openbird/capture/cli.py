@@ -127,7 +127,7 @@ def capture(
                 # --poll: force the legacy one-shot cadence for this run. The
                 # default (--stream) keeps auto behavior: persistent unless the
                 # env forces otherwise or the binary proves it can't stream.
-                daemon._stream_supported = False
+                daemon.force_oneshot_mode()
             try:
                 if once:
                     stats = daemon.run(max_events=max_events)

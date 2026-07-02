@@ -144,6 +144,7 @@ _BACKOFF_MAX = 60.0  # cap on the exponential backoff delay
 CAPTURE_MODE_ENV = "OPENBIRD_CAPTURE_MODE"  # "oneshot" | "persistent" (force)
 _STREAM_READ_TIMEOUT_MIN = 30.0  # floor for the no-events stall timeout
 _STREAM_STOP_SLICE = 1.0  # queue.get slice: stop-responsiveness bound
+_STREAM_QUEUE_MAX = 1000  # bounded event queue (backpressure, not unbounded RAM)
 _LIVENESS_WRITE_INTERVAL = 10.0  # max sidecar write frequency (seconds)
 # A persistent cycle that survived at least this long resets the consecutive-
 # failure counter BEFORE its failure is counted: a once-a-day crash must never
@@ -982,7 +983,10 @@ class CaptureDaemon:
         stop = stop_event or threading.Event()
         proc = self._spawn(stream=True)
         stats = CaptureStats()
-        lines: "queue.Queue[object]" = queue.Queue()
+        # Bounded: if ingest wedges (e.g. a stuck embed call), the reader
+        # blocks once full, the pipe backs up, and the helper's writes stall —
+        # bounded memory with natural backpressure instead of unbounded growth.
+        lines: "queue.Queue[object]" = queue.Queue(maxsize=_STREAM_QUEUE_MAX)
         eof_sentinel = object()
 
         def _reader(stdout) -> None:
@@ -1026,7 +1030,9 @@ class CaptureDaemon:
                                 "(silent for %.0fs)",
                                 read_timeout,
                             )
-                            raise HelperExitError("capture helper stalled")
+                            raise HelperExitError(
+                                "capture helper stalled"
+                            ) from None
                         # Process died; the reader's EOF sentinel arrives next.
                     continue
                 if item is eof_sentinel:
@@ -1079,6 +1085,15 @@ class CaptureDaemon:
             return stats
         # A healthy stream helper never exits 0 on its own (only on our signal).
         raise HelperExitError("stream helper exited unexpectedly (code 0)")
+
+    def force_oneshot_mode(self) -> None:
+        """Public switch to the legacy one-shot polling cadence (CLI --poll).
+
+        Persistent/stream mode never activates for this daemon instance; the
+        env force (:data:`CAPTURE_MODE_ENV`) still wins either way, matching
+        the auto path's precedence.
+        """
+        self._stream_supported = False
 
     def _capture_mode(self) -> str:
         """Effective loop mode: env force wins, else downgrade-aware default."""
