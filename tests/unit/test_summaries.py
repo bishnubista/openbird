@@ -551,3 +551,32 @@ def test_date_run_clips_cross_midnight_block(store, mem_settings):
     assert len(rows) == 1
     assert rows[0]["start_ts"] >= day_start
     assert store.block_summaries_for_date("2026-01-05") == []
+
+
+def test_adjacent_date_builds_keep_both_clipped_summaries(store, mem_settings):
+    # Codex round-2 regression: building Jan 5 then Jan 6 over the same
+    # cross-midnight block must yield TWO rows (date-qualified keys), and
+    # rebuilding Jan 5 must not steal Jan 6's row (or vice versa).
+    import datetime as dt
+
+    day6 = dt.datetime(2026, 1, 6, 0, 0, 0).timestamp()
+    day5 = day6 - 86400.0
+    sid = store.open_span(
+        epoch_id="e", start_ts=day6 - 1800.0, end_ts=day6 + 1800.0,
+        bundle_id="com.apple.mail", detail_tier=1,
+    )
+    store.add_observation(
+        "cross midnight work grounding text long enough to select",
+        source="capture", ts=day6 + 60.0, span_id=sid,
+    )
+    provider = _CiteAllProvider()
+    now = day6 + 86400.0 + 10_000.0
+    for start, end in [(day5, day6), (day6, day6 + 86400.0), (day5, day6)]:
+        run_block_summaries(
+            store, provider, now=now, settings=mem_settings,
+            window=(start, end), force=True,
+        )
+    jan5 = store.block_summaries_for_date("2026-01-05")
+    jan6 = store.block_summaries_for_date("2026-01-06")
+    assert len(jan5) == 1 and len(jan6) == 1
+    assert jan5[0]["end_ts"] <= day6 and jan6[0]["start_ts"] >= day6

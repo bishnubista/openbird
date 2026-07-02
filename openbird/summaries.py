@@ -140,8 +140,21 @@ def compute_span_blocks(
 
 
 def block_key(block: Block) -> str:
-    """Stable identity of a block: sha256 over its sorted span ids."""
-    payload = json.dumps(sorted(block.span_ids), separators=(",", ":"))
+    """Stable identity of a block: sha256 over (local_date, sorted span ids).
+
+    The local date (of the block's — possibly window-clipped — start) is part
+    of the identity so a cross-midnight block built for two adjacent ``--date``
+    windows yields TWO rows instead of the second build stealing the first's
+    (save_block_summary deletes by key). Unbounded runs never clip (see
+    run_block_summaries), so their starts — and therefore keys — are stable
+    across sliding lookback windows.
+    """
+    from openbird.day_memory import local_date_for_window
+
+    payload = json.dumps(
+        [local_date_for_window(block.start_ts), *sorted(block.span_ids)],
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -567,10 +580,16 @@ def run_block_summaries(
         range_end = now
 
     spans = store.spans_in_range(range_start, range_end)
-    # Clip blocks to the runner window: a --date run must not summarize a
-    # cross-midnight block under the previous local_date (it would then never
-    # compose into the requested day's answer).
-    blocks = compute_span_blocks(spans, start_ts=range_start, end_ts=range_end)
+    if window is not None:
+        # Clip blocks to an EXPLICIT window: a --date run must not summarize a
+        # cross-midnight block under the previous local_date (it would never
+        # compose into the requested day's answer).
+        blocks = compute_span_blocks(spans, start_ts=range_start, end_ts=range_end)
+    else:
+        # Unbounded (hourly lookback) runs never clip: clipping at the sliding
+        # lookback edge would shift a boundary block's start each firing,
+        # changing its date-qualified key and re-summarizing it every hour.
+        blocks = compute_span_blocks(spans)
     settle = float(settings.block_summaries_settle_seconds)
     existing = store.block_summary_keys()
     overrides = _taxonomy.load_overrides(settings)
