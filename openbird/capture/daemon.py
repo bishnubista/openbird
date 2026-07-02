@@ -208,7 +208,18 @@ _CAPTURE_TRIGGERS = frozenset(
     }
 )
 _SYSTEM_KINDS = frozenset(
-    {"will_sleep", "did_wake", "screen_locked", "screen_unlocked"}
+    {
+        "will_sleep",
+        "did_wake",
+        "screen_locked",
+        "screen_unlocked",
+        # Mic run-state edges (Phase C1). Raw hardware signal only — the
+        # meeting judgment (conjunction with the frontmost surface) is applied
+        # in SpanTracker. Old daemons coerce these unknown kinds to None and
+        # on_system(None, ts) is a no-op — zero back-compat risk.
+        "mic_started",
+        "mic_stopped",
+    }
 )
 
 
@@ -721,8 +732,14 @@ class CaptureDaemon:
             return stats._with(afk_transitions=1)
         if event_type == "system":
             # ``kind`` was sanitized against the closed vocabulary at parse time.
-            self._span_tracker.on_system(event.get("kind"), ts)
-            logger.debug("capture: system event kind=%s", event.get("kind"))
+            kind = event.get("kind")
+            if kind in ("mic_started", "mic_stopped"):
+                # Mic edges route to the tracker's meeting machinery (Phase
+                # C1); sleep/lock force-close stays in on_system.
+                self._span_tracker.on_mic(kind == "mic_started", ts)
+            else:
+                self._span_tracker.on_system(kind, ts)
+            logger.debug("capture: system event kind=%s", kind)
             return stats._with(heartbeats=1)
         if event_type == "app_changed":
             self._span_tracker.on_app_changed(event.get("app"), ts)
@@ -1007,6 +1024,10 @@ class CaptureDaemon:
             "mode": mode,
             "afk": self._afk,
             "heartbeat_seq": heartbeat_seq,
+            # Meeting-live latch (Phase C1): a metadata BIT for the
+            # background-LLM gate. getattr-guarded so bare NullSpanTracker
+            # stand-ins (tests) stay valid.
+            "meeting": bool(getattr(self._span_tracker, "meeting_live", False)),
         }
         path = self._liveness_path()
         tmp = path.with_name(path.name + ".tmp")

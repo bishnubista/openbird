@@ -9,8 +9,8 @@ Design rules (all reached adversarial-review consensus; see
 docs/design/capture-efficiency-redesign.md):
 
 * Identity tuple = ``(bundle_id, detail_tier, reason, window, url_host,
-  identity_key, afk)`` with NULL-equals-NULL semantics (plain ``None``
-  equality). Tier-0 identities are built with ``window=None, url_host=None,
+  identity_key, afk, meeting)`` with NULL-equals-NULL semantics (plain
+  ``None`` equality). Tier-0 identities are built with ``window=None, url_host=None,
   identity_key=None`` unconditionally — the SECOND enforcement point after the
   helper (a malicious/old helper sending a title for a blocked app still
   yields a title-free span).
@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -45,6 +45,48 @@ _SPAN_FLUSH_INTERVAL = 10.0
 
 #: Floor/derivation constants for the merge pulsetime.
 _PULSETIME_FLOOR = 15.0
+
+# Meeting-app sets (Phase C1). The meeting JUDGMENT is the conjunction
+# ``mic_hot AND (bundle in MEETING_BUNDLES OR url_host in MEETING_HOSTS)`` and
+# lives HERE, daemon-side: only Python has the tier-gated url_host (a Meet tab
+# is a browser bundle; its host exists only on tier-1 spans), and mic-alone
+# would flag dictation/Siri while app-alone would flag idling in Discord.
+#
+# Python-only by design — no Swift copy, no parity test: unlike the
+# dangerous-app list (a privacy boundary enforced BEFORE any AX read, hence
+# three lockstep copies), this set is an enrichment label. A stale entry
+# mislabels time; it never leaks content. User override is deferred.
+#
+# Entries are stored CASEFOLDED and compared casefolded (bundle ids arrive raw
+# from NSRunningApplication and are STORED raw — only the comparison folds).
+MEETING_BUNDLES = frozenset(
+    s.casefold()
+    for s in (
+        "us.zoom.xos",
+        "com.microsoft.teams2",
+        "com.microsoft.teams",
+        "com.apple.FaceTime",
+        "Cisco-Systems.Spark",
+        "com.webex.meetingmanager",
+        "com.hnc.Discord",
+    )
+)
+MEETING_HOSTS = frozenset(
+    s.casefold()
+    for s in (
+        "meet.google.com",
+        "teams.microsoft.com",
+        "teams.live.com",
+        "app.zoom.us",
+    )
+)
+
+
+def _meeting_app(bundle_id: str | None, url_host: str | None) -> bool:
+    """Casefolded membership test against the meeting sets (mic not consulted)."""
+    if bundle_id is not None and bundle_id.casefold() in MEETING_BUNDLES:
+        return True
+    return url_host is not None and url_host.casefold() in MEETING_HOSTS
 
 
 class SpanSink(Protocol):
@@ -62,6 +104,7 @@ class SpanSink(Protocol):
         url_host: str | None = ...,
         identity_key: str | None = ...,
         afk: bool = ...,
+        meeting: bool = ...,
         reason: str | None = ...,
         span_id: str | None = ...,
     ) -> str: ...
@@ -82,6 +125,10 @@ class _SpanIdentity:
     url_host: str | None
     identity_key: str | None
     afk: bool
+    #: Meeting conjunction bit (Phase C1). Part of the identity so a mid-span
+    #: flip SPLITS the span (extend-in-place would lie about time), exactly
+    #: like ``afk``.
+    meeting: bool = False
 
 
 @dataclass
@@ -121,6 +168,9 @@ def policy_fingerprint(settings: Settings) -> str:
 class NullSpanTracker:
     """No-op tracker for sinks without the span API (lightweight test fakes)."""
 
+    #: Mirrors :attr:`SpanTracker.meeting_live` (liveness sidecar field).
+    meeting_live: bool = False
+
     def begin_epoch(self) -> None: ...
 
     def on_frame(self, **_kw) -> None:
@@ -133,6 +183,8 @@ class NullSpanTracker:
     def on_afk_transition(self, *_a, **_kw) -> None: ...
 
     def on_system(self, *_a, **_kw) -> None: ...
+
+    def on_mic(self, *_a, **_kw) -> None: ...
 
     def close_open(self, *_a, **_kw) -> None: ...
 
@@ -157,9 +209,19 @@ class SpanTracker:
         self._epoch_id: str | None = None
         self._fingerprint = policy_fingerprint(settings)
         self._open: _OpenSpan | None = None
-        # Pending app-boundary marker: (bundle_id, wall_ts, mono_ts).
-        self._pending: tuple[str | None, float, float] | None = None
+        # Pending app-boundary marker: (bundle_id, wall_ts, mono_ts, mic_hot).
+        # The mic bit records the state AT MARKER TIME so backdating across the
+        # marker can apply the Phase C1 exactness rule (see _open_new).
+        self._pending: tuple[str | None, float, float, bool] | None = None
         self.error_count = 0
+        # Mic run-state (Phase C1): the raw hardware bit from the helper's
+        # mic_started/mic_stopped edges, plus the last edge's wall time.
+        self._mic_hot = False
+        self._mic_edge_wall: float | None = None
+        # Deferral latch: a meeting span was seen since the mic went hot.
+        # meeting_live stays ON while the user glances at Notes mid-call and
+        # never fires for dictation (mic hot but no meeting surface).
+        self._meeting_seen = False
 
         ceiling = float(getattr(settings, "capture_force_ceiling_seconds", 60.0))
         tick = float(getattr(settings, "capture_idle_tick_seconds", 5.0))
@@ -187,6 +249,13 @@ class SpanTracker:
 
         self.close_open()
         self._pending = None
+        # Mic state re-learns from the new helper: a fresh helper re-emits
+        # mic_started when the mic is ALREADY hot, so resetting here can never
+        # lose a live call — but a stale hot bit from a dead helper (its
+        # mic_stopped lost with it) must not survive into the new epoch.
+        self._mic_hot = False
+        self._mic_edge_wall = None
+        self._meeting_seen = False
         self._epoch_id = uuid.uuid4().hex
         logger.debug(
             "capture: span_epoch begin policy_fp=%s", self._fingerprint
@@ -226,6 +295,7 @@ class SpanTracker:
                 url_host=identity.url_host,
                 identity_key=identity.identity_key,
                 afk=identity.afk,
+                meeting=identity.meeting,
                 reason=identity.reason,
             )
         except Exception as exc:  # noqa: BLE001
@@ -248,6 +318,22 @@ class SpanTracker:
                 exc_info=False,
             )
 
+    # -- meeting conjunction (Phase C1) -----------------------------------------
+
+    @property
+    def meeting_live(self) -> bool:
+        """Deferral signal: mic currently hot AND a meeting span was seen.
+
+        The latch keeps deferral ON while the user glances at a non-meeting
+        app mid-call; it clears on mic-off and on epoch change. Written to the
+        liveness sidecar (a metadata bit) for the background-LLM gate.
+        """
+        return self._mic_hot and self._meeting_seen
+
+    def _is_meeting(self, bundle_id: str | None, url_host: str | None) -> bool:
+        """The meeting judgment: mic hot AND a meeting bundle/host (casefolded)."""
+        return self._mic_hot and _meeting_app(bundle_id, url_host)
+
     # -- identity ----------------------------------------------------------------
 
     def _identity_for_frame(
@@ -269,7 +355,10 @@ class SpanTracker:
         )
         if cls.tier == redact.SPAN_TIER_COARSE:
             # Second enforcement point (after the helper): coarse spans carry
-            # NO window/url/identity keys, unconditionally.
+            # NO window/url/identity keys, unconditionally. Meeting matches on
+            # the bundle only (url_host is None here BY DESIGN, so a coarse
+            # browser span never flags via a Meet tab — but a non-allowlisted
+            # Zoom still gets meeting=1 on its coarse span).
             return _SpanIdentity(
                 bundle_id=app,
                 detail_tier=0,
@@ -278,16 +367,19 @@ class SpanTracker:
                 url_host=None,
                 identity_key=None,
                 afk=afk,
+                meeting=self._is_meeting(app, None),
             )
         safe_window, _safe_url, _rules = redact.scrub_metadata(window=window, url=None)
+        host = _url_host(url)
         return _SpanIdentity(
             bundle_id=app,
             detail_tier=1,
             reason=None,
             window=safe_window,
-            url_host=_url_host(url),
+            url_host=host,
             identity_key=None,  # extraction deferred (storage shape decided)
             afk=afk,
+            meeting=self._is_meeting(app, host),
         )
 
     # -- merge core ----------------------------------------------------------------
@@ -303,6 +395,8 @@ class SpanTracker:
     def _extend(self, ts: float, now_mono: float) -> str:
         span = self._open
         assert span is not None
+        if span.identity.meeting:
+            self._meeting_seen = True
         if ts > span.last_event_wall:
             span.last_event_wall = ts
         span.last_event_mono = now_mono
@@ -312,22 +406,51 @@ class SpanTracker:
         return span.span_id
 
     def _open_new(
-        self, identity: _SpanIdentity, ts: float, now_mono: float
+        self,
+        identity: _SpanIdentity,
+        ts: float,
+        now_mono: float,
+        *,
+        consume_pending: bool = True,
     ) -> str | None:
         self.close_open()
         start_ts = ts
         # A matching pending boundary marker backdates the start to the exact
         # (pre-debounce) switch instant.
-        if self._pending is not None:
-            p_bundle, p_wall, p_mono = self._pending
+        if consume_pending and self._pending is not None:
+            p_bundle, p_wall, p_mono, p_mic = self._pending
             if p_bundle == identity.bundle_id and (
                 now_mono - p_mono
             ) <= self.pulsetime:
-                start_ts = min(p_wall, ts)
+                # Exactness rule (Phase C1): backdating across the marker is
+                # only truthful when the meeting bit did NOT flip between
+                # marker time and frame time. On a flip (mic edge landed in
+                # between), the pre-edge stretch is materialized with the
+                # MARKER-time bit and the new span opens at the mic edge — an
+                # app switch to Zoom at t=100 with the mic starting at t=101
+                # yields non-meeting [100,101) + meeting [101,...), never a
+                # meeting span backdated to 100 (and inversely after a stop).
+                marker_meeting = p_mic and _meeting_app(
+                    identity.bundle_id, identity.url_host
+                )
+                if marker_meeting == identity.meeting:
+                    start_ts = min(p_wall, ts)
+                else:
+                    edge = (
+                        self._mic_edge_wall
+                        if self._mic_edge_wall is not None
+                        else ts
+                    )
+                    start_ts = min(max(p_wall, edge), ts)
+                    if start_ts > p_wall:
+                        pre = replace(identity, meeting=marker_meeting)
+                        self._safe_open(pre, p_wall, start_ts)
             self._pending = None
         span_id = self._safe_open(identity, start_ts, max(start_ts, ts))
         if span_id is None:
             return None
+        if identity.meeting:
+            self._meeting_seen = True
         self._open = _OpenSpan(
             span_id=span_id,
             identity=identity,
@@ -370,7 +493,7 @@ class SpanTracker:
             # is nothing being captured to attribute). Record the marker so a
             # near-simultaneous unpause frame can still backdate its start,
             # but never fragment the paused span itself.
-            self._pending = (bundle_id, ts, now_mono)
+            self._pending = (bundle_id, ts, now_mono, self._mic_hot)
             return
         if span is not None and span.identity.bundle_id == bundle_id:
             # Re-activation of the same app: not a boundary.
@@ -378,7 +501,7 @@ class SpanTracker:
         if self._pending is not None:
             # Fast A->B->A: the middle app never produced a frame. Materialize
             # its small span [pending.ts, ts] so the timeline stays truthful.
-            p_bundle, p_wall, p_mono = self._pending
+            p_bundle, p_wall, p_mono, _p_mic = self._pending
             if p_bundle != bundle_id and (now_mono - p_mono) <= self.pulsetime:
                 identity = self._identity_for_frame(
                     app=p_bundle, window=None, url=None,
@@ -391,7 +514,7 @@ class SpanTracker:
             # Close the outgoing app's span at the exact switch instant.
             span.last_event_wall = max(span.last_event_wall, min(ts, time.time()))
             self.close_open()
-        self._pending = (bundle_id, ts, now_mono)
+        self._pending = (bundle_id, ts, now_mono, self._mic_hot)
 
     def on_heartbeat(self, *, afk: bool, paused: bool, ts: float) -> None:
         """Liveness pulse: extends a matching open span; manages paused spans."""
@@ -410,6 +533,7 @@ class SpanTracker:
                     url_host=None,
                     identity_key=None,
                     afk=afk,
+                    meeting=False,  # paused pseudo-spans never flag
                 )
                 self._open_new(identity, ts, now_mono)
                 return
@@ -445,6 +569,9 @@ class SpanTracker:
                 url_host=identity.url_host,
                 identity_key=identity.identity_key,
                 afk=True,
+                # Copied AS-IS (critical): on a call you don't type — meeting
+                # spans routinely go AFK and must stay meeting time.
+                meeting=identity.meeting,
             )
             self._open_new(afk_identity, max(span.start_ts, ts), now_mono)
             return
@@ -453,6 +580,40 @@ class SpanTracker:
         if span is not None and span.identity.afk:
             span.last_event_wall = max(span.last_event_wall, ts)
             self.close_open()
+
+    def on_mic(self, hot: bool, ts: float) -> None:
+        """Mic run-state edge (mic_started/mic_stopped): recompute + split.
+
+        The meeting bit is part of the merge identity, so when the edge flips
+        the OPEN span's recomputed bit, the span truncate-closes at the exact
+        edge instant and reopens with the bit flipped (backdated edge, exactly
+        mirroring :meth:`on_afk_transition`). Duplicate edges are no-ops.
+        """
+        hot = bool(hot)
+        if hot == self._mic_hot:
+            return
+        self._mic_hot = hot
+        self._mic_edge_wall = ts
+        if not hot:
+            self._meeting_seen = False
+        span = self._open
+        if span is None:
+            return
+        identity = span.identity
+        new_meeting = self._is_meeting(identity.bundle_id, identity.url_host)
+        if new_meeting == identity.meeting:
+            return  # paused pseudo-spans (NULL bundle) always land here
+        now_mono = self._mono()
+        # Close the outgoing span at the exact edge instant (clamped to now,
+        # like the app-switch boundary), then reopen with the bit flipped.
+        span.last_event_wall = max(span.last_event_wall, min(ts, time.time()))
+        self.close_open()
+        self._open_new(
+            replace(identity, meeting=new_meeting),
+            max(span.start_ts, ts),
+            now_mono,
+            consume_pending=False,
+        )
 
     def on_system(self, kind: str | None, ts: float) -> None:
         """Sleep/lock force-close; wake/unlock is a no-op (next frame opens)."""
@@ -464,4 +625,10 @@ class SpanTracker:
             self._pending = None
 
 
-__all__ = ["NullSpanTracker", "SpanTracker", "policy_fingerprint"]
+__all__ = [
+    "MEETING_BUNDLES",
+    "MEETING_HOSTS",
+    "NullSpanTracker",
+    "SpanTracker",
+    "policy_fingerprint",
+]
