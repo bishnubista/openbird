@@ -373,3 +373,79 @@ def test_total_memory_bytes_never_raises():
 
     assert isinstance(_total_memory_bytes(), int)
     assert _total_memory_bytes() >= 0
+
+
+# ---------------------------------------------------------------------------
+# Stream-capture timing knobs (Phase A) — clamps, not rejections
+# ---------------------------------------------------------------------------
+
+
+def test_capture_timing_defaults(tmp_path):
+    s = Settings(data_dir=str(tmp_path))
+    assert s.capture_afk_threshold_seconds == 150.0
+    assert s.capture_idle_tick_seconds == 5.0
+    assert s.capture_force_ceiling_seconds == 60.0
+    assert s.capture_min_gap_seconds == 1.0
+
+
+def test_capture_idle_tick_clamped_to_legal_range(tmp_path):
+    lo = Settings(data_dir=str(tmp_path), capture_idle_tick_seconds=0.01)
+    assert lo.capture_idle_tick_seconds == 5.0
+    hi = Settings(data_dir=str(tmp_path), capture_idle_tick_seconds=99.0)
+    assert hi.capture_idle_tick_seconds == 10.0
+
+
+def test_capture_min_gap_floor_is_one_second(tmp_path):
+    s = Settings(data_dir=str(tmp_path), capture_min_gap_seconds=0.01)
+    assert s.capture_min_gap_seconds == 1.0
+
+
+def test_capture_afk_threshold_floor(tmp_path):
+    s = Settings(data_dir=str(tmp_path), capture_afk_threshold_seconds=1.0)
+    assert s.capture_afk_threshold_seconds == 30.0
+
+
+def test_capture_ceiling_cross_field_floor(tmp_path):
+    # Ceiling below both the floor and the tick must be raised to their max.
+    s = Settings(
+        data_dir=str(tmp_path),
+        capture_idle_tick_seconds=8.0,
+        capture_force_ceiling_seconds=2.0,
+    )
+    assert s.capture_force_ceiling_seconds == 8.0
+
+
+def test_capture_timing_nonfinite_falls_back_to_default(tmp_path):
+    s = Settings(
+        data_dir=str(tmp_path),
+        capture_idle_tick_seconds=float("nan"),
+        capture_force_ceiling_seconds=float("inf"),
+    )
+    assert s.capture_idle_tick_seconds == 5.0
+    assert s.capture_force_ceiling_seconds == 60.0
+
+
+def test_capture_timing_env_override_clamped(monkeypatch):
+    monkeypatch.setenv("OPENBIRD_CAPTURE_IDLE_TICK_SECONDS", "0.5")
+    monkeypatch.setenv("OPENBIRD_CAPTURE_MIN_GAP_SECONDS", "0.1")
+    reset_settings_cache()
+    try:
+        s = get_settings()
+        assert s.capture_idle_tick_seconds == 5.0
+        assert s.capture_min_gap_seconds == 1.0
+    finally:
+        reset_settings_cache()
+
+
+def test_capture_timing_env_typo_never_blocks_startup(monkeypatch):
+    # Clamp-never-reject extends to PARSING: a non-numeric env value falls
+    # back to the default instead of raising during settings construction.
+    monkeypatch.setenv("OPENBIRD_CAPTURE_IDLE_TICK_SECONDS", "abc")
+    monkeypatch.setenv("OPENBIRD_CAPTURE_FORCE_CEILING_SECONDS", "")
+    reset_settings_cache()
+    try:
+        s = get_settings()
+        assert s.capture_idle_tick_seconds == 5.0
+        assert s.capture_force_ceiling_seconds == 60.0
+    finally:
+        reset_settings_cache()

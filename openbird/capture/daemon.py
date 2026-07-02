@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import queue
 import select
 import shutil
 import subprocess
@@ -137,6 +138,22 @@ _DEFAULT_MAX_CONSECUTIVE_FAILURES = 5  # circuit breaker: stop after this many
 _BACKOFF_BASE = 1.0  # first retry delay (seconds), doubled each consecutive fail
 _BACKOFF_MAX = 60.0  # cap on the exponential backoff delay
 
+# Persistent (stream) mode. The helper runs long-lived (`--stream`), pushing
+# typed NDJSON events; the daemon reads them in short queue slices so a stop
+# request is honored within ~1s regardless of the stall-detection timeout.
+CAPTURE_MODE_ENV = "OPENBIRD_CAPTURE_MODE"  # "oneshot" | "persistent" (force)
+_STREAM_READ_TIMEOUT_MIN = 30.0  # floor for the no-events stall timeout
+_STREAM_STOP_SLICE = 1.0  # queue.get slice: stop-responsiveness bound
+_STREAM_QUEUE_MAX = 1000  # bounded event queue (backpressure, not unbounded RAM)
+_LIVENESS_WRITE_INTERVAL = 10.0  # max sidecar write frequency (seconds)
+# A persistent cycle that survived at least this long resets the consecutive-
+# failure counter BEFORE its failure is counted: a once-a-day crash must never
+# accumulate into a breaker trip, while a restart storm still trips it fast.
+_FAILURE_DECAY_SECONDS = 300.0
+#: Liveness sidecar filename (inside data_dir). Metadata only — timestamps,
+#: mode, AFK flag, heartbeat seq. Never content. capture-health reads it.
+LIVENESS_FILENAME = "capture.liveness.json"
+
 # App-supervised self-exit (orphan cleanup).
 #
 # An app-launched ``capture --loop`` daemon must self-exit when its supervising
@@ -162,6 +179,52 @@ _SUPERVISOR_TOKEN_MAX = 256
 # event. Short enough that a normal shutdown joins the watcher promptly; long
 # enough that it is not a busy-spin while idling for the app to die.
 _SUPERVISOR_SELECT_TIMEOUT = 0.2
+
+
+# Typed stream-event vocabulary (Phase A, event-driven capture). A line without
+# a ``type`` field is a capture frame — that is the back-compat contract with
+# older one-shot helper binaries, which predate typing entirely. Unknown or
+# non-string ``type`` values are treated as capture frames (fail-safe: the
+# strictest path — they then pass through redaction and are rejected if empty).
+_EVENT_TYPES = frozenset({"capture", "afk_transition", "heartbeat", "system"})
+
+# Closed vocabularies for helper-supplied enum-ish metadata. These strings can
+# reach logs, so they are sanitized against a closed set — a helper bug can
+# never route free text (which could embed content) into a log line.
+_CAPTURE_TRIGGERS = frozenset(
+    {
+        "app_activated",
+        "window_changed",
+        "title_changed",
+        "focus_changed",
+        "typing_pause",
+        "idle_tick",
+        "force_ceiling",
+        "return_from_afk",
+        "startup",
+    }
+)
+_SYSTEM_KINDS = frozenset(
+    {"will_sleep", "did_wake", "screen_locked", "screen_unlocked"}
+)
+
+
+def _finite_ts(value: object, fallback: float | None = None) -> float:
+    """Return a FINITE timestamp from an untrusted value (shared guard).
+
+    JSON permits ``NaN``/``Infinity`` literals and ``float('nan')`` does not
+    raise, so a malformed helper ``ts`` could otherwise poison liveness math,
+    session clocks, or time-range ordering. Non-finite or unparseable values
+    fall back to ``fallback`` (wall-clock now when omitted). Used by the
+    capture-ingest clock, typed-event dispatch, and liveness bookkeeping.
+    """
+    try:
+        parsed = float(value) if value is not None else None  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = None
+    if parsed is None or not math.isfinite(parsed):
+        return time.time() if fallback is None else fallback
+    return parsed
 
 
 class IngestSink(Protocol):
@@ -193,6 +256,10 @@ class CaptureStats:
     coalesced: int = 0
     rejected: int = 0
     errors: int = 0
+    # Typed stream-event counters (Phase A). ``heartbeats`` counts liveness-only
+    # events (heartbeat + system); ``afk_transitions`` counts AFK state flips.
+    heartbeats: int = 0
+    afk_transitions: int = 0
 
     def _with(self, **delta: int) -> "CaptureStats":
         return CaptureStats(
@@ -201,6 +268,8 @@ class CaptureStats:
             coalesced=self.coalesced + delta.get("coalesced", 0),
             rejected=self.rejected + delta.get("rejected", 0),
             errors=self.errors + delta.get("errors", 0),
+            heartbeats=self.heartbeats + delta.get("heartbeats", 0),
+            afk_transitions=self.afk_transitions + delta.get("afk_transitions", 0),
         )
 
     def _add(self, other: "CaptureStats") -> "CaptureStats":
@@ -211,6 +280,8 @@ class CaptureStats:
             coalesced=self.coalesced + other.coalesced,
             rejected=self.rejected + other.rejected,
             errors=self.errors + other.errors,
+            heartbeats=self.heartbeats + other.heartbeats,
+            afk_transitions=self.afk_transitions + other.afk_transitions,
         )
 
 
@@ -236,8 +307,14 @@ def parse_event(line: str) -> dict | None:
     """Parse one helper JSON line into a normalized event dict.
 
     Returns ``None`` for blank lines or malformed JSON (a metadata-only warning
-    is logged — never the offending text). On success returns a dict with keys
-    ``app, window, url, text, ts, incognito`` (missing optionals defaulted).
+    is logged — never the offending text). Stream-mode helpers emit *typed*
+    events (``type`` in :data:`_EVENT_TYPES`); a line without ``type`` — or with
+    an unknown/non-string one — is a capture frame (back-compat with one-shot
+    helpers, and fail-safe: unknown types go through the strictest path).
+
+    Capture frames return the classic shape ``app, window, url, text, ts,
+    incognito`` plus ``type="capture"`` and a sanitized optional ``trigger``.
+    Non-capture events return metadata-only dicts (never window/URL/text).
     """
     line = line.strip()
     if not line:
@@ -252,11 +329,39 @@ def parse_event(line: str) -> dict | None:
         logger.warning("capture: helper line was not a JSON object; dropping")
         return None
 
+    event_type = raw.get("type")
+    if not isinstance(event_type, str) or event_type not in _EVENT_TYPES:
+        event_type = "capture"
+
     ts = raw.get("ts")
     try:
         ts_val = float(ts) if ts is not None else None
     except (TypeError, ValueError):
         ts_val = None
+
+    if event_type != "capture":
+        # Metadata-only events: sanitize every enum-ish field against a closed
+        # vocabulary (these values can reach logs; free text must not).
+        kind = raw.get("kind")
+        idle = raw.get("idle_seconds")
+        try:
+            idle_val = float(idle) if idle is not None else None
+        except (TypeError, ValueError):
+            idle_val = None
+        seq = raw.get("seq")
+        return {
+            "type": event_type,
+            "ts": ts_val,
+            "afk": bool(raw.get("afk", False)),
+            "paused": bool(raw.get("paused", False)),
+            "idle_seconds": idle_val,
+            "seq": seq if isinstance(seq, int) else None,
+            "kind": kind if isinstance(kind, str) and kind in _SYSTEM_KINDS else None,
+        }
+
+    trigger = raw.get("trigger")
+    if not isinstance(trigger, str) or trigger not in _CAPTURE_TRIGGERS:
+        trigger = None
 
     def _str_or_none(value: object) -> str | None:
         """Accept only strings for free-text fields; coerce anything else to None."""
@@ -268,6 +373,8 @@ def parse_event(line: str) -> dict | None:
     text_val = text if isinstance(text, str) else ""
 
     return {
+        "type": "capture",
+        "trigger": trigger,
         "app": _str_or_none(raw.get("app")),
         "window": _str_or_none(raw.get("window")),
         "url": _str_or_none(raw.get("url")),
@@ -330,6 +437,15 @@ class CaptureDaemon:
         self._session_id: str | None = None
         self._session_app: str | None = None
         self._session_last_ts: float | None = None
+        # AFK state mirrored from helper afk_transition events (stream mode).
+        # Metadata only; used for diagnostics/liveness, never gates ingestion
+        # (the helper already suppresses captures while AFK at the source).
+        self._afk = False
+        # Whether the helper binary supports --stream. Optimistic until proven
+        # otherwise: a helper that EOFs rc=0 without EVER emitting a heartbeat
+        # is an old one-shot binary that ignored the flag — we then downgrade
+        # to poll mode for the rest of this daemon's life (no respawn storm).
+        self._stream_supported = True
         self._stderr_thread: threading.Thread | None = None
         # Safe, content-free error counter for the whole-data-path privacy gate:
         # store/embed failures bump this instead of emitting tracebacks that
@@ -353,19 +469,10 @@ class CaptureDaemon:
     def _event_clock(ts: object) -> float:
         """Return a FINITE comparison/storage timestamp from an untrusted ts.
 
-        JSON permits ``NaN``/``Infinity`` literals and ``float('nan')`` does not
-        raise, so a malformed helper ``ts`` could otherwise poison the session
-        clock (every later finite comparison against NaN is False, freezing
-        segmentation) and corrupt time-range ordering in storage. Non-finite or
-        unparseable values fall back to wall-clock now.
+        Delegates to the shared :func:`_finite_ts` guard (see its docstring for
+        the NaN/Infinity rationale). Kept as a method for existing callers/tests.
         """
-        try:
-            value = float(ts) if ts is not None else None
-        except (TypeError, ValueError):
-            value = None
-        if value is None or not math.isfinite(value):
-            return time.time()
-        return value
+        return _finite_ts(ts)
 
     @staticmethod
     def _signature(
@@ -435,6 +542,9 @@ class CaptureDaemon:
         metadata-only ``reason`` code.
         """
         stats = stats._with(received=1)
+        event_type = event.get("type", "capture")
+        if event_type != "capture" and event_type in _EVENT_TYPES:
+            return self._handle_typed_event(event_type, event, stats)
         if self.is_paused():
             self._reset_coalescing()
             logger.debug("capture: rejected event reason=paused")
@@ -544,6 +654,31 @@ class CaptureDaemon:
             )
         return stats._with(ingested=1)
 
+    def _handle_typed_event(
+        self, event_type: str, event: dict, stats: CaptureStats
+    ) -> CaptureStats:
+        """Handle a metadata-only stream event (never ingests content).
+
+        ``afk_transition`` flips the mirrored AFK state and resets coalescing —
+        the first frame after a return from AFK must be stored even if its
+        content is unchanged, so "resumed at HH:MM" is visible on the timeline.
+        ``heartbeat`` and ``system`` are liveness-only. All logging here is
+        reason-code metadata; the event dicts carry no window/URL/text by
+        construction (see :func:`parse_event`).
+        """
+        if event_type == "afk_transition":
+            afk = bool(event.get("afk", False))
+            self._afk = afk
+            self._reset_coalescing()
+            logger.debug("capture: afk_transition afk=%s", afk)
+            return stats._with(afk_transitions=1)
+        if event_type == "system":
+            # ``kind`` was sanitized against the closed vocabulary at parse time.
+            logger.debug("capture: system event kind=%s", event.get("kind"))
+            return stats._with(heartbeats=1)
+        # heartbeat: pure liveness.
+        return stats._with(heartbeats=1)
+
     # -- stream drivers -------------------------------------------------------
 
     def run_lines(self, lines: Iterable[str]) -> CaptureStats:
@@ -563,7 +698,7 @@ class CaptureDaemon:
             stats = self.handle_event(event, stats)
         return stats
 
-    def _resolve_helper(self) -> list[str]:
+    def _resolve_helper(self, *, stream: bool = False) -> list[str]:
         """Return the launch argv, failing closed if the signed helper is absent.
 
         Enforces the signed-bundle / TCC requirement: when
@@ -576,7 +711,7 @@ class CaptureDaemon:
         argv = list(self.helper_cmd)
         if not argv:
             raise HelperUnavailableError("capture: empty helper command")
-        argv = self._with_policy_args(argv)
+        argv = self._with_policy_args(argv, stream=stream)
         if not self.require_signed_helper:
             return argv
 
@@ -600,13 +735,17 @@ class CaptureDaemon:
         argv[0] = resolved
         return argv
 
-    def _with_policy_args(self, argv: list[str]) -> list[str]:
+    def _with_policy_args(self, argv: list[str], *, stream: bool = False) -> list[str]:
         """Append the allow/block policy so the helper gates content AT THE SOURCE.
 
         The capture helper enforces the pause + allowlist-only policy before
         reading any AX text, so paused/disallowed app content is never read or
         sent over IPC. The Python redaction pass (`redact.decide`) still runs as
         authoritative defense-in-depth.
+
+        With ``stream=True`` the persistent-mode flags are appended: ``--stream``
+        plus the (config-clamped) timing knobs. Poll/one-shot spawns never pass
+        them, so ``openbird doctor`` and ``--once`` behave exactly as before.
         """
         allow = list(getattr(self.settings, "allowlist", None) or [])
         block = list(getattr(self.settings, "blocklist", None) or [])
@@ -620,9 +759,22 @@ class CaptureDaemon:
         # triggers an Automation prompt — by default.
         if getattr(self.settings, "capture_urls", False):
             extra += ["--capture-urls"]
+        if stream:
+            s = self.settings
+            extra += [
+                "--stream",
+                "--idle-tick",
+                str(getattr(s, "capture_idle_tick_seconds", 5.0)),
+                "--afk-threshold",
+                str(getattr(s, "capture_afk_threshold_seconds", 150.0)),
+                "--ceiling",
+                str(getattr(s, "capture_force_ceiling_seconds", 60.0)),
+                "--min-gap",
+                str(getattr(s, "capture_min_gap_seconds", 1.0)),
+            ]
         return argv + extra
 
-    def _spawn(self) -> subprocess.Popen[str]:
+    def _spawn(self, *, stream: bool = False) -> subprocess.Popen[str]:
         """Launch the helper as a text-mode subprocess yielding stdout lines.
 
         stdout carries the JSON event stream. stderr is **drained on a separate
@@ -630,7 +782,7 @@ class CaptureDaemon:
         stderr cannot fill the pipe buffer and deadlock capture; its contents are
         never logged (only a capped byte count), honoring subprocess hygiene.
         """
-        argv = self._resolve_helper()
+        argv = self._resolve_helper(stream=stream)
         proc = subprocess.Popen(
             argv,
             # Detach the helper from FD 0. When the app supervises us, FD 0 is the
@@ -766,6 +918,189 @@ class CaptureDaemon:
             if rc is not None and rc != 0:
                 raise HelperExitError(f"capture helper exited with code {rc}")
         return stats
+
+    # -- persistent (stream) mode ---------------------------------------------
+
+    def _stream_read_timeout(self) -> float:
+        """No-events stall bound: 3 heartbeat intervals, floored at 30s."""
+        tick = float(getattr(self.settings, "capture_idle_tick_seconds", 5.0))
+        return max(_STREAM_READ_TIMEOUT_MIN, 3.0 * tick)
+
+    def _liveness_path(self) -> Path:
+        return Path(self.settings.data_dir) / LIVENESS_FILENAME
+
+    def _write_liveness(
+        self,
+        *,
+        mode: str,
+        last_event_ts: float | None,
+        last_capture_ts: float | None,
+        heartbeat_seq: int | None,
+    ) -> None:
+        """Atomically write the metadata-only liveness sidecar (best-effort).
+
+        capture-health reads this to distinguish "daemon alive and eventing"
+        from "daemon gone / wedged" without ever reporting ok off a stale
+        timestamp. Write-temp-then-rename inside data_dir keeps readers from
+        ever observing a torn file. Failures are logged as a reason code only.
+        """
+        payload = {
+            "updated_at": time.time(),
+            "last_event_ts": last_event_ts,
+            "last_capture_ts": last_capture_ts,
+            "mode": mode,
+            "afk": self._afk,
+            "heartbeat_seq": heartbeat_seq,
+        }
+        path = self._liveness_path()
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(payload))
+            os.replace(tmp, path)
+        except OSError:
+            logger.debug("capture: liveness_write_failed")
+
+    def run_persistent(
+        self, *, stop_event: "threading.Event | None" = None
+    ) -> CaptureStats:
+        """Run ONE persistent-helper cycle: spawn ``--stream``, consume events.
+
+        A reader thread pushes decoded lines into a queue; this loop drains it
+        in :data:`_STREAM_STOP_SLICE` slices so a stop request is honored
+        within ~1s (never a full stall timeout). Outcomes:
+
+          * ``stop_event`` set -> helper terminated, CLEAN return (stats).
+          * helper stdout EOF, rc != 0 -> :class:`HelperExitError` (supervisor
+            backoff applies; exit 2 = AX denial, 3 = pipe/EPIPE refusal).
+          * EOF, rc == 0, NO heartbeat ever seen -> old binary that ignored
+            ``--stream``: mark stream unsupported, CLEAN return (the caller
+            falls back to poll mode — no error, no breaker hit).
+          * EOF, rc == 0, heartbeats seen -> unexpected self-exit of a healthy
+            stream helper: :class:`HelperExitError` (respawn with backoff).
+          * no events for the stall timeout with the process alive -> reap it
+            and raise :class:`HelperExitError` ("stalled").
+        """
+        stop = stop_event or threading.Event()
+        proc = self._spawn(stream=True)
+        stats = CaptureStats()
+        # Bounded: if ingest wedges (e.g. a stuck embed call), the reader
+        # blocks once full, the pipe backs up, and the helper's writes stall —
+        # bounded memory with natural backpressure instead of unbounded growth.
+        lines: "queue.Queue[object]" = queue.Queue(maxsize=_STREAM_QUEUE_MAX)
+        eof_sentinel = object()
+
+        def _reader(stdout) -> None:
+            try:
+                for line in stdout:
+                    lines.put(line)
+            except (OSError, ValueError):
+                pass  # stream closed during shutdown
+            finally:
+                lines.put(eof_sentinel)
+
+        reader = threading.Thread(
+            target=_reader, args=(proc.stdout,), name="capture-stream-reader",
+            daemon=True,
+        )
+        reader.start()
+
+        saw_heartbeat = False
+        heartbeat_seq: int | None = None
+        last_event_ts: float | None = None
+        last_capture_ts: float | None = None
+        read_timeout = self._stream_read_timeout()
+        last_line_mono = time.monotonic()
+        last_liveness_mono = 0.0
+        stopped_by_us = False
+        try:
+            while True:
+                if stop.is_set():
+                    stopped_by_us = True
+                    break
+                try:
+                    item = lines.get(timeout=_STREAM_STOP_SLICE)
+                except queue.Empty:
+                    if time.monotonic() - last_line_mono > read_timeout:
+                        if proc.poll() is None:
+                            # Alive but silent past 3 heartbeat intervals: a
+                            # wedged helper. Reap and let the supervisor back
+                            # off (metadata-only log).
+                            logger.warning(
+                                "capture stream: reason=helper_stalled "
+                                "(silent for %.0fs)",
+                                read_timeout,
+                            )
+                            raise HelperExitError(
+                                "capture helper stalled"
+                            ) from None
+                        # Process died; the reader's EOF sentinel arrives next.
+                    continue
+                if item is eof_sentinel:
+                    break
+                last_line_mono = time.monotonic()
+                event = parse_event(item)  # type: ignore[arg-type]
+                if event is None:
+                    if str(item).strip():
+                        stats = stats._with(errors=1)
+                    continue
+                event_type = event.get("type", "capture")
+                if event_type == "heartbeat":
+                    saw_heartbeat = True
+                    seq = event.get("seq")
+                    heartbeat_seq = seq if isinstance(seq, int) else heartbeat_seq
+                ts = _finite_ts(event.get("ts"))
+                last_event_ts = ts
+                if event_type == "capture":
+                    last_capture_ts = ts
+                stats = self.handle_event(event, stats)
+                now_mono = time.monotonic()
+                if now_mono - last_liveness_mono >= _LIVENESS_WRITE_INTERVAL:
+                    self._write_liveness(
+                        mode="stream",
+                        last_event_ts=last_event_ts,
+                        last_capture_ts=last_capture_ts,
+                        heartbeat_seq=heartbeat_seq,
+                    )
+                    last_liveness_mono = now_mono
+        finally:
+            self._shutdown(proc)
+            # Final flush so the sidecar reflects end-of-cycle state (the
+            # periodic write is interval-bounded and may lag the last events).
+            self._write_liveness(
+                mode="stream",
+                last_event_ts=last_event_ts,
+                last_capture_ts=last_capture_ts,
+                heartbeat_seq=heartbeat_seq,
+            )
+
+        if stopped_by_us or stop.is_set():
+            return stats
+        rc = proc.returncode
+        if rc is not None and rc != 0:
+            raise HelperExitError(f"capture helper exited with code {rc}")
+        if not saw_heartbeat:
+            # Old binary: ignored --stream, did its one-shot capture, exited 0.
+            self._stream_supported = False
+            logger.info("capture: stream_unsupported; falling back to one-shot polling")
+            return stats
+        # A healthy stream helper never exits 0 on its own (only on our signal).
+        raise HelperExitError("stream helper exited unexpectedly (code 0)")
+
+    def force_oneshot_mode(self) -> None:
+        """Public switch to the legacy one-shot polling cadence (CLI --poll).
+
+        Persistent/stream mode never activates for this daemon instance; the
+        env force (:data:`CAPTURE_MODE_ENV`) still wins either way, matching
+        the auto path's precedence.
+        """
+        self._stream_supported = False
+
+    def _capture_mode(self) -> str:
+        """Effective loop mode: env force wins, else downgrade-aware default."""
+        forced = os.environ.get(CAPTURE_MODE_ENV, "").strip().lower()
+        if forced in ("oneshot", "persistent"):
+            return forced
+        return "persistent" if self._stream_supported else "oneshot"
 
     @staticmethod
     def _watch_supervisor(token: str, fd: int, stop: "threading.Event") -> None:
@@ -905,12 +1240,39 @@ class CaptureDaemon:
         logger.info("capture supervisor: starting (poll_interval=%.1fs)", poll_interval)
         try:
             while not stop.is_set():
+                cycle_start = time.monotonic()
                 try:
-                    total = total._add(self.run(stop_event=stop))
+                    if self._capture_mode() == "persistent":
+                        total = total._add(self.run_persistent(stop_event=stop))
+                    else:
+                        cycle_stats = self.run(stop_event=stop)
+                        total = total._add(cycle_stats)
+                        # Keep the liveness sidecar current in poll mode too:
+                        # after an old-binary downgrade the last stream-mode
+                        # flush would otherwise go stale within 30s and
+                        # capture-health would report a healthy polling daemon
+                        # as "stale". Poll cycles are near-instant, so cycle
+                        # wall-clock stands in for the event time — but only
+                        # when the cycle actually received events (honest
+                        # nulls otherwise). Metadata only.
+                        now = time.time()
+                        got_events = cycle_stats.received > 0
+                        self._write_liveness(
+                            mode="oneshot",
+                            last_event_ts=now if got_events else None,
+                            last_capture_ts=now if got_events else None,
+                            heartbeat_seq=None,
+                        )
                 except HelperUnavailableError:
                     # Missing signed bundle is permanent, not transient: don't retry.
                     raise
                 except Exception as exc:  # noqa: BLE001 - one bad cycle must not kill the loop
+                    # Duration-based decay: a persistent cycle that survived a
+                    # long time before failing is NOT part of a failure streak.
+                    # A once-a-day crash must never accumulate into a breaker
+                    # trip; a restart storm (fast failures) still trips it.
+                    if time.monotonic() - cycle_start >= _FAILURE_DECAY_SECONDS:
+                        failures = 0
                     failures += 1
                     self.error_count += 1
                     # Metadata only: class + consecutive count, never the message.
@@ -997,4 +1359,6 @@ __all__ = [
     "HELPER_PATH_ENV",
     "DEFAULT_SIGNED_HELPER_PATH",
     "SUPERVISOR_TOKEN_ENV",
+    "CAPTURE_MODE_ENV",
+    "LIVENESS_FILENAME",
 ]

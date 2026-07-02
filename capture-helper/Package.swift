@@ -18,8 +18,21 @@ let package = Package(
         .macOS(.v13)
     ],
     targets: [
+        // Pure scheduling/state-machine logic for stream mode (no AX, no
+        // Foundation timers, no I/O) — a library target so `swift test` can
+        // drive it deterministically with a fake monotonic clock.
+        .target(
+            name: "CaptureHelperCore",
+            path: "Sources/CaptureHelperCore"
+        ),
+        .testTarget(
+            name: "CaptureHelperCoreTests",
+            dependencies: ["CaptureHelperCore"],
+            path: "Tests/CaptureHelperCoreTests"
+        ),
         .executableTarget(
             name: "CaptureHelper",
+            dependencies: ["CaptureHelperCore"],
             path: "Sources/CaptureHelper",
             // NOTE: dangerous_apps.json is the CANONICAL dangerous-app list and a
             // committed source file, but it is intentionally NOT bundled as a

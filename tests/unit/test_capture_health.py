@@ -211,14 +211,19 @@ def test_capture_health_cli_json_is_metadata_only(tmp_path, fake_provider, monke
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
+    # Deliberately extended for Phase A: the additive `daemon` liveness block
+    # (metadata only — state/timestamps/mode/afk/seq, never content).
     assert set(payload) == {
         "generated_at",
         "recent_window_seconds",
         "paused",
         "allowlist_count",
         "blocklist_count",
+        "daemon",
         "apps",
     }
+    # No daemon running in this test -> no sidecar -> unknown, never "ok".
+    assert payload["daemon"] == {"state": "unknown"}
     assert payload["allowlist_count"] == 1
     row = payload["apps"][0]
     assert set(row) == {

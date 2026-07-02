@@ -453,6 +453,8 @@ def test_normalize_app_specific_chrome():
 def test_parse_event_valid():
     e = parse_event(_line(app="a", window="w", url="u", text="t", ts=123.5))
     assert e == {
+        "type": "capture",
+        "trigger": None,
         "app": "a",
         "window": "w",
         "url": "u",
@@ -473,6 +475,91 @@ def test_parse_event_bad_ts_becomes_none():
     e = parse_event(_line(app="a", text="t", ts="not-a-number"))
     assert e is not None
     assert e["ts"] is None
+
+
+# ---------------------------------------------------------------------------
+# parse_event — typed stream events (Phase A)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_event_typed_heartbeat_is_metadata_only():
+    e = parse_event(json.dumps({"type": "heartbeat", "ts": 5.0, "seq": 3, "afk": False}))
+    assert e is not None
+    assert e["type"] == "heartbeat"
+    assert e["seq"] == 3
+    # Typed events must never carry content-bearing fields.
+    for forbidden in ("app", "window", "url", "text"):
+        assert forbidden not in e
+
+
+def test_parse_event_typed_system_sanitizes_kind():
+    ok = parse_event(json.dumps({"type": "system", "kind": "will_sleep", "ts": 1.0}))
+    assert ok is not None and ok["kind"] == "will_sleep"
+    # Free-text kind (could embed content) is dropped, not passed through.
+    bad = parse_event(json.dumps({"type": "system", "kind": "user typed secret", "ts": 1.0}))
+    assert bad is not None and bad["kind"] is None
+
+
+def test_parse_event_unknown_type_treated_as_capture():
+    # Fail-safe: an unknown type goes through the strictest (capture) path,
+    # where empty text is rejected by redaction downstream.
+    e = parse_event(json.dumps({"type": "mystery", "ts": 1.0}))
+    assert e is not None
+    assert e["type"] == "capture"
+    assert e["text"] == ""
+
+
+def test_parse_event_capture_trigger_sanitized():
+    ok = parse_event(_line(app="a", text="t", ts=1.0).replace('"app"', '"trigger": "idle_tick", "app"', 1))
+    assert ok is not None and ok["trigger"] == "idle_tick"
+    bad = parse_event(_line(app="a", text="t", ts=1.0).replace('"app"', '"trigger": "free text!", "app"', 1))
+    assert bad is not None and bad["trigger"] is None
+
+
+# ---------------------------------------------------------------------------
+# CaptureDaemon — typed-event dispatch (Phase A)
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_counts_typed_events_without_ingesting(allow_settings):
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings)
+    lines = [
+        json.dumps({"type": "heartbeat", "ts": 1.0, "seq": 0}),
+        json.dumps({"type": "system", "kind": "screen_locked", "ts": 2.0}),
+        json.dumps({"type": "afk_transition", "ts": 3.0, "afk": True, "idle_seconds": 150.0}),
+    ]
+    stats = daemon.run_lines(lines)
+    assert stats.received == 3
+    assert stats.heartbeats == 2  # heartbeat + system are liveness-only
+    assert stats.afk_transitions == 1
+    assert stats.ingested == 0
+    assert stats.rejected == 0
+    assert store.calls == []
+
+
+def test_daemon_afk_transition_resets_coalescing(allow_settings):
+    store = FakeStore()
+    daemon = CaptureDaemon(store, settings=allow_settings, duplicate_window=60.0)
+    frame = _line(app="com.apple.mail", window="Inbox", text="same report", ts=10.0)
+    afk_away = json.dumps({"type": "afk_transition", "ts": 12.0, "afk": True})
+    afk_back = json.dumps({"type": "afk_transition", "ts": 20.0, "afk": False})
+    frame_later = _line(app="com.apple.mail", window="Inbox", text="same report", ts=21.0)
+
+    stats = daemon.run_lines([frame, afk_away, afk_back, frame_later])
+
+    # Without the AFK reset the second identical frame would coalesce; the
+    # return-from-AFK boundary must force a fresh stored observation.
+    assert stats.ingested == 2
+    assert stats.coalesced == 0
+    assert stats.afk_transitions == 2
+    assert daemon._afk is False
+
+
+def test_daemon_afk_state_mirrors_last_transition(allow_settings):
+    daemon = CaptureDaemon(FakeStore(), settings=allow_settings)
+    daemon.run_lines([json.dumps({"type": "afk_transition", "ts": 1.0, "afk": True})])
+    assert daemon._afk is True
 
 
 # ---------------------------------------------------------------------------

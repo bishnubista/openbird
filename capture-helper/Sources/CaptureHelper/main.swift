@@ -18,6 +18,7 @@
 
 import ApplicationServices
 import AppKit
+import CaptureHelperCore
 import Foundation
 
 // MARK: - Tunable limits (bound traversal so a bad AX tree can't hang us)
@@ -32,7 +33,8 @@ private enum Limits {
 // MARK: - Non-content diagnostics (stderr only)
 
 /// Write a NON-CONTENT diagnostic line to stderr. Never pass captured text here.
-private func diag(_ message: String) {
+/// Internal (not private): StreamEngine.swift shares it for the same contract.
+func diag(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
@@ -84,7 +86,7 @@ func stdoutPipeStatIsPrivate(mode: mode_t, uid: uid_t, euid: uid_t, nlink: nlink
 /// Uses `fstat` on the already-open fd (not `stat` on a path) so the bits we
 /// validate belong to the exact file the helper will write to — closing the
 /// TOCTOU window a path-based check would leave open.
-private func stdoutIsPrivatePipe() -> Bool {
+func stdoutIsPrivatePipe() -> Bool {
     var st = stat()
     guard fstat(FileHandle.standardOutput.fileDescriptor, &st) == 0 else { return false }
     return stdoutPipeStatIsPrivate(
@@ -92,7 +94,7 @@ private func stdoutIsPrivatePipe() -> Bool {
 }
 
 /// Prompt for (and report) Accessibility trust. Returns whether we are trusted.
-private func ensureAccessibilityTrust(prompt: Bool) -> Bool {
+func ensureAccessibilityTrust(prompt: Bool) -> Bool {
     let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
     let options = [key: prompt] as CFDictionary
     return AXIsProcessTrustedWithOptions(options)
@@ -123,6 +125,7 @@ private final class TraversalBudget {
     var nodesVisited = 0
     var bytesCollected = 0
     var sensitiveSkipped = 0   // nodes skipped by the secure/role policy
+    var axTimedOut = false     // a batched AX read hit kAXErrorCannotComplete
     let deadline: Date
 
     init(deadlineSeconds: Double) {
@@ -130,7 +133,8 @@ private final class TraversalBudget {
     }
 
     var expired: Bool {
-        nodesVisited >= Limits.maxNodes
+        axTimedOut
+            || nodesVisited >= Limits.maxNodes
             || bytesCollected >= Limits.maxTextBytes
             || Date() >= deadline
     }
@@ -152,16 +156,14 @@ private let skipValueRoles: Set<String> = [
     "AXSecureTextField",
 ]
 
-/// Whether this element's role/subrole marks it as sensitive (skip wholesale).
-private func isSensitive(_ element: AXUIElement) -> Bool {
-    if let subrole = axString(element, kAXSubroleAttribute as String),
-       sensitiveSubroles.contains(subrole) {
-        return true
-    }
-    if let role = axString(element, kAXRoleAttribute as String),
-       skipValueRoles.contains(role) {
-        return true
-    }
+/// Whether this role/subrole pair marks a node as sensitive (skip wholesale).
+/// Takes the already-fetched strings so the SENSITIVITY DECISION NEVER REQUIRES
+/// READING VALUE/TITLE: the two-stage batched fetch in `collectText` reads
+/// role/subrole first and only requests content attributes for nodes this
+/// function clears (the secure-field invariant, enforced by fetch ORDER).
+private func isSensitiveMeta(role: String?, subrole: String?) -> Bool {
+    if let subrole, sensitiveSubroles.contains(subrole) { return true }
+    if let role, skipValueRoles.contains(role) { return true }
     return false
 }
 
@@ -174,18 +176,30 @@ private func axString(_ element: AXUIElement, _ attribute: String) -> String? {
     return nil
 }
 
-/// Read the children of an AX element, or an empty array.
-private func axChildren(_ element: AXUIElement) -> [AXUIElement] {
-    var value: CFTypeRef?
-    let err = AXUIElementCopyAttributeValue(
-        element, kAXChildrenAttribute as CFString, &value)
-    guard err == .success, let children = value as? [AXUIElement] else { return [] }
-    return children
+/// Batched attribute read: one IPC round-trip for N attributes (vs N trips).
+/// Returns positional values (error placeholders surface as non-castable
+/// entries -> nil at the use site), or nil on wholesale failure. Flags
+/// `budget.axTimedOut` on kAXErrorCannotComplete — with the 1s messaging
+/// timeout set, that means the target app is not responding; the caller
+/// accepts the partial text collected so far instead of stalling the capture.
+private func axBatch(
+    _ element: AXUIElement, _ attributes: [String], budget: TraversalBudget
+) -> [AnyObject]? {
+    var values: CFArray?
+    let err = AXUIElementCopyMultipleAttributeValues(
+        element, attributes as CFArray, AXCopyMultipleAttributeOptions(), &values)
+    if err == .cannotComplete {
+        budget.axTimedOut = true
+        return nil
+    }
+    guard err == .success, let arr = values as? [AnyObject], arr.count == attributes.count
+    else { return nil }
+    return arr
 }
 
 /// Live pause-state check. The pause sidecar is intentionally read on every
 /// checkpoint; the helper never caches it for a whole capture.
-private func capturePaused(_ pauseFile: String?) -> Bool {
+func capturePaused(_ pauseFile: String?) -> Bool {
     guard let pauseFile else { return false }
     if pauseFile.isEmpty {
         diag("capture: pause_state_unknown")
@@ -208,7 +222,7 @@ private func capturePaused(_ pauseFile: String?) -> Bool {
     return false
 }
 
-private func skipIfPaused(_ pauseFile: String?) -> Bool {
+func skipIfPaused(_ pauseFile: String?) -> Bool {
     if capturePaused(pauseFile) {
         diag("capture: skipped_paused")
         return true
@@ -230,17 +244,44 @@ private func collectText(
     if skipIfPaused(pauseFile) || depth > Limits.maxDepth || budget.expired { return }
     budget.nodesVisited += 1
 
-    // Role/subrole policy BEFORE reading any value: never aggregate secure text
-    // fields (passwords), and never descend into them.
+    // STAGE 1 — role/subrole ONLY, batched (1 IPC round-trip). The sensitivity
+    // decision happens before any content attribute is requested, preserving
+    // the secure-field invariant: a password field's value/title is never even
+    // asked for, let alone read.
     if skipIfPaused(pauseFile) { return }
-    if isSensitive(element) {
+    guard let meta = axBatch(
+        element,
+        [kAXRoleAttribute as String, kAXSubroleAttribute as String],
+        budget: budget)
+    else {
+        // FAIL CLOSED: if role/subrole cannot be read at all, we cannot prove
+        // the node is non-sensitive, so its value/title are never requested
+        // and its subtree is skipped. (Per-attribute absence inside a
+        // successful batch is different — placeholders yield nil strings and
+        // the node is judged on what IS present.)
+        return
+    }
+    if budget.expired { return }
+    if isSensitiveMeta(role: meta[0] as? String, subrole: meta[1] as? String) {
         budget.sensitiveSkipped += 1
         return
     }
 
-    for attr in [kAXValueAttribute as String, kAXTitleAttribute as String] {
-        if skipIfPaused(pauseFile) { return }
-        if let s = axString(element, attr), !s.isEmpty {
+    // STAGE 2 — content + children for proven non-sensitive nodes, batched
+    // (value/title/children in one round-trip; was 5 single-attribute trips).
+    if skipIfPaused(pauseFile) { return }
+    let content = axBatch(
+        element,
+        [
+            kAXValueAttribute as String,
+            kAXTitleAttribute as String,
+            kAXChildrenAttribute as String,
+        ],
+        budget: budget)
+    if budget.expired { return }
+
+    for candidate in [content?[0] as? String, content?[1] as? String] {
+        if let s = candidate, !s.isEmpty {
             parts.append(s)
             budget.bytesCollected += s.utf8.count
             if budget.expired { return }
@@ -248,7 +289,7 @@ private func collectText(
     }
 
     if skipIfPaused(pauseFile) { return }
-    for child in axChildren(element) {
+    for child in (content?[2] as? [AXUIElement]) ?? [] {
         if skipIfPaused(pauseFile) || budget.expired { return }
         collectText(
             from: child,
@@ -263,17 +304,37 @@ private func collectText(
 // MARK: - JSON emission
 
 /// One capture record. Encoded to a single JSON line on stdout.
-private struct CaptureEvent: Encodable {
+///
+/// `type`/`trigger` are stream-mode additions: nil in one-shot mode, so the
+/// synthesized encoder omits them and old-daemon output stays byte-compatible
+/// (the Python side treats a line without `type` as a capture frame).
+struct CaptureEvent: Encodable {
+    let type: String?
+    let trigger: String?
     let app: String?
     let window: String?
     let url: String?
     let text: String
     let ts: Double
     let incognito: Bool
+
+    init(
+        app: String?, window: String?, url: String?, text: String,
+        ts: Double, incognito: Bool, trigger: String? = nil
+    ) {
+        self.type = trigger == nil ? nil : "capture"
+        self.trigger = trigger
+        self.app = app
+        self.window = window
+        self.url = url
+        self.text = text
+        self.ts = ts
+        self.incognito = incognito
+    }
 }
 
 /// Emit a capture event as a single JSON line on STDOUT (the only content sink).
-private func emit(_ event: CaptureEvent) {
+func emit(_ event: CaptureEvent) {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.withoutEscapingSlashes]
     guard let data = try? encoder.encode(event) else {
@@ -446,9 +507,15 @@ private func browserTabInfo(appName: String) -> BrowserTab {
 }
 
 /// Capture the frontmost app's active-window text once and emit it.
-private func captureFrontmost(
-    allow: Set<String>, block: Set<String>, pauseFile: String?, captureUrls: Bool
+///
+/// Stream mode passes `trigger` (stamped onto the event) and `emitter` (the
+/// locked POSIX-write sink); one-shot mode uses the defaults, keeping its
+/// output byte-compatible with older daemons.
+func captureFrontmost(
+    allow: Set<String>, block: Set<String>, pauseFile: String?, captureUrls: Bool,
+    trigger: String? = nil, emitter: ((CaptureEvent) -> Void)? = nil
 ) {
+    let send = emitter ?? emit
     if skipIfPaused(pauseFile) { return }
 
     guard let frontApp = NSWorkspace.shared.frontmostApplication else {
@@ -465,9 +532,9 @@ private func captureFrontmost(
     if !contentAllowed(bundleId: bundleId, allow: allow, block: block) {
         diag("capture: skipped_not_allowlisted")
         if skipIfPaused(pauseFile) { return }
-        emit(CaptureEvent(
+        send(CaptureEvent(
             app: bundleId, window: nil, url: nil, text: "",
-            ts: Date().timeIntervalSince1970, incognito: false))
+            ts: Date().timeIntervalSince1970, incognito: false, trigger: trigger))
         return
     }
 
@@ -477,13 +544,17 @@ private func captureFrontmost(
     if isDangerousBundle(bundleId) {
         diag("capture: skipped_dangerous_app")
         if skipIfPaused(pauseFile) { return }
-        emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
-                          ts: Date().timeIntervalSince1970, incognito: false))
+        send(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
+                          ts: Date().timeIntervalSince1970, incognito: false,
+                          trigger: trigger))
         return
     }
 
     if skipIfPaused(pauseFile) { return }
     let appElement = AXUIElementCreateApplication(pid)
+    // Bound every AX message to this app at 1s (kAXErrorCannotComplete on
+    // breach -> axBatch flags the budget and the walk accepts partial text).
+    AXUIElementSetMessagingTimeout(appElement, 1.0)
     if skipIfPaused(pauseFile) { return }
 
     // Resolve the focused window (fall back to the first window).
@@ -516,8 +587,9 @@ private func captureFrontmost(
     if isIncognitoTitle(windowTitle) {
         diag("capture: skipped_incognito")
         if skipIfPaused(pauseFile) { return }
-        emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
-                          ts: Date().timeIntervalSince1970, incognito: true))
+        send(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
+                          ts: Date().timeIntervalSince1970, incognito: true,
+                          trigger: trigger))
         return
     }
 
@@ -533,8 +605,9 @@ private func captureFrontmost(
         if tab.confirmedPrivate {
             diag("capture: skipped_incognito_mode")
             if skipIfPaused(pauseFile) { return }
-            emit(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
-                              ts: Date().timeIntervalSince1970, incognito: true))
+            send(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
+                              ts: Date().timeIntervalSince1970, incognito: true,
+                              trigger: trigger))
             return
         }
         capturedURL = tab.url
@@ -555,7 +628,8 @@ private func captureFrontmost(
     // Emit only NON-content metadata to stderr. `capturedURL` was probed above
     // (opt-in only); the diag carries a presence bit (0/1), never the URL string.
     diag("capture: ok nodes=\(budget.nodesVisited) bytes=\(text.utf8.count) "
-        + "secure_skipped=\(budget.sensitiveSkipped) url=\(capturedURL != nil ? 1 : 0)")
+        + "secure_skipped=\(budget.sensitiveSkipped) url=\(capturedURL != nil ? 1 : 0)"
+        + (budget.axTimedOut ? " partial=ax_timeout" : ""))
 
     let event = CaptureEvent(
         app: bundleId,
@@ -563,16 +637,17 @@ private func captureFrontmost(
         url: capturedURL,
         text: text,
         ts: Date().timeIntervalSince1970,
-        incognito: false
+        incognito: false,
+        trigger: trigger
     )
     if skipIfPaused(pauseFile) { return }
-    emit(event)
+    send(event)
 }
 
 // MARK: - Entry point
 
 /// Parse a repeatable/comma-separated list flag (e.g. `--allow a,b --allow c`).
-private func listArg(_ args: [String], _ name: String) -> Set<String> {
+func listArg(_ args: [String], _ name: String) -> Set<String> {
     var out: Set<String> = []
     var i = 0
     while i < args.count {
@@ -589,7 +664,7 @@ private func listArg(_ args: [String], _ name: String) -> Set<String> {
 }
 
 /// Parse a single value flag (e.g. `--pause-file /path/to/capture.paused`).
-private func valueArg(_ args: [String], _ name: String) -> String? {
+func valueArg(_ args: [String], _ name: String) -> String? {
     var i = 0
     while i < args.count {
         if args[i] == name, i + 1 < args.count, !args[i + 1].hasPrefix("--") {
@@ -626,6 +701,25 @@ private func run() {
     // Opt-in: capture the active browser tab's URL via Apple Events (off unless the
     // daemon passes --capture-urls, which it does only when the user enables it).
     let captureUrls = args.contains("--capture-urls")
+
+    // Persistent event-driven mode. Timing knobs arrive pre-clamped from the
+    // Python config; SchedulerConfig defensively re-clamps. Stream mode never
+    // returns (RunLoop.main.run() / exit paths inside).
+    if args.contains("--stream") {
+        func doubleArg(_ name: String) -> Double? {
+            valueArg(args, name).flatMap(Double.init)
+        }
+        let config = SchedulerConfig(
+            minGap: doubleArg("--min-gap") ?? 1.0,
+            idleTick: doubleArg("--idle-tick") ?? 5.0,
+            forceCeiling: doubleArg("--ceiling") ?? 60.0,
+            afkThreshold: doubleArg("--afk-threshold") ?? 150.0
+        )
+        StreamEngine(
+            allow: allow, block: block, pauseFile: pauseFile,
+            captureUrls: captureUrls, config: config
+        ).run(noPrompt: noPrompt)
+    }
 
     if skipIfPaused(pauseFile) { return }
 
