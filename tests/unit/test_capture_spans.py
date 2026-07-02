@@ -524,3 +524,46 @@ def test_app_switch_never_fragments_paused_span(settings):
     assert tracker._open.span_id == paused.span_id
     paused_rows = [r for r in store.spans.values() if r["reason"] == "paused"]
     assert len(paused_rows) == 1
+
+
+def test_fast_aba_middle_span_splits_at_mic_edge(settings):
+    # Codex diff-review regression: Mail -> Zoom at 100 (mic cold), mic starts
+    # at 101, back to Mail at 102 before any Zoom frame. The materialized Zoom
+    # stretch must split: [100,101) meeting=0, [101,102) meeting=1.
+    tracker, store, clock = make_tracker(settings)
+    frame(tracker, app="com.apple.mail", ts=99.0)
+    clock.t += 1.0
+    tracker.on_app_changed("us.zoom.xos", 100.0)  # mic cold at marker time
+    clock.t += 1.0
+    tracker.on_mic(True, 101.0)
+    clock.t += 1.0
+    tracker.on_app_changed("com.apple.mail", 102.0)  # back before a Zoom frame
+    zoom = sorted(
+        (r for r in store.spans.values() if r["bundle_id"] == "us.zoom.xos"),
+        key=lambda r: r["start_ts"],
+    )
+    assert [(r["start_ts"], r["end_ts"], r["meeting"]) for r in zoom] == [
+        (100.0, 101.0, False),
+        (101.0, 102.0, True),
+    ]
+
+
+def test_fast_aba_middle_span_mic_stop_inverse(settings):
+    # Inverse ordering: mic hot at the marker, stops mid-stretch.
+    tracker, store, clock = make_tracker(settings)
+    tracker.on_mic(True, 98.0)
+    frame(tracker, app="com.apple.mail", ts=99.0)
+    clock.t += 1.0
+    tracker.on_app_changed("us.zoom.xos", 100.0)  # mic hot at marker time
+    clock.t += 1.0
+    tracker.on_mic(False, 101.0)
+    clock.t += 1.0
+    tracker.on_app_changed("com.apple.mail", 102.0)
+    zoom = sorted(
+        (r for r in store.spans.values() if r["bundle_id"] == "us.zoom.xos"),
+        key=lambda r: r["start_ts"],
+    )
+    assert [(r["start_ts"], r["end_ts"], r["meeting"]) for r in zoom] == [
+        (100.0, 101.0, True),
+        (101.0, 102.0, False),
+    ]

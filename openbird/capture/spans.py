@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, replace
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -501,15 +501,41 @@ class SpanTracker:
         if self._pending is not None:
             # Fast A->B->A: the middle app never produced a frame. Materialize
             # its small span [pending.ts, ts] so the timeline stays truthful.
-            p_bundle, p_wall, p_mono, _p_mic = self._pending
-            if p_bundle != bundle_id and (now_mono - p_mono) <= self.pulsetime:
-                identity = self._identity_for_frame(
+            p_bundle, p_wall, p_mono, p_mic = self._pending
+            if (
+                p_bundle != bundle_id
+                and (now_mono - p_mono) <= self.pulsetime
+                and ts > p_wall
+            ):
+                base = self._identity_for_frame(
                     app=p_bundle, window=None, url=None,
                     incognito=False, paused=False,
                     afk=span.identity.afk if span else False,
                 )
-                if ts > p_wall:
-                    self._safe_open(identity, p_wall, ts)
+                # Meeting exactness for the materialized stretch: the bit must
+                # reflect the MIC STATE DURING [p_wall, ts), not at judgment
+                # time. If the mic flipped mid-stretch, split at the edge so
+                # each side carries its true bit (same rule _open_new applies
+                # to backdating).
+                app_meet = _meeting_app(p_bundle, None)
+                edge = self._mic_edge_wall
+                if not app_meet or p_mic == self._mic_hot:
+                    self._safe_open(base, p_wall, ts)
+                elif edge is not None and p_wall < edge < ts:
+                    self._safe_open(replace(base, meeting=p_mic), p_wall, edge)
+                    self._safe_open(
+                        replace(base, meeting=self._mic_hot), edge, ts
+                    )
+                elif edge is not None and edge <= p_wall:
+                    # Flip happened before the stretch began: current bit holds
+                    # for the whole range (base already carries it).
+                    self._safe_open(base, p_wall, ts)
+                else:
+                    # Flip after the stretch ended (or edge unknown): the
+                    # marker-time bit holds for the whole range.
+                    self._safe_open(
+                        replace(base, meeting=p_mic and app_meet), p_wall, ts
+                    )
         if span is not None:
             # Close the outgoing app's span at the exact switch instant.
             span.last_event_wall = max(span.last_event_wall, min(ts, time.time()))
