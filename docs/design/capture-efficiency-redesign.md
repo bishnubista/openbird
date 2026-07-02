@@ -134,7 +134,7 @@ empty frame would lose its correct reason. Span classification and the
 should-store-an-observation decision are separate questions evaluated from the same
 structural inputs:
 
-```
+```sql
 activity_spans(
   span_id TEXT PK,
   start_ts REAL, end_ts REAL,          -- merged extent (wall clock, storage only)
@@ -144,11 +144,20 @@ activity_spans(
   url_host TEXT,                       -- tier 1 ONLY; host only; URL capture stays opt-in
   afk INTEGER,                         -- 0/1
   meeting INTEGER DEFAULT 0,           -- Phase C
-  reason TEXT                          -- tier 0: why coarse (not_allowlisted |
-                                       --   blocklisted | dangerous | private |
-                                       --   paused | self_capture)
+  reason TEXT                          -- tier 0 ONLY: why coarse; closed enum:
+                                       --   not_allowlisted | blocklisted |
+                                       --   dangerous | private | paused |
+                                       --   self_capture. NULL for tier 1.
 )
 ```
+
+**Canonical identity contract** (one representation, no mixing): the reason enum is
+the snake_case closed set above — prose names like "self-capture" always mean the
+enum value `self_capture`. Field presence is tier-determined and NULL-sentineled:
+tier 0 ⇒ `window = NULL`, `url_host = NULL`, `reason` set; tier 1 ⇒ `reason = NULL`,
+`window`/`url_host` set (url_host NULL unless URL capture is enabled). The merge
+identity tuple below compares these fields with NULL-equals-NULL semantics, so the
+always-NULL fields of a tier can never split that tier's merges.
 
 - **Tier 1 (full)** — only when `classify_policy()` returns full (allowlisted, not
   private/incognito, not paused, not dangerous): scrubbed window title, URL host, and
@@ -335,7 +344,7 @@ The product must answer two distinct query classes; they need different machiner
 **Entity/state — "have I completed project X?"** A state judgment, not a time query.
 Requires an **entity ledger** built on Phase B's stable identity keys:
 
-```
+```sql
 entities(
   id TEXT PK, kind TEXT,       -- repo | domain | document | topic
   name TEXT, aliases TEXT,     -- "openbird" = repo key + Slack channel + doc titles
