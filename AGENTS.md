@@ -21,7 +21,7 @@ straight to code. For each feature/fix:
    with Claude as a cross-family, blocking-only second opinion before coding:
    ```bash
    claude -p --model opus --effort high \
-     "<blocking-only review prompt: lead with 'VERDICT: approve|revise'; review only, do not implement or run the repo pipeline>" \
+     "<blocking-only review prompt: lead with 'VERDICT: approve|revise'; review only, do not implement or run the repo pipeline; inspect files with Read/Grep/Glob directly - subagents such as Explore are unavailable in headless runs, do not call them>" \
      < /dev/null > review.log 2>&1   # stdin + logfile are mandatory - see "Running gates safely"
    ```
    Iterate plan <-> Claude until the verdict is `approve` and no
