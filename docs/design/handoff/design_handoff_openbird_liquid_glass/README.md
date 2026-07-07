@@ -2,7 +2,8 @@
 
 > Historical prototype note: this handoff predates Phase C2 deep capture. Treat
 > the root `README.md`, `docs/design/privacy-data-flow.md`, and
-> `docs/privacy-routes.yaml` as authoritative for current privacy copy.
+> `docs/privacy-routes.yaml` as authoritative for current privacy copy and
+> Screen Recording scope.
 
 ## Overview
 OpenBird is a local-first macOS work-memory app. It runs in the menu bar, stores text from your active window by default, optionally uses per-app transient window stills for on-device OCR, transcribes meetings locally, and answers natural-language questions about what you did ("What did I work on yesterday?") with grounded, citation-backed answers drawn from on-device memory.
@@ -62,7 +63,7 @@ All three answer the same seed query **"What did I work on yesterday?"** with th
 
 ### 4. Onboarding / Setup
 - **Purpose:** First-run permissions.
-- **Layout:** 540px glass sheet (traffic lights). Centered: 54px bird, "Welcome to OpenBird", privacy subhead ("stores text, not screenshots or images"). Four permission rows (icon tile in `rgba(47,127,242,0.14)`, title + subtitle, status): Screen text capture **Granted** · Accessibility **Granted** · System audio for meetings **Enable** button · Local model · Ollama **Connected**. Primary "Start capturing" button. Footer lock line: "Local by default. Pause anytime from the menu bar."
+- **Layout:** 540px glass sheet (traffic lights). Centered: 54px bird, "Welcome to OpenBird", privacy subhead ("stores text, not screenshots or images"). Permission rows (icon tile in `rgba(47,127,242,0.14)`, title + subtitle, status): Screen text capture **Granted** · Accessibility **Granted** · system-audio / Screen Recording **Enable** button · Meeting transcription status · active model route status. Primary "Start capturing" button. Footer lock line: "Local by default. Pause anytime from the menu bar."
 
 > The bottom-center floating pill (Menu/Ask/Today/Setup + direction switcher + light/dark toggle) is a **prototype-only control** — do not ship it.
 
