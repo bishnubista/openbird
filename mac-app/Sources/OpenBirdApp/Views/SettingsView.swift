@@ -148,7 +148,7 @@ struct SettingsView: View {
             hairline
             permissionRow(
                 icon: "rectangle.inset.filled", title: "Screen Recording", badge: .optional,
-                subtitle: "Only needed for meeting / system-audio capture",
+                subtitle: "Needed for meetings and OCR fallback in opted-in apps",
                 trailing: model.screenRecordingState == .ok
                     ? .affirm("On")
                     : .secondary("Enable") { model.requestScreenRecording() }

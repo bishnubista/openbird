@@ -2,14 +2,15 @@
 
 **Open-source, local-first personal memory for your Mac.**
 
-OpenBird is an always-on macOS work assistant that reads the **text** of your active window (never
-screenshots), optionally transcribes meetings from system audio (an opt-in extra — see
+OpenBird is an always-on macOS work assistant that stores **text** from your active window by
+default. For apps you explicitly enable, it can use transient window stills for on-device OCR when
+Accessibility text is unavailable; screenshots/images are never stored. It can also optionally
+transcribe meetings from system audio (an opt-in extra — see
 [Meeting transcription backends](#meeting-transcription-backends); not bundled in the notarized
-beta), unifies everything into a **searchable personal memory that stays on your machine**, lets you
-chat and draft grounded in that memory (with citations), and runs scheduled "Routines." OpenBird is
-**local-first**: your data never leaves your device by
-default, the model layer is **BYO-model** (Ollama out of the box, cloud opt-in), and the system is
-fully auditable.
+beta). Everything is unified into a **searchable personal memory that stays on your machine**, lets
+you chat and draft grounded in that memory (with citations), and runs scheduled "Routines."
+OpenBird is **local-first**: your data never leaves your device by default, the model layer is
+**BYO-model** (Ollama out of the box, cloud opt-in), and the system is fully auditable.
 
 > Status: **early but working.** Python core + Swift capture/audio helpers + a native macOS
 > trust-controller app build and pass the test suite. Functional screen/audio capture requires a signed bundle + macOS permissions (see
@@ -19,6 +20,8 @@ fully auditable.
 
 - **Private by default:** memory lives in on-device SQLite, with encryption gated by preflight.
 - **Text-first capture:** active-window text and UI metadata are stored, not screenshots or video.
+  Optional per-app deep capture uses a transient window-scoped still for on-device OCR only when
+  Accessibility text is empty; the image is never stored or logged.
 - **Opt-in browser URLs:** set `OPENBIRD_CAPTURE_URLS=1` to also record the active tab's URL for
   Chromium browsers (Chrome/Edge/Brave/Arc/Vivaldi) via Apple Events — off by default, skips private
   windows, scrubs query strings/tokens, and triggers a one-time macOS Automation prompt per browser.
@@ -62,7 +65,7 @@ uv run openbird preflight    # reports ollama, sqlite-vec/FTS5, encryption, perm
 uv run --extra encryption python scripts/encryption_gate.py
 
 # 4. Try it (no screen capture needed)
-echo "Decision: store screen text in SQLite, not screenshots." > note.txt
+echo "Decision: store active-window text in SQLite; never store screenshots." > note.txt
 uv run openbird ingest note.txt
 uv run openbird chat "what did we decide about storage?"
 

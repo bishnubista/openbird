@@ -1243,6 +1243,8 @@ final class MemoryStatsTests: XCTestCase {
     ) {
         XCTAssertFalse(text.contains("Nothing leaves your device"), file: file, line: line)
         XCTAssertFalse(text.contains("keeps everything on this device"), file: file, line: line)
+        XCTAssertFalse(text.contains("never screenshots"), file: file, line: line)
+        XCTAssertFalse(text.contains("no images captured"), file: file, line: line)
     }
 
     private func assertNoUnknownLocalRouteClaim(

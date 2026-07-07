@@ -25,6 +25,7 @@ path as any other off-device model route.
 | Route | Source | Captured Fields | Storage | Runtime Egress | Retention/Delete | User Truth Surface |
 |---|---|---|---|---|---|---|
 | `capture.active_window` | Swift Accessibility helper | bundle id, sanitized window title, active-window text, timestamp, incognito flag | SQLite `observations`, `content_blobs`, `chunks`, FTS, sqlite-vec | none unless downstream chat/routine uses a remote model | `openbird data purge`, `prune`, and uninstall purge cascade through derived indexes | app capture state, allowlist/blocklist, preflight |
+| `capture.ocr_window` | Swift helper, per-app opt-in `SCScreenshotManager` window still + on-device Vision OCR | bundle id, sanitized window title, recognized text, timestamp, OCR provenance flag | same SQLite memory path as AX text: `observations`, `content_blobs`, `chunks`, FTS, sqlite-vec; the transient `CGImage` is never stored | none unless downstream chat/routine uses a remote model | `openbird data purge`, `prune`, and uninstall purge cascade through derived indexes; deleting OCR text is identical to deleting AX text | app deep-capture section, capture health, preflight, privacy route manifest |
 | `capture.pause` | pause sidecar in data dir | no content should be read while source-pause is active | no new rows | none | pause file removed by resume/uninstall cleanup | app/menu bar state must say source-paused only when helper enforces it |
 | `ingest.files` | user-selected file or folder | file text/metadata extracted by local parser path | SQLite memory store and derived indexes | none unless model route is remote during embedding/chat | purge/prune cascade; future export is separate egress | CLI/app ingestion status |
 | `chat.local` | question plus retrieved memory | question, retrieved chunks, citations | chat output is not persisted by the core CLI today | local Ollama loopback only | underlying memory deletion removes future retrievability | no cloud banner |
@@ -50,6 +51,10 @@ path as any other off-device model route.
    vectors, and temporary/export scratch files owned by OpenBird.
 6. Release readiness requires positive proof. `release_gate_ok=true` requires
    SQLCipher encryption to be verified and, on macOS, signed-helper/TCC proof.
+7. OCR pixels are transient sensor input only. A window-scoped `CGImage` may exist
+   inside the helper for an opted-in OCR attempt, but it must never be written to
+   disk, logs, stderr, argv, environment, exports, or SQLite; only scrubbed
+   recognized text may enter the normal capture pipe.
 
 ## Product Decisions
 
@@ -69,6 +74,11 @@ path as any other off-device model route.
   app names, raw URLs, or window-title metadata. Users can inspect the redacted
   rows locally with `openbird data reasoning-ledger`; the command is a maintenance
   read and must not construct a model provider or send memory off-device.
+- Deep capture / OCR scope: OCR is a deliberate exception to the text-only sensor
+  mechanism, not to the text-only storage contract. It is off by default, per-app
+  only after the allowlist gate, uses `CGPreflightScreenCaptureAccess` without
+  prompting, suppresses while the mic is hot, and stores only recognized text over
+  the same scrub/normalize/dedup path as Accessibility text.
 - Connector/agent permissions: SurfSense-style ask/allow/deny rules are deferred
   until OpenBird adds connector write actions or agent tools. Adding the rules
   without the scope would expand architecture without improving current privacy.

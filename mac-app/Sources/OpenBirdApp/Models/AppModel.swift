@@ -863,8 +863,8 @@ final class AppModel: ObservableObject {
     /// True when the CORE text-memory path is ready enough to claim "Ready":
     /// route + Accessibility are OK, an allowlisted app is being captured, and the
     /// memory store has at least one observation. If stats cannot be read, this
-    /// conservatively stays false. Encryption is a data-at-rest enhancement, and
-    /// Screen Recording / Microphone are meetings-only; they do not gate this label.
+    /// conservatively stays false. Encryption is a data-at-rest enhancement; optional
+    /// Screen Recording / Microphone capabilities do not gate this core-memory label.
     var isFullyConfigured: Bool {
         nextStepState == .ok
     }
