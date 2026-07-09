@@ -107,6 +107,27 @@ context is advisory, not a release failure. `BLOCKED` means the install, signing
 database decryption, daemon identity, or version proof is incomplete. The workflow
 reports assistant-connector status but never enables Claude automatically.
 
+### 7. End-user smoke test (the release is NOT done without this)
+
+Every check above runs authenticated — they all pass even when the release is broken for
+real users (this shipped broken once: the repo had been flipped private, so every public
+download 404'd while `gh`-based checks stayed green).
+
+```bash
+script/release_status.sh --public-gate   # exit 1 unless repo is PUBLIC and both
+                                         # public download URLs answer unauthenticated
+```
+
+The gate encodes the two reachability checks (repo visibility == PUBLIC; unauthenticated
+HTTP success on the dmg and source-tarball URLs). Do not substitute authenticated
+`gh release view` checks for it.
+
+Then the real upgrade path: `brew update && brew upgrade openbird && brew upgrade --cask
+openbird`, and verify versions in BOTH places — the PATH `openbird` is the **cask's**
+binary, so `openbird doctor` can show the old version after a successful *formula* upgrade;
+check the Cellar (`brew list --versions openbird`) too. Finish with a capture smoke test:
+launch the upgraded app and confirm one capture lands.
+
 ## Notes for tester-facing release notes
 The dmg release notes are written by the `release-dmg` skill. For a richer changelog on
 either release, generate it from history:

@@ -28,7 +28,16 @@
 # drift it could not verify.
 #
 # Usage:
-#   script/release_status.sh [--beta-rehearsal]
+#   script/release_status.sh [--beta-rehearsal | --public-gate]
+#
+# --public-gate runs the beta-rehearsal probes AND hard-fails unless the release is
+# reachable by an UNAUTHENTICATED end user: repo visibility must be PUBLIC and both
+# public download URLs must answer 2xx/3xx without a token. This exists because a
+# release once shipped "green" on every authenticated check while the repo had
+# silently flipped private and all public downloads 404'd. `private_expected` is an
+# acceptable state for --beta-rehearsal, never for --public-gate. Local install/signing
+# checks are printed but ADVISORY under --public-gate: the gate runs before the
+# brew-upgrade smoke step, so stale local state must not fail public reachability.
 #
 # Exit codes:
 #   0  aligned, or a release legitimately in progress (nothing published yet to lag)
@@ -38,21 +47,19 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") [--beta-rehearsal]" >&2
+  echo "usage: $(basename "$0") [--beta-rehearsal | --public-gate]" >&2
   exit 2
 }
 
 beta_rehearsal=0
-case "$#" in
-  0) ;;
-  1)
-    case "$1" in
-      --beta-rehearsal) beta_rehearsal=1 ;;
-      *) usage ;;
-    esac
-    ;;
-  *) usage ;;
-esac
+public_gate=0
+for arg in "$@"; do
+  case "$arg" in
+    --beta-rehearsal) beta_rehearsal=1 ;;
+    --public-gate) public_gate=1; beta_rehearsal=1 ;;
+    *) usage ;;
+  esac
+done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
@@ -251,6 +258,22 @@ add_beta_blocker() {
   fi
 }
 
+# Public-gate blockers are tracked separately from beta (local install) blockers:
+# the gate runs BEFORE the brew-upgrade smoke step, so a stale/missing local app is
+# expected there and must not fail the public-reachability verdict.
+public_blocker=0
+public_blocker_reason=""
+
+add_public_blocker() {
+  local reason="$1"
+  public_blocker=1
+  if [ -n "$public_blocker_reason" ]; then
+    public_blocker_reason="$public_blocker_reason; $reason"
+  else
+    public_blocker_reason="$reason"
+  fi
+}
+
 bundle_signing_metadata() {
   local bundle="$1" out rc stapler_rc team signature notarization reason
   rc=0
@@ -320,6 +343,17 @@ if [ "$beta_rehearsal" -eq 1 ]; then
   src_public_status="$(public_download_status "$src_published" "$src_http_code")"
   case "$dmg_public_status" in blocked*) add_beta_blocker "DMG public download $dmg_public_status" ;; esac
   case "$src_public_status" in blocked*) add_beta_blocker "source public download $src_public_status" ;; esac
+
+  # --public-gate: end-user reachability is a hard requirement, not advisory.
+  # Authenticated gh checks pass even when the repo is private and every public
+  # download 404s for real users, so require positive proof of the public path.
+  if [ "$public_gate" -eq 1 ]; then
+    if [ "$repo_visibility" != "PUBLIC" ]; then
+      add_public_blocker "repo visibility is $repo_visibility - a public release requires PUBLIC (downloads 404 for end users while authenticated checks stay green)"
+    fi
+    case "$dmg_public_status" in ok*) ;; *) add_public_blocker "DMG public download not confirmed ok: $dmg_public_status" ;; esac
+    case "$src_public_status" in ok*) ;; *) add_public_blocker "source public download not confirmed ok: $src_public_status" ;; esac
+  fi
 
   beta_app_bundle="${OPENBIRD_RELEASE_STATUS_APP_BUNDLE:-/Applications/OpenBird.app}"
   installed_app_v="missing"
@@ -404,7 +438,17 @@ if [ "$drift" -eq 1 ]; then
   echo "   point at the published $pyproject_v artifacts."
   exit 1
 fi
-if [ "$beta_rehearsal" -eq 1 ] && [ "$beta_blocker" -eq 1 ]; then
+if [ "$public_gate" -eq 1 ]; then
+  if [ "$public_blocker" -eq 1 ]; then
+    echo "=> public gate blocker: $public_blocker_reason"
+    echo "   End users cannot reach this release; fix visibility/publication before declaring done."
+    exit 1
+  fi
+  if [ "$beta_blocker" -eq 1 ]; then
+    echo "   (advisory under --public-gate: local install checks flagged: $beta_blocker_reason;"
+    echo "    expected before the brew-upgrade smoke step - not gating this verdict.)"
+  fi
+elif [ "$beta_rehearsal" -eq 1 ] && [ "$beta_blocker" -eq 1 ]; then
   echo "=> beta blocker: $beta_blocker_reason"
   echo "   Fix the release/install evidence before treating this as public-beta ready."
   exit 1
