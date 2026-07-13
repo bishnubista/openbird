@@ -1,6 +1,8 @@
+# frozen_string_literal: true
+
 cask "openbird" do
-  version "0.9.0"
-  sha256 "ef370d71fca3ba36adeaf64fe8ddaf834f883d26e365f4532bec78ce24dbcc1d"
+  version "0.10.0"
+  sha256 "0e4cf884a2bc288f6a72b4aae997a13247d2035028fe421128f1781d0c390955"
 
   url "https://github.com/bishnubista/openbird/releases/download/beta-dmg-#{version}/OpenBird.dmg"
   name "OpenBird"
