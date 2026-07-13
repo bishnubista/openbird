@@ -137,3 +137,17 @@ def test_malformed_latest_report_blocks_instead_of_crashing(tmp_path, monkeypatc
 def test_missing_command_is_blocked():
     with pytest.raises(post_release_audit.Blocked, match="command_unavailable"):
         post_release_audit._run(["/definitely/missing/openbird-command"], timeout=0.1)
+
+
+def test_process_discovery_error_status_is_blocked(monkeypatch):
+    result = post_release_audit.subprocess.CompletedProcess(
+        args=["pgrep"], returncode=2, stdout="", stderr="pgrep metadata error"
+    )
+    monkeypatch.setattr(
+        post_release_audit.subprocess, "run", lambda *args, **kwargs: result
+    )
+
+    with pytest.raises(
+        post_release_audit.Blocked, match="process_discovery_failed:rc_2"
+    ):
+        post_release_audit._app_processes()

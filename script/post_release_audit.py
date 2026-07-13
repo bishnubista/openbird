@@ -126,6 +126,8 @@ def _app_processes() -> set[int]:
         )
     except OSError as exc:
         raise Blocked("process_discovery_unavailable") from exc
+    if result.returncode not in (0, 1):
+        raise Blocked(f"process_discovery_failed:rc_{result.returncode}")
     candidates = {int(value) for value in result.stdout.split() if value.isdigit()}
     return {pid for pid in candidates if _is_app_process(pid)}
 
