@@ -4,8 +4,8 @@
 class Openbird < Formula
   desc "Local-first macOS memory assistant with a native trust controller"
   homepage "https://github.com/bishnubista/openbird"
-  url "https://github.com/bishnubista/openbird/releases/download/v0.10.1/openbird-0.10.1.tar.gz"
-  sha256 "4049d9351f50c4142ed0ae05fb6e23d34fb171010ba5150200f0a6fc55eb7cda"
+  url "https://github.com/bishnubista/openbird/releases/download/v0.11.0/openbird-0.11.0.tar.gz"
+  sha256 "84ceda0121f2342d6cc3599be03a5ca5f9de3ff13e7566a6cba86aee3f1c5827"
 
   depends_on "rust" => :build
   depends_on "uv" => :build
