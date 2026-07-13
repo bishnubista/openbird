@@ -226,6 +226,36 @@ def test_store_assistant_reads_never_call_model_methods(tmp_path):
     assert search[0][1] == "OpenBird assistant connector work"
 
 
+def test_store_search_limits_after_deduplicating_repeated_capture(tmp_path):
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+    repeated = "OpenBird assistant repeated capture"
+    alternate = "OpenBird assistant alternate capture"
+    try:
+        for index in range(30):
+            store.add_observation(
+                repeated,
+                app="com.example.Editor",
+                source="capture",
+                ts=float(index),
+            )
+        store.add_observation(
+            alternate,
+            app="com.example.Terminal",
+            source="capture",
+            ts=100.0,
+        )
+
+        results = store.lexical_capture_text(
+            "OpenBird assistant", limit=2, max_chars=2000
+        )
+    finally:
+        store.close()
+
+    assert {text for _, text in results} == {repeated, alternate}
+    assert next(obs.ts for obs, text in results if text == repeated) == 29.0
+
+
 def test_mcp_server_exposes_only_bounded_read_tools(tmp_path):
     service = AssistantCaptureService(
         settings=Settings(data_dir=tmp_path), store_factory=_FakeStore

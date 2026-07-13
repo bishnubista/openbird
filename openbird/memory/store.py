@@ -844,35 +844,41 @@ class MemoryStore:
         match = self._fts_query(query)
         if not match or limit <= 0:
             return []
-        # A chunk may occur in many observations. Fetch a bounded over-pool, then
-        # keep the newest occurrence per chunk without an unbounded SQL scan.
-        pool = min(500, max(int(limit) * 5, 20))
         rows = self.conn.execute(
-            "SELECT o.*, c.chunk_hash AS matched_chunk, c.text AS chunk_text, "
-            "bm25(fts_chunks) AS rank FROM fts_chunks "
-            "JOIN chunks c ON c.rowid_int = fts_chunks.rowid "
-            "JOIN blob_chunks bc ON bc.chunk_hash = c.chunk_hash "
-            "JOIN observations o ON o.content_hash = bc.content_hash "
-            "WHERE fts_chunks MATCH ? AND o.source = 'capture' "
-            "ORDER BY rank ASC, o.ts DESC, o.id DESC LIMIT ?",
-            (match, pool),
+            "WITH ranked_chunks AS ("
+            "  SELECT c.chunk_hash, c.text AS chunk_text, "
+            "         bm25(fts_chunks) AS rank "
+            "  FROM fts_chunks "
+            "  JOIN chunks c ON c.rowid_int = fts_chunks.rowid "
+            "  WHERE fts_chunks MATCH ? AND EXISTS ("
+            "    SELECT 1 FROM blob_chunks capture_bc "
+            "    JOIN observations capture_o "
+            "      ON capture_o.content_hash = capture_bc.content_hash "
+            "    WHERE capture_bc.chunk_hash = c.chunk_hash "
+            "      AND capture_o.source = 'capture'"
+            "  ) "
+            "  ORDER BY rank ASC LIMIT ?"
+            "), ranked_occurrences AS ("
+            "  SELECT o.*, rc.chunk_hash AS matched_chunk, rc.chunk_text, rc.rank, "
+            "         ROW_NUMBER() OVER ("
+            "           PARTITION BY rc.chunk_hash ORDER BY o.ts DESC, o.id DESC"
+            "         ) AS occurrence_rank "
+            "  FROM ranked_chunks rc "
+            "  JOIN blob_chunks bc ON bc.chunk_hash = rc.chunk_hash "
+            "  JOIN observations o ON o.content_hash = bc.content_hash "
+            "  WHERE o.source = 'capture'"
+            ") "
+            "SELECT * FROM ranked_occurrences WHERE occurrence_rank = 1 "
+            "ORDER BY rank ASC, ts DESC, id DESC LIMIT ?",
+            (match, int(limit), int(limit)),
         ).fetchall()
-        out: list[tuple[Observation, str]] = []
-        seen_chunks: set[str] = set()
-        for row in rows:
-            chunk_hash = str(row["matched_chunk"])
-            if chunk_hash in seen_chunks:
-                continue
-            seen_chunks.add(chunk_hash)
-            out.append(
-                (
-                    self._row_to_observation(row),
-                    str(row["chunk_text"] or "")[:max_chars],
-                )
+        return [
+            (
+                self._row_to_observation(row),
+                str(row["chunk_text"] or "")[:max_chars],
             )
-            if len(out) >= limit:
-                break
-        return out
+            for row in rows
+        ]
 
     def export_observations(
         self,
