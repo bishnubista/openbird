@@ -85,12 +85,16 @@ Tap once, then choose the artifact you want:
 brew tap bishnubista/openbird https://github.com/bishnubista/openbird.git
 
 # CLI (formula): ingest / chat / routine — no capture, runs anywhere
-brew install bishnubista/openbird/openbird
+brew install openbird
 openbird --help
 
 # Notarized app (cask): installs OpenBird.app to /Applications — capture-capable
-brew install --cask bishnubista/openbird/openbird
+brew install --cask openbird
 ```
+
+Note the formula and cask currently share the token `openbird`, so bare
+`brew install openbird` installs the **CLI** (a formula always wins a same-name
+tie); use `--cask` to get the app.
 
 The **cask** downloads the notarized `.dmg` and installs the signed
 `OpenBird.app` to `/Applications`, so macOS can grant (and persist) Screen
