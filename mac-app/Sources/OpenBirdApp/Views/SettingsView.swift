@@ -75,7 +75,10 @@ struct SettingsView: View {
                 + "OpenBird never sends data in the background."
             )
         }
-        .sheet(isPresented: $pendingChatGPTConnection) { chatGPTSetupSheet }
+        .sheet(
+            isPresented: $pendingChatGPTConnection,
+            onDismiss: { chatGPTRuntimeKey = "" }
+        ) { chatGPTSetupSheet }
     }
 
     // MARK: Header
@@ -748,7 +751,10 @@ struct SettingsView: View {
                     }
                 }
                 Spacer()
-                Button("Cancel", role: .cancel) { pendingChatGPTConnection = false }
+                Button("Cancel", role: .cancel) {
+                    chatGPTRuntimeKey = ""
+                    pendingChatGPTConnection = false
+                }
                 Button("Connect") {
                     model.connectChatGPTAssistant(
                         tunnelID: chatGPTTunnelID.trimmingCharacters(in: .whitespacesAndNewlines),
