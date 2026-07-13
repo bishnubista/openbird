@@ -53,18 +53,27 @@ class AssistantStore(Protocol):
 
     def recent_capture_text(
         self, start_ts: float, end_ts: float, *, limit: int, max_chars: int
-    ) -> list[tuple[Observation, str]]: ...
+    ) -> list[tuple[Observation, str]]:
+        """Return recent captured observations without model calls."""
+        ...
 
     def lexical_capture_text(
         self, query: str, *, limit: int, max_chars: int
-    ) -> list[tuple[Observation, str]]: ...
+    ) -> list[tuple[Observation, str]]:
+        """Return lexical capture matches without model calls."""
+        ...
 
-    def stats(self) -> dict[str, Any]: ...
+    def stats(self) -> dict[str, Any]:
+        """Return metadata-only store statistics."""
+        ...
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Close the store connection."""
+        ...
 
 
 def _maintenance_store() -> AssistantStore:
+    """Open a fresh maintenance store for one assistant tool invocation."""
     # Imported lazily to avoid a module cycle while cli.py registers commands.
     from openbird.cli import _store_maintenance
 
@@ -72,6 +81,7 @@ def _maintenance_store() -> AssistantStore:
 
 
 def _bounded_int(value: int, *, name: str, minimum: int, maximum: int) -> int:
+    """Validate an integer tool argument against an inclusive range."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{name} must be an integer")
     if value < minimum or value > maximum:
@@ -80,6 +90,7 @@ def _bounded_int(value: int, *, name: str, minimum: int, maximum: int) -> int:
 
 
 def _bounded_query(query: str) -> str:
+    """Normalize and bound a lexical search query."""
     value = str(query or "").strip()
     if not value:
         raise ValueError("query must not be blank")
@@ -98,11 +109,13 @@ class AssistantCaptureService:
         store_factory: Callable[[], AssistantStore] = _maintenance_store,
         clock: Callable[[], float] = time.time,
     ) -> None:
+        """Configure the service with injectable local dependencies."""
         self.settings = settings or get_settings()
         self.store_factory = store_factory
         self.clock = clock
 
     def recent_capture(self, *, minutes: int = 60, limit: int = 10) -> dict[str, Any]:
+        """Return exclusion-filtered capture from a bounded recent window."""
         minutes = _bounded_int(
             minutes, name="minutes", minimum=1, maximum=MAX_MINUTES
         )
@@ -121,6 +134,7 @@ class AssistantCaptureService:
         return self._serialize_rows(rows, requested_limit=limit)
 
     def search_capture(self, *, query: str, limit: int = 8) -> dict[str, Any]:
+        """Return exclusion-filtered lexical matches from captured memory."""
         query = _bounded_query(query)
         limit = _bounded_int(limit, name="limit", minimum=1, maximum=MAX_RESULTS)
         store = self.store_factory()
@@ -135,6 +149,7 @@ class AssistantCaptureService:
         return self._serialize_rows(rows, requested_limit=limit)
 
     def capture_status(self) -> dict[str, Any]:
+        """Return local store and exclusion counts without captured content."""
         store = self.store_factory()
         try:
             stats = store.stats()
@@ -158,6 +173,7 @@ class AssistantCaptureService:
         *,
         requested_limit: int,
     ) -> dict[str, Any]:
+        """Apply egress exclusions and serialize only bounded safe fields."""
         capture_rows = [(obs, text) for obs, text in rows if obs.source == "capture"]
         kept, audit = filter_rows_for_deep_brain(capture_rows, settings=self.settings)
 
@@ -237,6 +253,7 @@ def create_mcp_server(service: AssistantCaptureService | None = None):
         structured_output=True,
     )
     def recent_capture(minutes: int = 60, limit: int = 10) -> dict[str, Any]:
+        """Expose recent captured memory through MCP."""
         return capture.recent_capture(minutes=minutes, limit=limit)
 
     @server.tool(
@@ -248,6 +265,7 @@ def create_mcp_server(service: AssistantCaptureService | None = None):
         structured_output=True,
     )
     def search_capture(query: str, limit: int = 8) -> dict[str, Any]:
+        """Expose lexical capture search through MCP."""
         return capture.search_capture(query=query, limit=limit)
 
     @server.tool(
@@ -256,6 +274,7 @@ def create_mcp_server(service: AssistantCaptureService | None = None):
         structured_output=True,
     )
     def capture_status() -> dict[str, Any]:
+        """Expose metadata-only capture status through MCP."""
         return capture.capture_status()
 
     return server
@@ -267,6 +286,7 @@ def run_mcp_server() -> None:
 
 
 def claude_config_path() -> Path:
+    """Return the current user's Claude Desktop MCP configuration path."""
     return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
 
 
@@ -282,6 +302,7 @@ def resolve_openbird_executable() -> Path:
 
 
 def _file_snapshot(path: Path) -> tuple[_FileSnapshot, bytes]:
+    """Read a config file and return a content identity for conflict checks."""
     try:
         payload = path.read_bytes()
     except FileNotFoundError:
@@ -292,6 +313,7 @@ def _file_snapshot(path: Path) -> tuple[_FileSnapshot, bytes]:
 
 
 def _read_claude_config(path: Path) -> tuple[dict[str, Any], _FileSnapshot, bytes]:
+    """Parse Claude's config while retaining the exact source snapshot."""
     snapshot, payload = _file_snapshot(path)
     if not snapshot.exists:
         return {}, snapshot, payload
@@ -313,6 +335,7 @@ def _atomic_private_write(
     *,
     expected_snapshot: _FileSnapshot | None = None,
 ) -> None:
+    """Privately replace a file after an optional optimistic conflict check."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp_path = Path(temp_name)
@@ -370,6 +393,7 @@ def install_claude_config(
 
 
 def claude_config_status(*, config_path: Path | None = None) -> dict[str, Any]:
+    """Report connected only when Claude's configured command is launchable."""
     path = config_path or claude_config_path()
     config, _, _ = _read_claude_config(path)
     entry = (config.get("mcpServers") or {}).get("openbird")
