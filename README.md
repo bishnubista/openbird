@@ -30,9 +30,9 @@ OpenBird is **local-first**: your data never leaves your device by default, the 
   are part of the product surface.
 - **Extensible integrations:** the MVP starts with a filesystem MCP connector and keeps write
   actions behind explicit confirmation.
-- **Desktop assistant access:** connect the read-only local MCP server to Claude Desktop so Claude
-  can search or inspect recent capture on demand. OpenBird applies outbound exclusions and hard
-  payload limits before any excerpt crosses the assistant boundary.
+- **Desktop assistant access:** choose Claude Desktop or ChatGPT as the reasoning layer over the
+  same read-only MCP tools. OpenBird applies outbound exclusions and hard payload limits before any
+  excerpt crosses the assistant boundary.
 
 ## Architecture
 
@@ -95,7 +95,7 @@ openbird --help
 brew install --cask bishnubista/openbird/openbird
 ```
 
-### Claude Desktop
+### Claude Desktop or ChatGPT
 
 The notarized app includes a local, read-only MCP server. Connect it with one command:
 
@@ -111,9 +111,14 @@ to Anthropic and cannot be recalled by a later local purge. URLs and window titl
 returned by these tools. See [Desktop assistant access](docs/assistant-connectors.md) for the exact
 tool and privacy contract.
 
-ChatGPT does not currently connect directly to a local MCP server. OpenAI's supported private/local
-path is [Secure MCP Tunnel](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta.eot);
-OpenBird does not open a listener or tunnel automatically.
+For ChatGPT, open OpenBird Settings → Desktop assistants → ChatGPT. The guided flow uses OpenAI's
+[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels): enable
+Developer Mode, create a tunnel plus a restricted runtime key, then paste those two values into
+OpenBird. The runtime key stays in the macOS Keychain. OpenBird starts an outbound-only tunnel and
+reports Connected only when its private readiness check passes. You must then add the tunnel as a
+custom app in ChatGPT. Associate the tunnel with the target ChatGPT workspace and grant the runtime
+principal **Tunnels Read + Use** permission; without both, the tunnel may not appear in ChatGPT's
+custom-app picker. ChatGPT plan availability and workspace policies still apply.
 
 The **cask** downloads the notarized `.dmg` and installs the signed
 `OpenBird.app` to `/Applications`, so macOS can grant (and persist) Screen

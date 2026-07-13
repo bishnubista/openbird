@@ -138,6 +138,33 @@ struct ClaudeAssistantStatus: Codable, Equatable, Sendable {
     }
 }
 
+struct ChatGPTAssistantStatus: Codable, Equatable, Sendable {
+    let configured: Bool
+    let helperAvailable: Bool
+    var running = false
+    var ready = false
+
+    enum CodingKeys: String, CodingKey {
+        case configured
+        case helperAvailable = "helper_available"
+    }
+}
+
+enum ChatGPTTunnelStopReason: Equatable {
+    case retryable
+    case appTermination
+}
+
+struct ChatGPTTunnelLifecycleState: Equatable {
+    private(set) var shuttingDown = false
+
+    var canLaunch: Bool { !shuttingDown }
+
+    mutating func recordStop(_ reason: ChatGPTTunnelStopReason) {
+        if reason == .appTermination { shuttingDown = true }
+    }
+}
+
 struct DBKeyBootstrapReport: Equatable, Sendable {
     let ok: Bool
     let outcome: String
@@ -706,6 +733,9 @@ final class OpenBirdService: @unchecked Sendable {
     private let promptEditRunner: PromptEditRunner
     private let pasteboardWriter: @Sendable (String) -> Void
     private let openBirdCLIResolver: (@Sendable () -> String?)?
+    private let chatGPTCredentialLoader: @Sendable () -> ChatGPTTunnelCredential?
+    private let chatGPTCredentialSaver: @Sendable (ChatGPTTunnelCredential) -> Bool
+    private let chatGPTCredentialDeleter: @Sendable () -> Bool
     /// Status-path probe for a long-lived external `openbird capture --loop` daemon.
     /// Defaults to the real `pgrep`-based body; injectable so `isCaptureRunning()` (and
     /// thus `AppModel.init`) can be made hermetic in tests regardless of host process
@@ -726,6 +756,11 @@ final class OpenBirdService: @unchecked Sendable {
 
     /// The capture daemon launched by the app (if any), so it can be stopped.
     private var captureProcess: Process?
+    /// Long-lived tunnel process launched by this service; never discover or kill by name.
+    private var chatGPTTunnelProcess: Process?
+    /// Guards tunnel ownership against async setup/status and synchronous app termination.
+    private let chatGPTTunnelProcessLock = NSLock()
+    private var chatGPTTunnelLifecycle = ChatGPTTunnelLifecycleState()
 
     /// Write end of the "death pipe" handed to the launched capture daemon as its
     /// stdin. We hold it open for this app's lifetime and never write to it after
@@ -755,6 +790,15 @@ final class OpenBirdService: @unchecked Sendable {
             NSPasteboard.general.setString(text, forType: .string)
         },
         openBirdCLIResolver: (@Sendable () -> String?)? = nil,
+        chatGPTCredentialLoader: @escaping @Sendable () -> ChatGPTTunnelCredential? = {
+            ChatGPTCredentialStore.load()
+        },
+        chatGPTCredentialSaver: @escaping @Sendable (ChatGPTTunnelCredential) -> Bool = {
+            ChatGPTCredentialStore.save($0)
+        },
+        chatGPTCredentialDeleter: @escaping @Sendable () -> Bool = {
+            ChatGPTCredentialStore.delete()
+        },
         externalLoopDaemonProbe: @escaping @Sendable () -> Bool = {
             OpenBirdService.realExternalLoopDaemonRunning()
         },
@@ -783,6 +827,9 @@ final class OpenBirdService: @unchecked Sendable {
         }
         self.pasteboardWriter = pasteboardWriter
         self.openBirdCLIResolver = openBirdCLIResolver
+        self.chatGPTCredentialLoader = chatGPTCredentialLoader
+        self.chatGPTCredentialSaver = chatGPTCredentialSaver
+        self.chatGPTCredentialDeleter = chatGPTCredentialDeleter
         self.externalLoopDaemonProbe = externalLoopDaemonProbe
         self.captureHelperRunningProbe = captureHelperRunningProbe
         self.loginItemStateProbe = loginItemStateProbe
@@ -1377,6 +1424,133 @@ final class OpenBirdService: @unchecked Sendable {
             timeout: timeout
         )
         return result.exitCode == 0
+    }
+
+    /// Metadata-only ChatGPT state. Connected requires our owned process and its
+    /// ephemeral loopback readiness endpoint, never profile presence alone.
+    func chatGPTAssistantStatus(timeout: TimeInterval = 10) async -> ChatGPTAssistantStatus? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
+        let result = await runAsync(
+            cli,
+            arguments: ["assistant", "chatgpt-status", "--json", "--executable", cli],
+            timeout: timeout
+        )
+        guard result.exitCode == 0,
+              var status = Self.parseChatGPTAssistantStatus(result.stdout) else { return nil }
+        status.running = currentChatGPTTunnelProcess()?.isRunning == true
+        status.ready = status.running ? await chatGPTTunnelReady() : false
+        return status
+    }
+
+    static func parseChatGPTAssistantStatus(_ output: String) -> ChatGPTAssistantStatus? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ChatGPTAssistantStatus.self, from: data)
+    }
+
+    func connectChatGPTAssistant(tunnelID: String, runtimeKey: String) async -> Bool {
+        let credential = ChatGPTTunnelCredential(tunnelID: tunnelID, runtimeKey: runtimeKey)
+        guard await configureChatGPT(credential), chatGPTCredentialSaver(credential) else {
+            return false
+        }
+        return await startChatGPTTunnel(credential)
+    }
+
+    func resumeChatGPTAssistant() async -> Bool {
+        guard let credential = chatGPTCredentialLoader() else { return false }
+        guard await configureChatGPT(credential) else { return false }
+        return await startChatGPTTunnel(credential)
+    }
+
+    func removeChatGPTAssistant() async -> Bool {
+        stopChatGPTTunnel()
+        guard let cli = resolveOpenBirdCLI() else { return false }
+        let removed = await runAsync(
+            cli, arguments: ["assistant", "remove-chatgpt", "--yes"], timeout: 10
+        ).exitCode == 0
+        return removed && chatGPTCredentialDeleter()
+    }
+
+    private func configureChatGPT(_ credential: ChatGPTTunnelCredential) async -> Bool {
+        guard let cli = resolveOpenBirdCLI() else { return false }
+        var environment = Self.childEnvironment()
+        environment["CONTROL_PLANE_API_KEY"] = credential.runtimeKey
+        let result = await runAsync(
+            cli,
+            arguments: [
+                "assistant", "configure-chatgpt", "--yes",
+                "--tunnel-id", credential.tunnelID, "--executable", cli,
+            ],
+            timeout: 60,
+            environment: environment
+        )
+        return result.exitCode == 0
+    }
+
+    private func startChatGPTTunnel(_ credential: ChatGPTTunnelCredential) async -> Bool {
+        stopChatGPTTunnel()
+        guard let cli = resolveOpenBirdCLI() else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cli)
+        process.arguments = ["assistant", "run-chatgpt", "--executable", cli]
+        var environment = Self.childEnvironment()
+        environment["CONTROL_PLANE_API_KEY"] = credential.runtimeKey
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        do {
+            guard try launchChatGPTTunnelProcess(process) else { return false }
+        } catch {
+            return false
+        }
+        for _ in 0..<100 {
+            if !process.isRunning { break }
+            if await chatGPTTunnelReady() { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        stopChatGPTTunnel()
+        return false
+    }
+
+    private func chatGPTTunnelReady() async -> Bool {
+        let file = Self.dataDirectoryURL()
+            .appendingPathComponent("runtime/chatgpt-health.url")
+        guard let base = try? String(contentsOf: file, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = URL(string: base)?.appendingPathComponent("readyz") else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return false }
+        return (200..<300).contains(http.statusCode)
+    }
+
+    func terminateLaunchedChatGPTTunnel() {
+        stopChatGPTTunnel(reason: .appTermination)
+    }
+
+    private func currentChatGPTTunnelProcess() -> Process? {
+        chatGPTTunnelProcessLock.lock()
+        defer { chatGPTTunnelProcessLock.unlock() }
+        return chatGPTTunnelProcess
+    }
+
+    private func launchChatGPTTunnelProcess(_ process: Process) throws -> Bool {
+        chatGPTTunnelProcessLock.lock()
+        defer { chatGPTTunnelProcessLock.unlock() }
+        guard chatGPTTunnelLifecycle.canLaunch else { return false }
+        try process.run()
+        chatGPTTunnelProcess = process
+        return true
+    }
+
+    private func stopChatGPTTunnel(reason: ChatGPTTunnelStopReason = .retryable) {
+        chatGPTTunnelProcessLock.lock()
+        chatGPTTunnelLifecycle.recordStop(reason)
+        let process = chatGPTTunnelProcess
+        chatGPTTunnelProcess = nil
+        chatGPTTunnelProcessLock.unlock()
+        if let process, process.isRunning { process.terminate() }
     }
 
     // MARK: - Helpers

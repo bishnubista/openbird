@@ -12,10 +12,21 @@ class Openbird < Formula
   depends_on :macos
   depends_on "python@3.13"
 
-  # OpenBird installs a source-built venv plus local Swift products.
   # Preserve Python wheel @rpath IDs so Homebrew does not rewrite bundled
   # extension modules with longer install names than their headers can hold.
   preserve_rpath
+
+  resource "tunnel-client" do
+    on_arm do
+      url "https://github.com/openai/tunnel-client/releases/download/v0.0.10/tunnel-client-v0.0.10-darwin-arm64.zip"
+      sha256 "288accc7fd20cfee1d495adb933773af9e19ebc0cdef3173f7fb544afa5065b2"
+    end
+
+    on_intel do
+      url "https://github.com/openai/tunnel-client/releases/download/v0.0.10/tunnel-client-v0.0.10-darwin-amd64.zip"
+      sha256 "1a48616e584484f8bef4c1128d515ac96cf44d0d9609c1462abccc1793f4b847"
+    end
+  end
 
   def install
     odie "OpenBird requires Apple's Swift toolchain. Install Xcode Command Line Tools first." unless which("swift")
@@ -30,6 +41,11 @@ class Openbird < Formula
     # Build the bundle but defer signing: we rewrite openbird-cli below, and
     # signing must happen AFTER that rewrite or the app's seal would be invalid.
     ENV["OPENBIRD_SKIP_SIGN"] = "1"
+    resource("tunnel-client").stage do
+      chmod 0755, "tunnel-client"
+      cp "tunnel-client", buildpath/"tunnel-client"
+    end
+    ENV["OPENBIRD_TUNNEL_CLIENT"] = buildpath/"tunnel-client"
     system "./script/build_and_run.sh", "--no-launch"
     app = buildpath/"dist/OpenBird.app"
     app_macos = app/"Contents/MacOS"
@@ -109,6 +125,7 @@ class Openbird < Formula
     assert_path_exists libexec/"OpenBird.app/Contents/MacOS/OpenBird"
     assert_path_exists libexec/"OpenBird.app/Contents/MacOS/capture-helper"
     assert_path_exists libexec/"OpenBird.app/Contents/MacOS/audio-helper"
+    assert_predicate libexec/"OpenBird.app/Contents/MacOS/tunnel-client", :executable?
     assert_predicate bin/"openbird-app", :executable?
   end
 end

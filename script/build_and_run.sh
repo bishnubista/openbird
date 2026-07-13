@@ -60,7 +60,10 @@ mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$app_build_dir/$APP_NAME" "$APP_BINARY"
 cp "$capture_helper" "$APP_MACOS/capture-helper"
 cp "$audio_helper" "$APP_MACOS/audio-helper"
-chmod +x "$APP_BINARY" "$APP_MACOS/capture-helper" "$APP_MACOS/audio-helper"
+"$ROOT_DIR/script/stage_tunnel_client.sh" "$APP_MACOS/tunnel-client"
+cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$APP_RESOURCES/THIRD_PARTY_NOTICES.md"
+cp "$ROOT_DIR/LICENSE" "$APP_RESOURCES/LICENSE"
+chmod +x "$APP_BINARY" "$APP_MACOS/capture-helper" "$APP_MACOS/audio-helper" "$APP_MACOS/tunnel-client"
 
 cat >"$APP_MACOS/openbird-cli" <<WRAPPER
 #!/usr/bin/env bash
