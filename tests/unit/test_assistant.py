@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import stat
 from pathlib import Path
@@ -572,3 +573,17 @@ def test_cli_remove_chatgpt_handles_filesystem_error(monkeypatch):
     assert result.exit_code == 1
     assert "Could not remove OpenBird's ChatGPT profile" in result.output
     assert "profile is not writable" in result.output
+
+
+def test_tunnel_client_pins_match_homebrew_formula():
+    root = Path(__file__).parents[2]
+    script = (root / "script" / "stage_tunnel_client.sh").read_text()
+    formula = (root / "Formula" / "openbird.rb").read_text()
+    version = re.search(r'^VERSION="([^"]+)"$', script, re.MULTILINE)
+    checksums = re.findall(r'^\s*SHA256="([0-9a-f]{64})"$', script, re.MULTILINE)
+
+    assert version is not None
+    assert len(checksums) == 2
+    assert formula.count(f"tunnel-client-v{version.group(1)}-") == 2
+    for checksum in checksums:
+        assert formula.count(f'sha256 "{checksum}"') == 1
