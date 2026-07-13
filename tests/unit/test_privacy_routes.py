@@ -89,9 +89,20 @@ def test_assistant_mcp_route_is_bounded_explicit_egress() -> None:
     assert route["enforcement"]["transport"] == "local_stdio_only"
     assert route["enforcement"]["model_calls"] == "forbidden"
     assert route["enforcement"]["unknown_app"] == "fail_closed"
+    assert route["enforcement"]["install_requires"] == (
+        "explicit warning and interactive confirmation or --yes"
+    )
+    assert route["enforcement"]["exclusions"] == (
+        "deep_brain app, source, and observation-id exclusions before serialization"
+    )
+    assert route["enforcement"]["bounds"] == (
+        "2000 characters per excerpt and 12000 excerpt characters per call"
+    )
     assert "raw_url" in route["forbidden_fields"]
     assert "raw_window_title" in route["forbidden_fields"]
+    assert "unknown_app_observation" in route["forbidden_fields"]
     assert "cli.assistant_install_warning" in route["truth_surface"]
+    assert "mcp.egress_notice" in route["truth_surface"]
 
 
 def test_privacy_route_references_resolve() -> None:
