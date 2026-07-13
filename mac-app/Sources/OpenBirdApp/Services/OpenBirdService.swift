@@ -743,6 +743,9 @@ final class OpenBirdService: @unchecked Sendable {
     private var captureProcess: Process?
     /// Long-lived tunnel process launched by this service; never discover or kill by name.
     private var chatGPTTunnelProcess: Process?
+    /// Guards tunnel ownership against async setup/status and synchronous app termination.
+    private let chatGPTTunnelProcessLock = NSLock()
+    private var chatGPTTunnelShuttingDown = false
 
     /// Write end of the "death pipe" handed to the launched capture daemon as its
     /// stdin. We hold it open for this app's lifetime and never write to it after
@@ -1419,7 +1422,7 @@ final class OpenBirdService: @unchecked Sendable {
         )
         guard result.exitCode == 0,
               var status = Self.parseChatGPTAssistantStatus(result.stdout) else { return nil }
-        status.running = chatGPTTunnelProcess?.isRunning == true
+        status.running = currentChatGPTTunnelProcess()?.isRunning == true
         status.ready = status.running ? await chatGPTTunnelReady() : false
         return status
     }
@@ -1444,7 +1447,7 @@ final class OpenBirdService: @unchecked Sendable {
     }
 
     func removeChatGPTAssistant() async -> Bool {
-        terminateLaunchedChatGPTTunnel()
+        stopChatGPTTunnel()
         guard let cli = resolveOpenBirdCLI() else { return false }
         let removed = await runAsync(
             cli, arguments: ["assistant", "remove-chatgpt", "--yes"], timeout: 10
@@ -1469,7 +1472,7 @@ final class OpenBirdService: @unchecked Sendable {
     }
 
     private func startChatGPTTunnel(_ credential: ChatGPTTunnelCredential) async -> Bool {
-        terminateLaunchedChatGPTTunnel()
+        stopChatGPTTunnel()
         guard let cli = resolveOpenBirdCLI() else { return false }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cli)
@@ -1481,8 +1484,7 @@ final class OpenBirdService: @unchecked Sendable {
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
         do {
-            try process.run()
-            chatGPTTunnelProcess = process
+            guard try launchChatGPTTunnelProcess(process) else { return false }
         } catch {
             return false
         }
@@ -1509,8 +1511,31 @@ final class OpenBirdService: @unchecked Sendable {
     }
 
     func terminateLaunchedChatGPTTunnel() {
-        if let process = chatGPTTunnelProcess, process.isRunning { process.terminate() }
+        stopChatGPTTunnel(markShuttingDown: true)
+    }
+
+    private func currentChatGPTTunnelProcess() -> Process? {
+        chatGPTTunnelProcessLock.lock()
+        defer { chatGPTTunnelProcessLock.unlock() }
+        return chatGPTTunnelProcess
+    }
+
+    private func launchChatGPTTunnelProcess(_ process: Process) throws -> Bool {
+        chatGPTTunnelProcessLock.lock()
+        defer { chatGPTTunnelProcessLock.unlock() }
+        guard !chatGPTTunnelShuttingDown else { return false }
+        try process.run()
+        chatGPTTunnelProcess = process
+        return true
+    }
+
+    private func stopChatGPTTunnel(markShuttingDown: Bool = false) {
+        chatGPTTunnelProcessLock.lock()
+        if markShuttingDown { chatGPTTunnelShuttingDown = true }
+        let process = chatGPTTunnelProcess
         chatGPTTunnelProcess = nil
+        chatGPTTunnelProcessLock.unlock()
+        if let process, process.isRunning { process.terminate() }
     }
 
     // MARK: - Helpers
