@@ -7,6 +7,7 @@ class Openbird < Formula
   url "https://github.com/bishnubista/openbird/releases/download/v0.10.0/openbird-0.10.0.tar.gz"
   sha256 "23fdc3b08da03168d4dffcfc1f8b480b712b4eade01df9aa07cb66f7de07f8f6"
 
+  depends_on "rust" => :build
   depends_on "uv" => :build
   depends_on :macos
   depends_on "python@3.13"
