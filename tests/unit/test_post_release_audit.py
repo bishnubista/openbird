@@ -16,6 +16,13 @@ post_release_audit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(post_release_audit)
 
 
+def test_audit_uses_python39_compatible_utc_timezone():
+    source = MODULE_PATH.read_text()
+
+    assert "dt.UTC" not in source
+    assert source.count("dt.timezone.utc") == 2
+
+
 def _app(bundle_id: str, quality: str, samples: int = 10) -> dict:
     return {
         "bundle_id": bundle_id,

@@ -351,7 +351,7 @@ def _latest_report() -> dict[str, Any] | None:
 def _write_report(report: dict[str, Any], version: str) -> Path:
     REPORT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(REPORT_DIR, 0o700)
-    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     destination = REPORT_DIR / f"post-release-{version}-{stamp}.json"
     fd, temp_name = tempfile.mkstemp(prefix=".post-release-", dir=REPORT_DIR)
     temp_path = Path(temp_name)
@@ -433,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         report = {
             "schema_version": 1,
-            "generated_at": dt.datetime.now(dt.UTC).isoformat(),
+            "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "version": expected,
             "installed_app": str(APP),
             "capture_audit": audit,
