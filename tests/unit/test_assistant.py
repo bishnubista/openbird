@@ -289,6 +289,34 @@ def test_install_claude_config_refuses_malformed_input_without_mutation(tmp_path
     ).exists()
 
 
+def test_install_claude_config_refuses_concurrent_config_change(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "claude_desktop_config.json"
+    original = {"preferences": {"theme": "dark"}}
+    concurrent = {"preferences": {"theme": "light"}}
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    real_atomic_write = assistant._atomic_private_write
+
+    def change_before_replace(path, payload, *, expected_snapshot=None):
+        if expected_snapshot is not None:
+            config_path.write_text(json.dumps(concurrent), encoding="utf-8")
+        return real_atomic_write(
+            path, payload, expected_snapshot=expected_snapshot
+        )
+
+    monkeypatch.setattr(assistant, "_atomic_private_write", change_before_replace)
+
+    with pytest.raises(assistant.ClaudeConfigConflictError, match="retry"):
+        assistant.install_claude_config(
+            config_path=config_path, executable=tmp_path / "openbird"
+        )
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == concurrent
+    backup = config_path.with_name(f"{config_path.name}.openbird-backup")
+    assert json.loads(backup.read_text(encoding="utf-8")) == original
+
+
 def test_install_claude_config_creates_private_config_when_absent(tmp_path):
     config_path = tmp_path / "new" / "claude_desktop_config.json"
     executable = tmp_path / "openbird"
