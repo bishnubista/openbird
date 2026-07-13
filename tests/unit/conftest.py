@@ -15,14 +15,17 @@ def _no_gui_allowlist(monkeypatch):
     """Neutralize the macOS GUI-prefs bridges for ALL unit tests.
 
     ``_settings_from_env`` reads the real ``ai.openbird.OpenBird`` defaults domain
-    when ``OPENBIRD_ALLOWLIST`` / ``OPENBIRD_CAPTURE_OCR_APPS`` are unset. On a
+    when the corresponding ``OPENBIRD_*`` list variables are unset. On a
     developer Mac that runs the app, that domain is populated, so any
     ``get_settings()`` test would silently pick up the real lists. Default both
     bridges to "unreadable" everywhere; bridge tests opt back in by re-patching
-    ``_read_gui_allowlist`` / ``_read_gui_ocr_apps``.
+    ``_read_gui_allowlist`` / ``_read_gui_ocr_apps`` / detailed-capture reader.
     """
     monkeypatch.setattr("openbird.config._read_gui_allowlist", lambda: None)
     monkeypatch.setattr("openbird.config._read_gui_ocr_apps", lambda: None)
+    monkeypatch.setattr(
+        "openbird.config._read_gui_detailed_capture_apps", lambda: None
+    )
 
 
 class FakeProvider:

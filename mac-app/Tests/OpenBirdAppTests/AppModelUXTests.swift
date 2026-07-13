@@ -4,6 +4,7 @@ import XCTest
 @MainActor
 final class AppModelUXTests: XCTestCase {
     private let allowlistKey = "openbird.captureAllowlist"
+    private let detailedCaptureAppsKey = "openbird.detailedCaptureApps"
 
     private final class BoolProbe: @unchecked Sendable {
         var value: Bool
@@ -16,28 +17,42 @@ final class AppModelUXTests: XCTestCase {
     private func withRestoredAllowlist<T>(_ body: () throws -> T) rethrows -> T {
         let defaults = UserDefaults.standard
         let old = defaults.stringArray(forKey: allowlistKey)
+        let oldDetailed = defaults.stringArray(forKey: detailedCaptureAppsKey)
         defer {
             if let old {
                 defaults.set(old, forKey: allowlistKey)
             } else {
                 defaults.removeObject(forKey: allowlistKey)
             }
+            if let oldDetailed {
+                defaults.set(oldDetailed, forKey: detailedCaptureAppsKey)
+            } else {
+                defaults.removeObject(forKey: detailedCaptureAppsKey)
+            }
         }
         defaults.removeObject(forKey: allowlistKey)
+        defaults.removeObject(forKey: detailedCaptureAppsKey)
         return try body()
     }
 
     private func withRestoredAllowlist<T>(_ body: () async throws -> T) async rethrows -> T {
         let defaults = UserDefaults.standard
         let old = defaults.stringArray(forKey: allowlistKey)
+        let oldDetailed = defaults.stringArray(forKey: detailedCaptureAppsKey)
         defer {
             if let old {
                 defaults.set(old, forKey: allowlistKey)
             } else {
                 defaults.removeObject(forKey: allowlistKey)
             }
+            if let oldDetailed {
+                defaults.set(oldDetailed, forKey: detailedCaptureAppsKey)
+            } else {
+                defaults.removeObject(forKey: detailedCaptureAppsKey)
+            }
         }
         defaults.removeObject(forKey: allowlistKey)
+        defaults.removeObject(forKey: detailedCaptureAppsKey)
         return try await body()
     }
 
@@ -181,7 +196,8 @@ final class AppModelUXTests: XCTestCase {
                         coverage: "degraded",
                         totalObservations: 0,
                         recentObservations: 0,
-                        lastCapturedTS: nil
+                        lastCapturedTS: nil,
+                        detailedCapture: "available"
                     )
                 ]
             )))
@@ -194,7 +210,7 @@ final class AppModelUXTests: XCTestCase {
             let blocked = model.captureRowStatus(for: "com.apple.Terminal")
             XCTAssertEqual(blocked.label, "Blocked by safety")
             XCTAssertEqual(blocked.tone, .attention)
-            XCTAssertTrue(blocked.detail.contains("overrides"))
+            XCTAssertTrue(blocked.detail.contains("Detailed local capture"))
             XCTAssertEqual(model.effectiveCaptureAllowedCount, 1)
             XCTAssertEqual(model.captureAllowedSummary, "1 app effectively allowed")
         }
@@ -245,6 +261,28 @@ final class AppModelUXTests: XCTestCase {
             model.removeFromAllowlist("com.example.editor")
 
             XCTAssertEqual(model.lastActionMessage, "Removed com.example.editor from capture allowlist.")
+        }
+    }
+
+    func testDetailedCaptureRequiresEncryptionThenPersists() {
+        withRestoredAllowlist {
+            let service = serviceWithoutExternalCapture()
+            service.setAllowlist(["com.mitchellh.ghostty"])
+            let unencrypted = AppModel(service: service, initialReport: readyReport())
+
+            unencrypted.setDetailedCapture("com.mitchellh.ghostty", enabled: true)
+
+            XCTAssertTrue(unencrypted.detailedCaptureApps.isEmpty)
+            XCTAssertTrue(unencrypted.lastActionMessage.contains("requires verified"))
+
+            var encryptedReport = readyReport()
+            encryptedReport.encryptionEnabled = true
+            let encrypted = AppModel(service: service, initialReport: encryptedReport)
+
+            encrypted.setDetailedCapture("com.mitchellh.ghostty", enabled: true)
+
+            XCTAssertEqual(encrypted.detailedCaptureApps, ["com.mitchellh.ghostty"])
+            XCTAssertTrue(encrypted.lastActionMessage.contains("Enabled detailed"))
         }
     }
 

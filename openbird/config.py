@@ -51,15 +51,11 @@ def _clamp_setting(
         )
     return clamped
 
-# Apps excluded from capture until the user explicitly enables them:
-# terminals, code editors, browsers, password managers, finance/health apps.
-# NOTE: the blocklist is SUBTRACTIVE — `redact.decide` applies the allowlist first,
-# then removes blocklisted apps. So allowlisting a terminal alone will NOT capture
-# it; a user must also drop it from the blocklist (e.g. OPENBIRD_BLOCKLIST=... or a
-# custom `blocklist`). Third-party terminals are included because their virtualized
-# scrollback both leaks secrets and re-renders animated glyphs every frame (the
-# capture-bloat source Layer 1 / `volatility` addresses).
-_DEFAULT_BLOCKLIST: list[str] = [
+# High-context developer apps that may be explicitly enabled for detailed local
+# capture. Keep this exact-ID set separate from the dangerous-app backstop:
+# detailed capture may subtract one of these entries from the user blocklist, but
+# it can never make a password manager / Keychain app eligible.
+DETAILED_CAPTURE_ELIGIBLE_APPS: tuple[str, ...] = (
     "com.apple.Terminal",
     "com.googlecode.iterm2",
     "com.mitchellh.ghostty",
@@ -69,6 +65,18 @@ _DEFAULT_BLOCKLIST: list[str] = [
     "org.alacritty",
     "com.github.wez.wezterm",
     "com.microsoft.VSCode",
+)
+
+# Apps excluded from capture until the user explicitly enables an eligible app:
+# terminals, code editors, password managers, and Keychain.
+# NOTE: the blocklist is SUBTRACTIVE — `redact.decide` applies the allowlist first,
+# then removes blocklisted apps. So allowlisting a terminal alone will NOT capture
+# it; a user must also drop it from the blocklist (e.g. OPENBIRD_BLOCKLIST=... or a
+# custom `blocklist`). Third-party terminals are included because their virtualized
+# scrollback both leaks secrets and re-renders animated glyphs every frame (the
+# capture-bloat source Layer 1 / `volatility` addresses).
+_DEFAULT_BLOCKLIST: list[str] = [
+    *DETAILED_CAPTURE_ELIGIBLE_APPS,
     "com.1password.1password",
     "com.agilebits.onepassword7",
     "com.apple.keychainaccess",
@@ -86,6 +94,7 @@ _DEFAULT_BLOCKLIST: list[str] = [
 _GUI_PREFS_DOMAIN = "ai.openbird.OpenBird"
 _GUI_ALLOWLIST_KEY = "openbird.captureAllowlist"
 _GUI_OCR_APPS_KEY = "openbird.captureOcrApps"
+_GUI_DETAILED_CAPTURE_APPS_KEY = "openbird.detailedCaptureApps"
 
 
 def _default_data_dir() -> Path:
@@ -234,6 +243,11 @@ class Settings:
 
     allowlist: list[str] = field(default_factory=list)
     blocklist: list[str] = field(default_factory=lambda: list(_DEFAULT_BLOCKLIST))
+    # Exact bundle ids from DETAILED_CAPTURE_ELIGIBLE_APPS that may bypass their
+    # default terminal/editor blocklist entry. The allowlist, dangerous-app,
+    # self-capture, and private-window gates remain independently fail-closed.
+    # Non-empty detailed capture also forces require_encryption in __post_init__.
+    detailed_capture_apps: list[str] = field(default_factory=list)
 
     # Opt-in: capture the active browser tab's URL via Apple Events. OFF by
     # default — enabling it makes the helper script browsers (Chrome/Safari/…),
@@ -345,6 +359,22 @@ class Settings:
     rerank_timeout: float = 10.0
 
     def __post_init__(self) -> None:
+        eligible = {bundle_id.lower(): bundle_id for bundle_id in DETAILED_CAPTURE_ELIGIBLE_APPS}
+        normalized_detailed: list[str] = []
+        seen_detailed: set[str] = set()
+        for item in self.detailed_capture_apps:
+            if not isinstance(item, str):
+                continue
+            canonical = eligible.get(item.strip().lower())
+            if canonical is not None and canonical not in seen_detailed:
+                seen_detailed.add(canonical)
+                normalized_detailed.append(canonical)
+        self.detailed_capture_apps = normalized_detailed
+        # Detailed terminal/editor capture can include commands, output, and
+        # copied secrets. It must never open or create a plaintext fallback DB,
+        # even when OPENBIRD_REQUIRE_ENCRYPTION was omitted or explicitly false.
+        if self.detailed_capture_apps:
+            self.require_encryption = True
         # session_gap_seconds feeds numeric session-boundary arithmetic in the
         # capture daemon (_session_for). A NaN/inf gap freezes segmentation (every
         # finite comparison is False) and a negative gap over-splits every frame,
@@ -467,6 +497,7 @@ def _coerce(name: str, raw: str, default: object) -> object:
 _COERCE_DEFAULTS: dict[str, object] = {
     "allowlist": [],
     "blocklist": [],
+    "detailed_capture_apps": [],
     "capture_ocr_apps": [],
     "capture_ocr_min_interval_seconds": 30.0,
     "encryption_enabled": False,
@@ -670,6 +701,11 @@ def _read_gui_ocr_apps() -> list[str] | None:
     return _read_gui_string_list(_GUI_OCR_APPS_KEY)
 
 
+def _read_gui_detailed_capture_apps() -> list[str] | None:
+    """The menu-bar app's saved per-app detailed-capture grants."""
+    return _read_gui_string_list(_GUI_DETAILED_CAPTURE_APPS_KEY)
+
+
 def _settings_from_env() -> Settings:
     """Build a :class:`Settings` instance applying ``OPENBIRD_*`` overrides.
 
@@ -715,6 +751,13 @@ def _settings_from_env() -> Settings:
         if gui_ocr_apps is not None:
             overrides["capture_ocr_apps"] = gui_ocr_apps
 
+    # Same bridge for explicit terminal/editor detailed-capture grants. Env wins,
+    # including an explicit empty value that turns every grant off.
+    if "detailed_capture_apps" not in overrides:
+        gui_detailed_apps = _read_gui_detailed_capture_apps()
+        if gui_detailed_apps is not None:
+            overrides["detailed_capture_apps"] = gui_detailed_apps
+
     return Settings(**overrides)  # type: ignore[arg-type]
 
 
@@ -740,4 +783,5 @@ __all__ = [
     "is_ollama_model",
     "ollama_bare_model",
     "DEFAULT_OLLAMA_HOST",
+    "DETAILED_CAPTURE_ELIGIBLE_APPS",
 ]

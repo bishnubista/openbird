@@ -157,6 +157,32 @@ def test_capture_health_marks_opted_in_ocr_rows(tmp_path):
     assert report["daemon"] == {"state": "unknown"}
 
 
+def test_capture_health_reports_detailed_capture_availability_and_state(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        allowlist=["com.mitchellh.ghostty", "com.apple.Terminal", "com.apple.mail"],
+        detailed_capture_apps=["com.mitchellh.ghostty"],
+    )
+
+    report = build_capture_health(
+        settings=settings,
+        activity_by_app={},
+        generated_at=200.0,
+        paused=False,
+    )
+
+    by_app = {row["bundle_id"]: row for row in report["apps"]}
+    assert by_app["com.mitchellh.ghostty"]["detailed_capture"] == "enabled"
+    assert by_app["com.mitchellh.ghostty"]["policy"]["capture"] is True
+    assert by_app["com.apple.Terminal"]["detailed_capture"] == "available"
+    assert by_app["com.apple.Terminal"]["policy"] == {
+        "capture": False,
+        "reason": "blocklisted",
+    }
+    assert "detailed_capture" not in by_app["com.apple.mail"]
+    assert report["detailed_capture_apps_count"] == 1
+
+
 def test_capture_app_activity_reads_only_metadata(tmp_path, fake_provider):
     settings = Settings(data_dir=tmp_path, embed_dim=768)
     store = MemoryStore(settings=settings, provider=fake_provider)
@@ -244,6 +270,7 @@ def test_capture_health_cli_json_is_metadata_only(tmp_path, fake_provider, monke
         "paused",
         "allowlist_count",
         "blocklist_count",
+        "detailed_capture_apps_count",
         "ocr_apps_count",
         "daemon",
         "apps",

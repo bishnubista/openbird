@@ -196,6 +196,14 @@ def build_capture_health(
         # time — see the capture-health CLI table.
         if ocr_apps and redact._bundle_matches_any(bundle_id, ocr_apps):
             row["ocr"] = "opted_in"
+        if redact.is_detailed_capture_eligible(bundle_id):
+            row["detailed_capture"] = (
+                "enabled"
+                if redact._is_detailed_capture_enabled(
+                    bundle_id, settings.detailed_capture_apps
+                )
+                else "available"
+            )
         apps.append(row)
 
     return {
@@ -204,6 +212,7 @@ def build_capture_health(
         "paused": bool(paused),
         "allowlist_count": len(settings.allowlist),
         "blocklist_count": len(settings.blocklist),
+        "detailed_capture_apps_count": len(settings.detailed_capture_apps),
         "ocr_apps_count": len(ocr_apps),
         # Daemon liveness from the metadata-only sidecar (additive block;
         # Swift's JSONDecoder ignores unknown keys, and the Python consumers

@@ -13,6 +13,7 @@ struct SettingsView: View {
     @ObservedObject var model: AppModel
     @Environment(\.colorScheme) private var scheme
     @State private var newBundleID = ""
+    @State private var pendingDetailedCaptureBundleID: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,6 +26,7 @@ struct SettingsView: View {
                     }
                     permissionsCard
                     allowlistCard
+                    detailedCaptureCard
                     deepCaptureCard
                     privacyCard
                     promptCustomizationCard
@@ -34,6 +36,29 @@ struct SettingsView: View {
                 .padding(.vertical, 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+        .alert(
+            "Enable detailed local capture?",
+            isPresented: Binding(
+                get: { pendingDetailedCaptureBundleID != nil },
+                set: { if !$0 { pendingDetailedCaptureBundleID = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) {
+                pendingDetailedCaptureBundleID = nil
+            }
+            Button("Enable") {
+                if let bundleID = pendingDetailedCaptureBundleID {
+                    model.setDetailedCapture(bundleID, enabled: true)
+                }
+                pendingDetailedCaptureBundleID = nil
+            }
+        } message: {
+            Text(
+                "Terminal and editor text can contain commands, output, environment values, "
+                + "and copied secrets. OpenBird will store readable text in encrypted local "
+                + "memory; secure fields, private windows, and password managers stay blocked."
+            )
         }
     }
 
@@ -366,6 +391,72 @@ struct SettingsView: View {
             .overlay(Capsule().strokeBorder(OB.separator(scheme), lineWidth: 0.5))
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: Detailed local capture
+
+    private var detailedCaptureCard: some View {
+        sectionCard {
+            sectionLabel("Detailed local capture")
+            Text(
+                "Terminals and editors are blocked by default because their visible text can "
+                + "include secrets. Enable only the apps whose work context you want OpenBird "
+                + "to remember. Verified encrypted memory is required."
+            )
+            .font(.system(size: 11.5))
+            .foregroundStyle(OB.textSecondary(scheme))
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 16).padding(.bottom, 12)
+
+            if model.detailedCaptureEligibleApps.isEmpty {
+                hairline
+                Text("Allowlisted terminals and editors appear here after capture health is checked.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(OB.textSecondary(scheme))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+            } else {
+                ForEach(model.detailedCaptureEligibleApps, id: \.self) { bundleID in
+                    hairline
+                    detailedCaptureRow(bundleID)
+                }
+            }
+        }
+    }
+
+    private func detailedCaptureRow(_ bundleID: String) -> some View {
+        let id = AppIdentity.forBundleID(bundleID)
+        let enabled = model.detailedCaptureApps.contains(bundleID)
+        return HStack(spacing: 12) {
+            appIconTile(id)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(id.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(OB.textPrimary(scheme))
+                Text(enabled ? "Detailed text capture enabled" : "Blocked by default")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(OB.textSecondary(scheme))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Toggle(
+                "Detailed capture for \(id.name)",
+                isOn: Binding(
+                    get: { model.detailedCaptureApps.contains(bundleID) },
+                    set: { value in
+                        if value {
+                            pendingDetailedCaptureBundleID = bundleID
+                        } else {
+                            model.setDetailedCapture(bundleID, enabled: false)
+                        }
+                    }
+                )
+            )
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(model.encryptionState != .ok && !enabled)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 9)
     }
 
     // MARK: Deep capture (OCR) — Phase C2 opt-in

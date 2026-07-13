@@ -2226,6 +2226,52 @@ def test_terminal_recovery_requires_blocklist_override(tmp_path):
     assert d.reason == "allowlisted"
 
 
+def test_terminal_recovery_with_exact_detailed_capture_grant(tmp_path):
+    s = Settings(
+        data_dir=tmp_path,
+        allowlist=["com.mitchellh.ghostty"],
+        detailed_capture_apps=["com.mitchellh.ghostty"],
+    )
+    d = redact.decide(
+        app="com.mitchellh.ghostty", window="term", text="content", settings=s
+    )
+    assert d.capture
+    assert d.reason == "allowlisted"
+    assert s.require_encryption is True
+
+
+def test_detailed_capture_grant_cannot_widen_to_other_or_dangerous_apps(tmp_path):
+    s = Settings(
+        data_dir=tmp_path,
+        allowlist=["com.apple.Terminal", "com.1password.1password"],
+        blocklist=["com.apple.Terminal"],
+        detailed_capture_apps=["glob:com.apple.*", "com.1password.1password"],
+    )
+    terminal = redact.decide(
+        app="com.apple.Terminal", window="term", text="content", settings=s
+    )
+    vault = redact.decide(
+        app="com.1password.1password", window="vault", text="content", settings=s
+    )
+    assert (terminal.capture, terminal.reason) == (False, "blocklisted")
+    assert (vault.capture, vault.reason) == (False, "dangerous_app")
+
+
+def test_detailed_capture_grant_does_not_bypass_private_window(tmp_path):
+    s = Settings(
+        data_dir=tmp_path,
+        allowlist=["com.mitchellh.ghostty"],
+        detailed_capture_apps=["com.mitchellh.ghostty"],
+    )
+    d = redact.decide(
+        app="com.mitchellh.ghostty",
+        window="Private browsing",
+        text="content",
+        settings=s,
+    )
+    assert (d.capture, d.reason) == (False, "incognito")
+
+
 def test_default_blocklist_covers_third_party_terminals(tmp_path):
     # A non-terminal allowlisted app still captures (no over-blocking).
     s = Settings(data_dir=tmp_path, allowlist=["com.apple.mail"])
@@ -2575,6 +2621,16 @@ def test_classify_policy_blocklist_subtracts_and_dangerous_backstop():
     assert redact.classify_policy(app="com.apple.Terminal", window=None, settings=s) == redact.PolicyClass(0, "blocklisted")
     # Dangerous backstop coarsens even a (mis)allowlisted vault.
     assert redact.classify_policy(app="com.1password.1password", window=None, settings=s) == redact.PolicyClass(0, "dangerous")
+
+
+def test_classify_policy_detailed_capture_restores_full_tier():
+    s = _span_settings(
+        allowlist=["com.mitchellh.ghostty"],
+        detailed_capture_apps=["com.mitchellh.ghostty"],
+    )
+    assert redact.classify_policy(
+        app="com.mitchellh.ghostty", window=None, settings=s
+    ) == redact.PolicyClass(1, None)
 
 
 def test_classify_policy_glob_and_regex_entries():

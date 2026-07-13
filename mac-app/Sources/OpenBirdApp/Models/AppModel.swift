@@ -141,6 +141,9 @@ final class AppModel: ObservableObject {
     /// Deep-capture (OCR) opt-in list (Phase C2) — always a subset of
     /// `allowlist` by construction (the service filters on every write).
     @Published private(set) var ocrApps: [String] = []
+    /// Explicit terminal/editor grants. Python validates the exact eligible set
+    /// and forces SQLCipher whenever this list is non-empty.
+    @Published private(set) var detailedCaptureApps: [String] = []
     // TCC grants are checked from the APP's own process (that is where macOS
     // records them — a nested helper's request is attributed to the app bundle).
     @Published private(set) var accessibilityGranted = false
@@ -188,6 +191,7 @@ final class AppModel: ObservableObject {
         self.helpers = service.helperStatuses()
         self.allowlist = service.allowlist()
         self.ocrApps = service.ocrApps()
+        self.detailedCaptureApps = service.detailedCaptureApps()
         self.captureRunning = service.isCaptureRunning()
         self.accessibilityGranted = service.accessibilityGranted()
         self.screenRecordingGranted = service.screenRecordingGranted()
@@ -908,6 +912,7 @@ final class AppModel: ObservableObject {
         helpers = service.helperStatuses()
         allowlist = service.allowlist()
         ocrApps = service.ocrApps()
+        detailedCaptureApps = service.detailedCaptureApps()
         refreshLaunchAtLoginState()
         refreshPermissionStates()
         report = await service.preflightReport()
@@ -1233,6 +1238,7 @@ final class AppModel: ObservableObject {
         // The service pruned the OCR opt-in list to the new allowlist
         // (structural subset); mirror the persisted truth.
         ocrApps = service.ocrApps()
+        detailedCaptureApps = service.detailedCaptureApps()
         lastActionMessage = "Removed \(bundleID) from capture allowlist."
         applyPolicyChangeToRunningCapture()
         Task { await refreshCaptureHealth() }
@@ -1252,6 +1258,27 @@ final class AppModel: ObservableObject {
         lastActionMessage = enabled
             ? "Enabled deep capture (OCR) for \(bundleID)."
             : "Disabled deep capture (OCR) for \(bundleID)."
+        applyPolicyChangeToRunningCapture()
+        Task { await refreshCaptureHealth() }
+    }
+
+    /// Grant or revoke detailed local capture for one eligible terminal/editor.
+    /// Enabling is refused unless the live preflight verified SQLCipher; Python
+    /// independently forces strict encryption before opening the capture store.
+    func setDetailedCapture(_ bundleID: String, enabled: Bool) {
+        if enabled && encryptionState != .ok {
+            lastActionMessage = "Detailed capture requires verified encrypted memory."
+            return
+        }
+        var updated = detailedCaptureApps.filter { $0 != bundleID }
+        if enabled {
+            updated.append(bundleID)
+        }
+        service.setDetailedCaptureApps(updated)
+        detailedCaptureApps = service.detailedCaptureApps()
+        lastActionMessage = enabled
+            ? "Enabled detailed local capture for \(bundleID)."
+            : "Disabled detailed local capture for \(bundleID)."
         applyPolicyChangeToRunningCapture()
         Task { await refreshCaptureHealth() }
     }
@@ -1314,6 +1341,15 @@ final class AppModel: ObservableObject {
         return report.apps.first { $0.bundleID == bundleID }
     }
 
+    var detailedCaptureEligibleApps: [String] {
+        guard case let .loaded(report) = captureHealthState else {
+            return detailedCaptureApps
+        }
+        return report.apps.compactMap { row in
+            row.detailedCapture == nil ? nil : row.bundleID
+        }
+    }
+
     var effectiveCaptureAllowedCount: Int {
         guard case let .loaded(report) = captureHealthState else { return allowlist.count }
         return report.apps.filter { $0.policy.capture }.count
@@ -1358,7 +1394,9 @@ final class AppModel: ObservableObject {
         if !health.policy.capture {
             return CaptureRowStatus(
                 label: blockedStatusLabel(reason: health.policy.reason),
-                detail: blockedStatusDetail(reason: health.policy.reason),
+                detail: blockedStatusDetail(
+                    reason: health.policy.reason,
+                    detailedCapture: health.detailedCapture),
                 tone: .attention
             )
         }
@@ -1422,9 +1460,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func blockedStatusDetail(reason: String) -> String {
+    private func blockedStatusDetail(
+        reason: String, detailedCapture: String? = nil
+    ) -> String {
         switch reason {
         case "blocklisted":
+            if detailedCapture == "available" {
+                return "Terminal/editor capture is off. Enable Detailed local capture below."
+            }
             return "Safety blocklist overrides this allowlist entry."
         case "dangerous_app":
             return "Password managers and vault-like apps are never captured."
