@@ -67,12 +67,17 @@ entities_app = typer.Typer(
     help="Inspect the derived entity ledger (projects, domains, completion evidence).",
     no_args_is_help=True,
 )
+assistant_app = typer.Typer(
+    help="Connect read-only OpenBird capture to desktop assistants.",
+    no_args_is_help=True,
+)
 app.add_typer(routine_app, name="routine")
 app.add_typer(summaries_app, name="summaries")
 app.add_typer(entities_app, name="entities")
 app.add_typer(eval_app, name="eval")
 app.add_typer(day_memory_app, name="day-memory")
 app.add_typer(deep_brain_app, name="deep-brain")
+app.add_typer(assistant_app, name="assistant")
 register_capture_command(app)
 
 from openbird.prompts.cli import prompts_app  # noqa: E402 - after app is defined
@@ -82,6 +87,73 @@ app.add_typer(prompts_app, name="prompts")
 _console = Console()
 _err_console = Console(stderr=True)
 _log = logging.getLogger("openbird.cli")
+
+
+@assistant_app.command("serve", hidden=True)
+def assistant_serve() -> None:
+    """Run the local read-only MCP server over stdio."""
+    from openbird.assistant import run_mcp_server
+
+    try:
+        run_mcp_server()
+    except RuntimeError as exc:
+        _err_console.print(f"[red]{escape(str(exc))}[/]")
+        raise typer.Exit(code=1) from exc
+
+
+@assistant_app.command("install-claude")
+def assistant_install_claude(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    executable: Optional[Path] = typer.Option(
+        None,
+        "--executable",
+        hidden=True,
+        help="Pin Claude to the OpenBird CLI that launched this installer.",
+    ),
+) -> None:
+    """Connect OpenBird capture to Claude Desktop on this Mac."""
+    from openbird.assistant import (
+        ASSISTANT_EGRESS_NOTICE,
+        ClaudeConfigConflictError,
+        install_claude_config,
+    )
+
+    _err_console.print(f"[bold yellow]ASSISTANT ACCESS[/] — {ASSISTANT_EGRESS_NOTICE}")
+    if not yes:
+        if not sys.stdin.isatty():
+            _err_console.print(
+                "[red]Refusing[/] (non-interactive). Re-run with --yes to connect Claude."
+            )
+            raise typer.Exit(code=1)
+        if not typer.confirm("Connect read-only OpenBird capture to Claude Desktop?", default=False):
+            _console.print("[yellow]Aborted.[/]")
+            raise typer.Exit(code=1)
+    try:
+        result = install_claude_config(executable=executable)
+    except (ClaudeConfigConflictError, FileNotFoundError, OSError, ValueError) as exc:
+        _err_console.print(f"[red]Could not configure Claude Desktop:[/] {escape(str(exc))}")
+        raise typer.Exit(code=1) from exc
+    _console.print(f"[green]Connected[/] Claude Desktop via {result['config_path']}.")
+    _console.print("Restart Claude Desktop, then ask it to use OpenBird.")
+
+
+@assistant_app.command("status")
+def assistant_status(json_out: bool = typer.Option(False, "--json")) -> None:
+    """Show whether Claude Desktop has the OpenBird connector configured."""
+    from openbird.assistant import claude_config_status
+
+    try:
+        result = claude_config_status()
+    except ValueError as exc:
+        _err_console.print(f"[red]Claude Desktop config error:[/] {escape(str(exc))}")
+        raise typer.Exit(code=1) from exc
+    if json_out:
+        _console.print_json(json.dumps(result))
+        return
+    if result["configured"]:
+        _console.print(f"[green]Connected[/] Claude Desktop · {result['command']}")
+    else:
+        _console.print("[yellow]Not connected[/] · run openbird assistant install-claude")
 
 
 # --------------------------------------------------------------------------- #

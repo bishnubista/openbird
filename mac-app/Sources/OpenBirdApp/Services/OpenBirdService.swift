@@ -126,6 +126,18 @@ struct ProcessResult: Sendable {
     let stderr: String
 }
 
+struct ClaudeAssistantStatus: Codable, Equatable, Sendable {
+    let configured: Bool
+    let configPath: String
+    let command: String?
+
+    enum CodingKeys: String, CodingKey {
+        case configured
+        case configPath = "config_path"
+        case command
+    }
+}
+
 struct DBKeyBootstrapReport: Equatable, Sendable {
     let ok: Bool
     let outcome: String
@@ -1336,6 +1348,34 @@ final class OpenBirdService: @unchecked Sendable {
     func reindex(timeout: TimeInterval = 600) async -> Bool {
         guard let cli = resolveOpenBirdCLI() else { return false }
         let result = await runAsync(cli, arguments: ["reindex", "--yes"], timeout: timeout)
+        return result.exitCode == 0
+    }
+
+    /// Read Claude Desktop connector state through the metadata-only CLI command.
+    /// The status payload contains paths/booleans only, never captured content.
+    func claudeAssistantStatus(timeout: TimeInterval = 10) async -> ClaudeAssistantStatus? {
+        guard let cli = resolveOpenBirdCLI() else { return nil }
+        let result = await runAsync(
+            cli, arguments: ["assistant", "status", "--json"], timeout: timeout
+        )
+        guard result.exitCode == 0 else { return nil }
+        return Self.parseClaudeAssistantStatus(result.stdout)
+    }
+
+    static func parseClaudeAssistantStatus(_ output: String) -> ClaudeAssistantStatus? {
+        guard let data = output.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ClaudeAssistantStatus.self, from: data)
+    }
+
+    /// Install the local stdio MCP entry after the native UI has collected the
+    /// explicit user confirmation. `--yes` skips the CLI's second prompt only.
+    func connectClaudeAssistant(timeout: TimeInterval = 15) async -> Bool {
+        guard let cli = resolveOpenBirdCLI() else { return false }
+        let result = await runAsync(
+            cli,
+            arguments: ["assistant", "install-claude", "--yes", "--executable", cli],
+            timeout: timeout
+        )
         return result.exitCode == 0
     }
 

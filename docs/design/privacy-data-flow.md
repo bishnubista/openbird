@@ -33,6 +33,7 @@ path as any other off-device model route.
 | `chat.day_memory` | deterministic broad day-memory answer branch | question used only for classification, distilled day-memory metrics, workstreams, sessions, open loops, domains/repos, derived citation source ids, memory-context counts | SQLite `day_memories`; chat output is not persisted | explicit day-scoped branch returns before `_provider` using only the non-embedding maintenance stub; query-inferred branch may construct a provider before RAG, but returns before `provider.complete`; neither branch issues completion or embedding requests | purge/prune removes source observations and derived day memory, removing future retrievability | `reasoning_route=local_deterministic` / `Local only` label |
 | `chat.day_memory_cached_summary` | deterministic day answer composed with PRECOMPUTED block-summary narrative | distilled day-memory facts plus stored block-summary prose (local-model text generated EARLIER by the routines worker under the battery/idle gate), typed `block_summary` derived citations | SQLite `day_memories` + `block_summaries`; chat output is not persisted | none at answer time — composition is a local read, no provider call, no embedding; the generation-time route is the local Ollama model under `CloudOptInRequired` gating | deleting a cited span/observation trigger-deletes the block summary, and (recursive triggers) any day memory citing it; the composed narrative vanishes on the next answer | `reasoning_route=local_cached_model_summary` / `Local summary (cached model prose)` label — the deterministic label must NOT be shown once model prose is present |
 | `chat.remote` | question plus retrieved memory | question, retrieved chunks, citations | local DB plus provider request body | `third-party-cloud` or `self-hosted-remote`, depending on provider destination | local deletion cannot recall payloads already sent to remote providers | `CLOUD ACTIVE` banner and per-answer/provider disclosure |
+| `assistant.mcp_read` | assistant-invoked bounded local read | exclusion-filtered capture excerpt, app id, timestamp, source, observation id; no URL or window title | no new OpenBird storage; assistant provider request body after tool use | `third-party-cloud` when Claude/ChatGPT invokes a content tool; status is metadata-only | local deletion removes future retrievability but cannot recall excerpts already sent | install warning, MCP tool descriptions/results, `openbird assistant status` |
 | `deep_brain.ask` / `briefing.model` / `productivity.coach` | user-triggered packet reasoning | distilled packet content sent to the active model route; local ledger stores only packet hash, byte/count metadata, route metadata, exclusion reason counts, outcome, and error kind | provider request body plus SQLite `reasoning_send_ledger`; ledger inherits the memory DB's at-rest protection and stores no raw question, answer, packet JSON, snippets, observation IDs, citation IDs, configured exclusion names, source app names, URL metadata, or window-title metadata | `third-party-cloud` or `self-hosted-remote` only when active model route is remote; local model routes do not write ledger rows | full purge removes ledger rows; selective source deletion leaves redacted remote-send audit metadata because remote payloads cannot be recalled | `Cloud reasoning active` label and local `data reasoning-ledger` audit surface |
 | `routines.summary` | time-window retrieval | captured memory inside selected time window | routine output store where enabled | inherits active model route | underlying memory deletion removes future grounding | routine run output should inherit cloud banner |
 | `meetings.audio` | ScreenCaptureKit/audio helper | audio/transcript once enabled | local DB/transcript path | none for local ASR; remote if STT provider is remote | purge/prune/delete must remove transcript-derived memory | preflight TCC/audio readiness and provider route |
@@ -55,6 +56,9 @@ path as any other off-device model route.
    inside the helper for an opted-in OCR attempt, but it must never be written to
    disk, logs, stderr, argv, environment, exports, or SQLite; only scrubbed
    recognized text may enter the normal capture pipe.
+8. Assistant reads must use bounded local SQL/FTS paths, apply outbound exclusions
+   before serialization, and never construct or call an embedding, reranking, or
+   completion provider. URLs, window titles, and unknown-app legacy rows stay local.
 
 ## Product Decisions
 
@@ -79,6 +83,7 @@ path as any other off-device model route.
   only after the allowlist gate, uses `CGPreflightScreenCaptureAccess` without
   prompting, suppresses while the mic is hot, and stores only recognized text over
   the same scrub/normalize/dedup path as Accessibility text.
-- Connector/agent permissions: SurfSense-style ask/allow/deny rules are deferred
-  until OpenBird adds connector write actions or agent tools. Adding the rules
-  without the scope would expand architecture without improving current privacy.
+- Connector/agent permissions: the read-only assistant MCP surface inherits the
+  existing Deep Brain outbound exclusions and hard payload caps. SurfSense-style
+  per-action ask/allow/deny rules remain deferred until OpenBird adds write actions;
+  every future write must introduce its own explicit confirmation boundary.

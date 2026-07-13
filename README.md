@@ -30,6 +30,9 @@ OpenBird is **local-first**: your data never leaves your device by default, the 
   are part of the product surface.
 - **Extensible integrations:** the MVP starts with a filesystem MCP connector and keeps write
   actions behind explicit confirmation.
+- **Desktop assistant access:** connect the read-only local MCP server to Claude Desktop so Claude
+  can search or inspect recent capture on demand. OpenBird applies outbound exclusions and hard
+  payload limits before any excerpt crosses the assistant boundary.
 
 ## Architecture
 
@@ -91,6 +94,26 @@ openbird --help
 # Notarized app (cask): installs OpenBird.app to /Applications — capture-capable
 brew install --cask bishnubista/openbird/openbird
 ```
+
+### Claude Desktop
+
+The notarized app includes a local, read-only MCP server. Connect it with one command:
+
+```bash
+openbird assistant install-claude
+openbird assistant status
+```
+
+Restart Claude Desktop after installation, then ask Claude to use OpenBird for recent-work context
+or capture search. OpenBird does not push memory in the background: excerpts leave the Mac only
+when Claude invokes a content tool. Returned capture text, app identifiers, and timestamps are sent
+to Anthropic and cannot be recalled by a later local purge. URLs and window titles are never
+returned by these tools. See [Desktop assistant access](docs/assistant-connectors.md) for the exact
+tool and privacy contract.
+
+ChatGPT does not currently connect directly to a local MCP server. OpenAI's supported private/local
+path is [Secure MCP Tunnel](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta.eot);
+OpenBird does not open a listener or tunnel automatically.
 
 The **cask** downloads the notarized `.dmg` and installs the signed
 `OpenBird.app` to `/Applications`, so macOS can grant (and persist) Screen
