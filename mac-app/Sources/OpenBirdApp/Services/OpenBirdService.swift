@@ -150,6 +150,21 @@ struct ChatGPTAssistantStatus: Codable, Equatable, Sendable {
     }
 }
 
+enum ChatGPTTunnelStopReason: Equatable {
+    case retryable
+    case appTermination
+}
+
+struct ChatGPTTunnelLifecycleState: Equatable {
+    private(set) var shuttingDown = false
+
+    var canLaunch: Bool { !shuttingDown }
+
+    mutating func recordStop(_ reason: ChatGPTTunnelStopReason) {
+        if reason == .appTermination { shuttingDown = true }
+    }
+}
+
 struct DBKeyBootstrapReport: Equatable, Sendable {
     let ok: Bool
     let outcome: String
@@ -745,7 +760,7 @@ final class OpenBirdService: @unchecked Sendable {
     private var chatGPTTunnelProcess: Process?
     /// Guards tunnel ownership against async setup/status and synchronous app termination.
     private let chatGPTTunnelProcessLock = NSLock()
-    private var chatGPTTunnelShuttingDown = false
+    private var chatGPTTunnelLifecycle = ChatGPTTunnelLifecycleState()
 
     /// Write end of the "death pipe" handed to the launched capture daemon as its
     /// stdin. We hold it open for this app's lifetime and never write to it after
@@ -1493,7 +1508,7 @@ final class OpenBirdService: @unchecked Sendable {
             if await chatGPTTunnelReady() { return true }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        terminateLaunchedChatGPTTunnel()
+        stopChatGPTTunnel()
         return false
     }
 
@@ -1511,7 +1526,7 @@ final class OpenBirdService: @unchecked Sendable {
     }
 
     func terminateLaunchedChatGPTTunnel() {
-        stopChatGPTTunnel(markShuttingDown: true)
+        stopChatGPTTunnel(reason: .appTermination)
     }
 
     private func currentChatGPTTunnelProcess() -> Process? {
@@ -1523,15 +1538,15 @@ final class OpenBirdService: @unchecked Sendable {
     private func launchChatGPTTunnelProcess(_ process: Process) throws -> Bool {
         chatGPTTunnelProcessLock.lock()
         defer { chatGPTTunnelProcessLock.unlock() }
-        guard !chatGPTTunnelShuttingDown else { return false }
+        guard chatGPTTunnelLifecycle.canLaunch else { return false }
         try process.run()
         chatGPTTunnelProcess = process
         return true
     }
 
-    private func stopChatGPTTunnel(markShuttingDown: Bool = false) {
+    private func stopChatGPTTunnel(reason: ChatGPTTunnelStopReason = .retryable) {
         chatGPTTunnelProcessLock.lock()
-        if markShuttingDown { chatGPTTunnelShuttingDown = true }
+        chatGPTTunnelLifecycle.recordStop(reason)
         let process = chatGPTTunnelProcess
         chatGPTTunnelProcess = nil
         chatGPTTunnelProcessLock.unlock()

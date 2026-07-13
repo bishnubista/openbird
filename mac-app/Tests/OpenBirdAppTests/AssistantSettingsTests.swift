@@ -3,6 +3,16 @@ import XCTest
 @testable import OpenBirdApp
 
 final class AssistantSettingsTests: XCTestCase {
+    func testFailedTunnelStartRemainsRetryableButAppTerminationDoesNot() {
+        var lifecycle = ChatGPTTunnelLifecycleState()
+
+        lifecycle.recordStop(.retryable)
+        XCTAssertTrue(lifecycle.canLaunch)
+
+        lifecycle.recordStop(.appTermination)
+        XCTAssertFalse(lifecycle.canLaunch)
+    }
+
     func testParsesClaudeAssistantStatus() {
         let output = #"{"configured":true,"config_path":"/tmp/claude.json","command":"/Applications/OpenBird.app/Contents/MacOS/openbird-cli"}"#
 
