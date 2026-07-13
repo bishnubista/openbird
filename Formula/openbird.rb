@@ -1,3 +1,6 @@
+# frozen_string_literal: true
+
+# Homebrew formula for OpenBird's source-built CLI and macOS app bundle.
 class Openbird < Formula
   desc "Local-first macOS memory assistant with a native trust controller"
   homepage "https://github.com/bishnubista/openbird"
