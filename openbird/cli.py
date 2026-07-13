@@ -187,7 +187,9 @@ def assistant_configure_chatgpt(
         _err_console.print("[red]Refusing[/]. Re-run from OpenBird Settings or with --yes.")
         raise typer.Exit(code=1)
     try:
-        configure_chatgpt(tunnel_id, executable=executable)
+        status = configure_chatgpt(tunnel_id, executable=executable)
+        if not status["configured"] or not status["helper_available"]:
+            raise RuntimeError("OpenAI tunnel profile did not pass verification")
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
         _err_console.print(f"[red]Could not configure ChatGPT:[/] {escape(str(exc))}")
         raise typer.Exit(code=1) from exc

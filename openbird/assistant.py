@@ -518,7 +518,11 @@ def configure_chatgpt(
          "--profile-dir", str(profile.parent)],
         environment=env, timeout=30, runner=runner,
     )
-    return {"configured": True, "helper_available": True}
+    return chatgpt_status(
+        executable=command,
+        tunnel_client=helper,
+        profile_dir=profile_dir,
+    )
 
 
 def chatgpt_run_arguments(

@@ -438,9 +438,12 @@ def test_configure_chatgpt_reconciles_profile_without_secret_in_argv(tmp_path):
     executable.write_text("binary", encoding="utf-8")
     executable.chmod(0o700)
     calls = []
+    profile_dir = tmp_path / "profiles"
 
     def runner(arguments, **kwargs):
         calls.append((arguments, kwargs))
+        if arguments[1] == "init":
+            (profile_dir / "openbird.yaml").write_text("profile", encoding="utf-8")
         return subprocess.CompletedProcess(arguments, 0)
 
     secret = "runtime-test-secret-never-in-argv"
@@ -448,7 +451,7 @@ def test_configure_chatgpt_reconciles_profile_without_secret_in_argv(tmp_path):
         "tunnel_abcdef123",
         executable=executable,
         tunnel_client=helper,
-        profile_dir=tmp_path / "profiles",
+        profile_dir=profile_dir,
         environment={"CONTROL_PLANE_API_KEY": secret},
         runner=runner,
     )
@@ -461,6 +464,48 @@ def test_configure_chatgpt_reconciles_profile_without_secret_in_argv(tmp_path):
     assert secret not in " ".join(init_args)
     assert init_kwargs["env"]["CONTROL_PLANE_API_KEY"] == secret
     assert calls[1][0][1:4] == ["doctor", "--profile", "openbird"]
+
+
+def test_configure_chatgpt_reports_missing_profile_after_zero_exit(tmp_path):
+    helper = tmp_path / "tunnel-client"
+    helper.write_text("binary", encoding="utf-8")
+    helper.chmod(0o700)
+    executable = tmp_path / "openbird-cli"
+    executable.write_text("binary", encoding="utf-8")
+    executable.chmod(0o700)
+
+    result = assistant.configure_chatgpt(
+        "tunnel_abcdef123",
+        executable=executable,
+        tunnel_client=helper,
+        profile_dir=tmp_path / "profiles",
+        environment={"CONTROL_PLANE_API_KEY": "secret"},
+        runner=lambda arguments, **_kwargs: subprocess.CompletedProcess(arguments, 0),
+    )
+
+    assert result == {"configured": False, "helper_available": True}
+
+
+def test_configure_chatgpt_cli_rejects_unverified_profile(monkeypatch):
+    monkeypatch.setattr(
+        assistant,
+        "configure_chatgpt",
+        lambda *_args, **_kwargs: {"configured": False, "helper_available": True},
+    )
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "assistant",
+            "configure-chatgpt",
+            "--yes",
+            "--tunnel-id",
+            "tunnel_abcdef123",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "did not pass verification" in result.output
 
 
 def test_configure_chatgpt_rebinds_existing_profile_to_relocated_bundle(tmp_path):
