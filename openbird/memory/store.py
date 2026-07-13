@@ -807,6 +807,73 @@ class MemoryStore:
             out.append((self._row_to_observation(r), text))
         return out
 
+    def recent_capture_text(
+        self,
+        start_ts: float,
+        end_ts: float,
+        *,
+        limit: int,
+        max_chars: int = 2000,
+    ) -> list[tuple[Observation, str]]:
+        """Return a newest-first, row-bounded page of capture text.
+
+        This is an assistant-safe local read: it performs no embedding, rerank,
+        or completion call. App/source/id egress exclusions remain the caller's
+        responsibility because they are policy rather than storage semantics.
+        """
+        rows = self.conn.execute(
+            "SELECT o.*, b.text AS blob_text FROM observations o "
+            "JOIN content_blobs b ON b.content_hash = o.content_hash "
+            "WHERE o.ts >= ? AND o.ts <= ? AND o.source = 'capture' "
+            "ORDER BY o.ts DESC, o.id DESC LIMIT ?",
+            (float(start_ts), float(end_ts), max(0, int(limit))),
+        ).fetchall()
+        return [
+            (self._row_to_observation(row), str(row["blob_text"] or "")[:max_chars])
+            for row in rows
+        ]
+
+    def lexical_capture_text(
+        self,
+        query: str,
+        *,
+        limit: int,
+        max_chars: int = 2000,
+    ) -> list[tuple[Observation, str]]:
+        """BM25-only capture search with no model, vector, or reranker path."""
+        match = self._fts_query(query)
+        if not match or limit <= 0:
+            return []
+        # A chunk may occur in many observations. Fetch a bounded over-pool, then
+        # keep the newest occurrence per chunk without an unbounded SQL scan.
+        pool = min(500, max(int(limit) * 5, 20))
+        rows = self.conn.execute(
+            "SELECT o.*, c.chunk_hash AS matched_chunk, c.text AS chunk_text, "
+            "bm25(fts_chunks) AS rank FROM fts_chunks "
+            "JOIN chunks c ON c.rowid_int = fts_chunks.rowid "
+            "JOIN blob_chunks bc ON bc.chunk_hash = c.chunk_hash "
+            "JOIN observations o ON o.content_hash = bc.content_hash "
+            "WHERE fts_chunks MATCH ? AND o.source = 'capture' "
+            "ORDER BY rank ASC, o.ts DESC, o.id DESC LIMIT ?",
+            (match, pool),
+        ).fetchall()
+        out: list[tuple[Observation, str]] = []
+        seen_chunks: set[str] = set()
+        for row in rows:
+            chunk_hash = str(row["matched_chunk"])
+            if chunk_hash in seen_chunks:
+                continue
+            seen_chunks.add(chunk_hash)
+            out.append(
+                (
+                    self._row_to_observation(row),
+                    str(row["chunk_text"] or "")[:max_chars],
+                )
+            )
+            if len(out) >= limit:
+                break
+        return out
+
     def export_observations(
         self,
         *,

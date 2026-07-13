@@ -644,6 +644,47 @@ routes:
       - cli.CLOUD_ACTIVE
       - app.CLOUD_ACTIVE
 
+  - id: assistant.mcp_read
+    class: third-party-cloud
+    status: implemented_stdio_read_only
+    source: assistant-invoked bounded local SQLite or FTS capture read
+    derives_from:
+      - capture.active_window
+      - capture.ocr_window
+    captured_fields:
+      - exclusion_filtered_capture_excerpt
+      - app_bundle_id
+      - timestamp
+      - source
+      - observation_id
+    forbidden_fields:
+      - raw_url
+      - raw_window_title
+      - unknown_app_observation
+      - captured_text_in_logs
+    storage:
+      - no_new_openbird_storage
+      - assistant_provider_request_after_content_tool_invocation
+    egress:
+      default: none_until_content_tool_invocation
+      destination: connected_assistant_provider
+      warning: returned excerpts and metadata leave this Mac and cannot be recalled by local deletion
+    enforcement:
+      transport: local_stdio_only
+      install_requires: explicit warning and interactive confirmation or --yes
+      exclusions: deep_brain app, source, and observation-id exclusions before serialization
+      bounds: 2000 characters per excerpt and 12000 excerpt characters per call
+      model_calls: forbidden
+      unknown_app: fail_closed
+    deletion:
+      command: openbird data purge/prune
+      caveat: removes future retrievability only; cannot recall prior assistant payloads
+    truth_surface:
+      - cli.assistant_install_warning
+      - cli.assistant_status
+      - mcp.tool_descriptions
+      - mcp.egress_notice
+
   - id: routines.summary
     class: unknown
     source: scheduled time-window retrieval over local memory

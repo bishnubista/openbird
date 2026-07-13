@@ -55,6 +55,7 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "chat.day_memory",
         "chat.local",
         "chat.remote",
+        "assistant.mcp_read",
         "data.export",
         "deep_brain.ask",
         "deep_brain.preview",
@@ -78,6 +79,19 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "entities.aggregation",
         "chat.entity_ledger",
     }.issubset(routes)
+
+
+def test_assistant_mcp_route_is_bounded_explicit_egress() -> None:
+    route = _routes()["assistant.mcp_read"]
+
+    assert route["class"] == "third-party-cloud"
+    assert route["egress"]["default"] == "none_until_content_tool_invocation"
+    assert route["enforcement"]["transport"] == "local_stdio_only"
+    assert route["enforcement"]["model_calls"] == "forbidden"
+    assert route["enforcement"]["unknown_app"] == "fail_closed"
+    assert "raw_url" in route["forbidden_fields"]
+    assert "raw_window_title" in route["forbidden_fields"]
+    assert "cli.assistant_install_warning" in route["truth_surface"]
 
 
 def test_privacy_route_references_resolve() -> None:

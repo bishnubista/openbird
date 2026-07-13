@@ -14,6 +14,7 @@ struct SettingsView: View {
     @Environment(\.colorScheme) private var scheme
     @State private var newBundleID = ""
     @State private var pendingDetailedCaptureBundleID: String?
+    @State private var pendingClaudeConnection = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +30,7 @@ struct SettingsView: View {
                     detailedCaptureCard
                     deepCaptureCard
                     privacyCard
+                    assistantCard
                     promptCustomizationCard
                     trustCard
                 }
@@ -58,6 +60,16 @@ struct SettingsView: View {
                 "Terminal and editor text can contain commands, output, environment values, "
                 + "and copied secrets. OpenBird will store readable text in encrypted local "
                 + "memory; secure fields, private windows, and password managers stay blocked."
+            )
+        }
+        .alert("Connect Claude Desktop?", isPresented: $pendingClaudeConnection) {
+            Button("Cancel", role: .cancel) {}
+            Button("Connect") { model.connectClaudeAssistant() }
+        } message: {
+            Text(
+                "Claude can request bounded OpenBird excerpts, app identifiers, and timestamps. "
+                + "Those results are sent to Anthropic and cannot be recalled by deleting local memory. "
+                + "OpenBird never sends data in the background."
             )
         }
     }
@@ -637,6 +649,56 @@ struct SettingsView: View {
             return .affirm(model.deepBrainPreviewBadge)
         case .unknown, .failed:
             return .secondary(model.deepBrainPreviewBadge) { model.loadDeepBrainPreview() }
+        }
+    }
+
+    // MARK: Desktop assistants
+
+    private var assistantCard: some View {
+        sectionCard {
+            sectionLabel("Desktop assistants")
+            permissionRow(
+                icon: "sparkles",
+                title: "Claude Desktop",
+                badge: .optional,
+                subtitle: model.claudeAssistantSummary,
+                trailing: claudeAssistantTrailing
+            )
+            hairline
+            permissionRow(
+                icon: "bubble.left.and.text.bubble.right",
+                title: "ChatGPT",
+                badge: .optional,
+                subtitle: "ChatGPT requires OpenAI Secure MCP Tunnel for private local servers.",
+                trailing: .secondary("Learn more") {
+                    guard let url = URL(
+                        string: "https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta.eot"
+                    ) else { return }
+                    NSWorkspace.shared.open(url)
+                }
+            )
+            hairline
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield").font(.system(size: 11))
+                Text("URLs and window titles stay local. Existing outbound exclusions apply.")
+                    .font(.system(size: 11.5))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(OB.textTertiary(scheme))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16).padding(.vertical, 11)
+        }
+    }
+
+    private var claudeAssistantTrailing: RowTrailing {
+        if model.claudeAssistantBusy { return .attention("Connecting") }
+        switch model.claudeAssistantState {
+        case .connected:
+            return .affirm("Connected")
+        case .unknown:
+            return .attention("Check")
+        case .disconnected, .failed:
+            return .primary("Connect") { pendingClaudeConnection = true }
         }
     }
 
