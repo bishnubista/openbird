@@ -232,11 +232,14 @@ private struct MainWindowRoot: View {
             // Resume only from the real app lifecycle. AppModel is also created by
             // unit tests and headless self-tests, which must never touch credentials
             // or start a network child merely because a model was initialized.
-            await model.resumeChatGPTAssistant()
             // Resume capture if the user is already configured and didn't pause it.
             // After refresh() so allowlist / pause / running state is current.
             // Idempotent, so re-running this .task cannot double-spawn.
             model.autoResumeCaptureIfNeeded()
+            // ChatGPT is optional and network-dependent; it must never delay the
+            // core capture daemon. Keep it in this real-app lifecycle, but detached
+            // from capture resumption.
+            Task { await model.resumeChatGPTAssistant() }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshPermissionStates()
