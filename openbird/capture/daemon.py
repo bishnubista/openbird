@@ -859,6 +859,11 @@ class CaptureDaemon:
             extra += ["--allow", ",".join(allow)]
         if block:
             extra += ["--block", ",".join(block)]
+        detailed_capture_apps = list(
+            getattr(self.settings, "detailed_capture_apps", None) or []
+        )
+        if detailed_capture_apps:
+            extra += ["--detailed-capture-apps", ",".join(detailed_capture_apps)]
         # Opt-in browser URL capture (Apple Events): only pass the flag when the
         # user enabled it, so the helper never scripts a browser — and never
         # triggers an Automation prompt — by default.

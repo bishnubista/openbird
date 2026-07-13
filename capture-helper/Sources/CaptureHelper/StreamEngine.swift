@@ -120,6 +120,7 @@ final class StreamEngine {
     private var scheduler: Scheduler
     private let allow: Set<String>
     private let block: Set<String>
+    private let detailedCaptureApps: Set<String>
     private let pauseFile: String?
     private let captureUrls: Bool
     private let idleTick: Double
@@ -150,12 +151,14 @@ final class StreamEngine {
     private var ocrRuntime: OcrRuntime?
 
     init(
-        allow: Set<String>, block: Set<String>, pauseFile: String?,
+        allow: Set<String>, block: Set<String>, detailedCaptureApps: Set<String>,
+        pauseFile: String?,
         captureUrls: Bool, config: SchedulerConfig,
         ocrApps: Set<String> = [], ocrMinInterval: Double = 30.0
     ) {
         self.allow = allow
         self.block = block
+        self.detailedCaptureApps = detailedCaptureApps
         self.pauseFile = pauseFile
         self.captureUrls = captureUrls
         self.idleTick = config.idleTick
@@ -416,7 +419,9 @@ final class StreamEngine {
             let activity = ProcessInfo.processInfo.beginActivity(
                 options: .background, reason: "capture")
             captureFrontmost(
-                allow: self.allow, block: self.block, pauseFile: self.pauseFile,
+                allow: self.allow, block: self.block,
+                detailedCaptureApps: self.detailedCaptureApps,
+                pauseFile: self.pauseFile,
                 captureUrls: self.captureUrls, trigger: trigger,
                 emitter: { self.emitter.emit($0) },
                 ocr: self.ocrRuntime)

@@ -758,6 +758,36 @@ def test_policy_args_include_capture_urls_when_opted_in(allow_settings):
     assert "--capture-urls" in argv
 
 
+def test_policy_args_include_detailed_capture_apps_in_stream_and_poll(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        allowlist=["com.mitchellh.ghostty"],
+        detailed_capture_apps=["com.mitchellh.ghostty"],
+    )
+    daemon = CaptureDaemon(
+        FakeStore(), settings=settings, helper_cmd=("capture-helper",),
+        require_signed_helper=False,
+    )
+
+    for argv in (
+        daemon._with_policy_args(["capture-helper"]),
+        daemon._with_policy_args(["capture-helper"], stream=True),
+    ):
+        i = argv.index("--detailed-capture-apps")
+        assert argv[i + 1] == "com.mitchellh.ghostty"
+
+
+def test_policy_args_omit_detailed_capture_apps_without_grant(allow_settings):
+    daemon = CaptureDaemon(
+        FakeStore(), settings=allow_settings, helper_cmd=("capture-helper",),
+        require_signed_helper=False,
+    )
+
+    assert "--detailed-capture-apps" not in daemon._with_policy_args(
+        ["capture-helper"], stream=True
+    )
+
+
 def test_policy_args_include_ocr_args_only_when_opted_in_and_stream(allow_settings):
     import dataclasses
 
