@@ -240,6 +240,39 @@ _QUALITY_RANK = {
     "usable_context": 2,
     "rich_context": 3,
 }
+_CONTEXT_QUALITIES = frozenset(
+    {
+        "unavailable",
+        "insufficient_data",
+        "low_context",
+        "inconsistent_context",
+        "usable_context",
+        "rich_context",
+    }
+)
+
+
+def _validated_app_rows(audit: Any, *, reason: str) -> dict[str, dict[str, Any]]:
+    if not isinstance(audit, dict) or not isinstance(audit.get("apps"), list):
+        raise Blocked(reason)
+    rows: dict[str, dict[str, Any]] = {}
+    for row in audit["apps"]:
+        if not isinstance(row, dict):
+            raise Blocked(reason)
+        bundle_id = row.get("bundle_id")
+        samples = row.get("sample_count")
+        quality = row.get("context_quality")
+        if (
+            not isinstance(bundle_id, str)
+            or not bundle_id
+            or not isinstance(samples, int)
+            or isinstance(samples, bool)
+            or samples < 0
+            or quality not in _CONTEXT_QUALITIES
+        ):
+            raise Blocked(reason)
+        rows[bundle_id] = row
+    return rows
 
 
 def compare_audits(
@@ -248,9 +281,12 @@ def compare_audits(
     """Compare stable quality buckets; repetition remains advisory only."""
     if previous is None:
         return []
-    current_apps = {row["bundle_id"]: row for row in current.get("apps", [])}
-    previous_audit = previous.get("capture_audit", {})
-    previous_apps = {row["bundle_id"]: row for row in previous_audit.get("apps", [])}
+    current_apps = _validated_app_rows(current, reason="current_audit_malformed")
+    if not isinstance(previous, dict):
+        raise Blocked("prior_report_malformed")
+    previous_apps = _validated_app_rows(
+        previous.get("capture_audit"), reason="prior_report_malformed"
+    )
     comparisons: list[dict[str, Any]] = []
     for bundle_id in sorted(current_apps.keys() & previous_apps.keys()):
         new = current_apps[bundle_id]
@@ -288,13 +324,25 @@ def _latest_report() -> dict[str, Any] | None:
             candidates.append((path.stat().st_mtime_ns, path))
         except OSError:
             continue
+    malformed_found = False
     for _mtime, path in sorted(candidates, reverse=True):
         try:
             payload = json.loads(path.read_text())
         except (OSError, ValueError):
+            malformed_found = True
             continue
-        if isinstance(payload, dict):
-            return payload
+        try:
+            if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+                raise Blocked("prior_report_malformed")
+            _validated_app_rows(
+                payload.get("capture_audit"), reason="prior_report_malformed"
+            )
+        except Blocked:
+            malformed_found = True
+            continue
+        return payload
+    if malformed_found:
+        raise Blocked("prior_report_malformed")
     return None
 
 

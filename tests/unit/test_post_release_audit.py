@@ -26,12 +26,13 @@ def _app(bundle_id: str, quality: str, samples: int = 10) -> dict:
 
 def test_compare_audits_requires_sample_floor_and_ignores_repetition():
     previous = {
+        "schema_version": 1,
         "capture_audit": {
             "apps": [
                 {**_app("improved", "low_context"), "distinct_ratio": 1.0},
                 _app("too-small", "low_context", 2),
             ]
-        }
+        },
     }
     current = {
         "apps": [
@@ -99,12 +100,38 @@ def test_latest_report_uses_write_time_not_lexical_version(tmp_path, monkeypatch
     monkeypatch.setattr(post_release_audit, "REPORT_DIR", tmp_path)
     lexical_newer = tmp_path / "post-release-9.0.0-older.json"
     chronological_newer = tmp_path / "post-release-10.0.0-newer.json"
-    lexical_newer.write_text(json.dumps({"version": "9.0.0"}))
-    chronological_newer.write_text(json.dumps({"version": "10.0.0"}))
+    lexical_newer.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "version": "9.0.0",
+                "capture_audit": {"apps": []},
+            }
+        )
+    )
+    chronological_newer.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "version": "10.0.0",
+                "capture_audit": {"apps": []},
+            }
+        )
+    )
     os.utime(lexical_newer, ns=(1, 1))
     os.utime(chronological_newer, ns=(2, 2))
 
-    assert post_release_audit._latest_report() == {"version": "10.0.0"}
+    assert post_release_audit._latest_report()["version"] == "10.0.0"
+
+
+def test_malformed_latest_report_blocks_instead_of_crashing(tmp_path, monkeypatch):
+    monkeypatch.setattr(post_release_audit, "REPORT_DIR", tmp_path)
+    (tmp_path / "post-release-1.2.3-bad.json").write_text(
+        json.dumps({"schema_version": 1, "capture_audit": {"apps": [None]}})
+    )
+
+    with pytest.raises(post_release_audit.Blocked, match="prior_report_malformed"):
+        post_release_audit._latest_report()
 
 
 def test_missing_command_is_blocked():
