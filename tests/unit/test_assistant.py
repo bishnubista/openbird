@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import stat
 from pathlib import Path
 
@@ -425,3 +426,135 @@ def test_cli_install_claude_reports_config_conflict_without_traceback(monkeypatc
     assert "Could not configure Claude Desktop" in result.output
     assert "retry" in result.output
     assert result.exception is not None
+
+
+def test_configure_chatgpt_reconciles_profile_without_secret_in_argv(tmp_path):
+    helper = tmp_path / "tunnel-client"
+    helper.write_text("binary", encoding="utf-8")
+    helper.chmod(0o700)
+    executable = tmp_path / "bundle-b" / "openbird-cli"
+    executable.parent.mkdir()
+    executable.write_text("binary", encoding="utf-8")
+    executable.chmod(0o700)
+    calls = []
+
+    def runner(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return subprocess.CompletedProcess(arguments, 0)
+
+    secret = "runtime-test-secret-never-in-argv"
+    result = assistant.configure_chatgpt(
+        "tunnel_abcdef123",
+        executable=executable,
+        tunnel_client=helper,
+        profile_dir=tmp_path / "profiles",
+        environment={"CONTROL_PLANE_API_KEY": secret},
+        runner=runner,
+    )
+
+    assert result == {"configured": True, "helper_available": True}
+    init_args, init_kwargs = calls[0]
+    assert init_args[1:3] == ["init", "--force"]
+    assert "env:CONTROL_PLANE_API_KEY" in init_args
+    assert f"{executable.resolve()} assistant serve" in init_args
+    assert secret not in " ".join(init_args)
+    assert init_kwargs["env"]["CONTROL_PLANE_API_KEY"] == secret
+    assert calls[1][0][1:4] == ["doctor", "--profile", "openbird"]
+
+
+def test_configure_chatgpt_rebinds_existing_profile_to_relocated_bundle(tmp_path):
+    helper = tmp_path / "tunnel-client"
+    helper.write_text("binary", encoding="utf-8")
+    helper.chmod(0o700)
+    bundle_a = tmp_path / "Bundle A" / "openbird-cli"
+    bundle_b = tmp_path / "Bundle B" / "openbird-cli"
+    for executable in (bundle_a, bundle_b):
+        executable.parent.mkdir()
+        executable.write_text("binary", encoding="utf-8")
+        executable.chmod(0o700)
+    calls = []
+
+    def runner(arguments, **_kwargs):
+        calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0)
+
+    for executable in (bundle_a, bundle_b):
+        assistant.configure_chatgpt(
+            "tunnel_abcdef123",
+            executable=executable,
+            tunnel_client=helper,
+            profile_dir=tmp_path / "profiles",
+            environment={"CONTROL_PLANE_API_KEY": "secret"},
+            runner=runner,
+        )
+
+    init_a, init_b = calls[0], calls[2]
+    assert init_a[1:3] == init_b[1:3] == ["init", "--force"]
+    assert str(bundle_a.resolve()) in init_a[init_a.index("--mcp-command") + 1]
+    assert str(bundle_b.resolve()) in init_b[init_b.index("--mcp-command") + 1]
+    assert str(bundle_a.resolve()) not in init_b[init_b.index("--mcp-command") + 1]
+
+
+def test_configure_chatgpt_rejects_bad_id_and_missing_key(tmp_path):
+    with pytest.raises(ValueError, match="tunnel id"):
+        assistant.configure_chatgpt("not-a-tunnel", environment={})
+    with pytest.raises(ValueError, match="runtime key"):
+        assistant.configure_chatgpt("tunnel_abcdef", environment={})
+
+
+def test_chatgpt_run_arguments_are_privacy_hardened(tmp_path):
+    helper = tmp_path / "tunnel-client"
+    helper.write_text("binary", encoding="utf-8")
+    helper.chmod(0o700)
+    health = tmp_path / "runtime" / "health.url"
+
+    arguments = assistant.chatgpt_run_arguments(
+        tunnel_client=helper,
+        profile_dir=tmp_path / "profiles",
+        health_url_file=health,
+    )
+
+    joined = " ".join(arguments)
+    assert "--health.listen-addr 127.0.0.1:0" in joined
+    assert "--admin-ui.log-buffer-events 0" in joined
+    assert "--log.file /dev/null" in joined
+    assert "--open-web-ui" not in arguments
+    assert "--allow-remote-ui" not in arguments
+    assert stat.S_IMODE(health.stat().st_mode) == 0o600
+
+
+def test_run_chatgpt_execs_owned_tunnel_without_intermediate_child(tmp_path, monkeypatch):
+    helper = tmp_path / "tunnel-client"
+    helper.write_text("binary", encoding="utf-8")
+    helper.chmod(0o700)
+    calls = []
+
+    def fake_execve(path, arguments, environment):
+        calls.append((path, arguments, environment))
+        raise OSError("exec stopped by test")
+
+    monkeypatch.setattr(assistant.os, "execve", fake_execve)
+    with pytest.raises(OSError, match="stopped by test"):
+        assistant.run_chatgpt_tunnel(
+            tunnel_client=helper,
+            profile_dir=tmp_path / "profiles",
+            health_url_file=tmp_path / "health.url",
+            environment={"CONTROL_PLANE_API_KEY": "secret"},
+        )
+
+    assert calls[0][0] == str(helper.resolve())
+    assert calls[0][1][1] == "run"
+    assert "secret" not in " ".join(calls[0][1])
+
+
+def test_remove_chatgpt_deletes_only_owned_profile(tmp_path):
+    profile_dir = tmp_path / "profiles"
+    profile_dir.mkdir()
+    owned = profile_dir / "openbird.yaml"
+    other = profile_dir / "other.yaml"
+    owned.write_text("owned", encoding="utf-8")
+    other.write_text("other", encoding="utf-8")
+
+    assert assistant.remove_chatgpt_config(profile_dir=profile_dir)
+    assert not owned.exists()
+    assert other.read_text(encoding="utf-8") == "other"

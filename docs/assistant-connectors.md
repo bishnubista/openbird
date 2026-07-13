@@ -58,6 +58,22 @@ Claude. The installer backup is `claude_desktop_config.json.openbird-backup` bes
 ## ChatGPT
 
 [ChatGPT custom apps use remote MCP servers and do not connect directly to local MCP servers](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta.eot).
-OpenAI documents Secure MCP Tunnel for a private server running on a developer machine. OpenBird's
-initial connector remains stdio-only and does not automatically expose captured memory over HTTP or
-start a tunnel. An authenticated, user-controlled ChatGPT transport is a separate release gate.
+OpenBird therefore bundles OpenAI's official [Secure MCP Tunnel client](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+and exposes a guided setup in **Settings → Desktop assistants → ChatGPT**.
+
+1. Enable Developer Mode in ChatGPT.
+2. Create a Secure MCP Tunnel and a restricted runtime API key in the OpenAI Platform.
+3. Paste the `tunnel_...` id and runtime key into OpenBird and choose Connect.
+4. Add the tunnel as a custom app in ChatGPT.
+
+OpenBird stores both setup values in a dedicated macOS Keychain item. The runtime key is passed only
+through the tunnel child's environment, never through arguments, logs, UserDefaults, or repository
+files. Before every start, OpenBird forcibly reconciles its owned tunnel profile with the current
+app bundle, validates it, starts the outbound tunnel on an ephemeral loopback health port, disables
+the operator log buffer, and reports Connected only after `/readyz` succeeds.
+
+The same privacy boundary applies to both assistants: there is no background memory feed. When
+ChatGPT invokes a content tool, returned excerpts, app identifiers, timestamps, and observation IDs
+are sent to OpenAI and cannot be recalled by deleting local memory. URLs and window titles are not
+returned. Removing the connection stops only OpenBird's owned process and deletes only its Keychain
+item, local health marker, and `openbird` tunnel profile.

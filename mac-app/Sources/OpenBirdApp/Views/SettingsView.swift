@@ -15,6 +15,9 @@ struct SettingsView: View {
     @State private var newBundleID = ""
     @State private var pendingDetailedCaptureBundleID: String?
     @State private var pendingClaudeConnection = false
+    @State private var pendingChatGPTConnection = false
+    @State private var chatGPTTunnelID = ""
+    @State private var chatGPTRuntimeKey = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -72,6 +75,7 @@ struct SettingsView: View {
                 + "OpenBird never sends data in the background."
             )
         }
+        .sheet(isPresented: $pendingChatGPTConnection) { chatGPTSetupSheet }
     }
 
     // MARK: Header
@@ -669,13 +673,8 @@ struct SettingsView: View {
                 icon: "bubble.left.and.text.bubble.right",
                 title: "ChatGPT",
                 badge: .optional,
-                subtitle: "ChatGPT requires OpenAI Secure MCP Tunnel for private local servers.",
-                trailing: .secondary("Learn more") {
-                    guard let url = URL(
-                        string: "https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta.eot"
-                    ) else { return }
-                    NSWorkspace.shared.open(url)
-                }
+                subtitle: model.chatGPTAssistantSummary,
+                trailing: chatGPTAssistantTrailing
             )
             hairline
             HStack(spacing: 8) {
@@ -700,6 +699,73 @@ struct SettingsView: View {
         case .disconnected, .failed:
             return .primary("Connect") { pendingClaudeConnection = true }
         }
+    }
+
+    private var chatGPTAssistantTrailing: RowTrailing {
+        switch model.chatGPTAssistantState {
+        case .connected:
+            return .affirm("Connected")
+        case .connecting:
+            return .attention("Connecting")
+        case .unknown:
+            return .attention("Check")
+        case .setupNeeded, .needsAttention:
+            return .primary("Connect") { pendingChatGPTConnection = true }
+        }
+    }
+
+    private var chatGPTSetupSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Connect ChatGPT")
+                .font(.system(size: 20, weight: .bold))
+            Text(
+                "ChatGPT connects to this Mac through OpenAI Secure MCP Tunnel. "
+                + "OpenBird never uploads capture in the background; bounded excerpts leave "
+                + "only when you ask ChatGPT to use an OpenBird tool."
+            )
+            .font(.system(size: 12.5))
+            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                Button("1. Open ChatGPT Developer Mode settings") {
+                    NSWorkspace.shared.open(URL(string: "https://chatgpt.com/#settings/Connectors")!)
+                }
+                Button("2. Create or select a Secure MCP Tunnel") {
+                    NSWorkspace.shared.open(URL(string: "https://platform.openai.com/settings/organization/tunnels")!)
+                }
+            }
+            TextField("Tunnel id (tunnel_...)", text: $chatGPTTunnelID)
+                .textFieldStyle(.roundedBorder)
+            SecureField("Restricted tunnel runtime API key", text: $chatGPTRuntimeKey)
+                .textFieldStyle(.roundedBorder)
+            Text("The runtime key is stored in your Mac Keychain and never placed in logs or command arguments.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+            HStack {
+                if model.chatGPTAssistantState == .connected {
+                    Button("Remove connection", role: .destructive) {
+                        model.removeChatGPTAssistant()
+                        pendingChatGPTConnection = false
+                    }
+                }
+                Spacer()
+                Button("Cancel", role: .cancel) { pendingChatGPTConnection = false }
+                Button("Connect") {
+                    model.connectChatGPTAssistant(
+                        tunnelID: chatGPTTunnelID.trimmingCharacters(in: .whitespacesAndNewlines),
+                        runtimeKey: chatGPTRuntimeKey
+                    )
+                    chatGPTRuntimeKey = ""
+                    pendingChatGPTConnection = false
+                }
+                .disabled(
+                    !chatGPTTunnelID.hasPrefix("tunnel_") || chatGPTRuntimeKey.isEmpty
+                    || model.chatGPTAssistantState == .connecting
+                )
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
     }
 
     // MARK: Prompt customization

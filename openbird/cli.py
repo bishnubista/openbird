@@ -156,6 +156,72 @@ def assistant_status(json_out: bool = typer.Option(False, "--json")) -> None:
         _console.print("[yellow]Not connected[/] · run openbird assistant install-claude")
 
 
+@assistant_app.command("chatgpt-status")
+def assistant_chatgpt_status(
+    json_out: bool = typer.Option(False, "--json"),
+    executable: Optional[Path] = typer.Option(None, "--executable", hidden=True),
+) -> None:
+    """Show metadata-only ChatGPT tunnel setup readiness."""
+    from openbird.assistant import chatgpt_status
+
+    result = chatgpt_status(executable=executable)
+    if json_out:
+        _console.print_json(json.dumps(result))
+    elif result["configured"] and result["helper_available"]:
+        _console.print("[green]Configured[/] ChatGPT Secure MCP Tunnel")
+    else:
+        _console.print("[yellow]Setup needed[/] · use OpenBird Settings")
+
+
+@assistant_app.command("configure-chatgpt")
+def assistant_configure_chatgpt(
+    tunnel_id: str = typer.Option(..., "--tunnel-id"),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    executable: Optional[Path] = typer.Option(None, "--executable", hidden=True),
+) -> None:
+    """Configure OpenBird's official OpenAI Secure MCP Tunnel profile."""
+    from openbird.assistant import ASSISTANT_EGRESS_NOTICE, configure_chatgpt
+
+    _err_console.print(f"[bold yellow]ASSISTANT ACCESS[/] — {ASSISTANT_EGRESS_NOTICE}")
+    if not yes:
+        _err_console.print("[red]Refusing[/]. Re-run from OpenBird Settings or with --yes.")
+        raise typer.Exit(code=1)
+    try:
+        configure_chatgpt(tunnel_id, executable=executable)
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        _err_console.print(f"[red]Could not configure ChatGPT:[/] {escape(str(exc))}")
+        raise typer.Exit(code=1) from exc
+    _console.print("[green]Configured[/] ChatGPT Secure MCP Tunnel.")
+
+
+@assistant_app.command("run-chatgpt", hidden=True)
+def assistant_run_chatgpt(
+    executable: Optional[Path] = typer.Option(None, "--executable", hidden=True),
+) -> None:
+    """Run OpenBird's configured outbound ChatGPT tunnel."""
+    from openbird.assistant import run_chatgpt_tunnel
+
+    try:
+        run_chatgpt_tunnel(executable=executable)
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        _err_console.print(f"[red]ChatGPT tunnel could not start:[/] {escape(str(exc))}")
+        raise typer.Exit(code=1) from exc
+
+
+@assistant_app.command("remove-chatgpt", hidden=True)
+def assistant_remove_chatgpt(yes: bool = typer.Option(False, "--yes", "-y")) -> None:
+    """Remove only OpenBird's local ChatGPT tunnel profile."""
+    from openbird.assistant import remove_chatgpt_config
+
+    if not yes:
+        _err_console.print("[red]Refusing[/]. Re-run from OpenBird Settings or with --yes.")
+        raise typer.Exit(code=1)
+    if not remove_chatgpt_config():
+        _err_console.print("[red]Could not remove OpenBird's ChatGPT profile.[/]")
+        raise typer.Exit(code=1)
+    _console.print("[green]Removed[/] OpenBird's ChatGPT tunnel profile.")
+
+
 # --------------------------------------------------------------------------- #
 # Lazily-constructed shared services                                          #
 # --------------------------------------------------------------------------- #

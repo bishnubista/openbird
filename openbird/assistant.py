@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -31,6 +34,8 @@ MAX_MINUTES = 24 * 60
 MAX_RESULTS = 20
 MAX_EXCERPT_CHARS = 2_000
 MAX_TOTAL_EXCERPT_CHARS = 12_000
+CHATGPT_PROFILE = "openbird"
+_TUNNEL_ID_RE = re.compile(r"^tunnel_[A-Za-z0-9_-]{6,200}$")
 
 ASSISTANT_EGRESS_NOTICE = (
     "These excerpts, app identifiers, and timestamps leave OpenBird's local boundary "
@@ -414,14 +419,172 @@ def claude_config_status(*, config_path: Path | None = None) -> dict[str, Any]:
     }
 
 
+def tunnel_client_path(
+    *, executable: Path | None = None, explicit: Path | None = None
+) -> Path:
+    """Resolve only an explicit, bundled, or PATH tunnel-client executable."""
+    candidates: list[Path] = []
+    if explicit is not None:
+        candidates.append(explicit)
+    configured = os.environ.get("OPENBIRD_TUNNEL_CLIENT")
+    if configured:
+        candidates.append(Path(configured))
+    try:
+        owner = (executable or resolve_openbird_executable()).expanduser().resolve()
+        candidates.append(owner.parent / "tunnel-client")
+    except FileNotFoundError:
+        pass
+    discovered = shutil.which("tunnel-client")
+    if discovered:
+        candidates.append(Path(discovered))
+    for candidate in candidates:
+        path = candidate.expanduser().resolve()
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+    raise FileNotFoundError("OpenAI Secure MCP Tunnel helper is not installed")
+
+
+def chatgpt_profile_path(*, profile_dir: Path | None = None) -> Path:
+    """Return the OpenBird-owned tunnel profile path without reading its contents."""
+    root = profile_dir or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "tunnel-client"
+    return root.expanduser() / f"{CHATGPT_PROFILE}.yaml"
+
+
+def chatgpt_status(
+    *, executable: Path | None = None, tunnel_client: Path | None = None,
+    profile_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Return metadata-only ChatGPT tunnel readiness."""
+    try:
+        helper = tunnel_client_path(executable=executable, explicit=tunnel_client)
+    except FileNotFoundError:
+        helper = None
+    return {
+        "configured": chatgpt_profile_path(profile_dir=profile_dir).is_file(),
+        "helper_available": helper is not None,
+    }
+
+
+def _safe_tunnel_run(
+    arguments: list[str], *, environment: dict[str, str], timeout: float,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Run a bounded tunnel command without returning provider-owned output."""
+    try:
+        result = runner(
+            arguments,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("OpenAI tunnel command could not run") from exc
+    if result.returncode != 0:
+        raise RuntimeError("OpenAI tunnel setup did not pass validation")
+
+
+def configure_chatgpt(
+    tunnel_id: str, *, executable: Path | None = None,
+    tunnel_client: Path | None = None, profile_dir: Path | None = None,
+    environment: dict[str, str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> dict[str, Any]:
+    """Reconcile the OpenBird-owned tunnel profile against the current CLI."""
+    if not _TUNNEL_ID_RE.fullmatch(tunnel_id):
+        raise ValueError("tunnel id must start with tunnel_ and contain only safe characters")
+    env = dict(environment if environment is not None else os.environ)
+    if not env.get("CONTROL_PLANE_API_KEY"):
+        raise ValueError("OpenAI tunnel runtime key is required")
+    command = (executable or resolve_openbird_executable()).expanduser().resolve()
+    if not command.is_file() or not os.access(command, os.X_OK):
+        raise FileNotFoundError("OpenBird executable is not launchable")
+    helper = tunnel_client_path(executable=command, explicit=tunnel_client)
+    profile = chatgpt_profile_path(profile_dir=profile_dir)
+    profile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    profile.parent.chmod(0o700)
+    args = [
+        str(helper), "init", "--force", "--profile", CHATGPT_PROFILE,
+        "--profile-dir", str(profile.parent), "--tunnel-id", tunnel_id,
+        "--control-plane-api-key-ref", "env:CONTROL_PLANE_API_KEY",
+        "--mcp-command", shlex.join([str(command), "assistant", "serve"]),
+    ]
+    _safe_tunnel_run(args, environment=env, timeout=30, runner=runner)
+    _safe_tunnel_run(
+        [str(helper), "doctor", "--profile", CHATGPT_PROFILE,
+         "--profile-dir", str(profile.parent)],
+        environment=env, timeout=30, runner=runner,
+    )
+    return {"configured": True, "helper_available": True}
+
+
+def chatgpt_run_arguments(
+    *, executable: Path | None = None, tunnel_client: Path | None = None,
+    profile_dir: Path | None = None, health_url_file: Path | None = None,
+) -> list[str]:
+    """Build the privacy-hardened long-lived tunnel command."""
+    helper = tunnel_client_path(executable=executable, explicit=tunnel_client)
+    profile = chatgpt_profile_path(profile_dir=profile_dir)
+    data_root = Path(os.environ.get("OPENBIRD_DATA_DIR", Path.home() / ".openbird"))
+    health = health_url_file or data_root / "runtime" / "chatgpt-health.url"
+    health.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    health.parent.chmod(0o700)
+    health.unlink(missing_ok=True)
+    health.touch(mode=0o600)
+    health.chmod(0o600)
+    return [
+        str(helper), "run", "--profile", CHATGPT_PROFILE,
+        "--profile-dir", str(profile.parent),
+        "--health.listen-addr", "127.0.0.1:0",
+        "--health.url-file", str(health),
+        "--admin-ui.log-buffer-events", "0",
+        "--log.file", "/dev/null",
+    ]
+
+
+def run_chatgpt_tunnel(
+    *, executable: Path | None = None, tunnel_client: Path | None = None,
+    profile_dir: Path | None = None, health_url_file: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> None:
+    """Replace this process with the tunnel so app termination reaches it directly."""
+    env = dict(environment if environment is not None else os.environ)
+    if not env.get("CONTROL_PLANE_API_KEY"):
+        raise ValueError("OpenAI tunnel runtime key is required")
+    arguments = chatgpt_run_arguments(
+        executable=executable, tunnel_client=tunnel_client,
+        profile_dir=profile_dir, health_url_file=health_url_file,
+    )
+    os.execve(arguments[0], arguments, env)
+
+
+def remove_chatgpt_config(*, profile_dir: Path | None = None) -> bool:
+    """Delete only OpenBird's owned tunnel profile and local health marker."""
+    profile = chatgpt_profile_path(profile_dir=profile_dir)
+    profile.unlink(missing_ok=True)
+    data_root = Path(os.environ.get("OPENBIRD_DATA_DIR", Path.home() / ".openbird"))
+    health = data_root / "runtime" / "chatgpt-health.url"
+    health.unlink(missing_ok=True)
+    return not profile.exists()
+
+
 __all__ = [
     "ASSISTANT_EGRESS_NOTICE",
     "AssistantCaptureService",
     "ClaudeConfigConflictError",
     "claude_config_path",
     "claude_config_status",
+    "chatgpt_run_arguments",
+    "chatgpt_status",
+    "configure_chatgpt",
     "create_mcp_server",
     "install_claude_config",
     "resolve_openbird_executable",
     "run_mcp_server",
+    "run_chatgpt_tunnel",
+    "remove_chatgpt_config",
+    "tunnel_client_path",
 ]

@@ -48,6 +48,14 @@ enum ClaudeAssistantState: Equatable {
     case failed
 }
 
+enum ChatGPTAssistantState: Equatable {
+    case unknown
+    case setupNeeded
+    case connecting
+    case connected
+    case needsAttention
+}
+
 enum CaptureRowTone: Equatable {
     case ok
     case attention
@@ -163,6 +171,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var deepBrainPreviewState = DeepBrainPreviewState.unknown
     @Published private(set) var claudeAssistantState = ClaudeAssistantState.unknown
     @Published private(set) var claudeAssistantBusy = false
+    @Published private(set) var chatGPTAssistantState = ChatGPTAssistantState.unknown
     @Published private(set) var lastMemoryRefresh: Date?
     @Published private(set) var lastRefresh: Date?
     @Published private(set) var isRefreshing = false
@@ -218,6 +227,7 @@ final class AppModel: ObservableObject {
             queue: .main
         ) { _ in
             service.terminateLaunchedCapture()
+            service.terminateLaunchedChatGPTTunnel()
         }
     }
 
@@ -929,6 +939,7 @@ final class AppModel: ObservableObject {
         await refreshCaptureHealth()
         await refreshDeepBrainStatus()
         await refreshClaudeAssistantStatus()
+        await refreshChatGPTAssistantStatus()
         lastRefresh = Date()
     }
 
@@ -997,6 +1008,68 @@ final class AppModel: ObservableObject {
                 claudeAssistantState = .failed
                 lastActionMessage = "Could not connect Claude Desktop. Existing settings were not changed."
             }
+        }
+    }
+
+    func refreshChatGPTAssistantStatus() async {
+        guard let status = await service.chatGPTAssistantStatus() else {
+            chatGPTAssistantState = .needsAttention
+            return
+        }
+        if status.running && status.ready {
+            chatGPTAssistantState = .connected
+        } else if status.configured || !status.helperAvailable {
+            chatGPTAssistantState = .needsAttention
+        } else {
+            chatGPTAssistantState = .setupNeeded
+        }
+    }
+
+    var chatGPTAssistantSummary: String {
+        switch chatGPTAssistantState {
+        case .unknown:
+            return "Re-check setup to read ChatGPT tunnel status."
+        case .setupNeeded:
+            return "Connect through OpenAI Secure MCP Tunnel; no capture is sent in the background."
+        case .connecting:
+            return "Validating the private tunnel and starting its outbound connection."
+        case .connected:
+            return "Secure tunnel is live. Excerpts leave only when ChatGPT asks OpenBird."
+        case .needsAttention:
+            return "Tunnel is not ready. Reconnect with your tunnel id and restricted runtime key."
+        }
+    }
+
+    func connectChatGPTAssistant(tunnelID: String, runtimeKey: String) {
+        guard chatGPTAssistantState != .connecting else { return }
+        chatGPTAssistantState = .connecting
+        lastActionMessage = "Connecting ChatGPT Secure MCP Tunnel..."
+        Task {
+            let connected = await service.connectChatGPTAssistant(
+                tunnelID: tunnelID, runtimeKey: runtimeKey
+            )
+            chatGPTAssistantState = connected ? .connected : .needsAttention
+            lastActionMessage = connected
+                ? "ChatGPT tunnel connected. Add OpenBird as a custom app in ChatGPT."
+                : "Could not connect ChatGPT. Check the tunnel id and restricted runtime key."
+        }
+    }
+
+    func resumeChatGPTAssistant() async {
+        guard await service.resumeChatGPTAssistant() else {
+            await refreshChatGPTAssistantStatus()
+            return
+        }
+        chatGPTAssistantState = .connected
+    }
+
+    func removeChatGPTAssistant() {
+        Task {
+            let removed = await service.removeChatGPTAssistant()
+            chatGPTAssistantState = removed ? .setupNeeded : .needsAttention
+            lastActionMessage = removed
+                ? "ChatGPT tunnel removed from OpenBird."
+                : "Could not fully remove the ChatGPT tunnel."
         }
     }
 
