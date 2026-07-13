@@ -216,7 +216,14 @@ def assistant_remove_chatgpt(yes: bool = typer.Option(False, "--yes", "-y")) -> 
     if not yes:
         _err_console.print("[red]Refusing[/]. Re-run from OpenBird Settings or with --yes.")
         raise typer.Exit(code=1)
-    if not remove_chatgpt_config():
+    try:
+        removed = remove_chatgpt_config()
+    except OSError as exc:
+        _err_console.print(
+            f"[red]Could not remove OpenBird's ChatGPT profile:[/] {escape(str(exc))}"
+        )
+        raise typer.Exit(code=1) from exc
+    if not removed:
         _err_console.print("[red]Could not remove OpenBird's ChatGPT profile.[/]")
         raise typer.Exit(code=1)
     _console.print("[green]Removed[/] OpenBird's ChatGPT tunnel profile.")

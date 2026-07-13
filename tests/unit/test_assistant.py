@@ -558,3 +558,17 @@ def test_remove_chatgpt_deletes_only_owned_profile(tmp_path):
     assert assistant.remove_chatgpt_config(profile_dir=profile_dir)
     assert not owned.exists()
     assert other.read_text(encoding="utf-8") == "other"
+
+
+def test_cli_remove_chatgpt_handles_filesystem_error(monkeypatch):
+    monkeypatch.setattr(
+        assistant,
+        "remove_chatgpt_config",
+        lambda: (_ for _ in ()).throw(PermissionError("profile is not writable")),
+    )
+
+    result = CliRunner().invoke(cli.app, ["assistant", "remove-chatgpt", "--yes"])
+
+    assert result.exit_code == 1
+    assert "Could not remove OpenBird's ChatGPT profile" in result.output
+    assert "profile is not writable" in result.output
