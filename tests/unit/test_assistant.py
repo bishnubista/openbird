@@ -404,3 +404,24 @@ def test_cli_install_claude_refuses_noninteractive_without_yes(monkeypatch):
     assert result.exit_code == 1
     assert "ASSISTANT ACCESS" in result.output
     assert "Re-run with --yes" in result.output
+
+
+def test_cli_install_claude_reports_config_conflict_without_traceback(monkeypatch):
+    monkeypatch.setattr(
+        assistant,
+        "install_claude_config",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            assistant.ClaudeConfigConflictError(
+                "Claude Desktop config changed during installation; retry"
+            )
+        ),
+    )
+
+    result = CliRunner().invoke(
+        cli.app, ["assistant", "install-claude", "--yes"]
+    )
+
+    assert result.exit_code == 1
+    assert "Could not configure Claude Desktop" in result.output
+    assert "retry" in result.output
+    assert result.exception is not None

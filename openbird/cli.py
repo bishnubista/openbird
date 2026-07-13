@@ -112,7 +112,11 @@ def assistant_install_claude(
     ),
 ) -> None:
     """Connect OpenBird capture to Claude Desktop on this Mac."""
-    from openbird.assistant import ASSISTANT_EGRESS_NOTICE, install_claude_config
+    from openbird.assistant import (
+        ASSISTANT_EGRESS_NOTICE,
+        ClaudeConfigConflictError,
+        install_claude_config,
+    )
 
     _err_console.print(f"[bold yellow]ASSISTANT ACCESS[/] — {ASSISTANT_EGRESS_NOTICE}")
     if not yes:
@@ -126,7 +130,7 @@ def assistant_install_claude(
             raise typer.Exit(code=1)
     try:
         result = install_claude_config(executable=executable)
-    except (FileNotFoundError, OSError, ValueError) as exc:
+    except (ClaudeConfigConflictError, FileNotFoundError, OSError, ValueError) as exc:
         _err_console.print(f"[red]Could not configure Claude Desktop:[/] {escape(str(exc))}")
         raise typer.Exit(code=1) from exc
     _console.print(f"[green]Connected[/] Claude Desktop via {result['config_path']}.")
