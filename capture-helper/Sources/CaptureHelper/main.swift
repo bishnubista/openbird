@@ -507,11 +507,19 @@ private func isIncognitoTitle(_ title: String?) -> Bool {
 /// allowlist; the blocklist can only subtract. An EMPTY allowlist captures nothing
 /// (opt-in first run). Runs BEFORE any AX traversal so disallowed app text is never
 /// read or transmitted — enforcement at the boundary, not after IPC.
-private func contentAllowed(bundleId: String?, allow: Set<String>, block: Set<String>) -> Bool {
+private func contentAllowed(
+    bundleId: String?, allow: Set<String>, block: Set<String>,
+    detailedCaptureApps: Set<String>
+) -> Bool {
     guard let id = bundleId else { return false }   // unknown app -> deny
-    if anyMatch(id, block) { return false }         // blocklist subtracts
     if allow.isEmpty { return false }               // allowlist-only: empty = capture nothing
-    return anyMatch(id, allow)
+    guard anyMatch(id, allow) else { return false }
+    if anyMatch(id, block)
+        && !hasExactDetailedCaptureGrant(bundleId: id, entries: detailedCaptureApps)
+    {
+        return false
+    }
+    return true
 }
 
 // MARK: - Browser URL via Apple Events (opt-in)
@@ -594,7 +602,8 @@ private func browserTabInfo(appName: String) -> BrowserTab {
 /// runtime); one-shot mode uses the defaults — `ocr: nil` in particular keeps
 /// that path byte-identical with older daemons.
 func captureFrontmost(
-    allow: Set<String>, block: Set<String>, pauseFile: String?, captureUrls: Bool,
+    allow: Set<String>, block: Set<String>, detailedCaptureApps: Set<String>,
+    pauseFile: String?, captureUrls: Bool,
     trigger: String? = nil, emitter: ((CaptureEvent) -> Void)? = nil,
     ocr: OcrRuntime? = nil
 ) {
@@ -629,7 +638,10 @@ func captureFrontmost(
     // Allowlist-first gate BEFORE reading any AX text. A disallowed app emits
     // metadata only (empty text) so the daemon sees the focus change but no
     // captured content ever crosses the IPC boundary.
-    if !contentAllowed(bundleId: bundleId, allow: allow, block: block) {
+    if !contentAllowed(
+        bundleId: bundleId, allow: allow, block: block,
+        detailedCaptureApps: detailedCaptureApps)
+    {
         diag("capture: skipped_not_allowlisted")
         if skipIfPaused(pauseFile) { return }
         send(CaptureEvent(
@@ -863,6 +875,7 @@ private func run() {
     // Allowlist-first content policy, enforced before any AX text is read.
     let allow = listArg(args, "--allow")
     let block = listArg(args, "--block")
+    let detailedCaptureApps = listArg(args, "--detailed-capture-apps")
     let pauseFile = valueArg(args, "--pause-file")
     // Opt-in: capture the active browser tab's URL via Apple Events (off unless the
     // daemon passes --capture-urls, which it does only when the user enables it).
@@ -886,7 +899,8 @@ private func run() {
         // helper cannot hold. The daemon passes --ocr-apps only when the user
         // opted apps in; one-shot spawns never receive (and would ignore) it.
         StreamEngine(
-            allow: allow, block: block, pauseFile: pauseFile,
+            allow: allow, block: block, detailedCaptureApps: detailedCaptureApps,
+            pauseFile: pauseFile,
             captureUrls: captureUrls, config: config,
             ocrApps: listArg(args, "--ocr-apps"),
             ocrMinInterval: doubleArg("--ocr-min-interval") ?? 30.0
@@ -911,7 +925,9 @@ private func run() {
         exit(2)
     }
 
-    captureFrontmost(allow: allow, block: block, pauseFile: pauseFile, captureUrls: captureUrls)
+    captureFrontmost(
+        allow: allow, block: block, detailedCaptureApps: detailedCaptureApps,
+        pauseFile: pauseFile, captureUrls: captureUrls)
 }
 
 run()
