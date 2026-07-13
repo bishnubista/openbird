@@ -3,7 +3,8 @@
 The real privacy protection in OpenBird is the **allowlist-only first run**:
 nothing is captured unless its app bundle id is explicitly allowlisted, and a
 blocklist (password managers, finance/health apps, terminals, editors, browsers
-until enabled) is always honored. The regex secret-scrubbing here is a second
+until enabled) is honored unless an eligible terminal/editor has an explicit
+detailed-capture grant. The regex secret-scrubbing here is a second
 layer of defense applied to text that already passed the app gate — it cannot
 catch every secret and must never be presented as a guarantee.
 
@@ -26,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from openbird.config import Settings, get_settings
+from openbird.config import DETAILED_CAPTURE_ELIGIBLE_APPS, Settings, get_settings
 
 # ---------------------------------------------------------------------------
 # Secret-scrubbing patterns (defense-in-depth; intentionally conservative).
@@ -264,6 +265,23 @@ def _is_blocklisted(app: str | None, blocklist) -> bool:
     return _bundle_matches_any(app, blocklist)
 
 
+def is_detailed_capture_eligible(app: str | None) -> bool:
+    """Whether an exact terminal/editor bundle id may receive a detailed grant."""
+    return _bundle_matches_any(app, DETAILED_CAPTURE_ELIGIBLE_APPS)
+
+
+def _is_detailed_capture_enabled(app: str | None, entries: Iterable[str]) -> bool:
+    """Exact-ID detailed grant; pattern entries are deliberately inert."""
+    if not app or not is_detailed_capture_eligible(app):
+        return False
+    app_l = app.lower()
+    return any(
+        entry.strip().lower() == app_l
+        for entry in entries
+        if entry and not entry.startswith(("glob:", "re:"))
+    )
+
+
 def _is_dangerous(app: str | None) -> bool:
     """True if ``app``'s bundle id is in a hardcoded dangerous category (backstop).
 
@@ -356,7 +374,9 @@ def decide(
     if not _is_allowlisted(app, settings.allowlist):
         return RedactionDecision(capture=False, reason="not_allowlisted")
 
-    if _is_blocklisted(app, settings.blocklist):
+    if _is_blocklisted(app, settings.blocklist) and not _is_detailed_capture_enabled(
+        app, settings.detailed_capture_apps
+    ):
         return RedactionDecision(capture=False, reason="blocklisted")
 
     if _is_dangerous(app):
@@ -437,7 +457,9 @@ def classify_policy(
         return PolicyClass(SPAN_TIER_COARSE, "self_capture")
     if not _is_allowlisted(app, settings.allowlist):
         return PolicyClass(SPAN_TIER_COARSE, "not_allowlisted")
-    if _is_blocklisted(app, settings.blocklist):
+    if _is_blocklisted(app, settings.blocklist) and not _is_detailed_capture_enabled(
+        app, settings.detailed_capture_apps
+    ):
         return PolicyClass(SPAN_TIER_COARSE, "blocklisted")
     if _is_dangerous(app):
         return PolicyClass(SPAN_TIER_COARSE, "dangerous")
@@ -743,6 +765,7 @@ __all__ = [
     "scrub_metadata",
     "apply",
     "is_incognito",
+    "is_detailed_capture_eligible",
     "_SELF_BUNDLE_ROOT",
     "_is_self_capture",
 ]

@@ -42,6 +42,10 @@ routes:
       inherited_by:
         - chat.remote
         - routines.summary
+    enforcement:
+      detailed_local_capture: exact per-app terminal/editor grant may bypass only the default sensitive-app block; allowlist, dangerous-app, self-capture, private-window, secure-field, and verified-SQLCipher gates remain fail-closed
+      detailed_capture_encryption: any non-empty detailed-capture grant forces strict SQLCipher and refuses plaintext fallback
+      failure_mode: fail_closed
     deletion:
       command: openbird data purge/prune
       must_remove:
@@ -52,6 +56,7 @@ routes:
         - vector_rows
     truth_surface:
       - app.capture_state
+      - app.detailed_local_capture_section
       - app.dataDeletionCommandRow
       - preflight.privacy
 

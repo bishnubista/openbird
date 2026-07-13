@@ -516,6 +516,9 @@ struct CaptureHealthApp: Codable, Equatable, Identifiable {
     let totalObservations: Int
     let recentObservations: Int
     let lastCapturedTS: Double?
+    /// Additive metadata marker: "available" for an eligible blocked
+    /// terminal/editor, "enabled" for an active detailed-capture grant.
+    var detailedCapture: String? = nil
 
     var id: String { bundleID }
 
@@ -527,6 +530,7 @@ struct CaptureHealthApp: Codable, Equatable, Identifiable {
         case totalObservations = "total_observations"
         case recentObservations = "recent_observations"
         case lastCapturedTS = "last_captured_ts"
+        case detailedCapture = "detailed_capture"
     }
 }
 
@@ -680,6 +684,9 @@ final class OpenBirdService: @unchecked Sendable {
     /// Phase C2 deep-capture (OCR) opt-in list. Mirrored by the CLI's
     /// GUI-prefs bridge (openbird/config.py `_GUI_OCR_APPS_KEY`) — keep in sync.
     private let ocrAppsKey = "openbird.captureOcrApps"
+    /// Exact terminal/editor bundle ids granted detailed local capture. Mirrored
+    /// by openbird/config.py `_GUI_DETAILED_CAPTURE_APPS_KEY`.
+    private let detailedCaptureAppsKey = "openbird.detailedCaptureApps"
     private let accessibilityProbe: @Sendable () -> Bool
     private let accessibilityPrompter: @Sendable () -> Void
     private let privacyPaneOpener: @Sendable (PrivacyPane) -> Void
@@ -1177,6 +1184,10 @@ final class OpenBirdService: @unchecked Sendable {
         if !ocr.isEmpty {
             env["OPENBIRD_CAPTURE_OCR_APPS"] = ocr.joined(separator: ",")
         }
+        let detailed = detailedCaptureApps()
+        if !detailed.isEmpty {
+            env["OPENBIRD_DETAILED_CAPTURE_APPS"] = detailed.joined(separator: ",")
+        }
 
         // App-supervised self-exit ("death pipe"). Hand the daemon a pipe as its
         // stdin and stamp a per-launch random token into the environment. We write
@@ -1495,6 +1506,9 @@ final class OpenBirdService: @unchecked Sendable {
         // silently retain a deep-capture grant it can no longer honor.
         let pruned = Self.filteredOcrApps(ocrApps(), allowlist: cleaned)
         defaults.set(pruned, forKey: ocrAppsKey)
+        let prunedDetailed = Self.filteredDetailedCaptureApps(
+            detailedCaptureApps(), allowlist: cleaned)
+        defaults.set(prunedDetailed, forKey: detailedCaptureAppsKey)
     }
 
     // MARK: - Deep-capture (OCR) opt-in list (Phase C2)
@@ -1518,6 +1532,24 @@ final class OpenBirdService: @unchecked Sendable {
         defaults.set(
             Self.filteredOcrApps(bundleIDs, allowlist: allowlist()),
             forKey: ocrAppsKey)
+    }
+
+    // MARK: - Detailed local capture grants
+
+    static func filteredDetailedCaptureApps(
+        _ bundleIDs: [String], allowlist: [String]
+    ) -> [String] {
+        filteredOcrApps(bundleIDs, allowlist: allowlist)
+    }
+
+    func detailedCaptureApps() -> [String] {
+        defaults.stringArray(forKey: detailedCaptureAppsKey) ?? []
+    }
+
+    func setDetailedCaptureApps(_ bundleIDs: [String]) {
+        defaults.set(
+            Self.filteredDetailedCaptureApps(bundleIDs, allowlist: allowlist()),
+            forKey: detailedCaptureAppsKey)
     }
 
     /// Bundle IDs of other apps currently running with a regular UI, useful as

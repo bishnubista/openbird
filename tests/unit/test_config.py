@@ -108,6 +108,50 @@ def test_empty_blocklist_env_clears_to_empty(monkeypatch):
     assert get_settings().blocklist == []
 
 
+def test_detailed_capture_apps_from_env_force_encryption(monkeypatch):
+    monkeypatch.setenv(
+        "OPENBIRD_DETAILED_CAPTURE_APPS", "com.mitchellh.ghostty, com.apple.Terminal"
+    )
+    monkeypatch.setenv("OPENBIRD_REQUIRE_ENCRYPTION", "0")
+    settings = get_settings()
+    assert settings.detailed_capture_apps == [
+        "com.mitchellh.ghostty",
+        "com.apple.Terminal",
+    ]
+    assert settings.require_encryption is True
+
+
+def test_detailed_capture_apps_from_gui_prefs_when_env_unset(monkeypatch):
+    monkeypatch.delenv("OPENBIRD_DETAILED_CAPTURE_APPS", raising=False)
+    monkeypatch.setattr(
+        "openbird.config._read_gui_detailed_capture_apps",
+        lambda: ["com.mitchellh.ghostty"],
+    )
+    assert get_settings().detailed_capture_apps == ["com.mitchellh.ghostty"]
+
+
+def test_empty_detailed_capture_env_beats_gui_prefs(monkeypatch):
+    monkeypatch.setenv("OPENBIRD_DETAILED_CAPTURE_APPS", "")
+    monkeypatch.setattr(
+        "openbird.config._read_gui_detailed_capture_apps",
+        lambda: ["com.mitchellh.ghostty"],
+    )
+    assert get_settings().detailed_capture_apps == []
+
+
+def test_detailed_capture_apps_normalize_to_exact_eligible_ids(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        detailed_capture_apps=[
+            " COM.MITCHELLH.GHOSTTY ",
+            "com.mitchellh.ghostty",
+            "glob:com.apple.*",
+            "com.1password.1password",
+        ],
+    )
+    assert settings.detailed_capture_apps == ["com.mitchellh.ghostty"]
+
+
 def test_blocklist_defaults_when_env_unset(monkeypatch):
     # With no env var at all, the non-empty default blocklist stands.
     monkeypatch.delenv("OPENBIRD_BLOCKLIST", raising=False)

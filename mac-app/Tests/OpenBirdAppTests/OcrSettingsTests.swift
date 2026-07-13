@@ -7,6 +7,7 @@ import XCTest
 final class OcrSettingsTests: XCTestCase {
     private let allowlistKey = "openbird.captureAllowlist"
     private let ocrAppsKey = "openbird.captureOcrApps"
+    private let detailedCaptureAppsKey = "openbird.detailedCaptureApps"
 
     /// Save/restore both UserDefaults keys so tests never leak into (or read
     /// from) the developer's real app state.
@@ -14,8 +15,13 @@ final class OcrSettingsTests: XCTestCase {
         let defaults = UserDefaults.standard
         let oldAllow = defaults.stringArray(forKey: allowlistKey)
         let oldOcr = defaults.stringArray(forKey: ocrAppsKey)
+        let oldDetailed = defaults.stringArray(forKey: detailedCaptureAppsKey)
         defer {
-            for (key, old) in [(allowlistKey, oldAllow), (ocrAppsKey, oldOcr)] {
+            for (key, old) in [
+                (allowlistKey, oldAllow),
+                (ocrAppsKey, oldOcr),
+                (detailedCaptureAppsKey, oldDetailed),
+            ] {
                 if let old {
                     defaults.set(old, forKey: key)
                 } else {
@@ -25,6 +31,7 @@ final class OcrSettingsTests: XCTestCase {
         }
         defaults.removeObject(forKey: allowlistKey)
         defaults.removeObject(forKey: ocrAppsKey)
+        defaults.removeObject(forKey: detailedCaptureAppsKey)
         return try body()
     }
 
@@ -71,6 +78,31 @@ final class OcrSettingsTests: XCTestCase {
             // (a de-allowlisted app cannot keep a deep-capture grant).
             svc.setAllowlist(["com.example.mail"])
             XCTAssertEqual(svc.ocrApps(), ["com.example.mail"])
+        }
+    }
+
+    func testSetDetailedCaptureAppsFiltersToCurrentAllowlist() {
+        withRestoredDefaults {
+            let svc = service()
+            svc.setAllowlist(["com.mitchellh.ghostty"])
+            svc.setDetailedCaptureApps([
+                " com.mitchellh.ghostty ",
+                "com.mitchellh.ghostty",
+                "com.example.rogue",
+            ])
+            XCTAssertEqual(svc.detailedCaptureApps(), ["com.mitchellh.ghostty"])
+        }
+    }
+
+    func testAllowlistRemovalPrunesDetailedCaptureApps() {
+        withRestoredDefaults {
+            let svc = service()
+            svc.setAllowlist(["com.mitchellh.ghostty", "com.apple.Terminal"])
+            svc.setDetailedCaptureApps(["com.mitchellh.ghostty", "com.apple.Terminal"])
+
+            svc.setAllowlist(["com.apple.Terminal"])
+
+            XCTAssertEqual(svc.detailedCaptureApps(), ["com.apple.Terminal"])
         }
     }
 }
