@@ -62,9 +62,13 @@ OpenBird therefore bundles OpenAI's official [Secure MCP Tunnel client](https://
 and exposes a guided setup in **Settings → Desktop assistants → ChatGPT**.
 
 1. Enable Developer Mode in ChatGPT.
-2. Create a Secure MCP Tunnel and a restricted runtime API key in the OpenAI Platform.
+2. Create a Secure MCP Tunnel in the OpenAI Platform, associate it with the target ChatGPT
+   workspace, and create a restricted runtime API key with **Tunnels Read + Use** permission.
 3. Paste the `tunnel_...` id and runtime key into OpenBird and choose Connect.
 4. Add the tunnel as a custom app in ChatGPT.
+
+If the workspace association or either permission is missing, the tunnel may run locally but not
+appear in ChatGPT's custom-app picker.
 
 OpenBird stores both setup values in a dedicated macOS Keychain item. The runtime key is passed only
 through the tunnel child's environment, never through arguments, logs, UserDefaults, or repository

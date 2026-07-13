@@ -116,7 +116,9 @@ For ChatGPT, open OpenBird Settings → Desktop assistants → ChatGPT. The guid
 Developer Mode, create a tunnel plus a restricted runtime key, then paste those two values into
 OpenBird. The runtime key stays in the macOS Keychain. OpenBird starts an outbound-only tunnel and
 reports Connected only when its private readiness check passes. You must then add the tunnel as a
-custom app in ChatGPT. ChatGPT plan availability and workspace policies still apply.
+custom app in ChatGPT. Associate the tunnel with the target ChatGPT workspace and grant the runtime
+principal **Tunnels Read + Use** permission; without both, the tunnel may not appear in ChatGPT's
+custom-app picker. ChatGPT plan availability and workspace policies still apply.
 
 The **cask** downloads the notarized `.dmg` and installs the signed
 `OpenBird.app` to `/Applications`, so macOS can grant (and persist) Screen
