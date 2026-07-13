@@ -125,7 +125,7 @@ class Openbird < Formula
     assert_path_exists libexec/"OpenBird.app/Contents/MacOS/OpenBird"
     assert_path_exists libexec/"OpenBird.app/Contents/MacOS/capture-helper"
     assert_path_exists libexec/"OpenBird.app/Contents/MacOS/audio-helper"
-    assert_path_exists libexec/"OpenBird.app/Contents/MacOS/tunnel-client"
+    assert_predicate libexec/"OpenBird.app/Contents/MacOS/tunnel-client", :executable?
     assert_predicate bin/"openbird-app", :executable?
   end
 end
