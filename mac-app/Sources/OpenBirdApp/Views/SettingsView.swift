@@ -704,7 +704,7 @@ struct SettingsView: View {
     private var chatGPTAssistantTrailing: RowTrailing {
         switch model.chatGPTAssistantState {
         case .connected:
-            return .affirm("Connected")
+            return .affirmAction("Connected") { pendingChatGPTConnection = true }
         case .connecting:
             return .attention("Connecting")
         case .unknown:
@@ -977,6 +977,15 @@ struct SettingsView: View {
                 Text(label).font(.system(size: 12.5, weight: .semibold))
             }
             .foregroundStyle(OB.ok(scheme))
+        case .affirmAction(let label, let action):
+            Button(action: action) {
+                HStack(spacing: 5) {
+                    Image(systemName: "checkmark").font(.system(size: 12.5, weight: .bold))
+                    Text(label).font(.system(size: 12.5, weight: .semibold))
+                }
+                .foregroundStyle(OB.ok(scheme))
+            }
+            .buttonStyle(.plain)
         case .attention(let label):
             HStack(spacing: 5) {
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11.5))
@@ -1013,6 +1022,7 @@ private enum RowBadge { case required, optional }
 
 private enum RowTrailing {
     case affirm(String)
+    case affirmAction(String, () -> Void)
     case attention(String)
     case primary(String, () -> Void)
     case secondary(String, () -> Void)
