@@ -3159,6 +3159,70 @@ def data_capture_health(
     _console.print(table)
 
 
+@data_app.command("capture-audit")
+def data_capture_audit(
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    recent_window_seconds: float = typer.Option(
+        24 * 60 * 60,
+        "--recent-window-seconds",
+        min=0,
+        help="Window for capture richness aggregates.",
+    ),
+    minimum_samples: int = typer.Option(
+        5,
+        "--minimum-samples",
+        min=1,
+        help="Samples required before assigning a stable context-quality bucket.",
+    ),
+) -> None:
+    """Evaluate whether recent capture contains useful context, without exposing it."""
+    from openbird.capture.audit import build_capture_audit
+    from openbird.capture.health import build_capture_health
+
+    settings = get_settings()
+    now = time.time()
+    recent_since = now - recent_window_seconds
+    store = _store_maintenance()
+    try:
+        activity = store.capture_app_activity(recent_since_ts=recent_since)
+        quality = store.capture_content_quality(recent_since_ts=recent_since)
+    finally:
+        store.close()
+    health = build_capture_health(
+        settings=settings,
+        activity_by_app=activity,
+        generated_at=now,
+        recent_window_seconds=recent_window_seconds,
+    )
+    payload = build_capture_audit(
+        health=health,
+        content_quality=quality,
+        min_samples=minimum_samples,
+    )
+    if as_json:
+        _console.print_json(json.dumps(payload))
+        return
+
+    table = Table(title="Capture context audit", show_header=True, header_style="bold")
+    table.add_column("App")
+    table.add_column("Context")
+    table.add_column("Coverage")
+    table.add_column("Samples", justify="right")
+    table.add_column("Chars p50/p90", justify="right")
+    table.add_column("Lines p50/p90", justify="right")
+    for row in payload["apps"]:
+        table.add_row(
+            row["bundle_id"],
+            row["context_quality"],
+            row["coverage"],
+            str(row["sample_count"]),
+            f"{row['chars_p50']}/{row['chars_p90']}",
+            f"{row['lines_p50']}/{row['lines_p90']}",
+        )
+    _console.print(table)
+    _console.print(f"Overall: {payload['overall_state']}")
+
+
 @data_app.command("reasoning-ledger")
 def data_reasoning_ledger(
     limit: int = typer.Option(

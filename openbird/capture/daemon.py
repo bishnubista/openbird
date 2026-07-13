@@ -39,6 +39,7 @@ import uuid
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Protocol
 
@@ -154,6 +155,14 @@ _FAILURE_DECAY_SECONDS = 300.0
 #: Liveness sidecar filename (inside data_dir). Metadata only — timestamps,
 #: mode, AFK flag, heartbeat seq. Never content. capture-health reads it.
 LIVENESS_FILENAME = "capture.liveness.json"
+
+
+def _runtime_version() -> str:
+    """Return the version of the package running this daemon."""
+    try:
+        return version("openbird")
+    except PackageNotFoundError:
+        return "unknown"
 
 # App-supervised self-exit (orphan cleanup).
 #
@@ -471,6 +480,11 @@ class CaptureDaemon:
         self.duplicate_window = max(0.0, duplicate_window)
         self._last_ingested_signature: _CaptureSignature | None = None
         self._last_ingested_at: float | None = None
+        # Generated once in memory for this daemon process. Post-release checks
+        # use it to prove the newly installed app, rather than a stale process,
+        # wrote the current liveness sidecar.
+        self._instance_uuid = str(uuid.uuid4())
+        self._runtime_version = _runtime_version()
         # Episodic-session segmentation (Layer 4). A session groups a contiguous
         # run of activity in one app; ``_assemble_context`` / ``_answer_temporal``
         # use it to keep "what did I do today" recall coherent. State advances on
@@ -1067,6 +1081,9 @@ class CaptureDaemon:
         ever observing a torn file. Failures are logged as a reason code only.
         """
         payload = {
+            "instance_uuid": self._instance_uuid,
+            "pid": os.getpid(),
+            "runtime_version": self._runtime_version,
             "updated_at": time.time(),
             "last_event_ts": last_event_ts,
             "last_capture_ts": last_capture_ts,
