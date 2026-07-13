@@ -2814,6 +2814,97 @@ class MemoryStore:
             for row in rows
         }
 
+    def capture_content_quality(
+        self, *, recent_since_ts: float, source: str = "capture"
+    ) -> dict[str, dict[str, float | int]]:
+        """Return privacy-safe per-app aggregates of captured context richness.
+
+        Text is read only inside SQLite to calculate lengths and line counts.
+        The query emits one aggregate row per app and never returns captured
+        text, titles, URLs, or individual content hashes to Python.
+        """
+        rows = self.conn.execute(
+            """
+            WITH base AS (
+                SELECT
+                    o.app AS app,
+                    o.content_hash AS content_hash,
+                    LENGTH(COALESCE(b.text, '')) AS chars,
+                    CASE
+                        WHEN COALESCE(b.text, '') = '' THEN 0
+                        ELSE 1 + LENGTH(b.text) - LENGTH(REPLACE(b.text, CHAR(10), ''))
+                    END AS lines
+                FROM observations o
+                JOIN content_blobs b ON b.content_hash = o.content_hash
+                WHERE o.source = ?
+                  AND o.ts >= ?
+                  AND o.app IS NOT NULL
+                  AND o.app != ''
+            ),
+            grouped AS (
+                SELECT
+                    app,
+                    COUNT(*) AS sample_count,
+                    COUNT(DISTINCT content_hash) AS distinct_contexts,
+                    SUM(CASE WHEN chars >= 120 THEN 1 ELSE 0 END) AS substantive_count,
+                    SUM(CASE WHEN chars >= 400 OR lines >= 8 THEN 1 ELSE 0 END) AS rich_count
+                FROM base
+                GROUP BY app
+            ),
+            ranked AS (
+                SELECT
+                    app,
+                    chars,
+                    lines,
+                    ROW_NUMBER() OVER (PARTITION BY app ORDER BY chars) AS char_rank,
+                    ROW_NUMBER() OVER (PARTITION BY app ORDER BY lines) AS line_rank,
+                    COUNT(*) OVER (PARTITION BY app) AS sample_count
+                FROM base
+            ),
+            percentiles AS (
+                SELECT
+                    app,
+                    MIN(CASE WHEN char_rank >= (sample_count + 1) / 2 THEN chars END)
+                        AS chars_p50,
+                    MIN(CASE WHEN char_rank >= (9 * sample_count + 9) / 10 THEN chars END)
+                        AS chars_p90,
+                    MIN(CASE WHEN line_rank >= (sample_count + 1) / 2 THEN lines END)
+                        AS lines_p50,
+                    MIN(CASE WHEN line_rank >= (9 * sample_count + 9) / 10 THEN lines END)
+                        AS lines_p90
+                FROM ranked
+                GROUP BY app
+            )
+            SELECT
+                g.app,
+                g.sample_count,
+                g.distinct_contexts,
+                p.chars_p50,
+                p.chars_p90,
+                p.lines_p50,
+                p.lines_p90,
+                CAST(g.substantive_count AS REAL) / g.sample_count AS substantive_ratio,
+                CAST(g.rich_count AS REAL) / g.sample_count AS rich_ratio
+            FROM grouped g
+            JOIN percentiles p ON p.app = g.app
+            ORDER BY g.app
+            """,
+            (source, float(recent_since_ts)),
+        ).fetchall()
+        return {
+            row["app"]: {
+                "sample_count": int(row["sample_count"]),
+                "distinct_contexts": int(row["distinct_contexts"]),
+                "chars_p50": int(row["chars_p50"]),
+                "chars_p90": int(row["chars_p90"]),
+                "lines_p50": int(row["lines_p50"]),
+                "lines_p90": int(row["lines_p90"]),
+                "substantive_ratio": float(row["substantive_ratio"]),
+                "rich_ratio": float(row["rich_ratio"]),
+            }
+            for row in rows
+        }
+
     def integrity_check(self, *, quick: bool = False) -> dict:
         """Verify the database is not corrupt via SQLite's integrity check.
 

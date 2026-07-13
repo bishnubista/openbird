@@ -12,9 +12,11 @@ health-block staleness rules.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
+import uuid
 
 import pytest
 
@@ -284,9 +286,12 @@ def test_liveness_sidecar_written_and_metadata_only(allow_settings, tmp_path):
     assert payload["last_capture_ts"] is not None
     # Metadata only: no content-bearing keys, and no captured text anywhere.
     assert set(payload) == {
-        "updated_at", "last_event_ts", "last_capture_ts", "mode", "afk",
-        "heartbeat_seq", "meeting", "ocr_state",
+        "instance_uuid", "pid", "runtime_version", "updated_at", "last_event_ts",
+        "last_capture_ts", "mode", "afk", "heartbeat_seq", "meeting", "ocr_state",
     }
+    assert str(uuid.UUID(payload["instance_uuid"])) == payload["instance_uuid"]
+    assert payload["pid"] == os.getpid()
+    assert isinstance(payload["runtime_version"], str)
     assert payload["meeting"] is False  # a metadata BIT, off by default
     assert payload["ocr_state"] is None  # never reported in this run
     assert "hello from stream" not in path.read_text()
@@ -302,6 +307,9 @@ def test_health_daemon_block_states(allow_settings, tmp_path):
     # Fresh sidecar -> ok.
     path = tmp_path / LIVENESS_FILENAME
     path.write_text(json.dumps({
+        "instance_uuid": "00000000-0000-4000-8000-000000000001",
+        "pid": 123,
+        "runtime_version": "1.2.3",
         "updated_at": 995.0, "last_event_ts": 994.0, "last_capture_ts": 990.0,
         "mode": "stream", "afk": False, "heartbeat_seq": 7,
     }))
@@ -309,6 +317,9 @@ def test_health_daemon_block_states(allow_settings, tmp_path):
     assert health["daemon"]["state"] == "ok"
     assert health["daemon"]["mode"] == "stream"
     assert health["daemon"]["heartbeat_seq"] == 7
+    assert health["daemon"]["instance_uuid"] == "00000000-0000-4000-8000-000000000001"
+    assert health["daemon"]["pid"] == 123
+    assert health["daemon"]["runtime_version"] == "1.2.3"
 
     # Old sidecar -> stale, never ok off a stale timestamp.
     path.write_text(json.dumps({"updated_at": 100.0}))

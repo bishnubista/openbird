@@ -91,6 +91,22 @@ on <x.y.z>`. Run it after step 4's formula PR merges; a non-zero exit means a ch
 left behind — finish the lagging step before declaring the release done. (You can run it at
 any point mid-release to see which steps remain.)
 
+### 6. Install and audit the released app on this Mac
+After the cask and formula PRs are merged and step 5 is aligned, reinstall the
+published cask and audit the **installed** artifact:
+```bash
+script/post_release_audit.py --install --expected-version <x.y.z>
+```
+This stops the prior app-owned capture daemon, reinstalls and launches
+`/Applications/OpenBird.app`, then requires a fresh daemon instance whose kernel
+executable path and runtime version belong to that exact bundle. It runs the
+bundled CLI's privacy-safe capture audit and records only aggregate context-depth
+metrics under `~/.openbird/audits/` (`0700` directory, atomic `0600` reports).
+Reports compare apps only after both runs meet the minimum sample floor; repeated
+context is advisory, not a release failure. `BLOCKED` means the install, signing,
+database decryption, daemon identity, or version proof is incomplete. The workflow
+reports assistant-connector status but never enables Claude automatically.
+
 ## Notes for tester-facing release notes
 The dmg release notes are written by the `release-dmg` skill. For a richer changelog on
 either release, generate it from history:

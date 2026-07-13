@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 
 from typer.testing import CliRunner
 
 from openbird import cli
+from openbird.capture.audit import build_capture_audit
 from openbird.capture.health import build_capture_health
 from openbird.config import Settings, reset_settings_cache
 from openbird.memory.store import MemoryStore
@@ -225,6 +228,164 @@ def test_capture_app_activity_reads_only_metadata(tmp_path, fake_provider):
     assert "captured text" not in leaked
     assert "Sensitive Window" not in leaked
     assert "example.invalid" not in leaked
+
+
+def test_capture_content_quality_returns_aggregates_only(tmp_path, fake_provider):
+    settings = Settings(data_dir=tmp_path, embed_dim=768)
+    store = MemoryStore(settings=settings, provider=fake_provider)
+    sentinel_hash = "a" * 64
+    texts = ["x" * 50, "y" * 150, "z" * 500, "z" * 500, "q" * 800]
+    try:
+        for index, text in enumerate(texts):
+            store.add_observation(
+                text + (sentinel_hash if index == 4 else ""),
+                app="com.example.Editor",
+                window="SENTINEL_PRIVATE_WINDOW",
+                url="https://sentinel.invalid/private",
+                source="capture",
+                ts=100.0 + index,
+            )
+        quality = store.capture_content_quality(recent_since_ts=100.0)
+    finally:
+        store.close()
+
+    row = quality["com.example.Editor"]
+    assert row == {
+        "sample_count": 5,
+        "distinct_contexts": 4,
+        "chars_p50": 500,
+        "chars_p90": 864,
+        "lines_p50": 1,
+        "lines_p90": 1,
+        "substantive_ratio": 0.8,
+        "rich_ratio": 0.6,
+    }
+    rendered = json.dumps(quality)
+    assert "SENTINEL_PRIVATE_WINDOW" not in rendered
+    assert "sentinel.invalid" not in rendered
+    assert sentinel_hash not in rendered
+    assert re.search(r"\b[0-9a-f]{64}\b", rendered) is None
+
+
+def test_capture_audit_classifies_rich_shallow_and_bimodal_context():
+    health = {
+        "generated_at": 1000.0,
+        "recent_window_seconds": 86400,
+        "daemon": {
+            "state": "ok",
+            "instance_uuid": "00000000-0000-4000-8000-000000000001",
+            "pid": 123,
+            "runtime_version": "1.2.3",
+        },
+        "apps": [
+            {
+                "bundle_id": app,
+                "effective_state": "allowed_recent",
+                "coverage": coverage,
+            }
+            for app, coverage in (
+                ("rich", "full"),
+                ("shallow", "partial"),
+                ("bimodal", "full"),
+            )
+        ],
+    }
+    quality = {
+        "rich": {
+            "sample_count": 10,
+            "distinct_contexts": 9,
+            "chars_p50": 900,
+            "chars_p90": 1500,
+            "lines_p50": 20,
+            "lines_p90": 40,
+            "substantive_ratio": 1.0,
+            "rich_ratio": 0.9,
+        },
+        "shallow": {
+            "sample_count": 10,
+            "distinct_contexts": 8,
+            "chars_p50": 30,
+            "chars_p90": 80,
+            "lines_p50": 2,
+            "lines_p90": 3,
+            "substantive_ratio": 0.0,
+            "rich_ratio": 0.0,
+        },
+        "bimodal": {
+            "sample_count": 10,
+            "distinct_contexts": 3,
+            "chars_p50": 8,
+            "chars_p90": 800,
+            "lines_p50": 1,
+            "lines_p90": 20,
+            "substantive_ratio": 0.3,
+            "rich_ratio": 0.3,
+        },
+    }
+
+    audit = build_capture_audit(health=health, content_quality=quality)
+
+    by_app = {row["bundle_id"]: row for row in audit["apps"]}
+    assert by_app["rich"]["context_quality"] == "rich_context"
+    assert by_app["shallow"]["context_quality"] == "low_context"
+    assert "partial_capture_coverage" in by_app["shallow"]["reason_codes"]
+    assert by_app["bimodal"]["context_quality"] == "inconsistent_context"
+    assert audit["overall_state"] == "warn"
+
+
+def test_capture_audit_cli_json_never_emits_content_or_hashes(
+    tmp_path, fake_provider, monkeypatch
+):
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENBIRD_ALLOWLIST", "com.example.Editor")
+    monkeypatch.setenv("OPENBIRD_BLOCKLIST", "")
+    monkeypatch.setenv("OPENBIRD_DISABLE_KEYRING", "1")
+    reset_settings_cache()
+    settings = Settings(
+        data_dir=tmp_path,
+        allowlist=["com.example.Editor"],
+        blocklist=[],
+        embed_dim=768,
+    )
+    store = MemoryStore(settings=settings, provider=fake_provider)
+    sentinel_hash = "b" * 64
+    try:
+        for index in range(5):
+            store.add_observation(
+                ("SENTINEL_CAPTURE_TEXT " + sentinel_hash + " ") * 30,
+                app="com.example.Editor",
+                window="SENTINEL_WINDOW_TITLE",
+                url="https://sentinel.invalid/secret",
+                source="capture",
+                ts=time.time() + index,
+            )
+    finally:
+        store.close()
+    (tmp_path / "capture.liveness.json").write_text(
+        json.dumps(
+            {
+                "instance_uuid": "00000000-0000-4000-8000-000000000001",
+                "pid": 123,
+                "runtime_version": "1.2.3",
+                "updated_at": time.time(),
+            }
+        )
+    )
+
+    try:
+        result = CliRunner().invoke(cli.app, ["data", "capture-audit", "--json"])
+    finally:
+        reset_settings_cache()
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["overall_state"] == "pass"
+    assert payload["apps"][0]["context_quality"] == "rich_context"
+    assert "SENTINEL_CAPTURE_TEXT" not in result.output
+    assert "SENTINEL_WINDOW_TITLE" not in result.output
+    assert "sentinel.invalid" not in result.output
+    assert sentinel_hash not in result.output
+    assert re.search(r"\b[0-9a-f]{64}\b", result.output) is None
 
 
 def test_capture_health_cli_json_is_metadata_only(tmp_path, fake_provider, monkeypatch):

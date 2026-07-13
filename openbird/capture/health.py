@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ DEFAULT_RECENT_WINDOW_SECONDS = 24 * 60 * 60
 DAEMON_STALE_AFTER_SECONDS = 30.0
 # Back-compat alias for the pre-Phase-D private name.
 _DAEMON_STALE_AFTER_SECONDS = DAEMON_STALE_AFTER_SECONDS
+_RUNTIME_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+!-]{0,63}$")
 
 
 def _policy_for_app(bundle_id: str, settings: Settings) -> dict[str, Any]:
@@ -100,7 +103,8 @@ def _daemon_liveness(*, settings: Settings, now: float) -> dict[str, Any]:
     States: ``ok`` (fresh sidecar), ``stale`` (sidecar exists but is older than
     the staleness bound — daemon gone or wedged), ``unknown`` (no sidecar /
     unreadable / malformed — e.g. the daemon predates stream mode or hasn't
-    started). Only timestamps, mode, AFK, and seq are surfaced — no content.
+    started). Only writer identity, timestamps, mode, AFK, and seq are surfaced
+    — no captured content.
     """
     path = Path(settings.data_dir, "capture.liveness.json")
     try:
@@ -123,6 +127,18 @@ def _daemon_liveness(*, settings: Settings, now: float) -> dict[str, Any]:
     age = now - updated_at
     state = "ok" if 0 <= age <= _DAEMON_STALE_AFTER_SECONDS else "stale"
     seq = raw.get("heartbeat_seq")
+    instance_uuid = raw.get("instance_uuid")
+    try:
+        instance_uuid = str(uuid.UUID(instance_uuid))
+    except (AttributeError, TypeError, ValueError):
+        instance_uuid = None
+    pid = raw.get("pid")
+    pid = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+    runtime_version = raw.get("runtime_version")
+    if not isinstance(runtime_version, str) or not _RUNTIME_VERSION_RE.fullmatch(
+        runtime_version
+    ):
+        runtime_version = None
     # OCR fallback availability (Phase C2): sanitized against the closed pair
     # AND gated on daemon FRESHNESS — a stale sidecar's "available" is a dead
     # daemon's old claim, and the design budget says never report ok off a
@@ -130,6 +146,9 @@ def _daemon_liveness(*, settings: Settings, now: float) -> dict[str, Any]:
     ocr_state = raw.get("ocr_state") if state == "ok" else None
     return {
         "state": state,
+        "instance_uuid": instance_uuid,
+        "pid": pid,
+        "runtime_version": runtime_version,
         "updated_at": updated_at,
         "age_seconds": age,
         "mode": raw.get("mode") if raw.get("mode") in ("stream", "oneshot") else None,
