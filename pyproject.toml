@@ -1,6 +1,6 @@
 [project]
 name = "openbird"
-version = "0.10.0"
+version = "0.10.1"
 description = "OpenBird — open-source, local-first personal memory for macOS"
 readme = "README.md"
 license = "Apache-2.0"
