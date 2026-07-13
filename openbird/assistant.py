@@ -374,15 +374,19 @@ def claude_config_status(*, config_path: Path | None = None) -> dict[str, Any]:
     config, _, _ = _read_claude_config(path)
     entry = (config.get("mcpServers") or {}).get("openbird")
     expected_args = ["assistant", "serve"]
+    command = entry.get("command") if isinstance(entry, dict) else None
+    command_path = Path(command).expanduser() if isinstance(command, str) else None
     configured = (
         isinstance(entry, dict)
-        and isinstance(entry.get("command"), str)
+        and command_path is not None
+        and command_path.is_file()
+        and os.access(command_path, os.X_OK)
         and entry.get("args") == expected_args
     )
     return {
         "configured": configured,
         "config_path": str(path),
-        "command": entry.get("command") if isinstance(entry, dict) else None,
+        "command": command,
     }
 
 

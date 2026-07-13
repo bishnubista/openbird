@@ -254,6 +254,7 @@ def test_install_claude_config_preserves_other_content_and_writes_private_files(
     config_path.chmod(0o644)
     executable = tmp_path / "openbird"
     executable.write_text("binary", encoding="utf-8")
+    executable.chmod(0o700)
 
     result = assistant.install_claude_config(
         config_path=config_path, executable=executable
@@ -271,6 +272,33 @@ def test_install_claude_config_preserves_other_content_and_writes_private_files(
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(backup.stat().st_mode) == 0o600
     assert assistant.claude_config_status(config_path=config_path)["configured"] is True
+
+
+def test_claude_config_status_rejects_missing_or_nonexecutable_command(tmp_path):
+    config_path = tmp_path / "claude_desktop_config.json"
+    executable = tmp_path / "openbird"
+    executable.write_text("binary", encoding="utf-8")
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "openbird": {
+                        "command": str(executable),
+                        "args": ["assistant", "serve"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert assistant.claude_config_status(config_path=config_path)["configured"] is False
+
+    executable.chmod(0o700)
+    assert assistant.claude_config_status(config_path=config_path)["configured"] is True
+
+    executable.unlink()
+    assert assistant.claude_config_status(config_path=config_path)["configured"] is False
 
 
 def test_install_claude_config_refuses_malformed_input_without_mutation(tmp_path):
