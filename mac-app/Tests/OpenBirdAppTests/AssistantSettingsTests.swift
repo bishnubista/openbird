@@ -72,7 +72,7 @@ final class AssistantSettingsTests: XCTestCase {
     }
 
     func testParsesChatGPTMetadataWithoutCredentials() {
-        let output = #"{"configured":true,"helper_available":true}"#
+        let output = #"{"configured":true,"helper_available":true,"runtime_key":"must-be-ignored"}"#
 
         let status = OpenBirdService.parseChatGPTAssistantStatus(output)
 
@@ -85,7 +85,6 @@ final class AssistantSettingsTests: XCTestCase {
                 ready: false
             )
         )
-        XCTAssertFalse(output.contains("runtime_key"))
     }
 
     func testChatGPTStatusUsesMetadataOnlyCLIShape() async throws {
