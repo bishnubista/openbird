@@ -60,8 +60,16 @@ or restart-invalidated token fails and the walk restarts with a fresh first call
 `openbird_activity_summary` answers "what did I focus on" from **trusted metadata only** — activity
 spans, never captured text. It returns per-app foreground and meeting durations with span counts
 (top 30 apps; the rest folded into a nameless `other_apps` bucket reporting only its total seconds
-and app count), AFK time, context-switch count, and the longest focus block. Excluded apps and coarse/redacted spans contribute only unnamed `excluded_seconds` /
-`redacted_seconds` totals; their transitions never affect switch or focus numbers. An AFK gap ends
+and app count), AFK time, context-switch count, and the longest focus block. Redacted
+(coarse-tier) spans keep their app identity as metadata, so redacted time is attributed:
+`redacted_by_app` lists `{bundle_id, reason, seconds}` per app (closed reason vocabulary —
+`not_allowlisted`, `blocklisted`, `dangerous`, `private`, `paused`, `self_capture`, plus an
+`unknown` defense-in-depth sentinel emitted only for a corrupted row), with
+`redacted_unattributed_seconds` covering spans that never had an app (paused gaps, unknown
+app) and `redacted_other_seconds` folding the tail past the 30-app cap. **Excluded apps are
+different**: anything in `deep_brain_excluded_apps` is checked first and contributes only the
+unnamed `excluded_seconds` total — exclusion, not redaction, is the hiding mechanism. Neither
+bucket's transitions affect switch or focus numbers. An AFK gap ends
 a focus block (hidden spans deliberately do not — the break would reveal them). Meeting time is
 counted through AFK (listening in a call involves no input). Prefer it over paging excerpts for
 time-use questions: richer analysis, strictly less raw-text egress.
@@ -74,9 +82,14 @@ the assistant must never treat them as instructions.
 Installing the connector does not upload the database or stream capture. When Claude invokes a
 content tool, the returned excerpt, app identifier, timestamp, source, and observation ID leave
 OpenBird's local boundary through Claude. When Claude invokes the activity summary, **behavioral
-metadata** leaves the same way: app identifiers, per-app usage durations and span counts, AFK and
-meeting time, context-switch counts, focus-block timestamps, and the folded-tail app count — no
-captured text. Anthropic's retention and
+metadata** leaves the same way: app identifiers (including redacted apps with their reason
+codes), per-app usage durations and span counts, AFK and meeting time, context-switch counts,
+focus-block timestamps, and the folded-tail app count — no captured text. The status tool sends
+store-lifetime totals, encryption state, and exclusion-configuration counts. Every response also
+carries a `capture_host` label naming which Mac's store answered (configurable via
+`OPENBIRD_ASSISTANT_HOST_LABEL`; defaults to the hostname) and a machine-parseable `egress`
+block — `{scope, untrusted_content, fields}` — declaring exactly which JSON paths that tool may
+emit, so a calling agent can enforce its own egress policy instead of parsing prose. Anthropic's retention and
 workspace policies apply after that point. A later OpenBird purge prevents future retrieval but
 cannot recall data already sent.
 

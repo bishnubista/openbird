@@ -84,6 +84,7 @@ def _span(
     detail_tier: int = 1,
     afk: int = 0,
     meeting: int = 0,
+    reason: str | None = None,
 ) -> dict:
     return {
         "span_id": span_id,
@@ -93,6 +94,7 @@ def _span(
         "detail_tier": detail_tier,
         "afk": afk,
         "meeting": meeting,
+        "reason": reason,
     }
 
 
@@ -194,6 +196,7 @@ def test_capture_status_is_metadata_only(tmp_path):
         settings=Settings(
             data_dir=tmp_path,
             deep_brain_excluded_apps=["com.secret.App"],
+            assistant_host_label="test-host",
         ),
         store_factory=lambda: store,
     )
@@ -203,7 +206,14 @@ def test_capture_status_is_metadata_only(tmp_path):
     assert result == {
         "ok": True,
         "content_returned": False,
-        "observations": 42,
+        "egress_notice": assistant.ASSISTANT_STATUS_EGRESS_NOTICE,
+        "egress": {
+            "scope": "status_metadata",
+            "untrusted_content": False,
+            "fields": sorted(assistant.STATUS_EGRESS_FIELDS),
+        },
+        "capture_host": "test-host",
+        "observations_total": 42,
         "encryption_enabled": True,
         "excluded_apps_configured": 1,
         "excluded_sources_configured": 0,
@@ -1067,13 +1077,29 @@ def test_store_capture_spans_overlapping_is_projected_and_bounded(tmp_path):
                 window="Sensitive title",
                 url_host="example.com",
             )
+        store.open_span(
+            epoch_id="epoch",
+            start_ts=50.0,
+            end_ts=60.0,
+            bundle_id="com.blocked.App",
+            detail_tier=0,
+            reason="blocklisted",
+        )
         spans = store.capture_spans_overlapping(0, 100, limit=3)
         assert len(spans) == 3
         assert set(spans[0]) == {
             "span_id", "start_ts", "end_ts", "bundle_id",
-            "detail_tier", "afk", "meeting",
+            "detail_tier", "afk", "meeting", "reason",
         }
         assert "Sensitive title" not in json.dumps(spans)
+        # The tier-0 reason round-trips as the stored enum value, while the
+        # forbidden columns stay out of the projection entirely.
+        coarse = store.capture_spans_overlapping(50, 60, limit=10)
+        tier0 = next(s for s in coarse if s["detail_tier"] == 0)
+        assert tier0["bundle_id"] == "com.blocked.App"
+        assert tier0["reason"] == "blocklisted"
+        for forbidden in ("window", "url_host", "identity_key"):
+            assert forbidden not in tier0
     finally:
         store.close()
 
@@ -1159,9 +1185,17 @@ def test_cli_assistant_warnings_disclose_activity_egress(monkeypatch):
 
     for result in (install, chatgpt):
         assert result.exit_code == 1
-        assert "ASSISTANT ACCESS" in result.output
-        assert "ACTIVITY ACCESS" in result.output
-        assert "activity patterns" in result.output
+        # Rich wraps at the terminal width; normalize before phrase checks.
+        flat = " ".join(result.output.split())
+        assert "ASSISTANT ACCESS" in flat
+        assert "ACTIVITY ACCESS" in flat
+        assert "STATUS ACCESS" in flat
+        assert "activity patterns" in flat
+        # The consent copy must name every new egress category.
+        assert "redacted" in flat
+        assert "reason codes" in flat
+        assert "host label" in flat
+        assert "exclusion-configuration counts" in flat
 
 
 def test_activity_summary_afk_gap_splits_focus_but_hidden_gap_does_not(tmp_path):
@@ -1192,3 +1226,265 @@ def test_activity_summary_afk_gap_splits_focus_but_hidden_gap_does_not(tmp_path)
         "seconds": 100.0,
     }
     assert result["afk_seconds"] == 1800.0
+
+
+# -- v3: redaction attribution, capture_host, machine-parseable egress ----------
+
+
+def test_activity_summary_attributes_redacted_time_with_clipping(tmp_path):
+    spans = [
+        # Crosses the window START: only [340, 360] counts.
+        _span("pre", start_ts=300.0, end_ts=360.0, detail_tier=0, reason="blocklisted"),
+        _span(
+            "mid", start_ts=360.0, end_ts=370.0,
+            bundle_id="com.browser", detail_tier=0, reason="private",
+        ),
+        # Crosses the window END: only [390, 400] counts.
+        _span("post", start_ts=390.0, end_ts=450.0, detail_tier=0, reason="blocklisted"),
+        # NULL bundle crossing the start edge: unattributable, clipped to 10s.
+        _span(
+            "gap", start_ts=330.0, end_ts=350.0,
+            bundle_id=None, detail_tier=0, reason="paused",
+        ),
+        # Excluded app crossing the end edge: excluded wins, never named.
+        _span(
+            "excl", start_ts=395.0, end_ts=460.0,
+            bundle_id="com.secret.App", detail_tier=0, reason="blocklisted",
+        ),
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(
+            data_dir=tmp_path, deep_brain_excluded_apps=["com.secret.App"]
+        ),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 400.0,
+    )
+
+    result = service.activity_summary(minutes=1)
+
+    assert result["redacted_seconds"] == 50.0
+    assert result["redacted_by_app"] == [
+        {"bundle_id": "com.example.Editor", "reason": "blocklisted", "seconds": 30.0},
+        {"bundle_id": "com.browser", "reason": "private", "seconds": 10.0},
+    ]
+    assert result["redacted_unattributed_seconds"] == 10.0
+    assert result["redacted_other_seconds"] == 0.0
+    assert result["excluded_seconds"] == 5.0
+    assert "com.secret.App" not in json.dumps(result)
+    # Breakdown invariant under clipping: attributed + tail + unattributed
+    # must reconstruct the total exactly, from the same clipped durations.
+    assert (
+        sum(entry["seconds"] for entry in result["redacted_by_app"])
+        + result["redacted_other_seconds"]
+        + result["redacted_unattributed_seconds"]
+        == result["redacted_seconds"]
+    )
+
+
+def test_activity_summary_caps_redacted_apps_and_folds_tail(tmp_path):
+    spans = [
+        _span(
+            f"r{i}", start_ts=i * 10.0, end_ts=i * 10.0 + 10.0 - i * 0.1,
+            bundle_id=f"com.red.{i:02d}", detail_tier=0, reason="not_allowlisted",
+        )
+        for i in range(35)
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 400.0,
+    )
+
+    result = service.activity_summary(minutes=10)
+
+    assert len(result["redacted_by_app"]) == assistant.MAX_SUMMARY_APPS
+    assert result["redacted_other_seconds"] > 0
+    assert (
+        sum(entry["seconds"] for entry in result["redacted_by_app"])
+        + result["redacted_other_seconds"]
+        + result["redacted_unattributed_seconds"]
+        == pytest.approx(result["redacted_seconds"])
+    )
+
+
+def test_activity_summary_maps_corrupt_null_reason_to_unknown(tmp_path):
+    # Tier-0 reason is schema-guaranteed; a NULL here means a corrupted row,
+    # and the egress-only "unknown" sentinel must absorb it (never crash,
+    # never invent an enum member).
+    spans = [_span("bad", start_ts=0.0, end_ts=10.0, detail_tier=0, reason=None)]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 400.0,
+    )
+
+    result = service.activity_summary(minutes=10)
+
+    assert result["redacted_by_app"] == [
+        {"bundle_id": "com.example.Editor", "reason": "unknown", "seconds": 10.0}
+    ]
+
+
+def test_capture_host_label_present_on_every_tool_response(tmp_path):
+    settings = Settings(data_dir=tmp_path, assistant_host_label="studio-mini")
+    rows = [(_capture_obs("row", ts=1000.0), "text")]
+    spans = [_span("s", start_ts=990.0, end_ts=1000.0)]
+
+    def service_for(store):
+        return AssistantCaptureService(
+            settings=settings, store_factory=lambda: store, clock=lambda: 1000.0
+        )
+
+    responses = [
+        service_for(_FakeStore(recent=rows)).recent_capture(minutes=10, limit=5),
+        service_for(_FakeStore(search=rows)).search_capture(query="text", limit=5),
+        service_for(_FakeStore(spans=spans)).activity_summary(minutes=10),
+        service_for(_FakeStore()).capture_status(),
+    ]
+
+    assert all(response["capture_host"] == "studio-mini" for response in responses)
+
+
+def test_capture_host_defaults_to_hostname_then_sentinel(tmp_path, monkeypatch):
+    monkeypatch.setattr(assistant.platform, "node", lambda: "real-host.local")
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path), store_factory=_FakeStore
+    )
+    assert service.capture_host == "real-host.local"
+
+    monkeypatch.setattr(assistant.platform, "node", lambda: "")
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path), store_factory=_FakeStore
+    )
+    assert service.capture_host == "unknown-host"
+
+    # A whitespace-only configured label falls back like an unset one.
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path, assistant_host_label="   "),
+        store_factory=_FakeStore,
+    )
+    assert service.capture_host == "unknown-host"
+
+
+def _walk_egress_paths(value, prefix=""):
+    """Collect every data-bearing JSON path in a response.
+
+    List items normalize to ``[]``; top-level bookkeeping keys are skipped;
+    paths in EGRESS_MAP_FIELDS are terminal (their keys are data-dependent).
+    An empty list or a None sub-object contributes nothing/its bare path, so
+    the equality assertion below forces fixtures to be fully populated.
+    """
+    if isinstance(value, dict):
+        paths = set()
+        for key, sub in value.items():
+            if not prefix and key in assistant.EGRESS_BOOKKEEPING_KEYS:
+                continue
+            path = f"{prefix}.{key}" if prefix else key
+            if path in assistant.EGRESS_MAP_FIELDS:
+                paths.add(path)
+                continue
+            paths |= _walk_egress_paths(sub, path)
+        return paths
+    if isinstance(value, list):
+        paths = set()
+        for item in value:
+            paths |= _walk_egress_paths(item, f"{prefix}[]")
+        return paths
+    return {prefix}
+
+
+def test_egress_declarations_match_emitted_paths_exactly(tmp_path):
+    """Bidirectional pin: an emitted-but-undeclared field fails, and so does a
+    declared-but-missing one. Fixtures must populate every declared path."""
+    settings = Settings(
+        data_dir=tmp_path,
+        deep_brain_excluded_apps=["com.secret.App"],
+        assistant_host_label="test-host",
+    )
+    rows = [
+        (_capture_obs("kept", ts=1000.0), "kept excerpt"),
+        (_capture_obs("gone", ts=999.0, app="com.secret.App"), "hidden"),
+    ]
+    spans = [
+        _span("a", start_ts=0.0, end_ts=100.0, bundle_id="com.a"),
+        _span("b", start_ts=100.0, end_ts=160.0, bundle_id="com.b"),
+        _span("afk", start_ts=160.0, end_ts=200.0, bundle_id="com.a", afk=1),
+        _span("red", start_ts=200.0, end_ts=230.0, detail_tier=0, reason="private"),
+        _span(
+            "gap", start_ts=230.0, end_ts=240.0,
+            bundle_id=None, detail_tier=0, reason="paused",
+        ),
+        _span("excl", start_ts=240.0, end_ts=250.0, bundle_id="com.secret.App"),
+    ]
+
+    def service_for(store):
+        return AssistantCaptureService(
+            settings=settings, store_factory=lambda: store, clock=lambda: 1000.0
+        )
+
+    responses = {
+        "recent": service_for(_FakeStore(recent=rows)).recent_capture(
+            minutes=60, limit=5
+        ),
+        "search": service_for(_FakeStore(search=rows)).search_capture(
+            query="kept", limit=5
+        ),
+        "activity": service_for(_FakeStore(spans=spans)).activity_summary(
+            minutes=1440
+        ),
+        "status": service_for(
+            _FakeStore(stats={"observations": 1, "encryption_enabled": True})
+        ).capture_status(),
+    }
+
+    for name, response in responses.items():
+        declared = set(response["egress"]["fields"])
+        emitted = _walk_egress_paths(response)
+        assert emitted == declared, (
+            f"{name}: emitted-but-undeclared {sorted(emitted - declared)}; "
+            f"declared-but-missing {sorted(declared - emitted)}"
+        )
+        assert response["egress"]["scope"] in {
+            "capture_content", "activity_metadata", "status_metadata",
+        }
+        assert response["egress"]["untrusted_content"] is (
+            response.get("captured_content_is_untrusted", False)
+        )
+
+
+def test_activity_summary_redacted_invariant_is_exact_with_fractional_spans(tmp_path):
+    # Float addition is not associative: an independently accumulated total
+    # can differ from the grouped-and-sorted component sum in the last ulp.
+    # The total is derived from the emitted components, so equality is EXACT.
+    spans = [
+        _span(
+            "f1", start_ts=0.0, end_ts=724.726879575788,
+            bundle_id="com.a", detail_tier=0, reason="private",
+        ),
+        _span(
+            "f2", start_ts=800.0, end_ts=800.0 + 541.5229705223803,
+            bundle_id="com.b", detail_tier=0, reason="blocklisted",
+        ),
+        _span(
+            "f3", start_ts=1400.0, end_ts=1400.0 + 774.7999935132281,
+            bundle_id="com.a", detail_tier=0, reason="private",
+        ),
+        _span(
+            "gap", start_ts=2200.0, end_ts=2233.3333333333335,
+            bundle_id=None, detail_tier=0, reason="paused",
+        ),
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 2400.0,
+    )
+
+    result = service.activity_summary(minutes=40)
+
+    assert result["redacted_seconds"] == (
+        sum(entry["seconds"] for entry in result["redacted_by_app"])
+        + result["redacted_other_seconds"]
+        + result["redacted_unattributed_seconds"]
+    )
+    assert result["redacted_seconds"] > 0

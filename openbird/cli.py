@@ -115,12 +115,14 @@ def assistant_install_claude(
     from openbird.assistant import (
         ASSISTANT_ACTIVITY_EGRESS_NOTICE,
         ASSISTANT_EGRESS_NOTICE,
+        ASSISTANT_STATUS_EGRESS_NOTICE,
         ClaudeConfigConflictError,
         install_claude_config,
     )
 
     _err_console.print(f"[bold yellow]ASSISTANT ACCESS[/] — {ASSISTANT_EGRESS_NOTICE}")
     _err_console.print(f"[bold yellow]ACTIVITY ACCESS[/] — {ASSISTANT_ACTIVITY_EGRESS_NOTICE}")
+    _err_console.print(f"[bold yellow]STATUS ACCESS[/] — {ASSISTANT_STATUS_EGRESS_NOTICE}")
     if not yes:
         if not sys.stdin.isatty():
             _err_console.print(
@@ -185,11 +187,13 @@ def assistant_configure_chatgpt(
     from openbird.assistant import (
         ASSISTANT_ACTIVITY_EGRESS_NOTICE,
         ASSISTANT_EGRESS_NOTICE,
+        ASSISTANT_STATUS_EGRESS_NOTICE,
         configure_chatgpt,
     )
 
     _err_console.print(f"[bold yellow]ASSISTANT ACCESS[/] — {ASSISTANT_EGRESS_NOTICE}")
     _err_console.print(f"[bold yellow]ACTIVITY ACCESS[/] — {ASSISTANT_ACTIVITY_EGRESS_NOTICE}")
+    _err_console.print(f"[bold yellow]STATUS ACCESS[/] — {ASSISTANT_STATUS_EGRESS_NOTICE}")
     if not yes:
         _err_console.print("[red]Refusing[/]. Re-run from OpenBird Settings or with --yes.")
         raise typer.Exit(code=1)

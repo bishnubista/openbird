@@ -229,6 +229,12 @@ class Settings:
     deep_brain_excluded_sources: list[str] = field(default_factory=list)
     deep_brain_excluded_observation_ids: list[str] = field(default_factory=list)
 
+    # Host label included in assistant MCP responses so a user running OpenBird
+    # on several Macs can tell whose capture they are reading. None falls back
+    # to platform.node(), then the "unknown-host" sentinel. Its egress is
+    # disclosed in the assistant install warnings and per-response notices.
+    assistant_host_label: str | None = None
+
     # Runtime Ollama host: the base URL threaded into LiteLLM as api_base
     # for ollama/* models, so the runtime provider talks to the SAME host that
     # preflight probes. None falls back to the OLLAMA_HOST / OPENBIRD_OLLAMA_HOST

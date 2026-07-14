@@ -1004,12 +1004,14 @@ class MemoryStore:
         Unlike :meth:`spans_in_range` this read is hard-bounded (``limit``) and
         projected to the columns the assistant summary aggregates — it never
         returns ``window``, ``url_host``, or ``identity_key``, so tier-1 titles
-        cannot reach an assistant even by a serialization mistake. Callers pass
-        ``limit = cap + 1`` and treat a full result as overflow (fail closed).
+        cannot reach an assistant even by a serialization mistake. ``reason``
+        is included: it is the closed tier-0 enum (never content) that lets the
+        summary attribute redacted time. Callers pass ``limit = cap + 1`` and
+        treat a full result as overflow (fail closed).
         """
         rows = self.conn.execute(
-            "SELECT span_id, start_ts, end_ts, bundle_id, detail_tier, afk, meeting "
-            "FROM activity_spans WHERE start_ts <= ? AND end_ts >= ? "
+            "SELECT span_id, start_ts, end_ts, bundle_id, detail_tier, afk, meeting, "
+            "reason FROM activity_spans WHERE start_ts <= ? AND end_ts >= ? "
             "ORDER BY start_ts, span_id LIMIT ?",
             (float(end_ts), float(start_ts), max(0, int(limit))),
         ).fetchall()

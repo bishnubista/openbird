@@ -789,7 +789,56 @@ def test_assistant_activity_summary_route_is_metadata_only_egress() -> None:
     assert "captured_text" in route["forbidden_fields"]
     assert "window_title" in route["forbidden_fields"]
     assert "url_host" in route["forbidden_fields"]
-    assert "excluded_or_tier0_bundle_id" in route["forbidden_fields"]
+    # Redacted (tier-0) time is attributed per app+reason — that is captured,
+    # disclosed metadata. EXCLUDED apps remain the unnamed hiding mechanism.
+    assert "excluded_bundle_id" in route["forbidden_fields"]
+    assert "redacted_by_app_bundle_id_reason_seconds" in route["captured_fields"]
+    assert "redacted_unattributed_seconds" in route["captured_fields"]
+    assert "capture_host_label" in route["captured_fields"]
     assert "observation_derived_statistics" in route["forbidden_fields"]
     assert "cli.assistant_install_warning" in route["truth_surface"]
+    assert "app.assistant_connect_confirmations" in route["truth_surface"]
     assert "mcp.activity_egress_notice" in route["truth_surface"]
+
+
+def test_assistant_capture_status_route_is_declared_and_count_scoped() -> None:
+    route = _routes()["assistant.capture_status"]
+
+    assert route["class"] == "third-party-cloud"
+    assert route["egress"]["default"] == "none_until_tool_invocation"
+    assert route["enforcement"]["transport"] == "local_stdio_only"
+    assert route["enforcement"]["model_calls"] == "forbidden"
+    assert "store-lifetime" in route["enforcement"]["counts_scope"]
+    assert "observation_total_count" in route["captured_fields"]
+    assert "capture_host_label" in route["captured_fields"]
+    assert "captured_text" in route["forbidden_fields"]
+    assert "bundle_id" in route["forbidden_fields"]
+    assert "cli.assistant_install_warning" in route["truth_surface"]
+    assert "app.assistant_connect_confirmations" in route["truth_surface"]
+    assert "mcp.status_egress_notice" in route["truth_surface"]
+
+
+def test_every_assistant_mcp_tool_maps_to_a_declared_route(tmp_path) -> None:
+    # The MCP server's tool surface and the privacy manifest must not drift:
+    # each of the four tools is covered by exactly one assistant route.
+    routes = _routes()
+    assert {
+        "assistant.mcp_read",
+        "assistant.activity_summary",
+        "assistant.capture_status",
+    } <= set(routes)
+    # mcp_read covers both content tools; the other two map one-to-one.
+    import asyncio
+
+    from openbird import assistant as assistant_module
+
+    service = assistant_module.AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path), store_factory=lambda: None
+    )
+    tools = asyncio.run(assistant_module.create_mcp_server(service).list_tools())
+    assert {tool.name for tool in tools} == {
+        "openbird_recent_capture",   # assistant.mcp_read
+        "openbird_search_capture",   # assistant.mcp_read
+        "openbird_activity_summary", # assistant.activity_summary
+        "openbird_capture_status",   # assistant.capture_status
+    }
