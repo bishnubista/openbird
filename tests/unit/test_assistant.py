@@ -1077,6 +1077,8 @@ def test_store_capture_spans_overlapping_is_projected_and_bounded(tmp_path):
 
 
 def test_schema_v8_keyset_index_exists_on_fresh_and_migrated_dbs(tmp_path):
+    from openbird.memory.migrations import SCHEMA_VERSION
+
     settings = Settings(data_dir=tmp_path, embed_dim=64)
     store = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
 
@@ -1099,7 +1101,7 @@ def test_schema_v8_keyset_index_exists_on_fresh_and_migrated_dbs(tmp_path):
         assert "idx_observations_source_ts_id" in index_names(reopened)
         version = reopened.conn.execute("PRAGMA user_version").fetchone()
         value = next(iter(version.values())) if isinstance(version, dict) else version[0]
-        assert int(value) == 8
+        assert int(value) == SCHEMA_VERSION >= 8
     finally:
         reopened.close()
 

@@ -78,6 +78,9 @@ private struct DirtyCapture {
     var count: Int
 }
 
+private let genericAXAdapterId = "generic_ax"
+private let genericAXExtractorVersion = "generic_ax_v1"
+
 // MARK: - Locked POSIX emitter (EPIPE-aware)
 
 /// Serializes ALL stream-mode stdout writes (walk queue vs main run loop) and
@@ -456,8 +459,8 @@ final class StreamEngine {
                 finishedTs: Date().timeIntervalSince1970,
                 bundleId: bundleId,
                 trigger: kind,
-                adapterId: "generic_ax",
-                extractorVersion: "generic_ax_v1",
+                adapterId: genericAXAdapterId,
+                extractorVersion: genericAXExtractorVersion,
                 outcome: .skippedPaused,
                 completeness: CaptureCompleteness.none,
                 reasonCodes: [.paused]))
@@ -511,8 +514,8 @@ final class StreamEngine {
                 finishedTs: finishedTs,
                 bundleId: result.bundleId,
                 trigger: kind,
-                adapterId: "generic_ax",
-                extractorVersion: "generic_ax_v1",
+                adapterId: genericAXAdapterId,
+                extractorVersion: genericAXExtractorVersion,
                 policyTier: result.policyTier,
                 outcome: result.outcome,
                 nodesVisited: result.nodesVisited,
@@ -543,8 +546,8 @@ final class StreamEngine {
             startedTs: startedTs,
             bundleId: bundleId,
             trigger: trigger,
-            adapterId: "generic_ax",
-            extractorVersion: "generic_ax_v1")
+            adapterId: genericAXAdapterId,
+            extractorVersion: genericAXExtractorVersion)
     }
 
     private func recordInflightRequest(
