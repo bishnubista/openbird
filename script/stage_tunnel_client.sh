@@ -4,6 +4,7 @@ set -euo pipefail
 
 DEST="${1:-}"
 [[ -n "$DEST" ]] || { echo "usage: $0 DEST" >&2; exit 2; }
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 VERSION="0.0.10"
 case "$(uname -m)" in
@@ -31,10 +32,11 @@ if [[ -n "${OPENBIRD_TUNNEL_CLIENT:-}" ]]; then
   }
   cp "$OPENBIRD_TUNNEL_CLIENT" "$DEST"
   chmod +x "$DEST"
+  "$ROOT_DIR/script/smoke_tunnel_client.sh" "$DEST"
   exit 0
 fi
 
-CACHE_DIR="${OPENBIRD_BUILD_CACHE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/dist/cache}"
+CACHE_DIR="${OPENBIRD_BUILD_CACHE:-$ROOT_DIR/dist/cache}"
 ASSET="tunnel-client-v${VERSION}-darwin-${ARCH}.zip"
 ARCHIVE="$CACHE_DIR/$ASSET"
 URL="https://github.com/openai/tunnel-client/releases/download/v${VERSION}/$ASSET"
@@ -59,3 +61,4 @@ verify_macho "$TMP_DIR/tunnel-client" || {
 }
 cp "$TMP_DIR/tunnel-client" "$DEST"
 chmod +x "$DEST"
+"$ROOT_DIR/script/smoke_tunnel_client.sh" "$DEST"

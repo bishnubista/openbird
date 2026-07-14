@@ -593,7 +593,8 @@ def test_chatgpt_run_arguments_are_privacy_hardened(tmp_path):
 
     joined = " ".join(arguments)
     assert "--health.listen-addr 127.0.0.1:0" in joined
-    assert "--admin-ui.log-buffer-events 0" in joined
+    # v0.0.10 rejects zero with "log-buffer-events must be greater than zero".
+    assert "--admin-ui.log-buffer-events 1" in joined
     assert "--log.file /dev/null" in joined
     assert "--open-web-ui" not in arguments
     assert "--allow-remote-ui" not in arguments
@@ -663,6 +664,7 @@ def test_tunnel_client_pins_match_homebrew_formula():
     assert formula.count(f"tunnel-client-v{version.group(1)}-") == 2
     for checksum in checksums:
         assert formula.count(f'sha256 "{checksum}"') == 1
+    assert script.count('"$ROOT_DIR/script/smoke_tunnel_client.sh" "$DEST"') == 2
 
 
 # -- v2: cursor pagination, dedup groups, activity summary ---------------------
