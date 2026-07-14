@@ -474,6 +474,7 @@ def test_cli_human_table_omits_fixture_text():
     assert "SYNTHETIC_FORM_SENTINEL" not in result.stdout
     assert "Alpha note ready to review" not in result.stdout
     assert "Capture eval" in result.stdout
+    assert "Baseline gate failures: precision_below_minimum" in result.stdout
 
 
 def test_cli_candidate_gate_failure_uses_exit_one_without_leaking_text(tmp_path):
@@ -535,6 +536,16 @@ def test_cli_candidate_gate_failure_uses_exit_one_without_leaking_text(tmp_path)
     payload = json.loads(result.stdout)
     assert payload["passed"] is False
     assert "low_baseline_f1_gain_below_minimum" in payload["reason_codes"]
+
+    human = CliRunner().invoke(
+        cli.app,
+        ["eval", "capture", str(fixture), "--candidate", "candidate"],
+    )
+
+    assert human.exit_code == 1
+    assert "PRIVATE_CLI_SENTINEL" not in human.stdout
+    assert "Candidate gate failures: recall_below_minimum" in human.stdout
+    assert "Reason codes:" in human.stdout
 
 
 def test_cli_bad_fixture_uses_exit_two_without_leaking_body(tmp_path):

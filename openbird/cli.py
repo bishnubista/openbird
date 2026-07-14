@@ -3008,6 +3008,17 @@ def eval_capture(
                 row.append(str(candidate_payload[key]))
             table.add_row(*row)
         _console.print(table)
+        baseline_failures = baseline_payload["absolute_gate_failures"]
+        assert isinstance(baseline_failures, list)
+        if baseline_failures:
+            _console.print("Baseline gate failures: " + ", ".join(baseline_failures))
+        if candidate_payload is not None:
+            candidate_failures = candidate_payload["absolute_gate_failures"]
+            assert isinstance(candidate_failures, list)
+            if candidate_failures:
+                _console.print(
+                    "Candidate gate failures: " + ", ".join(candidate_failures)
+                )
         if report.reason_codes:
             _console.print("Reason codes: " + ", ".join(report.reason_codes))
 
