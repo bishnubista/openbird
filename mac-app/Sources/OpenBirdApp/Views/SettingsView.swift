@@ -65,16 +65,11 @@ struct SettingsView: View {
                 + "memory; secure fields, private windows, and password managers stay blocked."
             )
         }
-        .alert("Connect Claude Desktop?", isPresented: $pendingClaudeConnection) {
+        .alert(AssistantConsentCopy.claudeConnectTitle, isPresented: $pendingClaudeConnection) {
             Button("Cancel", role: .cancel) {}
             Button("Connect") { model.connectClaudeAssistant() }
         } message: {
-            Text(
-                "Claude can request bounded OpenBird excerpts, app identifiers, timestamps, "
-                + "app usage durations, and activity patterns (focus, meetings, context switches). "
-                + "Those results are sent to Anthropic and cannot be recalled by deleting local memory. "
-                + "OpenBird never sends data in the background."
-            )
+            Text(AssistantConsentCopy.claudeConnectMessage)
         }
         .sheet(
             isPresented: $pendingChatGPTConnection,
@@ -722,12 +717,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Connect ChatGPT")
                 .font(.system(size: 20, weight: .bold))
-            Text(
-                "ChatGPT connects to this Mac through OpenAI Secure MCP Tunnel. "
-                + "OpenBird never uploads capture in the background; bounded excerpts, app "
-                + "usage durations, and activity patterns leave only when you ask ChatGPT "
-                + "to use an OpenBird tool."
-            )
+            Text(AssistantConsentCopy.chatGPTConnectMessage)
             .font(.system(size: 12.5))
             .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 8) {

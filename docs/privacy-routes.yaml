@@ -657,6 +657,7 @@ routes:
       - timestamp
       - source
       - observation_id
+      - capture_host_label
     forbidden_fields:
       - raw_url
       - raw_window_title
@@ -700,13 +701,16 @@ routes:
       - context_switch_count
       - focus_block_timestamps
       - folded_tail_app_count_and_seconds
-      - unnamed_excluded_and_redacted_second_totals
+      - redacted_by_app_bundle_id_reason_seconds
+      - redacted_unattributed_seconds
+      - unnamed_excluded_second_total
+      - capture_host_label
     forbidden_fields:
       - captured_text
       - window_title
       - url_host
       - identity_key
-      - excluded_or_tier0_bundle_id
+      - excluded_bundle_id
       - observation_derived_statistics
     storage:
       - no_new_openbird_storage
@@ -731,6 +735,44 @@ routes:
       - app.assistant_connect_confirmations
       - mcp.tool_descriptions
       - mcp.activity_egress_notice
+
+  - id: assistant.capture_status
+    class: third-party-cloud
+    status: implemented_stdio_read_only
+    source: assistant-invoked metadata-only store status read (no content, no spans)
+    derives_from:
+      - capture.active_window
+    captured_fields:
+      - observation_total_count
+      - encryption_enabled_flag
+      - exclusion_config_counts
+      - capture_host_label
+    forbidden_fields:
+      - captured_text
+      - window_title
+      - url_host
+      - bundle_id
+      - observation_ids
+    storage:
+      - no_new_openbird_storage
+      - assistant_provider_request_after_tool_invocation
+    egress:
+      default: none_until_tool_invocation
+      destination: connected_assistant_provider
+      warning: store totals, encryption state, exclusion counts, and the host label leave this Mac and cannot be recalled by local deletion
+    enforcement:
+      transport: local_stdio_only
+      install_requires: explicit warning and interactive confirmation or --yes
+      counts_scope: store-lifetime totals, never windowed activity
+      model_calls: forbidden
+    deletion:
+      command: openbird data purge/prune
+      caveat: removes future retrievability only; cannot recall prior assistant payloads
+    truth_surface:
+      - cli.assistant_install_warning
+      - app.assistant_connect_confirmations
+      - mcp.tool_descriptions
+      - mcp.status_egress_notice
 
   - id: routines.summary
     class: unknown
