@@ -2939,6 +2939,82 @@ def meeting() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@eval_app.command("capture")
+def eval_capture(
+    fixture: Path = typer.Argument(..., help="Synthetic capture eval JSONL fixture."),
+    baseline: str = typer.Option(
+        "current_helper",
+        "--baseline",
+        help="Strategy name used as the comparison baseline.",
+    ),
+    candidate: Optional[str] = typer.Option(
+        None,
+        "--candidate",
+        help="Optional strategy name to evaluate for promotion.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Measure synthetic capture results without reading the live capture store."""
+    from openbird.capture import (
+        capture_eval_report_payload,
+        load_capture_eval_jsonl,
+        run_capture_eval,
+    )
+
+    try:
+        cases = load_capture_eval_jsonl(fixture)
+        report = run_capture_eval(
+            cases,
+            baseline_strategy=baseline,
+            candidate_strategy=candidate,
+        )
+    except (OSError, ValueError) as exc:
+        _err_console.print(f"[red]Invalid capture eval fixture:[/] {escape(str(exc))}")
+        raise typer.Exit(code=2) from exc
+
+    payload = capture_eval_report_payload(report)
+    if as_json:
+        _console.print_json(data=payload)
+    else:
+        table = Table(title="Capture eval", show_header=True, header_style="bold")
+        table.add_column("Metric")
+        table.add_column("Baseline", justify="right")
+        if report.candidate is not None:
+            table.add_column("Candidate", justify="right")
+
+        baseline_payload = payload["baseline"]
+        candidate_payload = payload["candidate"]
+        assert isinstance(baseline_payload, dict)
+        assert candidate_payload is None or isinstance(candidate_payload, dict)
+        table.add_row(
+            "passed",
+            "diagnostic" if report.mode == "baseline" else "—",
+            *([str(report.passed)] if report.candidate is not None else []),
+        )
+        for key in (
+            "total_cases",
+            "precision",
+            "recall",
+            "f1",
+            "exclusion_accuracy",
+            "minimum_repeat_similarity",
+            "changed_within_3s",
+            "p95_extraction_ms",
+            "budget_breach_count",
+            "forbidden_leak_count",
+        ):
+            row = [key, str(baseline_payload[key])]
+            if candidate_payload is not None:
+                row.append(str(candidate_payload[key]))
+            table.add_row(*row)
+        _console.print(table)
+        if report.reason_codes:
+            _console.print("Reason codes: " + ", ".join(report.reason_codes))
+
+    if report.mode == "candidate" and not report.passed:
+        raise typer.Exit(code=1)
+
+
 @eval_app.command("signals")
 def eval_signals(
     fixture: Path = typer.Argument(..., help="Signal eval JSONL fixture."),
