@@ -145,17 +145,19 @@ class _CursorTable:
         return handle
 
     def lookup(self, handle: str) -> _PageState:
-        """Return live state for ``handle`` or raise ``ValueError`` (fail closed)."""
+        """Pop live state for ``handle`` or raise ``ValueError`` (fail closed).
+
+        Handles are single-use: consuming one retires it atomically, so a walk
+        holds exactly one live handle (its ``next_cursor``) and cannot churn
+        the LRU out from under a concurrent walk. A retried/replayed token
+        fails closed like an unknown one — the assistant starts a fresh walk.
+        """
         if not isinstance(handle, str) or not handle or len(handle) > MAX_CURSOR_CHARS:
             raise ValueError("cursor is not a valid page token")
         with self._lock:
-            state = self._entries.get(handle)
-            if state is None:
+            state = self._entries.pop(handle, None)
+            if state is None or self._clock() - state.issued_at > CURSOR_TTL_SECONDS:
                 raise ValueError("cursor is unknown or expired; make a fresh request")
-            if self._clock() - state.issued_at > CURSOR_TTL_SECONDS:
-                del self._entries[handle]
-                raise ValueError("cursor is unknown or expired; make a fresh request")
-            self._entries.move_to_end(handle)
             return state
 
 
@@ -520,7 +522,9 @@ class AssistantCaptureService:
             "result_count": len(results),
             "excluded_observations": excluded_count,
             "excluded_by": dict(sorted(excluded_by.items())),
-            "truncated": stopped_early,
+            # True whenever this page did not represent the rest of the window —
+            # a group/char-budget stop OR a scan-cap stop; next_cursor recovers it.
+            "truncated": stopped_early or more_beyond_scan,
             "next_cursor": next_cursor,
         }
 

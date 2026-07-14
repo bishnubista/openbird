@@ -1097,3 +1097,59 @@ def test_schema_v8_keyset_index_exists_on_fresh_and_migrated_dbs(tmp_path):
         assert int(value) == 8
     finally:
         reopened.close()
+
+
+def test_cursor_handles_are_single_use(tmp_path):
+    rows = [
+        (_capture_obs(f"row-{i}", ts=1000.0 - i), f"text {i}") for i in range(10)
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(recent=rows),
+        clock=lambda: 1000.0,
+    )
+    cursor = service.recent_capture(minutes=60, limit=3)["next_cursor"]
+    assert cursor is not None
+
+    service.recent_capture(cursor=cursor)
+    with pytest.raises(ValueError, match="unknown or expired"):
+        service.recent_capture(cursor=cursor)  # replay of a consumed handle
+
+
+def test_recent_capture_scan_cap_page_of_duplicates_reports_truncated(tmp_path):
+    scan_cap = assistant.SCAN_CAP
+    rows = [
+        (
+            _capture_obs(f"dup-{i}", ts=500.0, hash_="hash-shared"),
+            "same text every time",
+        )
+        for i in range(scan_cap + 1)
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(recent=rows),
+        clock=lambda: 1000.0,
+    )
+
+    result = service.recent_capture(minutes=60, limit=20)
+
+    assert result["result_count"] == 1
+    assert result["results"][0]["seen_count"] == scan_cap
+    assert result["next_cursor"] is not None
+    assert result["truncated"] is True  # the scan cap, not the group cap, hit
+
+
+def test_cli_assistant_warnings_disclose_activity_egress(monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    install = runner.invoke(cli.app, ["assistant", "install-claude"])
+    chatgpt = runner.invoke(
+        cli.app, ["assistant", "configure-chatgpt", "--tunnel-id", "tunnel_x"]
+    )
+
+    for result in (install, chatgpt):
+        assert result.exit_code == 1
+        assert "ASSISTANT ACCESS" in result.output
+        assert "ACTIVITY ACCESS" in result.output
+        assert "activity patterns" in result.output
