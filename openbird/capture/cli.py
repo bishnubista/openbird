@@ -210,7 +210,9 @@ def _report_and_finish(stats, *, once: bool) -> None:
         f"[green]Capture {'pass' if once else 'session'} complete.[/] "
         f"received={stats.received} ingested={stats.ingested} "
         f"coalesced={stats.coalesced} rejected={stats.rejected} errors={stats.errors} "
-        f"heartbeats={stats.heartbeats} afk_transitions={stats.afk_transitions}"
+        f"heartbeats={stats.heartbeats} afk_transitions={stats.afk_transitions} "
+        f"attempts_started={stats.capture_attempts_started} "
+        f"attempts_finished={stats.capture_attempts_finished}"
     )
     if stats.received > 0 and stats.ingested == 0 and stats.errors > 0:
         _err_console.print(

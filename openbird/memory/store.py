@@ -38,6 +38,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from openbird.capture.attempts import CAPTURE_BUNDLE_ID_RE, CAPTURE_REASON_CODES
 from openbird.config import Settings, get_settings
 from openbird.llm.base import LLMProviderProtocol
 from openbird.llm.provider import create_llm_provider
@@ -51,7 +52,6 @@ from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
 from openbird.types import Observation, SearchHit
 
 _log = logging.getLogger("openbird.memory")
-
 
 def _log_rerank_skip(reason: str) -> None:
     """Log a reranker fallback with a STRUCTURED, content-free reason code.
@@ -527,6 +527,156 @@ class MemoryStore:
             source=source,
             span_id=span_id,
         )
+
+    def record_capture_attempt(self, **attempt: object) -> dict:
+        """Upsert one strictly metadata-only capture-attempt event.
+
+        The daemon owns validation against closed vocabularies. This store API
+        owns atomic started->finished updates and the observation/successor FKs.
+        Captured text, titles, URLs, and hashes are intentionally absent from
+        both the signature and table schema.
+        """
+        reason_codes = attempt.get("reason_codes")
+        if (
+            not isinstance(reason_codes, (list, tuple))
+            or len(reason_codes) > 16
+            or any(
+                not isinstance(reason, str)
+                or reason not in CAPTURE_REASON_CODES
+                for reason in reason_codes
+            )
+        ):
+            raise ValueError("invalid capture-attempt reason codes")
+        bundle_id = attempt.get("bundle_id")
+        if bundle_id is not None and (
+            not isinstance(bundle_id, str)
+            or CAPTURE_BUNDLE_ID_RE.fullmatch(bundle_id) is None
+        ):
+            raise ValueError("invalid capture-attempt bundle id")
+        for key in (
+            "trigger_ts", "started_ts", "finished_ts", "earliest_coalesced_ts"
+        ):
+            value = attempt.get(key)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+            ):
+                raise ValueError("invalid capture-attempt timestamp")
+        for key in (
+            "trigger_seq", "nodes_visited", "bytes_emitted", "elapsed_ms",
+            "coalesced_trigger_count",
+        ):
+            value = attempt.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("invalid capture-attempt counter")
+        for key in ("attempt_id", "helper_epoch", "successor_attempt_id"):
+            value = attempt.get(key)
+            if value is None and key == "successor_attempt_id":
+                continue
+            if not isinstance(value, str):
+                raise ValueError("invalid capture-attempt id")
+            try:
+                uuid.UUID(value)
+            except ValueError as exc:
+                raise ValueError("invalid capture-attempt id") from exc
+        reason_json = json.dumps(list(reason_codes), separators=(",", ":"))
+        values = (
+            attempt["attempt_id"],
+            attempt["helper_epoch"],
+            attempt["trigger_seq"],
+            attempt["trigger_ts"],
+            attempt.get("started_ts"),
+            attempt.get("finished_ts"),
+            attempt["status"],
+            attempt.get("bundle_id"),
+            attempt["trigger"],
+            attempt.get("adapter_id"),
+            attempt.get("extractor_version"),
+            attempt.get("policy_tier"),
+            attempt.get("outcome"),
+            attempt.get("nodes_visited", 0),
+            attempt.get("bytes_emitted", 0),
+            attempt.get("elapsed_ms", 0),
+            attempt.get("completeness"),
+            reason_json,
+            attempt.get("coalesced_trigger_count", 0),
+            attempt.get("earliest_coalesced_ts"),
+            attempt.get("successor_attempt_id"),
+            attempt.get("observation_id"),
+        )
+        try:
+            self._begin()
+            self.conn.execute(
+                """
+                INSERT INTO capture_attempts(
+                    attempt_id, helper_epoch, trigger_seq, trigger_ts,
+                    started_ts, finished_ts, status, bundle_id, trigger,
+                    adapter_id, extractor_version, policy_tier, outcome,
+                    nodes_visited, bytes_emitted, elapsed_ms, completeness,
+                    reason_codes_json, coalesced_trigger_count,
+                    earliest_coalesced_ts, successor_attempt_id, observation_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(attempt_id) DO UPDATE SET
+                    helper_epoch = excluded.helper_epoch,
+                    trigger_seq = excluded.trigger_seq,
+                    trigger_ts = excluded.trigger_ts,
+                    started_ts = COALESCE(excluded.started_ts, capture_attempts.started_ts),
+                    finished_ts = COALESCE(excluded.finished_ts, capture_attempts.finished_ts),
+                    status = CASE
+                        WHEN capture_attempts.status = 'finished'
+                         AND excluded.status = 'started' THEN capture_attempts.status
+                        ELSE excluded.status
+                    END,
+                    bundle_id = COALESCE(excluded.bundle_id, capture_attempts.bundle_id),
+                    trigger = excluded.trigger,
+                    adapter_id = COALESCE(excluded.adapter_id, capture_attempts.adapter_id),
+                    extractor_version = COALESCE(
+                        excluded.extractor_version, capture_attempts.extractor_version),
+                    policy_tier = COALESCE(excluded.policy_tier, capture_attempts.policy_tier),
+                    outcome = COALESCE(excluded.outcome, capture_attempts.outcome),
+                    nodes_visited = CASE WHEN excluded.status = 'finished'
+                        THEN excluded.nodes_visited ELSE capture_attempts.nodes_visited END,
+                    bytes_emitted = CASE WHEN excluded.status = 'finished'
+                        THEN excluded.bytes_emitted ELSE capture_attempts.bytes_emitted END,
+                    elapsed_ms = CASE WHEN excluded.status = 'finished'
+                        THEN excluded.elapsed_ms ELSE capture_attempts.elapsed_ms END,
+                    completeness = COALESCE(
+                        excluded.completeness, capture_attempts.completeness),
+                    reason_codes_json = CASE WHEN excluded.status = 'finished'
+                        THEN excluded.reason_codes_json
+                        ELSE capture_attempts.reason_codes_json END,
+                    coalesced_trigger_count = CASE WHEN excluded.status = 'finished'
+                        THEN excluded.coalesced_trigger_count
+                        ELSE capture_attempts.coalesced_trigger_count END,
+                    earliest_coalesced_ts = COALESCE(
+                        excluded.earliest_coalesced_ts,
+                        capture_attempts.earliest_coalesced_ts),
+                    successor_attempt_id = COALESCE(
+                        excluded.successor_attempt_id,
+                        capture_attempts.successor_attempt_id),
+                    observation_id = COALESCE(
+                        excluded.observation_id, capture_attempts.observation_id)
+                """,
+                values,
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        row = self.conn.execute(
+            "SELECT * FROM capture_attempts WHERE attempt_id = ?",
+            (attempt["attempt_id"],),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("capture attempt row was not inserted")
+        item = dict(row)
+        try:
+            item["reason_codes"] = json.loads(item.pop("reason_codes_json"))
+        except json.JSONDecodeError:
+            item["reason_codes"] = []
+        return item
 
     # -- search ---------------------------------------------------------------
 
@@ -2593,6 +2743,11 @@ class MemoryStore:
                     (ENTITY_AGGREGATION_KV_PREFIX + "%",),
                 )
                 cur.execute("DELETE FROM reasoning_send_ledger")
+                # Capture attempts contain no content, but bundle ids and
+                # timestamps are still private activity metadata. A full purge
+                # removes them; selective/retention purges keep accountability
+                # and let observation_id clear through ON DELETE SET NULL.
+                cur.execute("DELETE FROM capture_attempts")
                 cur.execute("DELETE FROM observations")
                 cur.execute("DELETE FROM activity_spans")
                 cur.execute("DELETE FROM blob_chunks")

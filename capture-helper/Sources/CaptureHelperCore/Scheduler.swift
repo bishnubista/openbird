@@ -18,7 +18,7 @@
 
 /// Why a capture fired. Values are the closed vocabulary the Python daemon
 /// sanitizes against (`_CAPTURE_TRIGGERS` in daemon.py) — keep in lockstep.
-public enum TriggerKind: String, Sendable {
+public enum TriggerKind: String, Encodable, Sendable {
     case appActivated = "app_activated"
     case windowChanged = "window_changed"
     case titleChanged = "title_changed"
@@ -80,7 +80,8 @@ public struct SchedulerConfig: Sendable {
 
 public struct Scheduler: Sendable {
     private let config: SchedulerConfig
-    /// Monotonic time of the last capture we ordered (nil = none yet).
+    /// Monotonic time of the last capture the engine actually admitted
+    /// (nil = none yet). A request alone never advances the cadence floor.
     private var lastCaptureAt: Double?
     /// Armed debounce: the pending trigger and its fire deadline.
     private var pending: (kind: TriggerKind, deadline: Double)?
@@ -89,6 +90,17 @@ public struct Scheduler: Sendable {
 
     public init(config: SchedulerConfig = SchedulerConfig()) {
         self.config = config
+    }
+
+    /// Monotonic deadline for the currently armed debounce/floor, if any.
+    /// StreamEngine uses this to install a one-shot wake-up instead of waiting
+    /// for the slower periodic idle timer.
+    public var nextDeadline: Double? { pending?.deadline }
+
+    /// Acknowledge that the engine actually enqueued a capture walk.
+    /// This is the ONLY operation that advances the minimum-gap clock.
+    public mutating func captureAdmitted(at now: Double) {
+        lastCaptureAt = now
     }
 
     /// Earliest monotonic time the next capture may run (the >=1s floor).
@@ -197,7 +209,6 @@ public struct Scheduler: Sendable {
             }
             return []
         }
-        lastCaptureAt = now
         return [.capture(kind)]
     }
 }

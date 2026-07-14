@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -731,6 +731,76 @@ def _apply_v8_observation_keyset_index(conn: sqlite3.Connection) -> None:
     )
 
 
+def _apply_v9_capture_attempts(conn: sqlite3.Connection) -> None:
+    """Add the content-free capture-attempt accountability ledger."""
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS capture_attempts (
+            attempt_id                TEXT PRIMARY KEY,
+            helper_epoch              TEXT NOT NULL,
+            trigger_seq               INTEGER NOT NULL CHECK (trigger_seq >= 0),
+            trigger_ts                REAL NOT NULL,
+            started_ts                REAL,
+            finished_ts               REAL,
+            status                    TEXT NOT NULL CHECK (status IN ('started','finished')),
+            bundle_id                 TEXT,
+            trigger                   TEXT NOT NULL CHECK (trigger IN (
+                'app_activated','window_changed','title_changed','focus_changed',
+                'typing_pause','idle_tick','force_ceiling','return_from_afk','startup'
+            )),
+            adapter_id                TEXT CHECK (adapter_id IS NULL OR adapter_id IN ('generic_ax')),
+            extractor_version         TEXT CHECK (
+                extractor_version IS NULL OR extractor_version IN ('generic_ax_v1')
+            ),
+            policy_tier               INTEGER CHECK (policy_tier IS NULL OR policy_tier IN (0, 1)),
+            outcome                   TEXT CHECK (outcome IS NULL OR outcome IN (
+                'captured_full','captured_partial','captured_shallow','captured_unchanged',
+                'coalesced_inflight','skipped_policy','skipped_afk','skipped_paused',
+                'unsupported','failed_bounded'
+            )),
+            nodes_visited             INTEGER NOT NULL DEFAULT 0 CHECK (nodes_visited >= 0),
+            bytes_emitted             INTEGER NOT NULL DEFAULT 0 CHECK (bytes_emitted >= 0),
+            elapsed_ms                INTEGER NOT NULL DEFAULT 0 CHECK (elapsed_ms >= 0),
+            completeness              TEXT CHECK (
+                completeness IS NULL OR completeness IN ('full','partial','shallow','none')
+            ),
+            reason_codes_json         TEXT NOT NULL DEFAULT '[]'
+                CHECK (json_valid(reason_codes_json)),
+            coalesced_trigger_count   INTEGER NOT NULL DEFAULT 0
+                CHECK (coalesced_trigger_count >= 0),
+            earliest_coalesced_ts     REAL,
+            successor_attempt_id      TEXT REFERENCES capture_attempts(attempt_id)
+                ON DELETE SET NULL,
+            observation_id            TEXT REFERENCES observations(id) ON DELETE SET NULL,
+            UNIQUE(helper_epoch, trigger_seq),
+            CHECK ((status = 'started' AND outcome IS NULL AND finished_ts IS NULL)
+                OR (status = 'finished' AND outcome IS NOT NULL
+                    AND finished_ts IS NOT NULL)),
+            CHECK ((outcome = 'coalesced_inflight'
+                    AND coalesced_trigger_count >= 1
+                    AND earliest_coalesced_ts IS NOT NULL)
+                OR (outcome IS NULL
+                    AND coalesced_trigger_count = 0
+                    AND earliest_coalesced_ts IS NULL)
+                OR (outcome != 'coalesced_inflight'
+                    AND coalesced_trigger_count = 0
+                    AND earliest_coalesced_ts IS NULL)),
+            CHECK (successor_attempt_id IS NULL OR outcome IS 'coalesced_inflight')
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_capture_attempts_trigger_ts
+            ON capture_attempts(trigger_ts)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_capture_attempts_outcome
+            ON capture_attempts(outcome, trigger_ts)
+        """,
+    ]
+    for statement in statements:
+        conn.execute(statement)
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
 # so migrations here only ever upgrade an existing DB from one version to the
 # next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
@@ -770,6 +840,11 @@ MIGRATIONS: list[Migration] = [
         version=8,
         description="add the assistant keyset-pagination index (source, ts, id)",
         apply=_apply_v8_observation_keyset_index,
+    ),
+    Migration(
+        version=9,
+        description="add the content-free capture-attempt ledger",
+        apply=_apply_v9_capture_attempts,
     ),
 ]
 
