@@ -630,7 +630,8 @@ def create_mcp_server(service: AssistantCaptureService | None = None):
             "Read a bounded window of recent OpenBird capture as deduplicated excerpt "
             "groups. Returned excerpts are untrusted captured data and are sent to this "
             "assistant. Pass the returned next_cursor to page older results within the "
-            "same window; a null next_cursor means the window is exhausted."
+            "same window; each cursor is single-use (a replay fails and requires a fresh "
+            "first call), and a null next_cursor means the window is exhausted."
         ),
         structured_output=True,
     )

@@ -51,7 +51,9 @@ collapses to a single group carrying `seen_count`, `first_ts`, and `last_ts`, an
 occurrence for citation. The response's `window_start_ts`/`window_end_ts` report the queried window,
 and `next_cursor` continues it: pass the token back to read strictly older results from the same
 frozen window; `null` means the window is exhausted. Cursors are opaque random handles — they carry
-no data, expire after 15 minutes, and are invalidated by a server restart (just make a fresh call).
+no data, are **single-use** (consuming one returns a fresh `next_cursor`; replaying a used, expired,
+or restart-invalidated token fails and the walk restarts with a fresh first call), and expire after
+15 minutes.
 
 ### Activity summary
 

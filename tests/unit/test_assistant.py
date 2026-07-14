@@ -760,8 +760,9 @@ def test_recent_capture_cursor_window_is_frozen_against_new_inserts(tmp_path):
     def factory():
         return MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
 
+    now = [1025.0]
     service = AssistantCaptureService(
-        settings=settings, store_factory=factory, clock=lambda: 1025.0
+        settings=settings, store_factory=factory, clock=lambda: now[0]
     )
     first = service.recent_capture(minutes=60, limit=20)
     assert first["next_cursor"] is not None
@@ -772,11 +773,15 @@ def test_recent_capture_cursor_window_is_frozen_against_new_inserts(tmp_path):
             "newer than the frozen window",
             app="com.example.Editor",
             source="capture",
-            ts=2000.0,
+            ts=1050.0,
         )
     finally:
         concurrent.close()
 
+    # The wall clock advances between pages (within the cursor TTL); a
+    # re-derived `[now - minutes, now]` window would now include ts=1050.0.
+    # The frozen window ends at 1025.0 and must not.
+    now[0] = 1100.0
     second = service.recent_capture(minutes=60, cursor=first["next_cursor"])
     texts = [item["excerpt"] for item in second["results"]]
     assert "newer than the frozen window" not in texts
