@@ -29,18 +29,42 @@ Restart Claude Desktop after connecting. Example prompts:
 
 ## Tool contract
 
-The server exposes exactly three read-only tools:
+The server exposes exactly four read-only tools:
 
 | Tool | Purpose | Bounds |
 |---|---|---|
-| `openbird_recent_capture` | Recent captured excerpts | 1-1440 minutes, 1-20 requested results |
+| `openbird_recent_capture` | Recent captured excerpts, deduplicated and pageable | 1-1440 minutes, 1-20 groups per page, 200-row page scan |
 | `openbird_search_capture` | Local BM25 capture search | 500-character query, 1-20 requested results |
+| `openbird_activity_summary` | Per-app durations, meetings, focus rollup | 1-1440 minutes; metadata only, no captured content |
 | `openbird_capture_status` | Memory and exclusion counts | Metadata only; no captured content |
 
 Content tools cap every excerpt at 2,000 characters and total excerpt text at 12,000 characters per
 call. They use direct local SQLite/FTS reads and never call an embedding, reranking, or completion
-model. Existing Deep Brain app, source, and observation exclusions are applied before serialization.
+model. Existing Deep Brain app, source, and observation exclusions are applied before serialization
+(a malformed `re:` exclusion pattern fails every tool closed rather than silently not matching).
 Legacy observations without app provenance fail closed. URLs and window titles stay local.
+
+### Paging and deduplication (`openbird_recent_capture`)
+
+Each result is one distinct piece of content: identical captured text seen many times inside a page
+collapses to a single group carrying `seen_count`, `first_ts`, and `last_ts`, anchored on the newest
+occurrence for citation. The response's `window_start_ts`/`window_end_ts` report the queried window,
+and `next_cursor` continues it: pass the token back to read strictly older results from the same
+frozen window; `null` means the window is exhausted. Cursors are opaque random handles — they carry
+no data, are **single-use** (consuming one returns a fresh `next_cursor`; replaying a used, expired,
+or restart-invalidated token fails and the walk restarts with a fresh first call), and expire after
+15 minutes.
+
+### Activity summary
+
+`openbird_activity_summary` answers "what did I focus on" from **trusted metadata only** — activity
+spans, never captured text. It returns per-app foreground and meeting durations with span counts
+(top 30 apps; the rest folded into a nameless `other_apps` bucket reporting only its total seconds
+and app count), AFK time, context-switch count, and the longest focus block. Excluded apps and coarse/redacted spans contribute only unnamed `excluded_seconds` /
+`redacted_seconds` totals; their transitions never affect switch or focus numbers. An AFK gap ends
+a focus block (hidden spans deliberately do not — the break would reveal them). Meeting time is
+counted through AFK (listening in a call involves no input). Prefer it over paging excerpts for
+time-use questions: richer analysis, strictly less raw-text egress.
 
 Captured excerpts are untrusted evidence. They can contain prompt-like text, commands, or secrets;
 the assistant must never treat them as instructions.
@@ -49,8 +73,12 @@ the assistant must never treat them as instructions.
 
 Installing the connector does not upload the database or stream capture. When Claude invokes a
 content tool, the returned excerpt, app identifier, timestamp, source, and observation ID leave
-OpenBird's local boundary through Claude. Anthropic's retention and workspace policies apply after
-that point. A later OpenBird purge prevents future retrieval but cannot recall data already sent.
+OpenBird's local boundary through Claude. When Claude invokes the activity summary, **behavioral
+metadata** leaves the same way: app identifiers, per-app usage durations and span counts, AFK and
+meeting time, context-switch counts, focus-block timestamps, and the folded-tail app count — no
+captured text. Anthropic's retention and
+workspace policies apply after that point. A later OpenBird purge prevents future retrieval but
+cannot recall data already sent.
 
 To disconnect, remove the `openbird` entry from `mcpServers` in Claude Desktop's config and restart
 Claude. The installer backup is `claude_desktop_config.json.openbird-backup` beside the config.
@@ -78,6 +106,7 @@ the operator log buffer, and reports Connected only after `/readyz` succeeds.
 
 The same privacy boundary applies to both assistants: there is no background memory feed. When
 ChatGPT invokes a content tool, returned excerpts, app identifiers, timestamps, and observation IDs
-are sent to OpenAI and cannot be recalled by deleting local memory. URLs and window titles are not
+are sent to OpenAI — and the activity summary sends the same behavioral metadata described above —
+and none of it can be recalled by deleting local memory. URLs and window titles are not
 returned. Removing the connection stops only OpenBird's owned process and deletes only its Keychain
 item, local health marker, and `openbird` tunnel profile.

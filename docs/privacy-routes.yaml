@@ -685,6 +685,53 @@ routes:
       - mcp.tool_descriptions
       - mcp.egress_notice
 
+  - id: assistant.activity_summary
+    class: third-party-cloud
+    status: implemented_stdio_read_only
+    source: assistant-invoked bounded activity-span aggregation (no content read)
+    derives_from:
+      - capture.active_window
+    captured_fields:
+      - app_bundle_id
+      - per_app_foreground_seconds
+      - per_app_meeting_seconds
+      - per_app_span_count
+      - afk_seconds
+      - context_switch_count
+      - focus_block_timestamps
+      - folded_tail_app_count_and_seconds
+      - unnamed_excluded_and_redacted_second_totals
+    forbidden_fields:
+      - captured_text
+      - window_title
+      - url_host
+      - identity_key
+      - excluded_or_tier0_bundle_id
+      - observation_derived_statistics
+    storage:
+      - no_new_openbird_storage
+      - assistant_provider_request_after_tool_invocation
+    egress:
+      default: none_until_tool_invocation
+      destination: connected_assistant_provider
+      warning: app usage durations and activity patterns leave this Mac and cannot be recalled by local deletion
+    enforcement:
+      transport: local_stdio_only
+      install_requires: explicit warning and interactive confirmation or --yes
+      exclusions: deep_brain app exclusions bucket matching spans into unnamed excluded_seconds before serialization
+      bucket_precedence: excluded then redacted then afk then visible, strict first-match per span
+      bounds: 5000 spans per window fail-closed, 30 named apps, 1-1440 minutes
+      model_calls: forbidden
+      malformed_exclusion_regex: fail_closed
+    deletion:
+      command: openbird data purge/prune
+      caveat: removes future retrievability only; cannot recall prior assistant payloads
+    truth_surface:
+      - cli.assistant_install_warning
+      - app.assistant_connect_confirmations
+      - mcp.tool_descriptions
+      - mcp.activity_egress_notice
+
   - id: routines.summary
     class: unknown
     source: scheduled time-window retrieval over local memory

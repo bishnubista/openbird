@@ -70,7 +70,8 @@ struct SettingsView: View {
             Button("Connect") { model.connectClaudeAssistant() }
         } message: {
             Text(
-                "Claude can request bounded OpenBird excerpts, app identifiers, and timestamps. "
+                "Claude can request bounded OpenBird excerpts, app identifiers, timestamps, "
+                + "app usage durations, and activity patterns (focus, meetings, context switches). "
                 + "Those results are sent to Anthropic and cannot be recalled by deleting local memory. "
                 + "OpenBird never sends data in the background."
             )
@@ -723,8 +724,9 @@ struct SettingsView: View {
                 .font(.system(size: 20, weight: .bold))
             Text(
                 "ChatGPT connects to this Mac through OpenAI Secure MCP Tunnel. "
-                + "OpenBird never uploads capture in the background; bounded excerpts leave "
-                + "only when you ask ChatGPT to use an OpenBird tool."
+                + "OpenBird never uploads capture in the background; bounded excerpts, app "
+                + "usage durations, and activity patterns leave only when you ask ChatGPT "
+                + "to use an OpenBird tool."
             )
             .font(.system(size: 12.5))
             .foregroundStyle(.secondary)
