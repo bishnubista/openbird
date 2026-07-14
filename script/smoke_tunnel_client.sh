@@ -21,6 +21,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Keep both the fake control-plane target and health probe strictly on loopback.
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+
 # A local discard port keeps the contract check offline. The health/admin server
 # starts independently and proves that the real binary accepted every launch flag.
 set -m
