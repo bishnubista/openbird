@@ -664,7 +664,7 @@ def test_tunnel_client_pins_match_homebrew_formula():
     assert formula.count(f"tunnel-client-v{version.group(1)}-") == 2
     for checksum in checksums:
         assert formula.count(f'sha256 "{checksum}"') == 1
-    assert '"$ROOT_DIR/script/smoke_tunnel_client.sh" "$DEST"' in script
+    assert script.count('"$ROOT_DIR/script/smoke_tunnel_client.sh" "$DEST"') == 2
 
 
 # -- v2: cursor pagination, dedup groups, activity summary ---------------------
