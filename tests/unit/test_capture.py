@@ -677,6 +677,18 @@ class _AttemptStore(FakeStore):
         return self.attempts[attempt["attempt_id"]]
 
 
+class _FailFinishedAttemptOnceStore(_AttemptStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def record_capture_attempt(self, **attempt):
+        if attempt["status"] == "finished" and not self.failed:
+            self.failed = True
+            raise RuntimeError("simulated ledger write failure")
+        return super().record_capture_attempt(**attempt)
+
+
 def _attempt_triplet(
     attempt_id: str,
     *,
@@ -718,6 +730,25 @@ def test_daemon_links_finished_attempt_to_ingested_observation(allow_settings):
     assert stats.capture_attempts_started == 1
     assert stats.capture_attempts_finished == 1
     assert stats.ingested == 1
+    assert final["outcome"] == "captured_full"
+    assert final["observation_id"] == "obs1"
+
+
+def test_daemon_retains_attempt_refinement_until_finished_write_succeeds(
+    allow_settings,
+):
+    store = _FailFinishedAttemptOnceStore()
+    daemon = CaptureDaemon(store, settings=allow_settings)
+    lines = _attempt_triplet(_ATTEMPT_ID_1, seq=1, ts=10.0)
+
+    first = daemon.run_lines(lines)
+    assert first.errors == 1
+    assert _ATTEMPT_ID_1 in daemon._attempt_results
+
+    retried = daemon.run_lines([lines[-1]])
+    assert retried.errors == 0
+    assert _ATTEMPT_ID_1 not in daemon._attempt_results
+    final = store.attempts[_ATTEMPT_ID_1]
     assert final["outcome"] == "captured_full"
     assert final["observation_id"] == "obs1"
 

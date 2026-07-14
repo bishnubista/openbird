@@ -993,7 +993,7 @@ class CaptureDaemon:
             status = event.get("status")
             record = {k: v for k, v in event.items() if k != "type"}
             if status == "finished":
-                result = self._attempt_results.pop(event["attempt_id"], None)
+                result = self._attempt_results.get(event["attempt_id"])
                 if result is not None:
                     if result.outcome is not None:
                         record["outcome"] = result.outcome
@@ -1007,6 +1007,8 @@ class CaptureDaemon:
             if recorder is not None:
                 try:
                     recorder(**record)
+                    if status == "finished":
+                        self._attempt_results.pop(event["attempt_id"], None)
                 except Exception as exc:  # noqa: BLE001 - isolate metadata write
                     self.error_count += 1
                     logger.error(
