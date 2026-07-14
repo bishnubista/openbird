@@ -87,10 +87,16 @@ CREATE TABLE IF NOT EXISTS capture_attempts (
     UNIQUE(helper_epoch, trigger_seq),
     CHECK ((status = 'started' AND outcome IS NULL AND finished_ts IS NULL)
         OR (status = 'finished' AND outcome IS NOT NULL AND finished_ts IS NOT NULL)),
-    CHECK ((outcome = 'coalesced_inflight' AND coalesced_trigger_count >= 1)
-        OR outcome IS NULL
-        OR (outcome != 'coalesced_inflight' AND coalesced_trigger_count = 0)),
-    CHECK (successor_attempt_id IS NULL OR outcome = 'coalesced_inflight')
+    CHECK ((outcome = 'coalesced_inflight'
+            AND coalesced_trigger_count >= 1
+            AND earliest_coalesced_ts IS NOT NULL)
+        OR (outcome IS NULL
+            AND coalesced_trigger_count = 0
+            AND earliest_coalesced_ts IS NULL)
+        OR (outcome != 'coalesced_inflight'
+            AND coalesced_trigger_count = 0
+            AND earliest_coalesced_ts IS NULL)),
+    CHECK (successor_attempt_id IS NULL OR outcome IS 'coalesced_inflight')
 );
 
 CREATE INDEX IF NOT EXISTS idx_capture_attempts_trigger_ts

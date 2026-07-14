@@ -776,10 +776,16 @@ def _apply_v9_capture_attempts(conn: sqlite3.Connection) -> None:
             CHECK ((status = 'started' AND outcome IS NULL AND finished_ts IS NULL)
                 OR (status = 'finished' AND outcome IS NOT NULL
                     AND finished_ts IS NOT NULL)),
-            CHECK ((outcome = 'coalesced_inflight' AND coalesced_trigger_count >= 1)
-                OR outcome IS NULL
-                OR (outcome != 'coalesced_inflight' AND coalesced_trigger_count = 0)),
-            CHECK (successor_attempt_id IS NULL OR outcome = 'coalesced_inflight')
+            CHECK ((outcome = 'coalesced_inflight'
+                    AND coalesced_trigger_count >= 1
+                    AND earliest_coalesced_ts IS NOT NULL)
+                OR (outcome IS NULL
+                    AND coalesced_trigger_count = 0
+                    AND earliest_coalesced_ts IS NULL)
+                OR (outcome != 'coalesced_inflight'
+                    AND coalesced_trigger_count = 0
+                    AND earliest_coalesced_ts IS NULL)),
+            CHECK (successor_attempt_id IS NULL OR outcome IS 'coalesced_inflight')
         )
         """,
         """

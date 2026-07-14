@@ -2203,6 +2203,57 @@ def test_capture_attempt_successor_fk_and_failed_update_rollback(tmp_path):
         s.close()
 
 
+def test_capture_attempt_sql_enforces_coalescing_invariants(tmp_path):
+    s = _open_store(tmp_path, "v9-attempt-coalescing-checks.db")
+    try:
+        successor_id = "123e4567-e89b-12d3-a456-426614174099"
+        s.record_capture_attempt(
+            **_capture_attempt_payload(successor_id, seq=99, status="started")
+        )
+        started = _capture_attempt_payload(
+            "123e4567-e89b-12d3-a456-426614174010", seq=10, status="started"
+        )
+        finished = {
+            **_capture_attempt_payload(
+                "123e4567-e89b-12d3-a456-426614174011",
+                seq=11,
+                status="finished",
+            ),
+            "finished_ts": 1011.2,
+            "outcome": "captured_full",
+            "completeness": "full",
+        }
+        coalesced = {
+            **_capture_attempt_payload(
+                "123e4567-e89b-12d3-a456-426614174012",
+                seq=12,
+                status="finished",
+            ),
+            "started_ts": None,
+            "finished_ts": 1012.2,
+            "outcome": "coalesced_inflight",
+            "completeness": "none",
+            "coalesced_trigger_count": 1,
+            "earliest_coalesced_ts": 1012.1,
+            "successor_attempt_id": successor_id,
+        }
+
+        invalid = [
+            {**started, "coalesced_trigger_count": 1},
+            {**started, "attempt_id": "123e4567-e89b-12d3-a456-426614174013",
+             "trigger_seq": 13, "earliest_coalesced_ts": 1013.1},
+            {**started, "attempt_id": "123e4567-e89b-12d3-a456-426614174014",
+             "trigger_seq": 14, "successor_attempt_id": successor_id},
+            {**finished, "earliest_coalesced_ts": 1011.1},
+            {**coalesced, "earliest_coalesced_ts": None},
+        ]
+        for payload in invalid:
+            with pytest.raises(sqlite3.IntegrityError):
+                s.record_capture_attempt(**payload)
+    finally:
+        s.close()
+
+
 def test_entity_evidence_existence_triggers_reject_unknown_refs(tmp_path):
     """Per-kind BEFORE INSERT triggers refuse evidence citing a missing source."""
     s = _open_store(tmp_path, "v7-refs.db")
