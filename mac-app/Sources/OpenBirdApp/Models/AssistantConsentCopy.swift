@@ -24,9 +24,9 @@ enum AssistantConsentCopy {
     static let chatGPTConnectMessage =
         "ChatGPT connects to this Mac through OpenAI Secure MCP Tunnel. OpenBird "
         + "never uploads capture in the background; bounded excerpts, app identifiers "
-        + "— including apps whose content was redacted, with reason codes — app usage "
-        + "durations, activity patterns, memory-store totals, encryption state, "
-        + "exclusion counts, and a host label identifying this Mac leave only when "
-        + "you ask ChatGPT to use an OpenBird tool, and cannot be recalled by "
-        + "deleting local memory."
+        + "— including apps whose content was redacted, with reason codes — "
+        + "timestamps, app usage durations, activity patterns, memory-store totals, "
+        + "encryption state, exclusion counts, and a host label identifying this Mac "
+        + "leave only when you ask ChatGPT to use an OpenBird tool, and cannot be "
+        + "recalled by deleting local memory."
 }

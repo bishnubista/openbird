@@ -9,6 +9,7 @@ final class AssistantConsentCopyTests: XCTestCase {
     private let requiredDisclosures = [
         "redacted",             // redacted apps are named…
         "reason code",          // …with their reason codes
+        "timestamps",           // observation/window timestamps
         "host label",           // machine identity leaves the Mac
         "usage durations",      // activity metadata
         "excerpts",             // captured text (content tools)
