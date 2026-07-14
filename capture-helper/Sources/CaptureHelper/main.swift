@@ -36,6 +36,43 @@ private enum Limits {
     static let ocrMaxSeconds = 2.5
 }
 
+/// Metadata-only result of one bounded extraction. This is emitted separately
+/// from the capture frame and must never carry captured text/title/URL/hash.
+struct CaptureExecutionResult {
+    let bundleId: String?
+    let policyTier: Int?
+    let outcome: CaptureAttemptOutcome
+    let completeness: CaptureCompleteness
+    let nodesVisited: Int
+    let bytesEmitted: Int
+    let reasonCodes: [CaptureAttemptReason]
+
+    static func paused(bundleId: String? = nil) -> CaptureExecutionResult {
+        CaptureExecutionResult(
+            bundleId: bundleId, policyTier: nil, outcome: .skippedPaused,
+            completeness: .none, nodesVisited: 0, bytesEmitted: 0,
+            reasonCodes: [.paused])
+    }
+
+    static func failed(
+        bundleId: String? = nil, reason: CaptureAttemptReason
+    ) -> CaptureExecutionResult {
+        CaptureExecutionResult(
+            bundleId: bundleId, policyTier: nil, outcome: .failedBounded,
+            completeness: .none, nodesVisited: 0, bytesEmitted: 0,
+            reasonCodes: [reason])
+    }
+
+    static func policy(
+        bundleId: String?, reason: CaptureAttemptReason
+    ) -> CaptureExecutionResult {
+        CaptureExecutionResult(
+            bundleId: bundleId, policyTier: 0, outcome: .skippedPolicy,
+            completeness: .none, nodesVisited: 0, bytesEmitted: 0,
+            reasonCodes: [reason])
+    }
+}
+
 // MARK: - Non-content diagnostics (stderr only)
 
 /// Write a NON-CONTENT diagnostic line to stderr. Never pass captured text here.
@@ -605,20 +642,20 @@ func captureFrontmost(
     allow: Set<String>, block: Set<String>, detailedCaptureApps: Set<String>,
     pauseFile: String?, captureUrls: Bool,
     trigger: String? = nil, emitter: ((CaptureEvent) -> Void)? = nil,
-    ocr: OcrRuntime? = nil
-) {
+    attemptId: String? = nil, ocr: OcrRuntime? = nil
+) -> CaptureExecutionResult {
     let send = emitter ?? emit
     // Start of the COMBINED AX+OCR wall budget (monotonic).
     let captureStart = DispatchTime.now()
-    if skipIfPaused(pauseFile) { return }
+    if skipIfPaused(pauseFile) { return .paused() }
 
     guard let frontApp = NSWorkspace.shared.frontmostApplication else {
         diag("capture: no_frontmost_app")
-        return
+        return .failed(reason: .noFrontmostApp)
     }
     let bundleId = frontApp.bundleIdentifier
     let pid = frontApp.processIdentifier
-    if skipIfPaused(pauseFile) { return }
+    if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
 
     // Self-capture gate FIRST (before the allowlist gate, any AX element
     // creation, and SCK): OpenBird must never read — or, with OCR in play,
@@ -628,11 +665,12 @@ func captureFrontmost(
     // early returns so the daemon still sees the focus change.
     if isSelfCapture(bundleId) {
         diag("capture: skipped_self_capture")
-        if skipIfPaused(pauseFile) { return }
+        if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
         send(CaptureEvent(
             app: bundleId, window: nil, url: nil, text: "",
-            ts: Date().timeIntervalSince1970, incognito: false, trigger: trigger))
-        return
+            ts: Date().timeIntervalSince1970, incognito: false, trigger: trigger,
+            attemptId: attemptId))
+        return .policy(bundleId: bundleId, reason: .selfCapture)
     }
 
     // Allowlist-first gate BEFORE reading any AX text. A disallowed app emits
@@ -643,11 +681,12 @@ func captureFrontmost(
         detailedCaptureApps: detailedCaptureApps)
     {
         diag("capture: skipped_not_allowlisted")
-        if skipIfPaused(pauseFile) { return }
+        if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
         send(CaptureEvent(
             app: bundleId, window: nil, url: nil, text: "",
-            ts: Date().timeIntervalSince1970, incognito: false, trigger: trigger))
-        return
+            ts: Date().timeIntervalSince1970, incognito: false, trigger: trigger,
+            attemptId: attemptId))
+        return .policy(bundleId: bundleId, reason: .notAllowlisted)
     }
 
     // Dangerous-app backstop runs BEFORE any AX access (no AX element is even
@@ -655,19 +694,19 @@ func captureFrontmost(
     // and ensures a vault's title/text is never read, even if (mis)allowlisted.
     if isDangerousBundle(bundleId) {
         diag("capture: skipped_dangerous_app")
-        if skipIfPaused(pauseFile) { return }
+        if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
         send(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
                           ts: Date().timeIntervalSince1970, incognito: false,
-                          trigger: trigger))
-        return
+                          trigger: trigger, attemptId: attemptId))
+        return .policy(bundleId: bundleId, reason: .dangerousApp)
     }
 
-    if skipIfPaused(pauseFile) { return }
+    if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
     let appElement = AXUIElementCreateApplication(pid)
     // Bound every AX message to this app at 1s (kAXErrorCannotComplete on
     // breach -> axBatch flags the budget and the walk accepts partial text).
     AXUIElementSetMessagingTimeout(appElement, 1.0)
-    if skipIfPaused(pauseFile) { return }
+    if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
 
     // Resolve the focused window (fall back to the first window).
     var focused: CFTypeRef?
@@ -687,22 +726,22 @@ func captureFrontmost(
 
     guard let window = windowElement else {
         diag("capture: no_window pid=\(pid)")
-        return
+        return .failed(bundleId: bundleId, reason: .noWindow)
     }
 
-    if skipIfPaused(pauseFile) { return }
+    if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
     let windowTitle = axString(window, kAXTitleAttribute as String)
-    if skipIfPaused(pauseFile) { return }
+    if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
 
     // Incognito/private windows: emit metadata only, with incognito=true and no
     // (potentially sensitive) window title, before any text traversal.
     if isIncognitoTitle(windowTitle) {
         diag("capture: skipped_incognito")
-        if skipIfPaused(pauseFile) { return }
+        if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
         send(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
                           ts: Date().timeIntervalSince1970, incognito: true,
-                          trigger: trigger))
-        return
+                          trigger: trigger, attemptId: attemptId))
+        return .policy(bundleId: bundleId, reason: .privateWindow)
     }
 
     // Browser URL probe runs BEFORE text traversal (opt-in only). The Apple Events
@@ -712,30 +751,33 @@ func captureFrontmost(
     // otherwise have its text captured. A non-private window yields the URL to emit.
     var capturedURL: String? = nil
     if captureUrls, let appName = browserScriptTarget(bundleId) {
-        if skipIfPaused(pauseFile) { return }
+        if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
         let tab = browserTabInfo(appName: appName)
         if tab.confirmedPrivate {
             diag("capture: skipped_incognito_mode")
-            if skipIfPaused(pauseFile) { return }
+            if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
             send(CaptureEvent(app: bundleId, window: nil, url: nil, text: "",
                               ts: Date().timeIntervalSince1970, incognito: true,
-                              trigger: trigger))
-            return
+                              trigger: trigger, attemptId: attemptId))
+            return .policy(bundleId: bundleId, reason: .privateWindow)
         }
         capturedURL = tab.url
     }
 
     let budget = TraversalBudget(deadlineSeconds: Limits.deadlineSeconds)
     var parts: [String] = []
-    if skipIfPaused(pauseFile) { return }
+    if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
     collectText(from: window, depth: 0, budget: budget, into: &parts, pauseFile: pauseFile)
-    if skipIfPaused(pauseFile) { return }
+    if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
 
     var text = parts.joined(separator: "\n")
     if text.utf8.count > Limits.maxTextBytes {
         let prefix = text.utf8.prefix(Limits.maxTextBytes)
         text = String(decoding: Array(prefix), as: UTF8.self)
     }
+    // Snapshot AX completeness before optional OCR work consumes more wall
+    // time; the AX deadline must not be misreported merely because OCR ran.
+    let axIncomplete = budget.expired
 
     // OCR fallback (Phase C2, stream-mode only — `ocr` is nil elsewhere).
     // This branch sits INSIDE the same gated tail as the AX emit: every
@@ -760,7 +802,7 @@ func captureFrontmost(
         case .run:
             // Live pause re-check immediately before the HAL call: a pause
             // that landed during the AX walk must also stop the screenshot.
-            if skipIfPaused(pauseFile) { return }
+            if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
             // COMBINED budget: AX + OCR <= combinedDeadlineSeconds total.
             // The deadline races the CANCELLABLE pre-image (SCK) phase only;
             // once pixels exist the bridge waits out the synchronous Vision
@@ -816,10 +858,23 @@ func captureFrontmost(
         ts: Date().timeIntervalSince1970,
         incognito: false,
         trigger: trigger,
+        attemptId: attemptId,
         ocr: ocrUsed ? true : nil
     )
-    if skipIfPaused(pauseFile) { return }
+    if skipIfPaused(pauseFile) { return .paused(bundleId: bundleId) }
     send(event)
+    let shallow = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let partial = axIncomplete && !shallow
+    return CaptureExecutionResult(
+        bundleId: bundleId,
+        policyTier: 1,
+        outcome: shallow ? .capturedShallow : (partial ? .capturedPartial : .capturedFull),
+        completeness: shallow ? .shallow : (partial ? .partial : .full),
+        nodesVisited: budget.nodesVisited,
+        bytesEmitted: text.utf8.count,
+        reasonCodes: shallow
+            ? [.emptyText]
+            : (partial ? [budget.axTimedOut ? .axTimeout : .budgetExhausted] : []))
 }
 
 // MARK: - Entry point
@@ -925,7 +980,7 @@ private func run() {
         exit(2)
     }
 
-    captureFrontmost(
+    _ = captureFrontmost(
         allow: allow, block: block, detailedCaptureApps: detailedCaptureApps,
         pauseFile: pauseFile, captureUrls: captureUrls)
 }

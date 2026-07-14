@@ -58,6 +58,21 @@ final class CaptureEventTests: XCTestCase {
         XCTAssertNil(obj["ocr"])
     }
 
+    func testStreamFrameCarriesAttemptIdWhenProvided() throws {
+        let event = CaptureEvent(
+            app: "com.example.app", window: "Title", url: nil,
+            text: "ax text", ts: 1000.0, incognito: false,
+            trigger: "app_activated",
+            attemptId: "123e4567-e89b-12d3-a456-426614174000")
+        let obj = try jsonObject(event)
+        XCTAssertEqual(
+            Set(obj.keys),
+            ["type", "trigger", "attempt_id", "app", "window", "text", "ts", "incognito"])
+        XCTAssertEqual(
+            obj["attempt_id"] as? String,
+            "123e4567-e89b-12d3-a456-426614174000")
+    }
+
     func testOcrFallbackFrameCarriesOcrTrue() throws {
         let event = CaptureEvent(
             app: "com.example.app", window: "Title", url: nil,

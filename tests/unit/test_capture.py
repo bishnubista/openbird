@@ -538,6 +538,113 @@ def test_parse_event_typed_events_unaffected_by_ocr_key():
     assert "ocr" not in e
 
 
+_ATTEMPT_ID_1 = "123e4567-e89b-12d3-a456-426614174001"
+_ATTEMPT_ID_2 = "123e4567-e89b-12d3-a456-426614174002"
+_HELPER_EPOCH = "123e4567-e89b-12d3-a456-426614174010"
+
+
+def _attempt_event(
+    attempt_id: str,
+    *,
+    status: str,
+    seq: int,
+    ts: float,
+    outcome: str | None = None,
+    completeness: str | None = None,
+    coalesced: int = 0,
+    earliest: float | None = None,
+    successor: str | None = None,
+) -> str:
+    event = {
+        "type": "capture_attempt",
+        "status": status,
+        "attempt_id": attempt_id,
+        "helper_epoch": _HELPER_EPOCH,
+        "trigger_seq": seq,
+        "trigger_ts": ts,
+        "trigger": "app_activated",
+        "nodes_visited": 0,
+        "bytes_emitted": 0,
+        "elapsed_ms": 0,
+        "reason_codes": [],
+        "coalesced_trigger_count": coalesced,
+    }
+    if status == "started":
+        event["started_ts"] = ts
+        event["adapter_id"] = "generic_ax"
+        event["extractor_version"] = "generic_ax_v1"
+    else:
+        event["finished_ts"] = ts + 0.1
+        if outcome != "coalesced_inflight":
+            event["started_ts"] = ts
+            event["adapter_id"] = "generic_ax"
+            event["extractor_version"] = "generic_ax_v1"
+        event["outcome"] = outcome
+        event["completeness"] = completeness
+    if earliest is not None:
+        event["earliest_coalesced_ts"] = earliest
+    if successor is not None:
+        event["successor_attempt_id"] = successor
+    return json.dumps(event)
+
+
+def test_parse_event_capture_attempt_is_strictly_metadata_only():
+    event = parse_event(
+        _attempt_event(
+            _ATTEMPT_ID_1,
+            status="finished",
+            seq=2,
+            ts=10.0,
+            outcome="coalesced_inflight",
+            completeness="none",
+            coalesced=3,
+            earliest=9.0,
+            successor=_ATTEMPT_ID_2,
+        )
+    )
+    assert event is not None
+    assert event["outcome"] == "coalesced_inflight"
+    assert event["coalesced_trigger_count"] == 3
+    assert event["successor_attempt_id"] == _ATTEMPT_ID_2
+    for forbidden in ("text", "window", "url", "content_hash"):
+        assert forbidden not in event
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("attempt_id", "not-a-uuid"),
+        ("trigger", "user typed secret"),
+        ("trigger_ts", float("nan")),
+        ("nodes_visited", -1),
+        ("reason_codes", ["captured text must not become a reason"]),
+        ("adapter_id", "free form adapter"),
+    ],
+)
+def test_parse_event_rejects_invalid_capture_attempt_metadata(field, value):
+    raw = json.loads(
+        _attempt_event(
+            _ATTEMPT_ID_1,
+            status="finished",
+            seq=1,
+            ts=10.0,
+            outcome="captured_full",
+            completeness="full",
+        )
+    )
+    raw[field] = value
+    assert parse_event(json.dumps(raw)) is None
+
+
+def test_capture_frame_attempt_id_is_validated_and_optional():
+    valid = parse_event(
+        _line(app="a", text="t", ts=1.0, attempt_id=_ATTEMPT_ID_1)
+    )
+    assert valid is not None and valid["attempt_id"] == _ATTEMPT_ID_1
+    invalid = parse_event(_line(app="a", text="t", ts=1.0, attempt_id="secret"))
+    assert invalid is not None and "attempt_id" not in invalid
+
+
 # ---------------------------------------------------------------------------
 # CaptureDaemon — typed-event dispatch (Phase A)
 # ---------------------------------------------------------------------------
@@ -558,6 +665,93 @@ def test_daemon_counts_typed_events_without_ingesting(allow_settings):
     assert stats.ingested == 0
     assert stats.rejected == 0
     assert store.calls == []
+
+
+class _AttemptStore(FakeStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts: dict[str, dict] = {}
+
+    def record_capture_attempt(self, **attempt):
+        self.attempts[attempt["attempt_id"]] = dict(attempt)
+        return self.attempts[attempt["attempt_id"]]
+
+
+def _attempt_triplet(
+    attempt_id: str,
+    *,
+    seq: int,
+    ts: float,
+    app: str = "com.apple.mail",
+    text: str = "useful capture",
+    helper_outcome: str = "captured_full",
+    completeness: str = "full",
+) -> list[str]:
+    return [
+        _attempt_event(attempt_id, status="started", seq=seq, ts=ts),
+        _line(
+            type="capture",
+            trigger="app_activated",
+            attempt_id=attempt_id,
+            app=app,
+            window="Inbox",
+            text=text,
+            ts=ts + 0.05,
+            incognito=False,
+        ),
+        _attempt_event(
+            attempt_id,
+            status="finished",
+            seq=seq,
+            ts=ts,
+            outcome=helper_outcome,
+            completeness=completeness,
+        ),
+    ]
+
+
+def test_daemon_links_finished_attempt_to_ingested_observation(allow_settings):
+    store = _AttemptStore()
+    daemon = CaptureDaemon(store, settings=allow_settings)
+    stats = daemon.run_lines(_attempt_triplet(_ATTEMPT_ID_1, seq=1, ts=10.0))
+    final = store.attempts[_ATTEMPT_ID_1]
+    assert stats.capture_attempts_started == 1
+    assert stats.capture_attempts_finished == 1
+    assert stats.ingested == 1
+    assert final["outcome"] == "captured_full"
+    assert final["observation_id"] == "obs1"
+
+
+def test_daemon_refines_duplicate_attempt_to_unchanged(allow_settings):
+    store = _AttemptStore()
+    daemon = CaptureDaemon(store, settings=allow_settings, duplicate_window=60.0)
+    lines = _attempt_triplet(_ATTEMPT_ID_1, seq=1, ts=10.0)
+    lines += _attempt_triplet(_ATTEMPT_ID_2, seq=2, ts=11.0)
+    stats = daemon.run_lines(lines)
+    assert stats.ingested == 1 and stats.coalesced == 1
+    assert store.attempts[_ATTEMPT_ID_2]["outcome"] == "captured_unchanged"
+    assert store.attempts[_ATTEMPT_ID_2]["reason_codes"] == ("unchanged",)
+
+
+def test_daemon_refines_normalized_empty_attempt_to_shallow(allow_settings):
+    store = _AttemptStore()
+    daemon = CaptureDaemon(store, settings=allow_settings)
+    stats = daemon.run_lines(
+        _attempt_triplet(_ATTEMPT_ID_1, seq=1, ts=10.0, text="⠂")
+    )
+    assert stats.rejected == 1
+    final = store.attempts[_ATTEMPT_ID_1]
+    assert final["outcome"] == "captured_shallow"
+    assert final["completeness"] == "shallow"
+    assert final["reason_codes"] == ("normalized_empty",)
+
+
+def test_daemon_attempt_result_cache_is_bounded(allow_settings):
+    daemon = CaptureDaemon(FakeStore(), settings=allow_settings)
+    for i in range(1025):
+        daemon._remember_attempt_result(f"attempt-{i}", outcome="captured_full")
+    assert len(daemon._attempt_results) == 1024
+    assert "attempt-0" not in daemon._attempt_results
 
 
 def test_daemon_afk_transition_resets_coalescing(allow_settings):

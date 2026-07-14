@@ -46,6 +46,7 @@ final class SchedulerTests: XCTestCase {
         // One capture, at the EARLIEST armed deadline (10.3), latest kind.
         let fired = captures(s.tick(now: 10.31, idleSeconds: 0.1))
         XCTAssertEqual(fired, [.focusChanged])
+        s.captureAdmitted(at: 10.31)
         // Storm fully drained: next tick inside idleTick window is quiet.
         XCTAssertEqual(captures(s.tick(now: 10.5, idleSeconds: 0.1)), [])
     }
@@ -56,6 +57,7 @@ final class SchedulerTests: XCTestCase {
         var s = makeScheduler(minGap: 1.0)
         _ = s.trigger(.appActivated, now: 10.0)
         XCTAssertEqual(captures(s.tick(now: 10.31, idleSeconds: 0.1)), [.appActivated])
+        s.captureAdmitted(at: 10.31)
         // A second trigger 100ms later must NOT capture before the 1s floor.
         _ = s.trigger(.windowChanged, now: 10.4)
         XCTAssertEqual(captures(s.tick(now: 10.75, idleSeconds: 0.1)), [])
@@ -69,6 +71,7 @@ final class SchedulerTests: XCTestCase {
         var s = makeScheduler(idleTick: 5.0, ceiling: 60.0)
         // First tick captures (nothing captured yet this run).
         XCTAssertEqual(captures(s.tick(now: 0.0, idleSeconds: 0.1)), [.idleTick])
+        s.captureAdmitted(at: 0.0)
         // Active user (idleSeconds low) but NO further triggers: the idle tick
         // keeps content flowing; suppress it by pretending ticks are sparse.
         // Jump far past the ceiling with no interim tick:
@@ -78,6 +81,7 @@ final class SchedulerTests: XCTestCase {
     func testIdleTickBackstopCadence() {
         var s = makeScheduler(idleTick: 5.0)
         XCTAssertEqual(captures(s.tick(now: 0.0, idleSeconds: 0.1)), [.idleTick])
+        s.captureAdmitted(at: 0.0)
         // Inside the tick window: heartbeat only.
         XCTAssertEqual(s.tick(now: 3.0, idleSeconds: 0.1), [.heartbeat])
         // Past it: capture.
@@ -152,5 +156,31 @@ final class SchedulerTests: XCTestCase {
     func testStartupTriggerFiresImmediately() {
         var s = makeScheduler()
         XCTAssertEqual(captures(s.trigger(.startup, now: 0.0)), [.startup])
+    }
+
+    func testRequestWithoutAdmissionDoesNotAdvanceFloor() {
+        var s = makeScheduler(minGap: 1.0)
+        XCTAssertEqual(captures(s.trigger(.startup, now: 10.0)), [.startup])
+        // The engine did not acknowledge the request, so a new immediate
+        // request is still eligible instead of being floor-deferred.
+        XCTAssertEqual(captures(s.trigger(.startup, now: 10.1)), [.startup])
+        XCTAssertNil(s.nextDeadline)
+    }
+
+    func testAdmissionAdvancesFloorAndExposesWakeDeadline() {
+        var s = makeScheduler(minGap: 1.0)
+        XCTAssertEqual(captures(s.trigger(.startup, now: 10.0)), [.startup])
+        s.captureAdmitted(at: 10.0)
+        XCTAssertEqual(s.trigger(.startup, now: 10.1), [])
+        XCTAssertEqual(s.nextDeadline, 11.0)
+        XCTAssertEqual(captures(s.tick(now: 10.99, idleSeconds: 0.1)), [])
+        XCTAssertEqual(captures(s.tick(now: 11.0, idleSeconds: 0.1)), [.startup])
+    }
+
+    func testDebounceExposesPromptOneShotDeadline() {
+        var s = makeScheduler()
+        XCTAssertEqual(s.trigger(.appActivated, now: 20.0), [])
+        XCTAssertEqual(try XCTUnwrap(s.nextDeadline), 20.3, accuracy: 0.000_001)
+        XCTAssertEqual(captures(s.tick(now: 20.3, idleSeconds: 0.1)), [.appActivated])
     }
 }

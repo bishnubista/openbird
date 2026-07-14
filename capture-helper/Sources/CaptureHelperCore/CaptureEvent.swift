@@ -17,6 +17,8 @@
 public struct CaptureEvent: Encodable {
     public let type: String?
     public let trigger: String?
+    /// Stream-mode attempt correlation id. Omitted in one-shot mode.
+    public let attemptId: String?
     public let app: String?
     public let window: String?
     public let url: String?
@@ -29,12 +31,14 @@ public struct CaptureEvent: Encodable {
 
     public init(
         app: String?, window: String?, url: String?, text: String,
-        ts: Double, incognito: Bool, trigger: String? = nil, ocr: Bool? = nil
+        ts: Double, incognito: Bool, trigger: String? = nil,
+        attemptId: String? = nil, ocr: Bool? = nil
     ) {
         // `type`/`trigger` are stream-mode additions: nil in one-shot mode so
         // the encoder omits them and old-daemon output stays byte-compatible.
         self.type = trigger == nil ? nil : "capture"
         self.trigger = trigger
+        self.attemptId = attemptId
         self.app = app
         self.window = window
         self.url = url
@@ -46,6 +50,7 @@ public struct CaptureEvent: Encodable {
 
     private enum CodingKeys: String, CodingKey {
         case type, trigger, app, window, url, text, ts, incognito, ocr
+        case attemptId = "attempt_id"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -54,6 +59,7 @@ public struct CaptureEvent: Encodable {
         // `null`) — the same shape synthesis produced, now stated explicitly.
         try container.encodeIfPresent(type, forKey: .type)
         try container.encodeIfPresent(trigger, forKey: .trigger)
+        try container.encodeIfPresent(attemptId, forKey: .attemptId)
         try container.encodeIfPresent(app, forKey: .app)
         try container.encodeIfPresent(window, forKey: .window)
         try container.encodeIfPresent(url, forKey: .url)

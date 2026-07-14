@@ -30,6 +30,7 @@ import logging
 import math
 import os
 import queue
+import re
 import select
 import shutil
 import subprocess
@@ -197,7 +198,10 @@ _SUPERVISOR_SELECT_TIMEOUT = 0.2
 # non-string ``type`` values are treated as capture frames (fail-safe: the
 # strictest path — they then pass through redaction and are rejected if empty).
 _EVENT_TYPES = frozenset(
-    {"capture", "afk_transition", "heartbeat", "system", "app_changed"}
+    {
+        "capture", "capture_attempt", "afk_transition", "heartbeat",
+        "system", "app_changed",
+    }
 )
 
 # Closed vocabularies for helper-supplied enum-ish metadata. These strings can
@@ -236,6 +240,45 @@ _SYSTEM_KINDS = frozenset(
         "ocr_unavailable",
     }
 )
+
+_CAPTURE_ATTEMPT_STATUSES = frozenset({"started", "finished"})
+_CAPTURE_OUTCOMES = frozenset(
+    {
+        "captured_full",
+        "captured_partial",
+        "captured_shallow",
+        "captured_unchanged",
+        "coalesced_inflight",
+        "skipped_policy",
+        "skipped_afk",
+        "skipped_paused",
+        "unsupported",
+        "failed_bounded",
+    }
+)
+_CAPTURE_COMPLETENESS = frozenset({"full", "partial", "shallow", "none"})
+_CAPTURE_REASON_CODES = frozenset(
+    {
+        "paused",
+        "self_capture",
+        "not_allowlisted",
+        "dangerous_app",
+        "private_window",
+        "no_frontmost_app",
+        "no_window",
+        "ax_timeout",
+        "budget_exhausted",
+        "empty_text",
+        "unchanged",
+        "normalized_empty",
+        "policy_rejected",
+        "ingest_failed",
+    }
+)
+_CAPTURE_ADAPTERS = frozenset({"generic_ax"})
+_CAPTURE_EXTRACTOR_VERSIONS = frozenset({"generic_ax_v1"})
+_BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
+_ATTEMPT_RESULT_CACHE_MAX = 1024
 
 
 def _finite_ts(value: object, fallback: float | None = None) -> float:
@@ -295,6 +338,8 @@ class CaptureStats:
     # Ingested capture frames whose text came from the OCR fallback (Phase C2,
     # ``ocr: true`` on the frame). A subset of ``ingested`` — metadata only.
     ocr_captures: int = 0
+    capture_attempts_started: int = 0
+    capture_attempts_finished: int = 0
 
     def _with(self, **delta: int) -> "CaptureStats":
         return CaptureStats(
@@ -307,6 +352,10 @@ class CaptureStats:
             afk_transitions=self.afk_transitions + delta.get("afk_transitions", 0),
             span_markers=self.span_markers + delta.get("span_markers", 0),
             ocr_captures=self.ocr_captures + delta.get("ocr_captures", 0),
+            capture_attempts_started=self.capture_attempts_started
+            + delta.get("capture_attempts_started", 0),
+            capture_attempts_finished=self.capture_attempts_finished
+            + delta.get("capture_attempts_finished", 0),
         )
 
     def _add(self, other: "CaptureStats") -> "CaptureStats":
@@ -321,6 +370,12 @@ class CaptureStats:
             afk_transitions=self.afk_transitions + other.afk_transitions,
             span_markers=self.span_markers + other.span_markers,
             ocr_captures=self.ocr_captures + other.ocr_captures,
+            capture_attempts_started=(
+                self.capture_attempts_started + other.capture_attempts_started
+            ),
+            capture_attempts_finished=(
+                self.capture_attempts_finished + other.capture_attempts_finished
+            ),
         )
 
 
@@ -334,12 +389,153 @@ class _CaptureSignature:
     text_hash: str
 
 
+@dataclass(frozen=True)
+class _AttemptIngestResult:
+    """Content-free daemon-side refinement held until the finished event."""
+
+    outcome: str | None = None
+    completeness: str | None = None
+    reason_codes: tuple[str, ...] = ()
+    observation_id: str | None = None
+
+
 def _truncate(text: str) -> str:
     """Truncate text to the byte cap on a UTF-8 boundary (no logging of text)."""
     encoded = text.encode("utf-8")
     if len(encoded) <= _MAX_TEXT_BYTES:
         return text
     return encoded[:_MAX_TEXT_BYTES].decode("utf-8", errors="ignore")
+
+
+def _strict_finite(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
+
+
+def _safe_uuid(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _bounded_nonnegative_int(value: object, *, maximum: int) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value <= maximum else None
+
+
+def _parse_capture_attempt(raw: dict) -> dict | None:
+    """Strictly sanitize one metadata-only capture-attempt wire event."""
+    status = raw.get("status")
+    attempt_id = _safe_uuid(raw.get("attempt_id"))
+    helper_epoch = _safe_uuid(raw.get("helper_epoch"))
+    trigger = raw.get("trigger")
+    trigger_ts = _strict_finite(raw.get("trigger_ts"))
+    started_ts = _strict_finite(raw.get("started_ts"))
+    finished_ts = _strict_finite(raw.get("finished_ts"))
+    trigger_seq = _bounded_nonnegative_int(
+        raw.get("trigger_seq"), maximum=(2**63) - 1
+    )
+    if (
+        status not in _CAPTURE_ATTEMPT_STATUSES
+        or attempt_id is None
+        or helper_epoch is None
+        or trigger not in _CAPTURE_TRIGGERS
+        or trigger_ts is None
+        or trigger_seq is None
+    ):
+        logger.warning("capture: dropping invalid capture_attempt metadata")
+        return None
+
+    outcome = raw.get("outcome")
+    completeness = raw.get("completeness")
+    if outcome is not None and outcome not in _CAPTURE_OUTCOMES:
+        return None
+    if completeness is not None and completeness not in _CAPTURE_COMPLETENESS:
+        return None
+    if status == "started":
+        if started_ts is None or finished_ts is not None or outcome is not None:
+            return None
+    elif finished_ts is None or outcome not in _CAPTURE_OUTCOMES:
+        return None
+    elif outcome != "coalesced_inflight" and started_ts is None:
+        return None
+
+    nodes = _bounded_nonnegative_int(raw.get("nodes_visited"), maximum=1_000_000)
+    emitted = _bounded_nonnegative_int(raw.get("bytes_emitted"), maximum=1_000_000)
+    elapsed = _bounded_nonnegative_int(raw.get("elapsed_ms"), maximum=300_000)
+    coalesced = _bounded_nonnegative_int(
+        raw.get("coalesced_trigger_count"), maximum=1_000_000
+    )
+    if None in (nodes, emitted, elapsed, coalesced):
+        return None
+
+    reasons = raw.get("reason_codes")
+    if (
+        not isinstance(reasons, list)
+        or len(reasons) > 16
+        or any(not isinstance(r, str) or r not in _CAPTURE_REASON_CODES for r in reasons)
+    ):
+        return None
+
+    bundle = raw.get("bundle_id")
+    if bundle is not None and (
+        not isinstance(bundle, str) or _BUNDLE_ID_RE.fullmatch(bundle) is None
+    ):
+        bundle = None
+    adapter = raw.get("adapter_id")
+    if adapter is not None and adapter not in _CAPTURE_ADAPTERS:
+        return None
+    extractor = raw.get("extractor_version")
+    if extractor is not None and extractor not in _CAPTURE_EXTRACTOR_VERSIONS:
+        return None
+    policy_tier = raw.get("policy_tier")
+    if policy_tier is not None and (
+        isinstance(policy_tier, bool) or policy_tier not in (0, 1)
+    ):
+        return None
+    earliest = _strict_finite(raw.get("earliest_coalesced_ts"))
+    successor = _safe_uuid(raw.get("successor_attempt_id"))
+    if raw.get("successor_attempt_id") is not None and successor is None:
+        return None
+    if outcome == "coalesced_inflight":
+        if coalesced is None or coalesced < 1 or earliest is None:
+            return None
+    elif coalesced != 0 or earliest is not None or successor is not None:
+        return None
+
+    return {
+        "type": "capture_attempt",
+        "status": status,
+        "attempt_id": attempt_id,
+        "helper_epoch": helper_epoch,
+        "trigger_seq": trigger_seq,
+        "trigger_ts": trigger_ts,
+        "started_ts": started_ts,
+        "finished_ts": finished_ts,
+        "bundle_id": bundle,
+        "trigger": trigger,
+        "adapter_id": adapter,
+        "extractor_version": extractor,
+        "policy_tier": policy_tier,
+        "outcome": outcome,
+        "nodes_visited": nodes,
+        "bytes_emitted": emitted,
+        "elapsed_ms": elapsed,
+        "completeness": completeness,
+        "reason_codes": tuple(reasons),
+        "coalesced_trigger_count": coalesced,
+        "earliest_coalesced_ts": earliest,
+        "successor_attempt_id": successor,
+    }
 
 
 def parse_event(line: str) -> dict | None:
@@ -371,6 +567,9 @@ def parse_event(line: str) -> dict | None:
     event_type = raw.get("type")
     if not isinstance(event_type, str) or event_type not in _EVENT_TYPES:
         event_type = "capture"
+
+    if event_type == "capture_attempt":
+        return _parse_capture_attempt(raw)
 
     ts = raw.get("ts")
     try:
@@ -418,7 +617,7 @@ def parse_event(line: str) -> dict | None:
     text = raw.get("text")
     text_val = text if isinstance(text, str) else ""
 
-    return {
+    event = {
         "type": "capture",
         "trigger": trigger,
         "app": _str_or_none(raw.get("app")),
@@ -433,6 +632,11 @@ def parse_event(line: str) -> dict | None:
         # never policy.
         "ocr": raw.get("ocr") is True,
     }
+    attempt_id = _safe_uuid(raw.get("attempt_id"))
+    if attempt_id is not None:
+        # Preserve the exact classic parser shape for one-shot/old stream frames.
+        event["attempt_id"] = attempt_id
+    return event
 
 
 class CaptureDaemon:
@@ -519,6 +723,9 @@ class CaptureDaemon:
         # store/embed failures bump this instead of emitting tracebacks that
         # might embed captured text.
         self.error_count = 0
+        # Bounded, content-free correlation cache. A helper crash after a frame
+        # but before its finished event cannot grow this without limit.
+        self._attempt_results: dict[str, _AttemptIngestResult] = {}
 
     def _pause_file(self) -> Path:
         """Path written by the macOS trust controller to pause ingestion."""
@@ -566,6 +773,28 @@ class CaptureDaemon:
     def _mark_ingested(self, signature: _CaptureSignature, event_at: float) -> None:
         self._last_ingested_signature = signature
         self._last_ingested_at = event_at
+
+    def _remember_attempt_result(
+        self,
+        attempt_id: object,
+        *,
+        outcome: str | None = None,
+        completeness: str | None = None,
+        reason_codes: tuple[str, ...] = (),
+        observation_id: str | None = None,
+    ) -> None:
+        if not isinstance(attempt_id, str):
+            return
+        # Reinsert to make replacement the newest entry in dict insertion order.
+        self._attempt_results.pop(attempt_id, None)
+        self._attempt_results[attempt_id] = _AttemptIngestResult(
+            outcome=outcome,
+            completeness=completeness,
+            reason_codes=reason_codes,
+            observation_id=observation_id,
+        )
+        while len(self._attempt_results) > _ATTEMPT_RESULT_CACHE_MAX:
+            self._attempt_results.pop(next(iter(self._attempt_results)))
 
     def _session_for(self, app: str | None, event_at: float) -> str:
         """Return the current episodic-session id, starting a new one when needed.
@@ -625,6 +854,7 @@ class CaptureDaemon:
         # normalize -> volatility -> scrub -> truncate -> scrub_metadata) —
         # the no-bypass guarantee, asserted by test, not by new code.
         ocr = event.get("ocr") is True
+        attempt_id = event.get("attempt_id")
         event_at = self._event_clock(ts)
 
         # Span resolution is EVENT-SCOPED and runs for EVERY frame — including
@@ -646,6 +876,12 @@ class CaptureDaemon:
         if paused:
             self._reset_coalescing()
             logger.debug("capture: rejected event reason=paused")
+            self._remember_attempt_result(
+                attempt_id,
+                outcome="skipped_paused",
+                completeness="none",
+                reason_codes=("paused",),
+            )
             return stats._with(rejected=1)
 
         decision, scrubbed = redact.apply(
@@ -658,6 +894,18 @@ class CaptureDaemon:
         if not decision.capture or scrubbed is None:
             self._reset_coalescing()
             logger.debug("capture: rejected event app=%s reason=%s", app, decision.reason)
+            reason_map = {
+                "not_allowlisted": "not_allowlisted",
+                "dangerous_app": "dangerous_app",
+                "incognito": "private_window",
+                "self_capture": "self_capture",
+            }
+            self._remember_attempt_result(
+                attempt_id,
+                outcome="skipped_policy",
+                completeness="none",
+                reason_codes=(reason_map.get(decision.reason, "policy_rejected"),),
+            )
             return stats._with(rejected=1)
 
         normalized = adapters.normalize_for_app(scrubbed, app)
@@ -675,6 +923,12 @@ class CaptureDaemon:
             # Everything was chrome/boilerplate/animation -> nothing worth storing.
             self._reset_coalescing()
             logger.debug("capture: event reduced to empty after normalization app=%s", app)
+            self._remember_attempt_result(
+                attempt_id,
+                outcome="captured_shallow",
+                completeness="shallow",
+                reason_codes=("normalized_empty",),
+            )
             return stats._with(rejected=1)
 
         normalized = _truncate(normalized)
@@ -696,6 +950,11 @@ class CaptureDaemon:
         )
         if self._is_recent_duplicate(signature, event_at):
             logger.debug("capture: coalesced unchanged event app=%s", app)
+            self._remember_attempt_result(
+                attempt_id,
+                outcome="captured_unchanged",
+                reason_codes=("unchanged",),
+            )
             return stats._with(coalesced=1)
 
         try:
@@ -704,7 +963,7 @@ class CaptureDaemon:
             # never see the kwarg, so their add_observation signature is
             # unchanged.
             span_kwargs = {"span_id": span_id} if span_id is not None else {}
-            self.store.add_observation(
+            observation = self.store.add_observation(
                 normalized,
                 app=app,
                 window=safe_window,
@@ -738,9 +997,19 @@ class CaptureDaemon:
                 exc_info=False,
             )
             self._reset_coalescing()
+            self._remember_attempt_result(
+                attempt_id,
+                outcome="failed_bounded",
+                completeness="none",
+                reason_codes=("ingest_failed",),
+            )
             return stats._with(errors=1)
 
         self._mark_ingested(signature, event_at)
+        self._remember_attempt_result(
+            attempt_id,
+            observation_id=observation.id,
+        )
         matched = tuple(decision.matched_rules) + tuple(body_rules) + tuple(title_rules)
         if matched:
             logger.debug(
@@ -762,6 +1031,36 @@ class CaptureDaemon:
         reason-code metadata; the event dicts carry no window/URL/text by
         construction (see :func:`parse_event`).
         """
+        if event_type == "capture_attempt":
+            status = event.get("status")
+            record = {k: v for k, v in event.items() if k != "type"}
+            if status == "finished":
+                result = self._attempt_results.pop(event["attempt_id"], None)
+                if result is not None:
+                    if result.outcome is not None:
+                        record["outcome"] = result.outcome
+                    if result.completeness is not None:
+                        record["completeness"] = result.completeness
+                    if result.reason_codes:
+                        record["reason_codes"] = result.reason_codes
+                    if result.observation_id is not None:
+                        record["observation_id"] = result.observation_id
+            recorder = getattr(self.store, "record_capture_attempt", None)
+            if recorder is not None:
+                try:
+                    recorder(**record)
+                except Exception as exc:  # noqa: BLE001 - isolate metadata write
+                    self.error_count += 1
+                    logger.error(
+                        "capture: record_attempt failed error_type=%s",
+                        type(exc).__name__,
+                        exc_info=False,
+                    )
+                    return stats._with(errors=1)
+            if status == "started":
+                return stats._with(capture_attempts_started=1)
+            return stats._with(capture_attempts_finished=1)
+
         ts = _finite_ts(event.get("ts"))
         if event_type == "afk_transition":
             afk = bool(event.get("afk", False))

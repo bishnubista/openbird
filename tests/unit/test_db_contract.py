@@ -1820,16 +1820,35 @@ _V8_OBJECTS = [
     ("index", "idx_observations_source_ts_id"),
 ]
 
+_V9_OBJECTS = [
+    ("table", "capture_attempts"),
+    ("index", "idx_capture_attempts_trigger_ts"),
+    ("index", "idx_capture_attempts_outcome"),
+]
+
 
 def _make_v6_shaped_db(path) -> sqlite3.Connection:
     """Build a realistic v6-stamped DB (pre-E2 shape) from current schema.sql."""
     conn = _make_v1_shaped_db(path)
+    for kind, name in _V8_OBJECTS + _V9_OBJECTS:
+        conn.execute(f"DROP {kind.upper()} IF EXISTS {name}")
     for _kind, name in _V7_OBJECTS:
         if _kind == "trigger":
             conn.execute(f"DROP TRIGGER IF EXISTS {name}")
     conn.execute("DROP TABLE IF EXISTS entity_evidence")
     conn.execute("DROP TABLE IF EXISTS entities")
     conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+    return conn
+
+
+def _make_v7_shaped_db(path) -> sqlite3.Connection:
+    """Build a realistic v7-stamped DB without the v8 index or v9 attempt ledger."""
+    from openbird.memory.migrations import _apply_v7_entity_ledger
+
+    conn = _make_v6_shaped_db(path)
+    _apply_v7_entity_ledger(conn)
+    conn.execute("PRAGMA user_version = 7")
     conn.commit()
     return conn
 
@@ -1876,13 +1895,13 @@ def _seed_entity_with_sources(store, *, ts=1000.0):
     return entity, obs, span_id, summary
 
 
-def test_empty_db_ladder_reaches_v8_cleanly(tmp_path):
-    """Fresh DB: every v7/v8 object exists exactly once and the stamp is current."""
-    s = _open_store(tmp_path, "fresh-v8.db")
+def test_empty_db_ladder_reaches_v9_cleanly(tmp_path):
+    """Fresh DB: every v7/v8/v9 object exists exactly once and the stamp is current."""
+    s = _open_store(tmp_path, "fresh-v9.db")
     try:
         ver = s.conn.execute("PRAGMA user_version").fetchone()
-        assert int(next(iter(ver.values()))) == SCHEMA_VERSION == 8
-        for kind, name in _V7_OBJECTS + _V8_OBJECTS:
+        assert int(next(iter(ver.values()))) == SCHEMA_VERSION == 9
+        for kind, name in _V7_OBJECTS + _V8_OBJECTS + _V9_OBJECTS:
             count = s.conn.execute(
                 "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
                 (kind, name),
@@ -1893,13 +1912,13 @@ def test_empty_db_ladder_reaches_v8_cleanly(tmp_path):
 
 
 def test_v6_db_upgrades_to_current(tmp_path):
-    """A v6-stamped DB gains every v7/v8 object and keeps the v6 objects intact."""
+    """A v6-stamped DB gains every v7/v8/v9 object and keeps the v6 objects intact."""
     db = tmp_path / "v6-to-current.db"
     conn = _make_v6_shaped_db(db)
     try:
         assert ensure_schema_version(conn) == SCHEMA_VERSION
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
-        for kind, name in _V8_OBJECTS + _V7_OBJECTS + _V6_OBJECTS:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        for kind, name in _V9_OBJECTS + _V8_OBJECTS + _V7_OBJECTS + _V6_OBJECTS:
             row = conn.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
                 (kind, name),
@@ -1975,6 +1994,173 @@ def test_v7_ddl_lockstep_schema_and_migration(tmp_path):
     finally:
         fresh.close()
         upgraded.close()
+
+
+def test_fresh_db_contains_v9_capture_attempt_objects(tmp_path):
+    """A genuinely empty DB gets v9 directly from schema.sql."""
+    s = _open_store(tmp_path, "fresh-v9-capture.db")
+    try:
+        assert s.conn.execute("PRAGMA user_version").fetchone()["user_version"] == 9
+        for kind, name in _V9_OBJECTS:
+            count = s.conn.execute(
+                "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()["c"]
+            assert count == 1, f"{kind} {name} count={count}"
+    finally:
+        s.close()
+
+
+def test_v7_db_upgrades_to_v9_capture_attempts(tmp_path):
+    db = tmp_path / "v7-to-v9.db"
+    conn = _make_v7_shaped_db(db)
+    try:
+        assert ensure_schema_version(conn) == SCHEMA_VERSION == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        for kind, name in _V9_OBJECTS:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()
+            assert row[0] == 1
+    finally:
+        conn.close()
+
+
+def test_v9_migration_is_idempotent_and_matches_schema(tmp_path):
+    from openbird.memory.migrations import _apply_v9_capture_attempts
+
+    fresh = _make_v1_shaped_db(tmp_path / "v9-lockstep-fresh.db")
+    upgraded = _make_v7_shaped_db(tmp_path / "v9-lockstep-upgraded.db")
+    try:
+        _apply_v9_capture_attempts(upgraded)
+        _apply_v9_capture_attempts(upgraded)
+        upgraded.commit()
+
+        def norm(row):
+            import re as _re
+
+            text = _re.sub(r"--[^\n]*", "", str(row[0]))
+            return " ".join(text.split())
+
+        for kind, name in _V9_OBJECTS:
+            a = fresh.execute(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?", (kind, name)
+            ).fetchone()
+            b = upgraded.execute(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?", (kind, name)
+            ).fetchone()
+            assert a is not None and b is not None
+            assert norm(a) == norm(b), f"{name}: schema.sql and migration drifted"
+    finally:
+        fresh.close()
+        upgraded.close()
+
+
+def _capture_attempt_payload(attempt_id: str, *, seq: int, status: str) -> dict:
+    payload = {
+        "attempt_id": attempt_id,
+        "helper_epoch": "123e4567-e89b-12d3-a456-426614174010",
+        "trigger_seq": seq,
+        "trigger_ts": 1000.0 + seq,
+        "started_ts": 1000.0 + seq,
+        "finished_ts": None,
+        "status": status,
+        "bundle_id": "com.apple.mail",
+        "trigger": "app_activated",
+        "adapter_id": "generic_ax",
+        "extractor_version": "generic_ax_v1",
+        "policy_tier": None,
+        "outcome": None,
+        "nodes_visited": 0,
+        "bytes_emitted": 0,
+        "elapsed_ms": 0,
+        "completeness": None,
+        "reason_codes": (),
+        "coalesced_trigger_count": 0,
+        "earliest_coalesced_ts": None,
+        "successor_attempt_id": None,
+        "observation_id": None,
+    }
+    return payload
+
+
+def test_capture_attempt_started_finished_fk_and_purge_contract(tmp_path):
+    s = _open_store(tmp_path, "v9-attempt-upsert.db")
+    try:
+        attempt_id = "123e4567-e89b-12d3-a456-426614174001"
+        started = _capture_attempt_payload(attempt_id, seq=1, status="started")
+        row = s.record_capture_attempt(**started)
+        assert row["status"] == "started" and row["outcome"] is None
+
+        obs = s.add_observation("captured body", source="capture", ts=1001.05)
+        finished = {
+            **started,
+            "status": "finished",
+            "finished_ts": 1001.2,
+            "policy_tier": 1,
+            "outcome": "captured_full",
+            "nodes_visited": 12,
+            "bytes_emitted": 13,
+            "elapsed_ms": 200,
+            "completeness": "full",
+            "observation_id": obs.id,
+        }
+        row = s.record_capture_attempt(**finished)
+        assert row["status"] == "finished"
+        assert row["observation_id"] == obs.id
+        assert row["nodes_visited"] == 12
+
+        # Selective purge clears the evidence link but keeps content-free
+        # accountability; a full purge removes even private activity metadata.
+        s.delete(since_ts=0.0)
+        row = s.conn.execute(
+            "SELECT observation_id FROM capture_attempts WHERE attempt_id=?",
+            (attempt_id,),
+        ).fetchone()
+        assert row["observation_id"] is None
+        s.delete(all=True)
+        assert s.conn.execute(
+            "SELECT COUNT(*) c FROM capture_attempts"
+        ).fetchone()["c"] == 0
+    finally:
+        s.close()
+
+
+def test_capture_attempt_successor_fk_and_failed_update_rollback(tmp_path):
+    s = _open_store(tmp_path, "v9-attempt-fk.db")
+    try:
+        successor_id = "123e4567-e89b-12d3-a456-426614174002"
+        coalesced_id = "123e4567-e89b-12d3-a456-426614174001"
+        successor = _capture_attempt_payload(successor_id, seq=2, status="started")
+        s.record_capture_attempt(**successor)
+        coalesced = {
+            **_capture_attempt_payload(coalesced_id, seq=1, status="finished"),
+            "started_ts": None,
+            "finished_ts": 1001.1,
+            "adapter_id": None,
+            "extractor_version": None,
+            "outcome": "coalesced_inflight",
+            "completeness": "none",
+            "coalesced_trigger_count": 3,
+            "earliest_coalesced_ts": 1000.5,
+            "successor_attempt_id": successor_id,
+        }
+        row = s.record_capture_attempt(**coalesced)
+        assert row["successor_attempt_id"] == successor_id
+        assert row["coalesced_trigger_count"] == 3
+
+        bad = {**successor, "status": "finished", "finished_ts": 1002.0,
+               "outcome": "captured secret", "completeness": "full"}
+        with pytest.raises(sqlite3.IntegrityError):
+            s.record_capture_attempt(**bad)
+        still_started = s.conn.execute(
+            "SELECT status, outcome FROM capture_attempts WHERE attempt_id=?",
+            (successor_id,),
+        ).fetchone()
+        assert still_started == {"status": "started", "outcome": None}
+    finally:
+        s.close()
 
 
 def test_entity_evidence_existence_triggers_reject_unknown_refs(tmp_path):

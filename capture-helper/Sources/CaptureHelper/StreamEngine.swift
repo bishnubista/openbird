@@ -66,6 +66,18 @@ private struct AppChangedEvent: Encodable {
     let app: String?
 }
 
+/// One bounded aggregate for scheduler requests that arrived while an AX walk
+/// was active. The row is emitted immediately and updated with its successor
+/// only when a later capture is actually admitted.
+private struct DirtyCapture {
+    let attemptId: String
+    var triggerSeq: UInt64
+    var trigger: TriggerKind
+    var triggerTs: Double
+    let earliestTs: Double
+    var count: Int
+}
+
 // MARK: - Locked POSIX emitter (EPIPE-aware)
 
 /// Serializes ALL stream-mode stdout writes (walk queue vs main run loop) and
@@ -126,18 +138,24 @@ final class StreamEngine {
     private let idleTick: Double
     private let emitter = StreamEmitter()
 
-    /// Serial utility-QoS queue for AX walks: never on the main run loop, at
-    /// most one walk in flight (triggers arriving mid-walk are dropped; the
-    /// idle tick backstops within `idleTick` seconds).
+    /// Serial utility-QoS queue for AX walks: never on the main run loop and at
+    /// most one walk in flight. Requests arriving mid-walk become one durable
+    /// dirty aggregate and are fed back through Scheduler after completion.
     private let walkQueue = DispatchQueue(
         label: "openbird.capture.walk", qos: .utility)
     /// Main-thread-confined (all scheduler input arrives on the main run loop).
     private var walkInFlight = false
     private var heartbeatSeq: UInt64 = 0
+    private let helperEpoch = UUID().uuidString.lowercased()
+    private var triggerSeq: UInt64 = 0
+    private var dirtyCapture: DirtyCapture?
     private var axObserver: AXObserver?
     private var observedPid: pid_t = -1
     private var signalSources: [DispatchSourceSignal] = []
     private var tickTimer: Timer?
+    /// One-shot wake-up for Scheduler's debounce/min-gap deadline. Without it,
+    /// a 300ms debounce waits for the slower periodic idle timer.
+    private var schedulerTimer: Timer?
     /// Mic run-state monitor (Phase C1); retained for the process lifetime.
     private var micMonitor: MicMonitor?
     /// Main-thread mirror of the aggregate mic bit (flipped in the MicMonitor
@@ -293,10 +311,17 @@ final class StreamEngine {
             diag("capture: accessibility_trust_lost")
             exit(2)
         }
+        if capturePaused(pauseFile) {
+            emitHeartbeat()
+            return
+        }
         perform(scheduler.tick(now: mono(), idleSeconds: hidIdleSeconds()))
     }
 
     private func onTrigger(_ kind: TriggerKind) {
+        // Do not create new scheduler requests while paused. A request that was
+        // already pending is still accounted at dispatchCapture defensively.
+        if capturePaused(pauseFile) { return }
         perform(scheduler.trigger(kind, now: mono()))
     }
 
@@ -405,29 +430,189 @@ final class StreamEngine {
                 emitHeartbeat()
             }
         }
+        armSchedulerTimer()
     }
 
     private func dispatchCapture(_ kind: TriggerKind) {
-        // While paused, skip the walk entirely (heartbeats carry paused=true);
-        // captureFrontmost re-checks the pause file anyway (defense-in-depth).
-        if capturePaused(pauseFile) { return }
-        if walkInFlight { return }  // next tick backstops the dropped trigger
+        let requestTs = Date().timeIntervalSince1970
+        let sequence = nextTriggerSequence()
+
+        // A pre-pause pending request can still reach this gate. It gets an
+        // explicit terminal disposition but is NOT admitted, so the cadence
+        // floor remains unchanged and unpause can retry promptly.
+        if capturePaused(pauseFile) {
+            let attemptId = UUID().uuidString.lowercased()
+            let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            emitter.emit(startedAttempt(
+                attemptId: attemptId, sequence: sequence, trigger: kind,
+                triggerTs: requestTs, startedTs: requestTs, bundleId: bundleId))
+            emitter.emit(CaptureAttemptEvent(
+                status: .finished,
+                attemptId: attemptId,
+                helperEpoch: helperEpoch,
+                triggerSeq: sequence,
+                triggerTs: requestTs,
+                startedTs: requestTs,
+                finishedTs: Date().timeIntervalSince1970,
+                bundleId: bundleId,
+                trigger: kind,
+                adapterId: "generic_ax",
+                extractorVersion: "generic_ax_v1",
+                outcome: .skippedPaused,
+                completeness: CaptureCompleteness.none,
+                reasonCodes: [.paused]))
+            return
+        }
+
+        if walkInFlight {
+            recordInflightRequest(kind, sequence: sequence, triggerTs: requestTs)
+            return
+        }
+
+        let attemptId = UUID().uuidString.lowercased()
+        let startedTs = Date().timeIntervalSince1970
+        let startedMono = mono()
+        let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        // Ordering contract: successor started exists before a coalesced row
+        // updates its successor id (safe for an optional self-reference).
+        emitter.emit(startedAttempt(
+            attemptId: attemptId, sequence: sequence, trigger: kind,
+            triggerTs: requestTs, startedTs: startedTs, bundleId: bundleId))
+
         walkInFlight = true
+        scheduler.captureAdmitted(at: startedMono)
+        if let dirty = dirtyCapture {
+            emitDirty(dirty, successorAttemptId: attemptId)
+            dirtyCapture = nil
+        }
         let trigger = kind.rawValue
         walkQueue.async { [weak self] in
             guard let self else { return }
             let activity = ProcessInfo.processInfo.beginActivity(
                 options: .background, reason: "capture")
-            captureFrontmost(
+            let result = captureFrontmost(
                 allow: self.allow, block: self.block,
                 detailedCaptureApps: self.detailedCaptureApps,
                 pauseFile: self.pauseFile,
                 captureUrls: self.captureUrls, trigger: trigger,
                 emitter: { self.emitter.emit($0) },
+                attemptId: attemptId,
                 ocr: self.ocrRuntime)
             ProcessInfo.processInfo.endActivity(activity)
-            DispatchQueue.main.async { self.walkInFlight = false }
+            let finishedTs = Date().timeIntervalSince1970
+            let elapsedMs = max(0, Int((self.mono() - startedMono) * 1_000.0))
+            self.emitter.emit(CaptureAttemptEvent(
+                status: .finished,
+                attemptId: attemptId,
+                helperEpoch: self.helperEpoch,
+                triggerSeq: sequence,
+                triggerTs: requestTs,
+                startedTs: startedTs,
+                finishedTs: finishedTs,
+                bundleId: result.bundleId,
+                trigger: kind,
+                adapterId: "generic_ax",
+                extractorVersion: "generic_ax_v1",
+                policyTier: result.policyTier,
+                outcome: result.outcome,
+                nodesVisited: result.nodesVisited,
+                bytesEmitted: result.bytesEmitted,
+                elapsedMs: elapsedMs,
+                completeness: result.completeness,
+                reasonCodes: result.reasonCodes))
+            DispatchQueue.main.async { self.captureWalkFinished() }
         }
+    }
+
+    private func nextTriggerSequence() -> UInt64 {
+        let current = triggerSeq
+        triggerSeq &+= 1
+        return current
+    }
+
+    private func startedAttempt(
+        attemptId: String, sequence: UInt64, trigger: TriggerKind,
+        triggerTs: Double, startedTs: Double, bundleId: String?
+    ) -> CaptureAttemptEvent {
+        CaptureAttemptEvent(
+            status: .started,
+            attemptId: attemptId,
+            helperEpoch: helperEpoch,
+            triggerSeq: sequence,
+            triggerTs: triggerTs,
+            startedTs: startedTs,
+            bundleId: bundleId,
+            trigger: trigger,
+            adapterId: "generic_ax",
+            extractorVersion: "generic_ax_v1")
+    }
+
+    private func recordInflightRequest(
+        _ kind: TriggerKind, sequence: UInt64, triggerTs: Double
+    ) {
+        if var dirty = dirtyCapture {
+            dirty.trigger = kind
+            dirty.triggerSeq = sequence
+            dirty.triggerTs = triggerTs
+            dirty.count += 1
+            dirtyCapture = dirty
+        } else {
+            dirtyCapture = DirtyCapture(
+                attemptId: UUID().uuidString.lowercased(),
+                triggerSeq: sequence,
+                trigger: kind,
+                triggerTs: triggerTs,
+                earliestTs: triggerTs,
+                count: 1)
+        }
+        if let dirty = dirtyCapture { emitDirty(dirty, successorAttemptId: nil) }
+    }
+
+    private func emitDirty(_ dirty: DirtyCapture, successorAttemptId: String?) {
+        emitter.emit(CaptureAttemptEvent(
+            status: .finished,
+            attemptId: dirty.attemptId,
+            helperEpoch: helperEpoch,
+            triggerSeq: dirty.triggerSeq,
+            triggerTs: dirty.triggerTs,
+            finishedTs: Date().timeIntervalSince1970,
+            trigger: dirty.trigger,
+            outcome: .coalescedInflight,
+            completeness: CaptureCompleteness.none,
+            coalescedTriggerCount: dirty.count,
+            earliestCoalescedTs: dirty.earliestTs,
+            successorAttemptId: successorAttemptId))
+    }
+
+    private func captureWalkFinished() {
+        walkInFlight = false
+        guard let dirty = dirtyCapture else { return }
+        // Keep the dirty row until an actual successor admission. If this fires
+        // into pause, dispatchCapture records skipped_paused and the next
+        // post-unpause scheduler request can still close the link.
+        perform(scheduler.trigger(dirty.trigger, now: mono()))
+    }
+
+    private func armSchedulerTimer() {
+        schedulerTimer?.invalidate()
+        schedulerTimer = nil
+        guard let deadline = scheduler.nextDeadline else { return }
+        let interval = max(0.001, deadline - mono())
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.schedulerTimer = nil
+            // Leaving the pending deadline armed while paused prevents a busy
+            // immediate-timer loop. The periodic tick pumps it after unpause.
+            if capturePaused(self.pauseFile) {
+                self.emitHeartbeat()
+                return
+            }
+            self.perform(
+                self.scheduler.tick(
+                    now: self.mono(), idleSeconds: self.hidIdleSeconds()))
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        schedulerTimer = timer
     }
 
     private func emitHeartbeat() {
