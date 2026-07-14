@@ -216,7 +216,11 @@ Response shape:
   afk, zero-clipped-duration, tier-0/redacted, and exclusion-matched spans — so a
   hidden bundle's transitions can never move a returned number (the same no-leak
   rule as the duration fields, applied to counts). A switch is a transition between
-  consecutive spans of that filtered sequence with different bundle ids.
+  consecutive spans of that filtered sequence with different bundle ids. A
+  visible-app AFK span additionally **ends the current focus run** (a nap must not
+  fuse two focus blocks; AFK is a disclosed bucket, so the break leaks nothing) —
+  hidden excluded/redacted spans deliberately do not break a run, since the break
+  itself would reveal that a hidden app intervened.
   Top-level `meeting_seconds` remains the sum over **returned** `apps[]` entries
   only; meeting time in the `other_apps` tail is deliberately not totaled (a
   nameless meeting total would invite subtraction games against future fields —

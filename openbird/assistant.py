@@ -337,7 +337,11 @@ class AssistantCaptureService:
         redacted_seconds = 0.0
         afk_seconds = 0.0
         per_app: dict[str, dict[str, Any]] = {}
-        visible_sequence: list[tuple[str, float, float]] = []
+        # None entries are AFK break markers: a visible-app AFK span ends the
+        # current focus run (a nap must not fuse two focus blocks) but leaves
+        # switch counting untouched. Hidden spans (excluded/redacted) add NO
+        # marker on purpose — a break would reveal that a hidden app intervened.
+        visible_sequence: list[tuple[str, float, float] | None] = []
         for span in spans:
             clip_start = max(float(span["start_ts"]), start_ts)
             clip_end = min(float(span["end_ts"]), end_ts)
@@ -355,6 +359,8 @@ class AssistantCaptureService:
             is_meeting = bool(span.get("meeting"))
             if is_afk:
                 afk_seconds += seconds
+                if visible_sequence and visible_sequence[-1] is not None:
+                    visible_sequence.append(None)
             if is_afk and not is_meeting:
                 continue
             entry = per_app.setdefault(
@@ -371,25 +377,36 @@ class AssistantCaptureService:
         context_switches = 0
         best_run: dict[str, Any] | None = None
         current: dict[str, Any] | None = None
-        for bundle, clip_start, clip_end in visible_sequence:
+        last_bundle: str | None = None
+
+        def _fold_run(run: dict[str, Any] | None) -> None:
+            nonlocal best_run
+            if run is not None and (
+                best_run is None or run["seconds"] > best_run["seconds"]
+            ):
+                best_run = run
+
+        for item in visible_sequence:
+            if item is None:
+                _fold_run(current)
+                current = None
+                continue
+            bundle, clip_start, clip_end = item
+            if last_bundle is not None and bundle != last_bundle:
+                context_switches += 1
+            last_bundle = bundle
             if current is not None and bundle == current["bundle_id"]:
                 current["end_ts"] = max(float(current["end_ts"]), clip_end)
                 current["seconds"] += clip_end - clip_start
                 continue
-            if current is not None:
-                context_switches += 1
-                if best_run is None or current["seconds"] > best_run["seconds"]:
-                    best_run = current
+            _fold_run(current)
             current = {
                 "bundle_id": bundle,
                 "start_ts": clip_start,
                 "end_ts": clip_end,
                 "seconds": clip_end - clip_start,
             }
-        if current is not None and (
-            best_run is None or current["seconds"] > best_run["seconds"]
-        ):
-            best_run = current
+        _fold_run(current)
 
         # Rank by foreground + meeting so a fully-afk meeting still surfaces.
         ranked = sorted(

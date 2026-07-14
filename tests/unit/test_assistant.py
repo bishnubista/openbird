@@ -1153,3 +1153,33 @@ def test_cli_assistant_warnings_disclose_activity_egress(monkeypatch):
         assert "ASSISTANT ACCESS" in result.output
         assert "ACTIVITY ACCESS" in result.output
         assert "activity patterns" in result.output
+
+
+def test_activity_summary_afk_gap_splits_focus_but_hidden_gap_does_not(tmp_path):
+    spans = [
+        _span("a1", start_ts=0.0, end_ts=100.0, bundle_id="com.a"),
+        _span("nap", start_ts=100.0, end_ts=1900.0, bundle_id="com.a", afk=1),
+        _span("a2", start_ts=1900.0, end_ts=1950.0, bundle_id="com.a"),
+        _span("hidden", start_ts=1950.0, end_ts=2000.0, detail_tier=0),
+        _span("a3", start_ts=2000.0, end_ts=2030.0, bundle_id="com.a"),
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 2030.0,
+    )
+
+    result = service.activity_summary(minutes=60)
+
+    # The AFK nap ends the first focus run (100s), so it cannot fuse with the
+    # later spans into a 180s block. The hidden tier-0 span does NOT split the
+    # second run (a2+a3 merge to 80s), and same-app resumption after AFK
+    # counts no context switch. Longest focus is therefore the 100s run.
+    assert result["context_switches"] == 0
+    assert result["longest_focus"] == {
+        "bundle_id": "com.a",
+        "start_ts": 0.0,
+        "end_ts": 100.0,
+        "seconds": 100.0,
+    }
+    assert result["afk_seconds"] == 1800.0

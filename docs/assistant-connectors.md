@@ -59,7 +59,8 @@ no data, expire after 15 minutes, and are invalidated by a server restart (just 
 spans, never captured text. It returns per-app foreground and meeting durations with span counts
 (top 30 apps; the rest folded into a nameless `other_apps` bucket reporting only its total seconds
 and app count), AFK time, context-switch count, and the longest focus block. Excluded apps and coarse/redacted spans contribute only unnamed `excluded_seconds` /
-`redacted_seconds` totals; their transitions never affect switch or focus numbers. Meeting time is
+`redacted_seconds` totals; their transitions never affect switch or focus numbers. An AFK gap ends
+a focus block (hidden spans deliberately do not — the break would reveal them). Meeting time is
 counted through AFK (listening in a call involves no input). Prefer it over paging excerpts for
 time-use questions: richer analysis, strictly less raw-text egress.
 
