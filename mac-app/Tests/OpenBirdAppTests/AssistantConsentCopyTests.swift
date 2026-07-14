@@ -7,11 +7,15 @@ import XCTest
 /// drops a disclosed data category must fail here, not ship silently.
 final class AssistantConsentCopyTests: XCTestCase {
     private let requiredDisclosures = [
-        "redacted",        // redacted apps are named…
-        "reason code",     // …with their reason codes
-        "host label",      // machine identity leaves the Mac
-        "usage durations", // activity metadata
-        "excerpts",        // captured text (content tools)
+        "redacted",             // redacted apps are named…
+        "reason code",          // …with their reason codes
+        "host label",           // machine identity leaves the Mac
+        "usage durations",      // activity metadata
+        "excerpts",             // captured text (content tools)
+        "memory-store totals",  // status tool: store-lifetime counts
+        "encryption state",     // status tool: encryption flag
+        "exclusion counts",     // status tool: exclusion configuration
+        "cannot be recalled",   // irreversibility
     ]
 
     func testClaudeConsentDisclosesEveryEgressCategory() {
@@ -19,8 +23,6 @@ final class AssistantConsentCopyTests: XCTestCase {
         for phrase in requiredDisclosures {
             XCTAssertTrue(copy.contains(phrase), "Claude consent copy lost disclosure: \(phrase)")
         }
-        XCTAssertTrue(copy.contains("memory-store totals"))
-        XCTAssertTrue(copy.contains("cannot be recalled"))
         XCTAssertTrue(copy.contains("never sends data in the background"))
     }
 
@@ -29,8 +31,6 @@ final class AssistantConsentCopyTests: XCTestCase {
         for phrase in requiredDisclosures {
             XCTAssertTrue(copy.contains(phrase), "ChatGPT consent copy lost disclosure: \(phrase)")
         }
-        XCTAssertTrue(copy.contains("memory-store totals"))
-        XCTAssertTrue(copy.contains("cannot be recalled"))
         XCTAssertTrue(copy.contains("never uploads capture in the background"))
     }
 }

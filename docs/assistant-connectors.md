@@ -63,7 +63,8 @@ spans, never captured text. It returns per-app foreground and meeting durations 
 and app count), AFK time, context-switch count, and the longest focus block. Redacted
 (coarse-tier) spans keep their app identity as metadata, so redacted time is attributed:
 `redacted_by_app` lists `{bundle_id, reason, seconds}` per app (closed reason vocabulary —
-`not_allowlisted`, `blocklisted`, `dangerous`, `private`, `paused`, `self_capture`), with
+`not_allowlisted`, `blocklisted`, `dangerous`, `private`, `paused`, `self_capture`, plus an
+`unknown` defense-in-depth sentinel emitted only for a corrupted row), with
 `redacted_unattributed_seconds` covering spans that never had an app (paused gaps, unknown
 app) and `redacted_other_seconds` folding the tail past the 30-app cap. **Excluded apps are
 different**: anything in `deep_brain_excluded_apps` is checked first and contributes only the

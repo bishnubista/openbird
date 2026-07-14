@@ -702,6 +702,8 @@ routes:
       - focus_block_timestamps
       - folded_tail_app_count_and_seconds
       - redacted_by_app_bundle_id_reason_seconds
+      - redacted_second_total
+      - redacted_other_seconds_tail
       - redacted_unattributed_seconds
       - unnamed_excluded_second_total
       - capture_host_label

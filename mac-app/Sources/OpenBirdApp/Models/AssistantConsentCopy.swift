@@ -16,15 +16,17 @@ enum AssistantConsentCopy {
         "Claude can request bounded OpenBird excerpts, app identifiers — including "
         + "apps whose content was redacted, with reason codes — timestamps, app usage "
         + "durations, activity patterns (focus, meetings, context switches), "
-        + "memory-store totals and exclusion counts, and a host label identifying "
-        + "this Mac. Those results are sent to Anthropic and cannot be recalled by "
-        + "deleting local memory. OpenBird never sends data in the background."
+        + "memory-store totals, encryption state, exclusion counts, and a host label "
+        + "identifying this Mac. Those results are sent to Anthropic and cannot be "
+        + "recalled by deleting local memory. OpenBird never sends data in the "
+        + "background."
 
     static let chatGPTConnectMessage =
         "ChatGPT connects to this Mac through OpenAI Secure MCP Tunnel. OpenBird "
         + "never uploads capture in the background; bounded excerpts, app identifiers "
         + "— including apps whose content was redacted, with reason codes — app usage "
-        + "durations, activity patterns, memory-store totals, and a host label "
-        + "identifying this Mac leave only when you ask ChatGPT to use an OpenBird "
-        + "tool, and cannot be recalled by deleting local memory."
+        + "durations, activity patterns, memory-store totals, encryption state, "
+        + "exclusion counts, and a host label identifying this Mac leave only when "
+        + "you ask ChatGPT to use an OpenBird tool, and cannot be recalled by "
+        + "deleting local memory."
 }

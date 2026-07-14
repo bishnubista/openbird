@@ -1448,3 +1448,41 @@ def test_egress_declarations_match_emitted_paths_exactly(tmp_path):
         assert response["egress"]["untrusted_content"] is (
             response.get("captured_content_is_untrusted", False)
         )
+
+
+def test_activity_summary_redacted_invariant_is_exact_with_fractional_spans(tmp_path):
+    # Float addition is not associative: an independently accumulated total
+    # can differ from the grouped-and-sorted component sum in the last ulp.
+    # The total is derived from the emitted components, so equality is EXACT.
+    spans = [
+        _span(
+            "f1", start_ts=0.0, end_ts=724.726879575788,
+            bundle_id="com.a", detail_tier=0, reason="private",
+        ),
+        _span(
+            "f2", start_ts=800.0, end_ts=800.0 + 541.5229705223803,
+            bundle_id="com.b", detail_tier=0, reason="blocklisted",
+        ),
+        _span(
+            "f3", start_ts=1400.0, end_ts=1400.0 + 774.7999935132281,
+            bundle_id="com.a", detail_tier=0, reason="private",
+        ),
+        _span(
+            "gap", start_ts=2200.0, end_ts=2233.3333333333335,
+            bundle_id=None, detail_tier=0, reason="paused",
+        ),
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 2400.0,
+    )
+
+    result = service.activity_summary(minutes=40)
+
+    assert result["redacted_seconds"] == (
+        sum(entry["seconds"] for entry in result["redacted_by_app"])
+        + result["redacted_other_seconds"]
+        + result["redacted_unattributed_seconds"]
+    )
+    assert result["redacted_seconds"] > 0
