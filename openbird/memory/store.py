@@ -38,6 +38,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from openbird.capture.attempts import CAPTURE_BUNDLE_ID_RE, CAPTURE_REASON_CODES
 from openbird.config import Settings, get_settings
 from openbird.llm.base import LLMProviderProtocol
 from openbird.llm.provider import create_llm_provider
@@ -51,17 +52,6 @@ from openbird.storage.crypto import mapping_row_factory, open_encrypted_db
 from openbird.types import Observation, SearchHit
 
 _log = logging.getLogger("openbird.memory")
-
-_CAPTURE_ATTEMPT_REASON_CODES = frozenset(
-    {
-        "paused", "self_capture", "not_allowlisted", "dangerous_app",
-        "private_window", "no_frontmost_app", "no_window", "ax_timeout",
-        "budget_exhausted", "empty_text", "unchanged", "normalized_empty",
-        "policy_rejected", "ingest_failed",
-    }
-)
-_CAPTURE_BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
-
 
 def _log_rerank_skip(reason: str) -> None:
     """Log a reranker fallback with a STRUCTURED, content-free reason code.
@@ -552,7 +542,7 @@ class MemoryStore:
             or len(reason_codes) > 16
             or any(
                 not isinstance(reason, str)
-                or reason not in _CAPTURE_ATTEMPT_REASON_CODES
+                or reason not in CAPTURE_REASON_CODES
                 for reason in reason_codes
             )
         ):
@@ -560,7 +550,7 @@ class MemoryStore:
         bundle_id = attempt.get("bundle_id")
         if bundle_id is not None and (
             not isinstance(bundle_id, str)
-            or _CAPTURE_BUNDLE_ID_RE.fullmatch(bundle_id) is None
+            or CAPTURE_BUNDLE_ID_RE.fullmatch(bundle_id) is None
         ):
             raise ValueError("invalid capture-attempt bundle id")
         for key in (

@@ -2057,6 +2057,46 @@ def test_v9_migration_is_idempotent_and_matches_schema(tmp_path):
         upgraded.close()
 
 
+def test_capture_attempt_sql_vocabulary_matches_parser(tmp_path):
+    """SQL CHECK constraints and the parser must share the same closed enums."""
+    import re as _re
+
+    from openbird.capture.attempts import (
+        CAPTURE_ADAPTERS,
+        CAPTURE_ATTEMPT_STATUSES,
+        CAPTURE_COMPLETENESS,
+        CAPTURE_EXTRACTOR_VERSIONS,
+        CAPTURE_OUTCOMES,
+        CAPTURE_TRIGGERS,
+    )
+
+    conn = _make_v1_shaped_db(tmp_path / "capture-vocabulary.db")
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='capture_attempts'"
+        ).fetchone()
+        assert row is not None
+        ddl = str(row[0])
+
+        def allowed(column: str) -> set[str]:
+            match = _re.search(
+                rf"\b{column}\b.*?\bIN\s*\(([^)]*)\)",
+                ddl,
+                flags=_re.IGNORECASE | _re.DOTALL,
+            )
+            assert match is not None, f"missing CHECK vocabulary for {column}"
+            return set(_re.findall(r"'([^']+)'", match.group(1)))
+
+        assert allowed("status") == CAPTURE_ATTEMPT_STATUSES
+        assert allowed("trigger") == CAPTURE_TRIGGERS
+        assert allowed("adapter_id") == CAPTURE_ADAPTERS
+        assert allowed("extractor_version") == CAPTURE_EXTRACTOR_VERSIONS
+        assert allowed("outcome") == CAPTURE_OUTCOMES
+        assert allowed("completeness") == CAPTURE_COMPLETENESS
+    finally:
+        conn.close()
+
+
 def _capture_attempt_payload(attempt_id: str, *, seq: int, status: str) -> dict:
     payload = {
         "attempt_id": attempt_id,

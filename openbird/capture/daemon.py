@@ -30,7 +30,6 @@ import logging
 import math
 import os
 import queue
-import re
 import select
 import shutil
 import subprocess
@@ -45,6 +44,16 @@ from pathlib import Path
 from typing import Protocol
 
 from openbird.capture import adapters, redact, volatility
+from openbird.capture.attempts import (
+    CAPTURE_ADAPTERS as _CAPTURE_ADAPTERS,
+    CAPTURE_ATTEMPT_STATUSES as _CAPTURE_ATTEMPT_STATUSES,
+    CAPTURE_BUNDLE_ID_RE as _BUNDLE_ID_RE,
+    CAPTURE_COMPLETENESS as _CAPTURE_COMPLETENESS,
+    CAPTURE_EXTRACTOR_VERSIONS as _CAPTURE_EXTRACTOR_VERSIONS,
+    CAPTURE_OUTCOMES as _CAPTURE_OUTCOMES,
+    CAPTURE_REASON_CODES as _CAPTURE_REASON_CODES,
+    CAPTURE_TRIGGERS as _CAPTURE_TRIGGERS,
+)
 from openbird.capture.spans import NullSpanTracker, SpanTracker
 from openbird.config import Settings, get_settings
 from openbird.types import Observation
@@ -204,22 +213,8 @@ _EVENT_TYPES = frozenset(
     }
 )
 
-# Closed vocabularies for helper-supplied enum-ish metadata. These strings can
-# reach logs, so they are sanitized against a closed set — a helper bug can
-# never route free text (which could embed content) into a log line.
-_CAPTURE_TRIGGERS = frozenset(
-    {
-        "app_activated",
-        "window_changed",
-        "title_changed",
-        "focus_changed",
-        "typing_pause",
-        "idle_tick",
-        "force_ceiling",
-        "return_from_afk",
-        "startup",
-    }
-)
+# Other closed vocabularies for helper-supplied enum-ish metadata. These
+# strings can reach logs, so a helper bug must never route free text into them.
 _SYSTEM_KINDS = frozenset(
     {
         "will_sleep",
@@ -241,43 +236,6 @@ _SYSTEM_KINDS = frozenset(
     }
 )
 
-_CAPTURE_ATTEMPT_STATUSES = frozenset({"started", "finished"})
-_CAPTURE_OUTCOMES = frozenset(
-    {
-        "captured_full",
-        "captured_partial",
-        "captured_shallow",
-        "captured_unchanged",
-        "coalesced_inflight",
-        "skipped_policy",
-        "skipped_afk",
-        "skipped_paused",
-        "unsupported",
-        "failed_bounded",
-    }
-)
-_CAPTURE_COMPLETENESS = frozenset({"full", "partial", "shallow", "none"})
-_CAPTURE_REASON_CODES = frozenset(
-    {
-        "paused",
-        "self_capture",
-        "not_allowlisted",
-        "dangerous_app",
-        "private_window",
-        "no_frontmost_app",
-        "no_window",
-        "ax_timeout",
-        "budget_exhausted",
-        "empty_text",
-        "unchanged",
-        "normalized_empty",
-        "policy_rejected",
-        "ingest_failed",
-    }
-)
-_CAPTURE_ADAPTERS = frozenset({"generic_ax"})
-_CAPTURE_EXTRACTOR_VERSIONS = frozenset({"generic_ax_v1"})
-_BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
 _ATTEMPT_RESULT_CACHE_MAX = 1024
 
 
