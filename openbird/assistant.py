@@ -939,7 +939,8 @@ def chatgpt_run_arguments(
         "--profile-dir", str(profile.parent),
         "--health.listen-addr", "127.0.0.1:0",
         "--health.url-file", str(health),
-        "--admin-ui.log-buffer-events", "0",
+        # tunnel-client v0.0.10 rejects zero; retain only its minimum event.
+        "--admin-ui.log-buffer-events", "1",
         "--log.file", "/dev/null",
     ]
 

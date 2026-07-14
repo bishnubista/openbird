@@ -102,7 +102,9 @@ OpenBird stores both setup values in a dedicated macOS Keychain item. The runtim
 through the tunnel child's environment, never through arguments, logs, UserDefaults, or repository
 files. Before every start, OpenBird forcibly reconciles its owned tunnel profile with the current
 app bundle, validates it, starts the outbound tunnel on an ephemeral loopback health port, disables
-the operator log buffer, and reports Connected only after `/readyz` succeeds.
+file logging, and limits the loopback-only operator buffer to one tunnel-client event. Unsafe raw
+HTTP logging and Harpoon payload capture remain disabled. OpenBird reports Connected only after
+`/readyz` succeeds.
 
 The same privacy boundary applies to both assistants: there is no background memory feed. When
 ChatGPT invokes a content tool, returned excerpts, app identifiers, timestamps, and observation IDs
