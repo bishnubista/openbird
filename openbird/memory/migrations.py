@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -715,6 +715,22 @@ def _apply_v7_entity_ledger(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _apply_v8_observation_keyset_index(conn: sqlite3.Connection) -> None:
+    """Add the assistant keyset-pagination index (source, ts, id).
+
+    Same idempotency contract as v4-v7: ``schema.sql`` (with the FINAL shape)
+    has already run on this connection, so the index usually exists — the
+    statement is IF-NOT-EXISTS and stays textually in lockstep with schema.sql.
+    Purely additive (index-only): no table rebuilds, no data rewrite. All three
+    columns are part of the frozen v1 shape, so this applies cleanly to every
+    released DB.
+    """
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_observations_source_ts_id "
+        "ON observations(source, ts, id)"
+    )
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
 # so migrations here only ever upgrade an existing DB from one version to the
 # next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
@@ -749,6 +765,11 @@ MIGRATIONS: list[Migration] = [
         version=7,
         description="add the entity ledger + completion evidence",
         apply=_apply_v7_entity_ledger,
+    ),
+    Migration(
+        version=8,
+        description="add the assistant keyset-pagination index (source, ts, id)",
+        apply=_apply_v8_observation_keyset_index,
     ),
 ]
 

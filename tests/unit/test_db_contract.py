@@ -1816,6 +1816,10 @@ _V7_OBJECTS = [
     ("trigger", "trg_entities_last_seen_summary_delete"),
 ]
 
+_V8_OBJECTS = [
+    ("index", "idx_observations_source_ts_id"),
+]
+
 
 def _make_v6_shaped_db(path) -> sqlite3.Connection:
     """Build a realistic v6-stamped DB (pre-E2 shape) from current schema.sql."""
@@ -1872,13 +1876,13 @@ def _seed_entity_with_sources(store, *, ts=1000.0):
     return entity, obs, span_id, summary
 
 
-def test_empty_db_ladder_reaches_v7_cleanly(tmp_path):
-    """Fresh DB: every v7 object exists exactly once and the stamp is current."""
-    s = _open_store(tmp_path, "fresh-v7.db")
+def test_empty_db_ladder_reaches_v8_cleanly(tmp_path):
+    """Fresh DB: every v7/v8 object exists exactly once and the stamp is current."""
+    s = _open_store(tmp_path, "fresh-v8.db")
     try:
         ver = s.conn.execute("PRAGMA user_version").fetchone()
-        assert int(next(iter(ver.values()))) == SCHEMA_VERSION == 7
-        for kind, name in _V7_OBJECTS:
+        assert int(next(iter(ver.values()))) == SCHEMA_VERSION == 8
+        for kind, name in _V7_OBJECTS + _V8_OBJECTS:
             count = s.conn.execute(
                 "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
                 (kind, name),
@@ -1888,14 +1892,14 @@ def test_empty_db_ladder_reaches_v7_cleanly(tmp_path):
         s.close()
 
 
-def test_v6_db_upgrades_to_v7(tmp_path):
-    """A v6-stamped DB gains every v7 object and keeps the v6 objects intact."""
-    db = tmp_path / "v6-to-v7.db"
+def test_v6_db_upgrades_to_current(tmp_path):
+    """A v6-stamped DB gains every v7/v8 object and keeps the v6 objects intact."""
+    db = tmp_path / "v6-to-current.db"
     conn = _make_v6_shaped_db(db)
     try:
         assert ensure_schema_version(conn) == SCHEMA_VERSION
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
-        for kind, name in _V7_OBJECTS + _V6_OBJECTS:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        for kind, name in _V8_OBJECTS + _V7_OBJECTS + _V6_OBJECTS:
             row = conn.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
                 (kind, name),
@@ -1915,6 +1919,25 @@ def test_v7_migration_is_idempotent_on_rerun(tmp_path):
         _apply_v7_entity_ledger(conn)  # rerun: must not raise or duplicate
         conn.commit()
         for kind, name in _V7_OBJECTS:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name),
+            ).fetchone()
+            assert row[0] == 1, f"{kind} {name}"
+    finally:
+        conn.close()
+
+
+def test_v8_migration_is_idempotent_on_rerun(tmp_path):
+    """Double-applying the v8 step must be a clean no-op (IF NOT EXISTS)."""
+    from openbird.memory.migrations import _apply_v8_observation_keyset_index
+
+    conn = _make_v6_shaped_db(tmp_path / "v8-idem.db")
+    try:
+        _apply_v8_observation_keyset_index(conn)
+        _apply_v8_observation_keyset_index(conn)  # rerun: must not raise or duplicate
+        conn.commit()
+        for kind, name in _V8_OBJECTS:
             row = conn.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
                 (kind, name),

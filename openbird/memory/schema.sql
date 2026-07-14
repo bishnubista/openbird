@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS observations (
 CREATE INDEX IF NOT EXISTS idx_observations_ts      ON observations(ts);
 CREATE INDEX IF NOT EXISTS idx_observations_hash    ON observations(content_hash);
 CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
+-- v8: covers the assistant keyset page scan (WHERE source = 'capture' AND the
+-- (ts, id) descent) so equal-timestamp groups never force a temp-B-tree re-sort
+-- per page. Safe here (all three columns exist in every released shape) AND in
+-- the v8 migration (IF NOT EXISTS keeps the two in lockstep).
+CREATE INDEX IF NOT EXISTS idx_observations_source_ts_id ON observations(source, ts, id);
 
 -- Heartbeat-merged activity spans (v4): ground-truth "app X was frontmost from
 -- t1 to t2" rows, two-tier by the STRUCTURAL policy classification

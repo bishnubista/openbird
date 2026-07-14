@@ -773,3 +773,23 @@ def test_privacy_route_chat_entity_ledger_is_local_deterministic() -> None:
     # Deletion lineage: the answer path stores nothing of its own — both
     # storage tables belong to the aggregation route's deletion contract.
     assert set(route["storage"]) == {"sqlite.entities", "sqlite.entity_evidence"}
+
+
+def test_assistant_activity_summary_route_is_metadata_only_egress() -> None:
+    route = _routes()["assistant.activity_summary"]
+
+    assert route["class"] == "third-party-cloud"
+    assert route["egress"]["default"] == "none_until_tool_invocation"
+    assert route["enforcement"]["transport"] == "local_stdio_only"
+    assert route["enforcement"]["model_calls"] == "forbidden"
+    assert route["enforcement"]["malformed_exclusion_regex"] == "fail_closed"
+    assert route["enforcement"]["bucket_precedence"] == (
+        "excluded then redacted then afk then visible, strict first-match per span"
+    )
+    assert "captured_text" in route["forbidden_fields"]
+    assert "window_title" in route["forbidden_fields"]
+    assert "url_host" in route["forbidden_fields"]
+    assert "excluded_or_tier0_bundle_id" in route["forbidden_fields"]
+    assert "observation_derived_statistics" in route["forbidden_fields"]
+    assert "cli.assistant_install_warning" in route["truth_surface"]
+    assert "mcp.activity_egress_notice" in route["truth_surface"]

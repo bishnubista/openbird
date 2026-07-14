@@ -44,28 +44,56 @@ class _FakeStore:
         *,
         recent: list[tuple[Observation, str]] | None = None,
         search: list[tuple[Observation, str]] | None = None,
+        spans: list[dict] | None = None,
         stats: dict | None = None,
     ) -> None:
         self.recent = recent or []
         self.search = search or []
+        self.spans = spans or []
         self._stats = stats or {"observations": 0, "encryption_enabled": True}
         self.closed = False
         self.recent_args = None
         self.search_args = None
+        self.spans_args = None
 
-    def recent_capture_text(self, start_ts, end_ts, *, limit, max_chars):
-        self.recent_args = (start_ts, end_ts, limit, max_chars)
+    def recent_capture_text(self, start_ts, end_ts, *, limit, max_chars, before=None):
+        self.recent_args = (start_ts, end_ts, limit, max_chars, before)
         return self.recent
 
     def lexical_capture_text(self, query, *, limit, max_chars):
         self.search_args = (query, limit, max_chars)
         return self.search
 
+    def capture_spans_overlapping(self, start_ts, end_ts, *, limit):
+        self.spans_args = (start_ts, end_ts, limit)
+        return self.spans[:limit]
+
     def stats(self):
         return self._stats
 
     def close(self):
         self.closed = True
+
+
+def _span(
+    span_id: str,
+    *,
+    start_ts: float,
+    end_ts: float,
+    bundle_id: str | None = "com.example.Editor",
+    detail_tier: int = 1,
+    afk: int = 0,
+    meeting: int = 0,
+) -> dict:
+    return {
+        "span_id": span_id,
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+        "bundle_id": bundle_id,
+        "detail_tier": detail_tier,
+        "afk": afk,
+        "meeting": meeting,
+    }
 
 
 def test_recent_capture_applies_all_exclusions_and_omits_ambient_metadata(tmp_path):
@@ -101,7 +129,7 @@ def test_recent_capture_applies_all_exclusions_and_omits_ambient_metadata(tmp_pa
     assert "url" not in result["results"][0]
     assert "Sensitive document title" not in json.dumps(result)
     assert "token=secret" not in json.dumps(result)
-    assert store.recent_args == (400.0, 1000.0, 50, 2000)
+    assert store.recent_args == (400.0, 1000.0, 201, 2000, None)
     assert store.closed is True
 
 
@@ -268,11 +296,14 @@ def test_mcp_server_exposes_only_bounded_read_tools(tmp_path):
     assert set(dumped) == {
         "openbird_recent_capture",
         "openbird_search_capture",
+        "openbird_activity_summary",
         "openbird_capture_status",
     }
     assert dumped["openbird_search_capture"]["inputSchema"]["required"] == ["query"]
     assert "untrusted" in dumped["openbird_search_capture"]["description"]
     assert "no capture text" in dumped["openbird_capture_status"]["description"]
+    assert "no capture text" in dumped["openbird_activity_summary"]["description"]
+    assert "next_cursor" in dumped["openbird_recent_capture"]["description"]
 
 
 def test_install_claude_config_preserves_other_content_and_writes_private_files(tmp_path):
@@ -632,3 +663,437 @@ def test_tunnel_client_pins_match_homebrew_formula():
     assert formula.count(f"tunnel-client-v{version.group(1)}-") == 2
     for checksum in checksums:
         assert formula.count(f'sha256 "{checksum}"') == 1
+
+
+# -- v2: cursor pagination, dedup groups, activity summary ---------------------
+
+
+def _capture_obs(id_, *, ts, hash_=None, app="com.example.Editor"):
+    return Observation(
+        id=id_,
+        content_hash=hash_ or f"hash-{id_}",
+        ts=ts,
+        app=app,
+        source="capture",
+    )
+
+
+def test_recent_capture_groups_repeated_blobs_into_one_result(tmp_path):
+    rows = [
+        (_capture_obs(f"dup-{i}", ts=1000.0 - i, hash_="hash-shared"), "PR #264 body")
+        for i in range(50)
+    ] + [(_capture_obs("other", ts=100.0), "unrelated excerpt")]
+    store = _FakeStore(recent=rows)
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: store,
+        clock=lambda: 1000.0,
+    )
+
+    result = service.recent_capture(minutes=60, limit=10)
+
+    shared = result["results"][0]
+    assert shared["seen_count"] == 50
+    assert shared["observation_id"] == "dup-0"  # newest occurrence is the anchor
+    assert shared["timestamp"] == 1000.0
+    assert shared["first_ts"] == 951.0
+    assert shared["last_ts"] == 1000.0
+    assert [item["excerpt"] for item in result["results"]] == [
+        "PR #264 body",
+        "unrelated excerpt",
+    ]
+    assert result["result_count"] == 2
+    assert result["truncated"] is False
+    assert result["next_cursor"] is None
+
+
+def test_recent_capture_cursor_walks_window_without_losing_groups(tmp_path):
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        for i in range(30):
+            store.add_observation(
+                f"distinct excerpt {i}",
+                app="com.example.Editor",
+                source="capture",
+                ts=1000.0 + i,
+            )
+    finally:
+        store.close()
+
+    def factory():
+        return MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+
+    service = AssistantCaptureService(
+        settings=settings, store_factory=factory, clock=lambda: 1030.0
+    )
+
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        result = service.recent_capture(minutes=60, limit=12, cursor=cursor)
+        seen.extend(item["excerpt"] for item in result["results"])
+        pages += 1
+        cursor = result["next_cursor"]
+        if cursor is None:
+            break
+    assert pages == 3
+    assert seen == [f"distinct excerpt {i}" for i in range(29, -1, -1)]
+    assert len(set(seen)) == 30  # every group emitted exactly once
+
+
+def test_recent_capture_cursor_window_is_frozen_against_new_inserts(tmp_path):
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        for i in range(25):
+            store.add_observation(
+                f"stable excerpt {i}",
+                app="com.example.Editor",
+                source="capture",
+                ts=1000.0 + i,
+            )
+    finally:
+        store.close()
+
+    def factory():
+        return MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+
+    service = AssistantCaptureService(
+        settings=settings, store_factory=factory, clock=lambda: 1025.0
+    )
+    first = service.recent_capture(minutes=60, limit=20)
+    assert first["next_cursor"] is not None
+
+    concurrent = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        concurrent.add_observation(
+            "newer than the frozen window",
+            app="com.example.Editor",
+            source="capture",
+            ts=2000.0,
+        )
+    finally:
+        concurrent.close()
+
+    second = service.recent_capture(minutes=60, cursor=first["next_cursor"])
+    texts = [item["excerpt"] for item in second["results"]]
+    assert "newer than the frozen window" not in texts
+    assert second["window_end_ts"] == first["window_end_ts"]
+    assert second["next_cursor"] is None
+    assert len(first["results"]) + len(texts) == 25
+
+
+def test_recent_capture_rejects_bad_unknown_and_expired_cursors(tmp_path):
+    now = [1000.0]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=_FakeStore,
+        clock=lambda: now[0],
+    )
+    with pytest.raises(ValueError, match="not a valid page token"):
+        service.recent_capture(cursor="")
+    with pytest.raises(ValueError, match="not a valid page token"):
+        service.recent_capture(cursor="x" * 200)
+    with pytest.raises(ValueError, match="unknown or expired"):
+        service.recent_capture(cursor="forged-or-guessed-token")
+
+    rows = [
+        (_capture_obs(f"row-{i}", ts=1000.0 - i), f"text {i}") for i in range(10)
+    ]
+    paged = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(recent=rows),
+        clock=lambda: now[0],
+    )
+    cursor = paged.recent_capture(minutes=60, limit=3)["next_cursor"]
+    assert cursor is not None
+    now[0] += 15 * 60 + 1
+    with pytest.raises(ValueError, match="unknown or expired"):
+        paged.recent_capture(cursor=cursor)
+
+
+def test_recent_capture_all_excluded_page_advances_without_leaking(tmp_path):
+    rows = [
+        (_capture_obs(f"secret-{i}", ts=1000.0 - i, app="com.secret.App"), "hidden")
+        for i in range(5)
+    ]
+    store = _FakeStore(recent=rows)
+    service = AssistantCaptureService(
+        settings=Settings(
+            data_dir=tmp_path, deep_brain_excluded_apps=["com.secret.App"]
+        ),
+        store_factory=lambda: store,
+        clock=lambda: 1000.0,
+    )
+
+    result = service.recent_capture(minutes=60, limit=5)
+
+    assert result["results"] == []
+    assert result["excluded_observations"] == 5
+    assert result["next_cursor"] is None  # scan consumed the whole window
+    dumped = json.dumps(result)
+    assert "secret-" not in dumped  # no excluded id leaks anywhere, cursor included
+    assert "hidden" not in dumped
+
+
+def test_recent_capture_limit_stop_resumes_at_unconsumed_row(tmp_path):
+    rows = [
+        (_capture_obs(f"row-{i}", ts=1000.0 - i), f"text {i}") for i in range(6)
+    ]
+    store = _FakeStore(recent=rows)
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: store,
+        clock=lambda: 1000.0,
+    )
+
+    first = service.recent_capture(minutes=60, limit=4)
+    assert [item["excerpt"] for item in first["results"]] == [
+        "text 0", "text 1", "text 2", "text 3",
+    ]
+    assert first["truncated"] is True
+    assert first["next_cursor"] is not None
+    # The page-2 keyset boundary is the last CONSUMED row (row-3), so the
+    # stopping row (row-4) must be the first row requested next.
+    service.recent_capture(cursor=first["next_cursor"])
+    assert store.recent_args[4] == (997.0, "row-3")
+
+
+def test_activity_summary_buckets_follow_strict_precedence(tmp_path):
+    spans = [
+        _span("visible", start_ts=0.0, end_ts=100.0),
+        _span("afk", start_ts=100.0, end_ts=160.0, afk=1),
+        _span("tier0", start_ts=160.0, end_ts=200.0, detail_tier=0),
+        _span("tier0-afk", start_ts=200.0, end_ts=230.0, detail_tier=0, afk=1),
+        _span("excl", start_ts=230.0, end_ts=280.0, bundle_id="com.secret.App"),
+        _span(
+            "excl-tier0-afk", start_ts=280.0, end_ts=300.0,
+            bundle_id="com.secret.App", detail_tier=0, afk=1,
+        ),
+        _span("paused", start_ts=300.0, end_ts=320.0, bundle_id=None, detail_tier=0),
+        _span("zero", start_ts=320.0, end_ts=320.0),
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(
+            data_dir=tmp_path, deep_brain_excluded_apps=["com.secret.App"]
+        ),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 400.0,
+    )
+
+    result = service.activity_summary(minutes=10)
+
+    assert result["content_returned"] is False
+    assert result["foreground_seconds"] == 100.0
+    assert result["afk_seconds"] == 60.0
+    assert result["redacted_seconds"] == 90.0   # tier0 + tier0-afk + paused
+    assert result["excluded_seconds"] == 70.0   # both excluded spans, afk/tier0 or not
+    assert result["apps"] == [
+        {
+            "bundle_id": "com.example.Editor",
+            "foreground_seconds": 100.0,
+            "span_count": 1,
+            "meeting_seconds": 0.0,
+        }
+    ]
+    dumped = json.dumps(result)
+    assert "com.secret.App" not in dumped
+    # Partition identity: visible + afk + redacted + excluded == clipped time.
+    total = (
+        result["foreground_seconds"] + result["afk_seconds"]
+        + result["redacted_seconds"] + result["excluded_seconds"]
+    )
+    assert total == 320.0
+
+
+def test_activity_summary_meeting_overlay_survives_afk(tmp_path):
+    spans = [
+        _span(
+            "zoom", start_ts=0.0, end_ts=3600.0,
+            bundle_id="us.zoom.xos", afk=1, meeting=1,
+        ),
+        _span("editor", start_ts=3600.0, end_ts=3660.0),
+        _span(
+            "hidden-meeting", start_ts=3660.0, end_ts=3700.0,
+            detail_tier=0, meeting=1,
+        ),
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 3700.0,
+    )
+
+    result = service.activity_summary(minutes=100)
+
+    zoom = next(a for a in result["apps"] if a["bundle_id"] == "us.zoom.xos")
+    assert zoom["meeting_seconds"] == 3600.0
+    assert zoom["foreground_seconds"] == 0.0  # fully afk, still surfaced
+    assert result["meeting_seconds"] == 3600.0  # hidden tier-0 meeting moves nothing
+    assert result["afk_seconds"] == 3600.0
+    assert result["meeting_seconds"] == sum(
+        a["meeting_seconds"] for a in result["apps"]
+    )
+
+
+def test_activity_summary_switches_and_focus_ignore_hidden_spans(tmp_path):
+    spans = [
+        _span("a1", start_ts=0.0, end_ts=100.0, bundle_id="com.a"),
+        _span("hidden", start_ts=100.0, end_ts=150.0, detail_tier=0),
+        _span("a2", start_ts=150.0, end_ts=260.0, bundle_id="com.a"),
+        _span("b", start_ts=260.0, end_ts=300.0, bundle_id="com.b"),
+        _span("afk", start_ts=300.0, end_ts=330.0, bundle_id="com.b", afk=1),
+        _span("a3", start_ts=330.0, end_ts=350.0, bundle_id="com.a"),
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 350.0,
+    )
+
+    result = service.activity_summary(minutes=10)
+
+    # Visible non-afk sequence: a1, a2, b, a3 -> a->b, b->a = 2 switches (the
+    # hidden tier-0 span between a1 and a2 does NOT split the run).
+    assert result["context_switches"] == 2
+    assert result["longest_focus"] == {
+        "bundle_id": "com.a",
+        "start_ts": 0.0,
+        "end_ts": 260.0,
+        "seconds": 210.0,
+    }
+
+
+def test_activity_summary_caps_apps_and_folds_tail(tmp_path):
+    spans = [
+        _span(f"s{i}", start_ts=i * 10.0, end_ts=i * 10.0 + 10.0 - i * 0.1,
+              bundle_id=f"com.app.{i:02d}")
+        for i in range(35)
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: 400.0,
+    )
+
+    result = service.activity_summary(minutes=10)
+
+    assert len(result["apps"]) == 30
+    assert result["other_apps_count"] == 5
+    assert result["other_apps_seconds"] > 0
+    named = sum(a["foreground_seconds"] for a in result["apps"])
+    assert named + result["other_apps_seconds"] == pytest.approx(
+        result["foreground_seconds"]
+    )
+
+
+def test_activity_summary_fails_closed_on_span_overflow(tmp_path):
+    spans = [
+        _span(f"s{i}", start_ts=float(i), end_ts=float(i) + 0.5)
+        for i in range(assistant.MAX_SUMMARY_SPANS + 1)
+    ]
+    service = AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path),
+        store_factory=lambda: _FakeStore(spans=spans),
+        clock=lambda: float(assistant.MAX_SUMMARY_SPANS + 2),
+    )
+    with pytest.raises(ValueError, match="narrower window"):
+        service.activity_summary(minutes=1440)
+
+
+def test_malformed_regex_exclusion_fails_every_tool_closed(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path, deep_brain_excluded_apps=["re:com.[unclosed"]
+    )
+    rows = [(_capture_obs("row", ts=1000.0), "text")]
+    service = AssistantCaptureService(
+        settings=settings,
+        store_factory=lambda: _FakeStore(
+            recent=rows, search=rows, spans=[_span("s", start_ts=0.0, end_ts=10.0)]
+        ),
+        clock=lambda: 1000.0,
+    )
+    for call in (
+        lambda: service.recent_capture(minutes=10, limit=5),
+        lambda: service.search_capture(query="text", limit=5),
+        lambda: service.activity_summary(minutes=10),
+    ):
+        with pytest.raises(ValueError, match="deep_brain_excluded_apps"):
+            call()
+
+
+def test_store_recent_capture_text_keyset_before_boundary(tmp_path):
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        ids = [
+            store.add_observation(
+                f"tie {i}", app="com.example.Editor", source="capture", ts=500.0
+            ).id
+            for i in range(5)
+        ]
+        rows = store.recent_capture_text(0, 1000, limit=10, max_chars=100)
+        assert len(rows) == 5
+        boundary = rows[2][0]
+        older = store.recent_capture_text(
+            0, 1000, limit=10, max_chars=100, before=(boundary.ts, boundary.id)
+        )
+        assert [obs.id for obs, _ in older] == [obs.id for obs, _ in rows[3:]]
+        assert set(ids) == {obs.id for obs, _ in rows}
+    finally:
+        store.close()
+
+
+def test_store_capture_spans_overlapping_is_projected_and_bounded(tmp_path):
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        for i in range(4):
+            store.open_span(
+                epoch_id="epoch",
+                start_ts=float(i * 10),
+                end_ts=float(i * 10 + 5),
+                bundle_id="com.example.Editor",
+                detail_tier=1,
+                window="Sensitive title",
+                url_host="example.com",
+            )
+        spans = store.capture_spans_overlapping(0, 100, limit=3)
+        assert len(spans) == 3
+        assert set(spans[0]) == {
+            "span_id", "start_ts", "end_ts", "bundle_id",
+            "detail_tier", "afk", "meeting",
+        }
+        assert "Sensitive title" not in json.dumps(spans)
+    finally:
+        store.close()
+
+
+def test_schema_v8_keyset_index_exists_on_fresh_and_migrated_dbs(tmp_path):
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+
+    def index_names(s):
+        rows = s.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        ).fetchall()
+        return {next(iter(r.values())) if isinstance(r, dict) else r[0] for r in rows}
+
+    try:
+        assert "idx_observations_source_ts_id" in index_names(store)
+        store.conn.execute("DROP INDEX idx_observations_source_ts_id")
+        store.conn.execute("PRAGMA user_version = 7")
+        store.conn.commit()
+    finally:
+        store.close()
+
+    reopened = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        assert "idx_observations_source_ts_id" in index_names(reopened)
+        version = reopened.conn.execute("PRAGMA user_version").fetchone()
+        value = next(iter(version.values())) if isinstance(version, dict) else version[0]
+        assert int(value) == 8
+    finally:
+        reopened.close()

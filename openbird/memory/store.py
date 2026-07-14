@@ -814,24 +814,56 @@ class MemoryStore:
         *,
         limit: int,
         max_chars: int = 2000,
+        before: tuple[float, str] | None = None,
     ) -> list[tuple[Observation, str]]:
         """Return a newest-first, row-bounded page of capture text.
 
         This is an assistant-safe local read: it performs no embedding, rerank,
         or completion call. App/source/id egress exclusions remain the caller's
         responsibility because they are policy rather than storage semantics.
+
+        ``before`` is an exclusive keyset boundary ``(ts, id)``: only rows
+        strictly below it in ``(ts, id)`` descending order are returned, so a
+        caller can resume a page walk without offsets (stable under concurrent
+        newer inserts — later pages are strictly older). Served by
+        ``idx_observations_source_ts_id`` (schema v8).
         """
-        rows = self.conn.execute(
+        sql = (
             "SELECT o.*, b.text AS blob_text FROM observations o "
             "JOIN content_blobs b ON b.content_hash = o.content_hash "
             "WHERE o.ts >= ? AND o.ts <= ? AND o.source = 'capture' "
-            "ORDER BY o.ts DESC, o.id DESC LIMIT ?",
-            (float(start_ts), float(end_ts), max(0, int(limit))),
-        ).fetchall()
+        )
+        params: list[object] = [float(start_ts), float(end_ts)]
+        if before is not None:
+            before_ts, before_id = before
+            sql += "AND (o.ts < ? OR (o.ts = ? AND o.id < ?)) "
+            params.extend([float(before_ts), float(before_ts), str(before_id)])
+        sql += "ORDER BY o.ts DESC, o.id DESC LIMIT ?"
+        params.append(max(0, int(limit)))
+        rows = self.conn.execute(sql, params).fetchall()
         return [
             (self._row_to_observation(row), str(row["blob_text"] or "")[:max_chars])
             for row in rows
         ]
+
+    def capture_spans_overlapping(
+        self, start_ts: float, end_ts: float, *, limit: int
+    ) -> list[dict]:
+        """Return a bounded, chronological page of spans overlapping the window.
+
+        Unlike :meth:`spans_in_range` this read is hard-bounded (``limit``) and
+        projected to the columns the assistant summary aggregates — it never
+        returns ``window``, ``url_host``, or ``identity_key``, so tier-1 titles
+        cannot reach an assistant even by a serialization mistake. Callers pass
+        ``limit = cap + 1`` and treat a full result as overflow (fail closed).
+        """
+        rows = self.conn.execute(
+            "SELECT span_id, start_ts, end_ts, bundle_id, detail_tier, afk, meeting "
+            "FROM activity_spans WHERE start_ts <= ? AND end_ts >= ? "
+            "ORDER BY start_ts, span_id LIMIT ?",
+            (float(end_ts), float(start_ts), max(0, int(limit))),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def lexical_capture_text(
         self,
