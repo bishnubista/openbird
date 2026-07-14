@@ -695,9 +695,11 @@ routes:
       - app_bundle_id
       - per_app_foreground_seconds
       - per_app_meeting_seconds
+      - per_app_span_count
       - afk_seconds
       - context_switch_count
       - focus_block_timestamps
+      - folded_tail_app_count_and_seconds
       - unnamed_excluded_and_redacted_second_totals
     forbidden_fields:
       - captured_text

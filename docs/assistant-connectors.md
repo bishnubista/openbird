@@ -56,9 +56,9 @@ no data, expire after 15 minutes, and are invalidated by a server restart (just 
 ### Activity summary
 
 `openbird_activity_summary` answers "what did I focus on" from **trusted metadata only** — activity
-spans, never captured text. It returns per-app foreground and meeting durations (top 30 apps, the
-rest folded into a nameless `other_apps` bucket), AFK time, context-switch count, and the longest
-focus block. Excluded apps and coarse/redacted spans contribute only unnamed `excluded_seconds` /
+spans, never captured text. It returns per-app foreground and meeting durations with span counts
+(top 30 apps; the rest folded into a nameless `other_apps` bucket reporting only its total seconds
+and app count), AFK time, context-switch count, and the longest focus block. Excluded apps and coarse/redacted spans contribute only unnamed `excluded_seconds` /
 `redacted_seconds` totals; their transitions never affect switch or focus numbers. Meeting time is
 counted through AFK (listening in a call involves no input). Prefer it over paging excerpts for
 time-use questions: richer analysis, strictly less raw-text egress.
@@ -71,8 +71,9 @@ the assistant must never treat them as instructions.
 Installing the connector does not upload the database or stream capture. When Claude invokes a
 content tool, the returned excerpt, app identifier, timestamp, source, and observation ID leave
 OpenBird's local boundary through Claude. When Claude invokes the activity summary, **behavioral
-metadata** leaves the same way: app identifiers, per-app usage durations, AFK and meeting time,
-context-switch counts, and focus-block timestamps — no captured text. Anthropic's retention and
+metadata** leaves the same way: app identifiers, per-app usage durations and span counts, AFK and
+meeting time, context-switch counts, focus-block timestamps, and the folded-tail app count — no
+captured text. Anthropic's retention and
 workspace policies apply after that point. A later OpenBird purge prevents future retrieval but
 cannot recall data already sent.
 
