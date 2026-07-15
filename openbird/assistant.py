@@ -9,6 +9,7 @@ before serializing results.
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import re
@@ -24,9 +25,11 @@ import time
 from collections import Counter, OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, datetime, time as dt_time, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from openbird.capture.redact import SPAN_TIER_FULL, _bundle_matches_any
 from openbird.config import Settings, get_settings
@@ -61,9 +64,9 @@ ASSISTANT_EGRESS_NOTICE = (
 
 ASSISTANT_ACTIVITY_EGRESS_NOTICE = (
     "These app identifiers — including apps whose content was redacted, with reason "
-    "codes — usage durations, activity patterns, and this Mac's host label leave "
-    "OpenBird's local boundary through the connected assistant. No captured text is "
-    "included."
+    "codes — usage durations, activity patterns, the resolved query window and its "
+    "timezone, and this Mac's host label leave OpenBird's local boundary through the "
+    "connected assistant. No captured text is included."
 )
 
 ASSISTANT_STATUS_EGRESS_NOTICE = (
@@ -126,6 +129,11 @@ ACTIVITY_EGRESS_FIELDS = (
     "capture_host",
     "window_start_ts",
     "window_end_ts",
+    "window.mode",
+    "window.start_ts",
+    "window.end_ts",
+    "window.timezone",
+    "window.local_day",
     "foreground_seconds",
     "afk_seconds",
     "meeting_seconds",
@@ -312,6 +320,151 @@ def _bounded_query(query: str) -> str:
     return value
 
 
+_LOCAL_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# One constant, non-echoing message for every local_day parse/overflow failure
+# (fromisoformat alone would also accept compact `20260714` and ISO week dates,
+# which the contract does not).
+_LOCAL_DAY_ERROR = "local_day must be YYYY-MM-DD, 'today', or 'yesterday'"
+
+
+def _bounded_ts(value: Any, *, name: str) -> float:
+    """Validate an epoch-seconds tool argument as a finite number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number (epoch seconds)")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def _system_timezone_name() -> str:
+    """Resolve the Mac's IANA timezone from the /etc/localtime symlink.
+
+    FAILS CLOSED when unresolvable: silently substituting UTC would aggregate
+    the wrong civil day, and echoing the substitution afterward cannot undo
+    that. macOS reliably keeps /etc/localtime pointing into a zoneinfo tree.
+    """
+    try:
+        target = os.path.realpath("/etc/localtime")
+    except OSError:
+        target = ""
+    marker = "/zoneinfo/"
+    index = target.find(marker)
+    if index >= 0:
+        name = target[index + len(marker):]
+        try:
+            ZoneInfo(name)
+        except (KeyError, ValueError, OSError):
+            pass
+        else:
+            return name
+    raise ValueError(
+        "could not resolve the system timezone; pass an explicit IANA timezone"
+    )
+
+
+def _resolve_summary_window(
+    *,
+    minutes: int | None,
+    start_ts: float | None,
+    end_ts: float | None,
+    local_day: str | None,
+    timezone: str | None,
+    now: float,
+) -> dict[str, Any]:
+    """Resolve one of three mutually exclusive window modes to a concrete window.
+
+    Returns the response's ``window`` echo: ``{mode, start_ts, end_ts,
+    timezone, local_day}`` with the HALF-OPEN convention ``[start_ts, end_ts)``.
+    ``minutes`` (default 60) is a trailing window ending at ``now``; ``range``
+    is an explicit epoch window bounded to 24h; ``local_day`` is one civil day
+    in an IANA timezone — its length is timezone-rule-dependent (DST days,
+    half-hour rules, historical 27h days), so it has no minutes ceiling, but a
+    SKIPPED date (e.g. Pacific/Apia 2011-12-30) resolves to an empty window
+    and fails closed. Midnights are built with zoneinfo datetimes at fold=0:
+    a repeated midnight picks its first occurrence and a nonexistent midnight
+    maps to the first valid instant, keeping ``end(day) == start(day + 1)``.
+    """
+    range_given = start_ts is not None or end_ts is not None
+    modes_given = sum(
+        (minutes is not None, range_given, local_day is not None)
+    )
+    if modes_given > 1:
+        raise ValueError("pass only one of minutes, start_ts/end_ts, or local_day")
+    if timezone is not None and local_day is None:
+        raise ValueError("timezone is only valid together with local_day")
+
+    if range_given:
+        if start_ts is None or end_ts is None:
+            raise ValueError("start_ts and end_ts must be provided together")
+        start = _bounded_ts(start_ts, name="start_ts")
+        end = _bounded_ts(end_ts, name="end_ts")
+        if end <= start:
+            raise ValueError("end_ts must be greater than start_ts")
+        if end - start > MAX_MINUTES * 60:
+            raise ValueError(
+                f"start_ts/end_ts window must span at most {MAX_MINUTES} minutes"
+            )
+        return {
+            "mode": "range",
+            "start_ts": start,
+            "end_ts": end,
+            "timezone": None,
+            "local_day": None,
+        }
+
+    if local_day is not None:
+        if not isinstance(local_day, str):
+            raise ValueError(_LOCAL_DAY_ERROR)
+        tz_name = timezone if timezone is not None else _system_timezone_name()
+        if not isinstance(tz_name, str) or not tz_name.strip():
+            raise ValueError("timezone must be a valid IANA timezone name")
+        tz_name = tz_name.strip()
+        try:
+            tz = ZoneInfo(tz_name)
+        except (KeyError, ValueError, OSError) as exc:
+            raise ValueError("timezone must be a valid IANA timezone name") from exc
+        token = local_day.strip()
+        if token.lower() in ("today", "yesterday"):
+            day = datetime.fromtimestamp(now, tz).date()
+            if token.lower() == "yesterday":
+                day -= timedelta(days=1)
+        elif _LOCAL_DAY_RE.fullmatch(token):
+            try:
+                day = date.fromisoformat(token)
+            except ValueError as exc:
+                raise ValueError(_LOCAL_DAY_ERROR) from exc
+        else:
+            raise ValueError(_LOCAL_DAY_ERROR)
+        try:
+            next_day = day + timedelta(days=1)
+        except OverflowError as exc:
+            raise ValueError(_LOCAL_DAY_ERROR) from exc
+        start = datetime.combine(day, dt_time(0, 0), tzinfo=tz).timestamp()
+        end = datetime.combine(next_day, dt_time(0, 0), tzinfo=tz).timestamp()
+        if not end > start:
+            # Dateline moves can skip whole dates; an empty window must never
+            # reach the store read (it could only waste the span cap).
+            raise ValueError("local_day does not exist in this timezone")
+        return {
+            "mode": "local_day",
+            "start_ts": start,
+            "end_ts": end,
+            "timezone": tz_name,
+            "local_day": day.isoformat(),
+        }
+
+    value = 60 if minutes is None else minutes
+    value = _bounded_int(value, name="minutes", minimum=1, maximum=MAX_MINUTES)
+    return {
+        "mode": "minutes",
+        "start_ts": now - value * 60,
+        "end_ts": now,
+        "timezone": None,
+        "local_day": None,
+    }
+
+
 class AssistantCaptureService:
     """Bounded, exclusion-aware read service for MCP tools."""
 
@@ -422,8 +575,22 @@ class AssistantCaptureService:
             ),
         }
 
-    def activity_summary(self, *, minutes: int = 60) -> dict[str, Any]:
+    def activity_summary(
+        self,
+        *,
+        minutes: int | None = None,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+        local_day: str | None = None,
+        timezone: str | None = None,
+    ) -> dict[str, Any]:
         """Return a metadata-only rollup of activity spans in a bounded window.
+
+        The window comes from ONE of three modes (see
+        :func:`_resolve_summary_window`): trailing ``minutes`` (default 60),
+        a half-open epoch ``[start_ts, end_ts)`` range, or ``local_day`` in an
+        IANA ``timezone``; the resolved window is echoed back verbatim in the
+        response's ``window`` object.
 
         Every returned duration derives from the exclusion-filtered span
         partition; no captured text, window title, or URL is read, and no
@@ -434,10 +601,16 @@ class AssistantCaptureService:
         capture deliberately keeps ``meeting`` through AFK — listening in a
         call involves no input.
         """
-        minutes = _bounded_int(minutes, name="minutes", minimum=1, maximum=MAX_MINUTES)
+        window = _resolve_summary_window(
+            minutes=minutes,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            local_day=local_day,
+            timezone=timezone,
+            now=float(self.clock()),
+        )
         _validate_excluded_app_patterns(self.settings)
-        end_ts = float(self.clock())
-        start_ts = end_ts - minutes * 60
+        start_ts, end_ts = window["start_ts"], window["end_ts"]
         store = self.store_factory()
         try:
             spans = store.capture_spans_overlapping(
@@ -584,6 +757,7 @@ class AssistantCaptureService:
             "capture_host": self.capture_host,
             "window_start_ts": start_ts,
             "window_end_ts": end_ts,
+            "window": window,
             "foreground_seconds": sum(
                 entry["foreground_seconds"] for _, entry in ranked
             ),
@@ -833,19 +1007,36 @@ def create_mcp_server(service: AssistantCaptureService | None = None):
     @server.tool(
         name="openbird_activity_summary",
         description=(
-            "Return a metadata-only rollup of a bounded recent window: per-app "
+            "Return a metadata-only rollup of a bounded activity window: per-app "
             "foreground/meeting durations, AFK time, context switches, the longest "
             "focus block, and a per-app redaction breakdown (bundle id + reason code + "
             "seconds for content-redacted spans; assistant-excluded apps stay unnamed). "
-            "App identifiers, durations, activity patterns, and a host label are sent "
-            "to this assistant; no capture text. Prefer this over paging excerpts for "
+            "Window modes (pass at most one): minutes (trailing window, default 60), "
+            "start_ts/end_ts (half-open epoch range [start_ts, end_ts), max 24h), or "
+            "local_day ('YYYY-MM-DD', 'today', or 'yesterday') with an optional IANA "
+            "timezone (defaults to this Mac's zone). The response echoes the resolved "
+            "window with its timezone. App identifiers, durations, activity patterns, "
+            "the resolved window/timezone, and a host label are sent to this "
+            "assistant; no capture text. Prefer this over paging excerpts for "
             "focus/time questions."
         ),
         structured_output=True,
     )
-    def activity_summary(minutes: int = 60) -> dict[str, Any]:
+    def activity_summary(
+        minutes: int | None = None,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+        local_day: str | None = None,
+        timezone: str | None = None,
+    ) -> dict[str, Any]:
         """Expose the metadata-only activity rollup through MCP."""
-        return capture.activity_summary(minutes=minutes)
+        return capture.activity_summary(
+            minutes=minutes,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            local_day=local_day,
+            timezone=timezone,
+        )
 
     @server.tool(
         name="openbird_capture_status",

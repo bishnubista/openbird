@@ -122,20 +122,35 @@ This multiplies the useful signal per call without raising any cap: same 20-row,
 
 The "what did I focus on today" tool. Reads `activity_spans` only; **returns zero
 captured text, zero window titles, zero URLs** — bundle ids, durations, and counts
-only. Same `minutes` bound (1–1440), no cursor needed (output is a fixed-size
-rollup, not a row stream).
+only. No cursor needed (output is a fixed-size rollup, not a row stream).
 
-Response shape:
+Window modes (v3 revision; pass at most one):
+
+| Mode | Parameters | Bound |
+|---|---|---|
+| `minutes` (default 60) | trailing window ending now | 1–1440 |
+| `range` | `start_ts`/`end_ts`, half-open `[start_ts, end_ts)` epoch seconds | ≤ 24h |
+| `local_day` | `"YYYY-MM-DD"` \| `"today"` \| `"yesterday"` + optional IANA `timezone` (defaults to the Mac's zone, fail-closed if unresolvable) | one civil day; length is timezone-rule-dependent (23–25h+ on DST days); skipped dates rejected |
+
+Response shape (v3: adds `window` echo, redaction attribution, `capture_host`,
+structured `egress` — see PR #275 and the window-modes PR):
 
 ```json
 {
   "ok": true,
   "content_returned": false,
+  "capture_host": "…",
+  "egress": {"scope": "activity_metadata", "untrusted_content": false, "fields": ["…"]},
   "window_start_ts": 0.0, "window_end_ts": 0.0,
+  "window": {"mode": "local_day", "start_ts": 0.0, "end_ts": 0.0,
+             "timezone": "America/New_York", "local_day": "2026-07-14"},
   "foreground_seconds": 0.0,
   "afk_seconds": 0.0,
   "meeting_seconds": 0.0,
   "redacted_seconds": 0.0,
+  "redacted_by_app": [{"bundle_id": "…", "reason": "blocklisted", "seconds": 0.0}],
+  "redacted_other_seconds": 0.0,
+  "redacted_unattributed_seconds": 0.0,
   "excluded_seconds": 0.0,
   "context_switches": 0,
   "longest_focus": {"bundle_id": "…", "start_ts": 0.0, "end_ts": 0.0, "seconds": 0.0},

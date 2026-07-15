@@ -706,6 +706,7 @@ routes:
       - redacted_other_seconds_tail
       - redacted_unattributed_seconds
       - unnamed_excluded_second_total
+      - resolved_query_window_echo_with_timezone
       - capture_host_label
     forbidden_fields:
       - captured_text
@@ -726,7 +727,7 @@ routes:
       install_requires: explicit warning and interactive confirmation or --yes
       exclusions: deep_brain app exclusions bucket matching spans into unnamed excluded_seconds before serialization
       bucket_precedence: excluded then redacted then afk then visible, strict first-match per span
-      bounds: 5000 spans per window fail-closed, 30 named apps, 1-1440 minutes
+      bounds: minutes and range modes bounded to 24h; local_day mode exactly one civil day whose length is timezone-rule-dependent, skipped dates rejected; 5000 spans per window fail-closed; 30 named apps
       model_calls: forbidden
       malformed_exclusion_regex: fail_closed
     deletion:

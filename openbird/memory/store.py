@@ -1007,11 +1007,16 @@ class MemoryStore:
         cannot reach an assistant even by a serialization mistake. ``reason``
         is included: it is the closed tier-0 enum (never content) that lets the
         summary attribute redacted time. Callers pass ``limit = cap + 1`` and
-        treat a full result as overflow (fail closed).
+        treat a full result as overflow (fail closed) — which is why the
+        overlap predicate is HALF-OPEN against ``[start_ts, end_ts)`` and
+        excludes empty spans: boundary-touching and zero-length rows can only
+        ever clip to zero seconds, so letting them through would waste cap
+        slots and could force a false overflow.
         """
         rows = self.conn.execute(
             "SELECT span_id, start_ts, end_ts, bundle_id, detail_tier, afk, meeting, "
-            "reason FROM activity_spans WHERE start_ts <= ? AND end_ts >= ? "
+            "reason FROM activity_spans "
+            "WHERE start_ts < ? AND end_ts > ? AND end_ts > start_ts "
             "ORDER BY start_ts, span_id LIMIT ?",
             (float(end_ts), float(start_ts), max(0, int(limit))),
         ).fetchall()
