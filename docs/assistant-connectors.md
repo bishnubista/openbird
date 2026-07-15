@@ -91,7 +91,8 @@ content tool, the returned excerpt, app identifier, timestamp, source, and obser
 OpenBird's local boundary through Claude. When Claude invokes the activity summary, **behavioral
 metadata** leaves the same way: app identifiers (including redacted apps with their reason
 codes), per-app usage durations and span counts, AFK and meeting time, context-switch counts,
-focus-block timestamps, and the folded-tail app count — no captured text. The status tool sends
+focus-block timestamps, the folded-tail app count, and the resolved query window with its IANA
+timezone (which reveals this Mac's timezone when the caller lets it default) — no captured text. The status tool sends
 store-lifetime totals, encryption state, and exclusion-configuration counts. Every response also
 carries a `capture_host` label naming which Mac's store answered (configurable via
 `OPENBIRD_ASSISTANT_HOST_LABEL`; defaults to the hostname) and a machine-parseable `egress`

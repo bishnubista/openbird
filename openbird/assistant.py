@@ -28,8 +28,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Annotated, Any, Protocol
 from zoneinfo import ZoneInfo
+
+from pydantic import BeforeValidator
 
 from openbird.capture.redact import SPAN_TIER_FULL, _bundle_matches_any
 from openbird.config import Settings, get_settings
@@ -325,6 +327,34 @@ _LOCAL_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # (fromisoformat alone would also accept compact `20260714` and ISO week dates,
 # which the contract does not).
 _LOCAL_DAY_ERROR = "local_day must be YYYY-MM-DD, 'today', or 'yesterday'"
+
+
+def _refuse_lax_number(value: Any) -> Any:
+    """Refuse bool/str inputs BEFORE pydantic's lax coercion numberizes them.
+
+    FastMCP validates tool arguments through a pydantic model, whose lax mode
+    would silently turn ``true`` into ``1.0`` and ``"100"`` into ``100.0`` —
+    bypassing :func:`_bounded_ts`. This BeforeValidator sees the raw JSON value
+    and enforces the same strictness at the public MCP boundary.
+    """
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, (int, float))
+    ):
+        raise ValueError("must be a number (epoch seconds), not a bool or string")
+    return value
+
+
+def _refuse_lax_int(value: Any) -> Any:
+    """Refuse bool/str inputs before pydantic lax coercion (see above)."""
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int)
+    ):
+        raise ValueError("must be an integer, not a bool or string")
+    return value
+
+
+StrictEpochSeconds = Annotated[float | None, BeforeValidator(_refuse_lax_number)]
+StrictMinutes = Annotated[int | None, BeforeValidator(_refuse_lax_int)]
 
 
 def _bounded_ts(value: Any, *, name: str) -> float:
@@ -1023,9 +1053,9 @@ def create_mcp_server(service: AssistantCaptureService | None = None):
         structured_output=True,
     )
     def activity_summary(
-        minutes: int | None = None,
-        start_ts: float | None = None,
-        end_ts: float | None = None,
+        minutes: StrictMinutes = None,
+        start_ts: StrictEpochSeconds = None,
+        end_ts: StrictEpochSeconds = None,
         local_day: str | None = None,
         timezone: str | None = None,
     ) -> dict[str, Any]:

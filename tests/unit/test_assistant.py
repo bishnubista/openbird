@@ -1761,3 +1761,23 @@ def test_egress_declarations_hold_in_local_day_mode(tmp_path):
         f"emitted-but-undeclared {sorted(emitted - declared)}; "
         f"declared-but-missing {sorted(declared - emitted)}"
     )
+
+
+def test_mcp_activity_summary_rejects_lax_coercible_arguments(tmp_path):
+    # Pydantic's lax mode would turn true into 1.0 and "100" into 100.0 before
+    # the service's strictness runs; the BeforeValidator annotations must
+    # refuse them at the public MCP boundary.
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    service = _summary_service(tmp_path)
+    server = assistant.create_mcp_server(service)
+    for arguments in (
+        {"start_ts": True, "end_ts": 60.0},
+        {"start_ts": "100", "end_ts": 200.0},
+        {"minutes": True},
+        {"minutes": "60"},
+    ):
+        with pytest.raises(ToolError, match="validation error"):
+            asyncio.run(
+                server.call_tool("openbird_activity_summary", arguments)
+            )

@@ -263,9 +263,9 @@ excerpt dips only when a specific question needs text.
 ### 4. Privacy truth surface + docs
 
 Behavioral rollups are a **new category of egress** — bundle ids, per-app durations,
-AFK/meeting metrics, switch counts, and focus timestamps leave the local boundary
-even though `content_returned` is false. Every surface that states what leaves must
-say so:
+AFK/meeting metrics, switch counts, focus timestamps, and (v3) the resolved query
+window with its IANA timezone leave the local boundary even though
+`content_returned` is false. Every surface that states what leaves must say so:
 
 - `openbird_activity_summary` responses carry their own egress notice field
   (sibling of `ASSISTANT_EGRESS_NOTICE`, worded for behavioral metadata: app
@@ -326,7 +326,10 @@ say so:
 7. stdio-only transport, unchanged tool count discipline (3 → 4, all read-only).
 8. Cursors are opaque server-side handles (random token, no decodable payload —
    excluded-row boundaries leak nothing) with server-held, semantically bounded
-   state; no tool argument can widen any window beyond the shipped 24-hour maximum.
+   state; no tool argument can widen any window beyond its mode's bound — 24 hours
+   for minutes/range, and exactly one civil day for `local_day` (which timezone
+   rules can make longer than 24 hours on a DST fall-back day; skipped dates are
+   rejected).
 
 ## Test plan
 
