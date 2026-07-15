@@ -35,7 +35,7 @@ The server exposes exactly four read-only tools:
 |---|---|---|
 | `openbird_recent_capture` | Recent captured excerpts, deduplicated and pageable | 1-1440 minutes, 1-20 groups per page, 200-row page scan |
 | `openbird_search_capture` | Local BM25 capture search | 500-character query, 1-20 requested results |
-| `openbird_activity_summary` | Per-app durations, meetings, focus rollup | 1-1440 minutes; metadata only, no captured content |
+| `openbird_activity_summary` | Per-app durations, meetings, focus rollup | Window modes: trailing minutes (1-1440, default 60), half-open `start_ts`/`end_ts` range (≤24h), or `local_day` + IANA timezone (one civil day); metadata only, no captured content |
 | `openbird_capture_status` | Memory and exclusion counts | Metadata only; no captured content |
 
 Content tools cap every excerpt at 2,000 characters and total excerpt text at 12,000 characters per
@@ -58,7 +58,14 @@ or restart-invalidated token fails and the walk restarts with a fresh first call
 ### Activity summary
 
 `openbird_activity_summary` answers "what did I focus on" from **trusted metadata only** — activity
-spans, never captured text. It returns per-app foreground and meeting durations with span counts
+spans, never captured text. The window is one of three modes: trailing `minutes` (default 60),
+a half-open `[start_ts, end_ts)` epoch range (max 24h), or `local_day` — `"YYYY-MM-DD"`,
+`"today"`, or `"yesterday"` — resolved against an IANA `timezone` (defaulting to this Mac's zone;
+if the system zone cannot be resolved the call fails rather than guessing). The response echoes
+the resolved window as `window: {mode, start_ts, end_ts, timezone, local_day}`, so "today" always
+comes back as the concrete date and zone that were actually used. A local day's length follows the
+zone's rules (a DST day can be 23 or 25 hours; a date skipped by a dateline change is rejected).
+It returns per-app foreground and meeting durations with span counts
 (top 30 apps; the rest folded into a nameless `other_apps` bucket reporting only its total seconds
 and app count), AFK time, context-switch count, and the longest focus block. Redacted
 (coarse-tier) spans keep their app identity as metadata, so redacted time is attributed:
@@ -84,7 +91,8 @@ content tool, the returned excerpt, app identifier, timestamp, source, and obser
 OpenBird's local boundary through Claude. When Claude invokes the activity summary, **behavioral
 metadata** leaves the same way: app identifiers (including redacted apps with their reason
 codes), per-app usage durations and span counts, AFK and meeting time, context-switch counts,
-focus-block timestamps, and the folded-tail app count — no captured text. The status tool sends
+focus-block timestamps, the folded-tail app count, and the resolved query window with its IANA
+timezone (which reveals this Mac's timezone when the caller lets it default) — no captured text. The status tool sends
 store-lifetime totals, encryption state, and exclusion-configuration counts. Every response also
 carries a `capture_host` label naming which Mac's store answered (configurable via
 `OPENBIRD_ASSISTANT_HOST_LABEL`; defaults to the hostname) and a machine-parseable `egress`

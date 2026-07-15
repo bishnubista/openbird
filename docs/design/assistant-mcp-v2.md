@@ -122,20 +122,35 @@ This multiplies the useful signal per call without raising any cap: same 20-row,
 
 The "what did I focus on today" tool. Reads `activity_spans` only; **returns zero
 captured text, zero window titles, zero URLs** — bundle ids, durations, and counts
-only. Same `minutes` bound (1–1440), no cursor needed (output is a fixed-size
-rollup, not a row stream).
+only. No cursor needed (output is a fixed-size rollup, not a row stream).
 
-Response shape:
+Window modes (v3 revision; pass at most one):
+
+| Mode | Parameters | Bound |
+|---|---|---|
+| `minutes` (default 60) | trailing window ending now | 1–1440 |
+| `range` | `start_ts`/`end_ts`, half-open `[start_ts, end_ts)` epoch seconds | ≤ 24h |
+| `local_day` | `"YYYY-MM-DD"` \| `"today"` \| `"yesterday"` + optional IANA `timezone` (defaults to the Mac's zone, fail-closed if unresolvable) | one civil day; length is timezone-rule-dependent (23–25h+ on DST days); skipped dates rejected |
+
+Response shape (v3: adds `window` echo, redaction attribution, `capture_host`,
+structured `egress` — see PR #275 and the window-modes PR):
 
 ```json
 {
   "ok": true,
   "content_returned": false,
+  "capture_host": "…",
+  "egress": {"scope": "activity_metadata", "untrusted_content": false, "fields": ["…"]},
   "window_start_ts": 0.0, "window_end_ts": 0.0,
+  "window": {"mode": "local_day", "start_ts": 0.0, "end_ts": 0.0,
+             "timezone": "America/New_York", "local_day": "2026-07-14"},
   "foreground_seconds": 0.0,
   "afk_seconds": 0.0,
   "meeting_seconds": 0.0,
   "redacted_seconds": 0.0,
+  "redacted_by_app": [{"bundle_id": "…", "reason": "blocklisted", "seconds": 0.0}],
+  "redacted_other_seconds": 0.0,
+  "redacted_unattributed_seconds": 0.0,
   "excluded_seconds": 0.0,
   "context_switches": 0,
   "longest_focus": {"bundle_id": "…", "start_ts": 0.0, "end_ts": 0.0, "seconds": 0.0},
@@ -248,9 +263,9 @@ excerpt dips only when a specific question needs text.
 ### 4. Privacy truth surface + docs
 
 Behavioral rollups are a **new category of egress** — bundle ids, per-app durations,
-AFK/meeting metrics, switch counts, and focus timestamps leave the local boundary
-even though `content_returned` is false. Every surface that states what leaves must
-say so:
+AFK/meeting metrics, switch counts, focus timestamps, and (v3) the resolved query
+window with its IANA timezone leave the local boundary even though
+`content_returned` is false. Every surface that states what leaves must say so:
 
 - `openbird_activity_summary` responses carry their own egress notice field
   (sibling of `ASSISTANT_EGRESS_NOTICE`, worded for behavioral metadata: app
@@ -311,7 +326,10 @@ say so:
 7. stdio-only transport, unchanged tool count discipline (3 → 4, all read-only).
 8. Cursors are opaque server-side handles (random token, no decodable payload —
    excluded-row boundaries leak nothing) with server-held, semantically bounded
-   state; no tool argument can widen any window beyond the shipped 24-hour maximum.
+   state; no tool argument can widen any window beyond its mode's bound — 24 hours
+   for minutes/range, and exactly one civil day for `local_day` (which timezone
+   rules can make longer than 24 hours on a DST fall-back day; skipped dates are
+   rejected).
 
 ## Test plan
 

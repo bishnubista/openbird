@@ -16,6 +16,7 @@ final class AssistantConsentCopyTests: XCTestCase {
         "memory-store totals",  // status tool: store-lifetime counts
         "encryption state",     // status tool: encryption flag
         "exclusion counts",     // status tool: exclusion configuration
+        "timezone",             // resolved query window + system timezone
         "cannot be recalled",   // irreversibility
     ]
 

@@ -794,7 +794,11 @@ def test_assistant_activity_summary_route_is_metadata_only_egress() -> None:
     assert "excluded_bundle_id" in route["forbidden_fields"]
     assert "redacted_by_app_bundle_id_reason_seconds" in route["captured_fields"]
     assert "redacted_unattributed_seconds" in route["captured_fields"]
+    assert "resolved_query_window_echo_with_timezone" in route["captured_fields"]
     assert "capture_host_label" in route["captured_fields"]
+    # The bounds text must describe all three window modes, not "1-1440 minutes".
+    assert "local_day" in route["enforcement"]["bounds"]
+    assert "1-1440" not in route["enforcement"]["bounds"]
     assert "observation_derived_statistics" in route["forbidden_fields"]
     assert "cli.assistant_install_warning" in route["truth_surface"]
     assert "app.assistant_connect_confirmations" in route["truth_surface"]

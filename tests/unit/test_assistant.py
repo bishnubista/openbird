@@ -1196,6 +1196,7 @@ def test_cli_assistant_warnings_disclose_activity_egress(monkeypatch):
         assert "reason codes" in flat
         assert "host label" in flat
         assert "exclusion-configuration counts" in flat
+        assert "timezone" in flat
 
 
 def test_activity_summary_afk_gap_splits_focus_but_hidden_gap_does_not(tmp_path):
@@ -1488,3 +1489,295 @@ def test_activity_summary_redacted_invariant_is_exact_with_fractional_spans(tmp_
         + result["redacted_unattributed_seconds"]
     )
     assert result["redacted_seconds"] > 0
+
+
+# -- v3.2: activity_summary window modes ----------------------------------------
+
+
+def _summary_service(tmp_path, *, spans=None, clock=1000.0, **settings_kwargs):
+    return AssistantCaptureService(
+        settings=Settings(data_dir=tmp_path, **settings_kwargs),
+        store_factory=lambda: _FakeStore(spans=spans or []),
+        clock=lambda: clock,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"minutes": 10, "start_ts": 0.0, "end_ts": 60.0}, "only one of"),
+        ({"minutes": 10, "local_day": "today"}, "only one of"),
+        ({"start_ts": 0.0, "end_ts": 60.0, "local_day": "today"}, "only one of"),
+        ({"start_ts": 0.0}, "provided together"),
+        ({"end_ts": 60.0}, "provided together"),
+        ({"timezone": "UTC"}, "only valid together with local_day"),
+        ({"start_ts": True, "end_ts": 60.0}, "must be a number"),
+        ({"start_ts": float("nan"), "end_ts": 60.0}, "must be finite"),
+        ({"start_ts": 0.0, "end_ts": float("inf")}, "must be finite"),
+        ({"start_ts": 60.0, "end_ts": 60.0}, "greater than start_ts"),
+        ({"start_ts": 0.0, "end_ts": 90_000.0}, "at most 1440 minutes"),
+        ({"local_day": "today", "timezone": "Not/AZone"}, "valid IANA"),
+        ({"local_day": "today", "timezone": "  "}, "valid IANA"),
+    ],
+)
+def test_activity_summary_rejects_invalid_window_modes(tmp_path, kwargs, message):
+    service = _summary_service(tmp_path)
+    with pytest.raises(ValueError, match=message):
+        service.activity_summary(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "bad_day",
+    ["20260714", "2026-W29-2", "9999-12-31", "not-a-day", "2026-7-4", ""],
+)
+def test_activity_summary_local_day_enforces_strict_format(tmp_path, bad_day):
+    service = _summary_service(tmp_path)
+    with pytest.raises(ValueError, match="local_day must be"):
+        service.activity_summary(local_day=bad_day, timezone="UTC")
+
+
+def test_activity_summary_default_window_is_trailing_hour(tmp_path):
+    service = _summary_service(tmp_path, clock=7200.0)
+
+    result = service.activity_summary()
+
+    assert result["window"] == {
+        "mode": "minutes",
+        "start_ts": 3600.0,
+        "end_ts": 7200.0,
+        "timezone": None,
+        "local_day": None,
+    }
+    assert result["window_start_ts"] == 3600.0
+    assert result["window_end_ts"] == 7200.0
+
+
+def test_activity_summary_range_mode_is_half_open_with_echo(tmp_path):
+    spans = [
+        _span("inside", start_ts=150.0, end_ts=180.0),
+        # Starts exactly at the exclusive end: clips to zero, contributes nothing.
+        _span("at-end", start_ts=200.0, end_ts=260.0, bundle_id="com.late"),
+    ]
+    service = _summary_service(tmp_path, spans=spans, clock=10_000.0)
+
+    result = service.activity_summary(start_ts=100.0, end_ts=200.0)
+
+    assert result["window"] == {
+        "mode": "range",
+        "start_ts": 100.0,
+        "end_ts": 200.0,
+        "timezone": None,
+        "local_day": None,
+    }
+    assert result["window_start_ts"] == 100.0
+    assert result["window_end_ts"] == 200.0
+    assert result["foreground_seconds"] == 30.0
+    assert all(app["bundle_id"] != "com.late" for app in result["apps"])
+
+
+def test_activity_summary_local_day_resolves_zoneinfo_midnights(tmp_path):
+    from datetime import date, datetime, time as dt_time
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("America/New_York")
+    expected_start = datetime.combine(
+        date(2026, 7, 14), dt_time(0, 0), tzinfo=tz
+    ).timestamp()
+    service = _summary_service(tmp_path, clock=10.0)
+
+    result = service.activity_summary(local_day="2026-07-14", timezone="America/New_York")
+
+    assert result["window"]["mode"] == "local_day"
+    assert result["window"]["timezone"] == "America/New_York"
+    assert result["window"]["local_day"] == "2026-07-14"
+    assert result["window"]["start_ts"] == expected_start
+    assert result["window"]["end_ts"] - result["window"]["start_ts"] == 86_400.0
+
+
+@pytest.mark.parametrize(
+    ("tz_name", "day", "expected_seconds"),
+    [
+        # 02:00 transitions.
+        ("America/New_York", "2026-03-08", 82_800.0),
+        ("America/New_York", "2026-11-01", 90_000.0),
+        # Midnight transitions: nonexistent midnight (spring forward at 00:00)
+        # and repeated midnight (fall back onto 00:00, fold=0 first occurrence).
+        ("America/Havana", "2026-03-08", 82_800.0),
+        ("America/Havana", "2026-11-01", 90_000.0),
+    ],
+)
+def test_activity_summary_local_day_follows_dst_rules(
+    tmp_path, tz_name, day, expected_seconds
+):
+    service = _summary_service(tmp_path, clock=10.0)
+
+    result = service.activity_summary(local_day=day, timezone=tz_name)
+
+    window = result["window"]
+    assert window["end_ts"] - window["start_ts"] == expected_seconds
+    # A 25h day deliberately exceeds the minutes-mode ceiling.
+    if expected_seconds > 86_400.0:
+        assert expected_seconds > assistant.MAX_MINUTES * 60
+
+
+def test_activity_summary_skipped_local_day_fails_closed(tmp_path):
+    # Samoa skipped 2011-12-30 crossing the dateline: both midnights resolve
+    # to the same instant, and an empty window must never reach the store.
+    service = _summary_service(tmp_path, clock=10.0)
+    with pytest.raises(ValueError, match="does not exist in this timezone"):
+        service.activity_summary(local_day="2011-12-30", timezone="Pacific/Apia")
+
+
+def test_activity_summary_relative_days_resolve_in_requested_timezone(tmp_path):
+    # 2026-07-15 03:00 UTC is still 2026-07-14 in Los Angeles.
+    clock = 1784084400.0  # 2026-07-15T03:00:00Z
+    from datetime import datetime, timezone as dt_timezone
+
+    assert datetime.fromtimestamp(clock, dt_timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M"
+    ) == "2026-07-15T03:00"
+    service = _summary_service(tmp_path, clock=clock)
+
+    today = service.activity_summary(local_day="today", timezone="America/Los_Angeles")
+    yesterday = service.activity_summary(
+        local_day="yesterday", timezone="America/Los_Angeles"
+    )
+    utc_today = service.activity_summary(local_day="today", timezone="UTC")
+
+    assert today["window"]["local_day"] == "2026-07-14"
+    assert yesterday["window"]["local_day"] == "2026-07-13"
+    assert utc_today["window"]["local_day"] == "2026-07-15"
+
+
+def test_activity_summary_uses_system_timezone_when_omitted(tmp_path, monkeypatch):
+    monkeypatch.setattr(assistant, "_system_timezone_name", lambda: "Europe/Berlin")
+    service = _summary_service(tmp_path, clock=10.0)
+
+    result = service.activity_summary(local_day="2026-07-14")
+
+    assert result["window"]["timezone"] == "Europe/Berlin"
+
+
+def test_system_timezone_name_parses_symlink_and_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        assistant.os.path, "realpath",
+        lambda _p: "/usr/share/zoneinfo/Europe/Berlin",
+    )
+    assert assistant._system_timezone_name() == "Europe/Berlin"
+
+    monkeypatch.setattr(assistant.os.path, "realpath", lambda _p: "/nonsense")
+    with pytest.raises(ValueError, match="could not resolve the system timezone"):
+        assistant._system_timezone_name()
+
+    monkeypatch.setattr(
+        assistant.os.path, "realpath",
+        lambda _p: "/usr/share/zoneinfo/Not/AZone",
+    )
+    with pytest.raises(ValueError, match="could not resolve the system timezone"):
+        assistant._system_timezone_name()
+
+
+def test_store_capture_spans_overlapping_is_half_open_and_skips_empty(tmp_path):
+    settings = Settings(data_dir=tmp_path, embed_dim=64)
+    store = MemoryStore(settings=settings, provider=FakeProvider(embed_dim=64))
+    try:
+        def span(start, end, bundle="com.example.Editor"):
+            store.open_span(
+                epoch_id="epoch", start_ts=start, end_ts=end,
+                bundle_id=bundle, detail_tier=1,
+            )
+
+        span(120.0, 180.0)          # real overlap
+        span(50.0, 100.0)           # ends exactly at window start: excluded
+        span(200.0, 260.0)          # starts exactly at window end: excluded
+        for i in range(10):         # zero-length rows: never fetched
+            span(150.0 + i, 150.0 + i)
+
+        # limit smaller than the junk-row count proves empty/boundary rows
+        # no longer consume cap slots (the old closed predicate fetched them).
+        rows = store.capture_spans_overlapping(100.0, 200.0, limit=4)
+        assert [r["span_id"] for r in rows] and len(rows) == 1
+        assert rows[0]["start_ts"] == 120.0
+    finally:
+        store.close()
+
+
+def test_mcp_activity_summary_schema_and_window_modes_end_to_end(tmp_path):
+    service = _summary_service(
+        tmp_path,
+        spans=[_span("s", start_ts=100.0, end_ts=160.0)],
+        clock=1000.0,
+    )
+    server = assistant.create_mcp_server(service)
+
+    tools = asyncio.run(server.list_tools())
+    schema = next(
+        t for t in tools if t.name == "openbird_activity_summary"
+    ).inputSchema
+    assert set(schema["properties"]) == {
+        "minutes", "start_ts", "end_ts", "local_day", "timezone",
+    }
+    # FastMCP omits the `required` key entirely when every argument is optional.
+    assert schema.get("required", []) == []
+
+    _content, ranged = asyncio.run(
+        server.call_tool(
+            "openbird_activity_summary", {"start_ts": 50.0, "end_ts": 250.0}
+        )
+    )
+    assert ranged["window"]["mode"] == "range"
+    assert ranged["foreground_seconds"] == 60.0
+
+    _content, day = asyncio.run(
+        server.call_tool(
+            "openbird_activity_summary",
+            {"local_day": "1970-01-01", "timezone": "UTC"},
+        )
+    )
+    assert day["window"]["mode"] == "local_day"
+    assert day["window"]["timezone"] == "UTC"
+
+
+def test_egress_declarations_hold_in_local_day_mode(tmp_path):
+    spans = [
+        _span("a", start_ts=100.0, end_ts=200.0, bundle_id="com.a"),
+        _span("b", start_ts=200.0, end_ts=260.0, bundle_id="com.b"),
+        _span("afk", start_ts=260.0, end_ts=300.0, bundle_id="com.a", afk=1),
+        _span("red", start_ts=300.0, end_ts=330.0, detail_tier=0, reason="private"),
+        _span(
+            "gap", start_ts=330.0, end_ts=340.0,
+            bundle_id=None, detail_tier=0, reason="paused",
+        ),
+    ]
+    service = _summary_service(
+        tmp_path, spans=spans, clock=1000.0, assistant_host_label="test-host"
+    )
+
+    response = service.activity_summary(local_day="1970-01-01", timezone="UTC")
+
+    declared = set(response["egress"]["fields"])
+    emitted = _walk_egress_paths(response)
+    assert emitted == declared, (
+        f"emitted-but-undeclared {sorted(emitted - declared)}; "
+        f"declared-but-missing {sorted(declared - emitted)}"
+    )
+
+
+def test_mcp_activity_summary_rejects_lax_coercible_arguments(tmp_path):
+    # Pydantic's lax mode would turn true into 1.0 and "100" into 100.0 before
+    # the service's strictness runs; the BeforeValidator annotations must
+    # refuse them at the public MCP boundary.
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    service = _summary_service(tmp_path)
+    server = assistant.create_mcp_server(service)
+    for arguments in (
+        {"start_ts": True, "end_ts": 60.0},
+        {"start_ts": "100", "end_ts": 200.0},
+        {"minutes": True},
+        {"minutes": "60"},
+    ):
+        with pytest.raises(ToolError, match="validation error"):
+            asyncio.run(
+                server.call_tool("openbird_activity_summary", arguments)
+            )
