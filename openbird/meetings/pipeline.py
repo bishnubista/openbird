@@ -1,6 +1,6 @@
 """VAD / windowing / transcript-stitching pipeline over PCM frames.
 
-This is a **pure-Python stub** that operates entirely on provided
+This is a **pure-Python pipeline** that operates entirely on provided
 :class:`~openbird.meetings.audio.AudioFrame` objects. It does NOT require real
 audio, a microphone, or any native VAD library — the voice-activity decision is a
 simple, deterministic energy threshold so the windowing/stitching logic can be

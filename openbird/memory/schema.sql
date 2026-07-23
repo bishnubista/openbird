@@ -46,6 +46,35 @@ CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
 -- per page. Safe here (all three columns exist in every released shape) AND in
 -- the v8 migration (IF NOT EXISTS keeps the two in lockstep).
 CREATE INDEX IF NOT EXISTS idx_observations_source_ts_id ON observations(source, ts, id);
+-- v10: meeting UUIDs are idempotency keys. Only meeting observations participate,
+-- so existing capture/import session ids retain their occurrence semantics.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_observations_meeting_session
+    ON observations(session_id)
+    WHERE source = 'meeting' AND session_id IS NOT NULL;
+
+-- Encrypted-at-rest meeting transcript checkpoints (v10). This table lives in
+-- the same SQLCipher-gated database as observations; raw PCM is never stored.
+-- The controller updates this row as transcript windows complete, then deletes
+-- it only after the corresponding meeting observation and indexes commit.
+CREATE TABLE IF NOT EXISTS pending_meetings (
+    meeting_id       TEXT PRIMARY KEY,
+    version          INTEGER NOT NULL DEFAULT 1 CHECK (version = 1),
+    started_ts       REAL NOT NULL,
+    ended_ts         REAL,
+    transcript       TEXT NOT NULL DEFAULT '',
+    segments_json    TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(segments_json)),
+    backend          TEXT,
+    partial_reason   TEXT,
+    dropped_windows  INTEGER NOT NULL DEFAULT 0 CHECK (dropped_windows >= 0),
+    failed_windows   INTEGER NOT NULL DEFAULT 0 CHECK (failed_windows >= 0),
+    truncated_bytes  INTEGER NOT NULL DEFAULT 0 CHECK (truncated_bytes >= 0),
+    observation_id   TEXT REFERENCES observations(id) ON DELETE SET NULL,
+    created_at       REAL NOT NULL,
+    updated_at       REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_meetings_started_ts
+    ON pending_meetings(started_ts);
 
 -- Content-free capture accountability (v9). This table deliberately excludes
 -- captured text, titles, URLs, content hashes, and free-form reasons. Started

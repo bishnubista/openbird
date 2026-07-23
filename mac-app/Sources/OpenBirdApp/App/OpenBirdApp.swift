@@ -9,6 +9,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// reason code. Held for the process lifetime; nil when disabled (release builds without
     /// OPENBIRD_LAYOUT_WATCHDOG). Not installed in headless self-test mode.
     private var layoutWatchdog: LayoutLoopWatchdog?
+    var terminationHandler: (() -> NSApplication.TerminateReply)?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        terminationHandler?() ?? .terminateNow
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // DEVELOP/SELF-TEST MODE: when OPENBIRD_SELFTEST_ASK=<query> is set, run that
@@ -190,6 +195,11 @@ struct OpenBirdApp: App {
                 askModel: askModel,
                 askPanel: askPanel
             )
+            .onAppear {
+                appDelegate.terminationHandler = { [weak model] in
+                    model?.applicationTerminationReply() ?? .terminateNow
+                }
+            }
         }
         .windowStyle(.hiddenTitleBar)
 

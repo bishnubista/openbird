@@ -121,6 +121,26 @@ struct OnboardingPresentationState: Equatable {
     }
 }
 
+enum MeetingRecordingState: Equatable {
+    case idle
+    case consent
+    case preparing(downloaded: Int64, total: Int64)
+    case recording(startedAt: Date)
+    case finalizing(completed: Int, remaining: Int, dropped: Int, failed: Int)
+
+    var isBusy: Bool {
+        switch self {
+        case .idle, .consent: return false
+        case .preparing, .recording, .finalizing: return true
+        }
+    }
+
+    var isRecording: Bool {
+        if case .recording = self { return true }
+        return false
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     static let embeddingGemmaMinimumOllamaVersion = "0.11.10"
@@ -180,6 +200,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var provisioningProgress: ModelPullProgress?
     @Published private(set) var provisioningError: String?
     @Published var lastActionMessage = ""
+    @Published private(set) var meetingState: MeetingRecordingState = .idle
+    @Published private(set) var meetingLastMessage = ""
+    @Published private(set) var meetingObservationID: String?
 
     // Quick-chat state (window chat panel).
     @Published private(set) var chatBusy = false
@@ -201,6 +224,9 @@ final class AppModel: ObservableObject {
     private var captureStopRequested = false
     /// Delayed post-start check that confirms capture is actually storing memory.
     private var captureHealthCheckTask: Task<Void, Never>?
+    private var meetingTerminationPending = false
+    private let meetingConsentKey = "openbird.meetingModelDownloadConsent.v1"
+    static let meetingModelApproximateBytes: Int64 = 2_508_288_736
 
     init(service: OpenBirdService, initialReport: PreflightReport = PreflightReport()) {
         self.service = service
@@ -228,14 +254,26 @@ final class AppModel: ObservableObject {
         ) { _ in
             service.terminateLaunchedCapture()
             service.terminateLaunchedChatGPTTunnel()
+            if service.meetingProcessIsRunning() {
+                _ = service.forceStopMeetingAudio()
+            }
         }
     }
 
     var menuBarSymbol: String {
-        Self.menuBarSymbol(captureRunning: captureRunning, capturePaused: capturePaused)
+        Self.menuBarSymbol(
+            captureRunning: captureRunning,
+            capturePaused: capturePaused,
+            meetingRecording: meetingState.isRecording
+        )
     }
 
-    nonisolated static func menuBarSymbol(captureRunning: Bool, capturePaused: Bool) -> String {
+    nonisolated static func menuBarSymbol(
+        captureRunning: Bool,
+        capturePaused: Bool,
+        meetingRecording: Bool = false
+    ) -> String {
+        if meetingRecording { return "waveform.circle.fill" }
         if captureRunning && !capturePaused { return "bird.fill" }
         return capturePaused ? "pause.circle" : "bird"
     }
@@ -904,6 +942,27 @@ final class AppModel: ObservableObject {
     var screenRecordingState: StepState { screenRecordingGranted ? .ok : .attention }
     var microphoneState: StepState { microphoneGranted ? .ok : .attention }
 
+    var meetingCanStart: Bool {
+        let audioBundled = helpers.first(where: { $0.id == "audio" })?.isBundled == true
+        return meetingState == .idle
+            && audioBundled
+            && service.canLaunchOpenBirdCLI()
+            && screenRecordingGranted
+            && microphoneGranted
+            && encryptionState == .ok
+    }
+
+    var meetingReadinessMessage: String? {
+        if helpers.first(where: { $0.id == "audio" })?.isBundled != true {
+            return "The signed audio helper is missing. Reinstall the Apple Silicon app."
+        }
+        if !screenRecordingGranted { return "Screen & System Audio Recording permission is required." }
+        if !microphoneGranted { return "Microphone permission is required." }
+        if encryptionState != .ok { return "Encrypted storage must be verified before recording." }
+        if !service.canLaunchOpenBirdCLI() { return "The bundled OpenBird CLI is missing." }
+        return nil
+    }
+
     var accessibilityEffectivelyGranted: Bool {
         accessibilityGranted || preflightAccessibilityPassed
     }
@@ -1327,8 +1386,184 @@ final class AppModel: ObservableObject {
     /// Stop the app-launched capture daemon, then terminate the app. Used by the
     /// Quit menu item so an explicit quit never leaves capture orphaned.
     func quit() {
-        service.terminateLaunchedCapture()
         NSApplication.shared.terminate(nil)
+    }
+
+    func requestStartMeeting() {
+        refreshPermissionStates()
+        guard meetingState == .idle else { return }
+        guard meetingReadinessMessage == nil else {
+            meetingLastMessage = meetingReadinessMessage ?? "Meeting recording is not ready."
+            return
+        }
+        if !UserDefaults.standard.bool(forKey: meetingConsentKey) {
+            meetingState = .consent
+            return
+        }
+        prepareMeetingAndRecord()
+    }
+
+    func confirmMeetingModelDownload() {
+        guard meetingState == .consent else { return }
+        UserDefaults.standard.set(true, forKey: meetingConsentKey)
+        prepareMeetingAndRecord()
+    }
+
+    func cancelMeetingAction() {
+        switch meetingState {
+        case .consent:
+            meetingState = .idle
+        case .preparing:
+            service.cancelMeetingPreparation()
+            meetingState = .idle
+            meetingLastMessage = "Meeting preparation canceled; partial model downloads can resume."
+        case .recording, .finalizing:
+            stopMeetingRecording()
+        case .idle:
+            break
+        }
+    }
+
+    func stopMeetingRecording() {
+        guard meetingState.isBusy else { return }
+        if case .preparing = meetingState {
+            service.cancelMeetingPreparation()
+            meetingState = .idle
+            return
+        }
+        if case .recording = meetingState {
+            meetingState = .finalizing(completed: 0, remaining: 0, dropped: 0, failed: 0)
+        }
+        meetingLastMessage = "Finalizing and saving the encrypted transcript…"
+        service.stopMeetingRecording()
+    }
+
+    func forceStopMeetingAudio() {
+        let stopped = service.forceStopMeetingAudio()
+        meetingState = .idle
+        meetingLastMessage = stopped
+            ? "Meeting audio was force-stopped. Recover any encrypted pending transcript from Terminal."
+            : "No meeting audio process was running."
+    }
+
+    /// AppKit quit hook: defer termination while a meeting child checkpoints.
+    func applicationTerminationReply() -> NSApplication.TerminateReply {
+        service.terminateLaunchedCapture()
+        service.terminateLaunchedChatGPTTunnel()
+        guard service.meetingProcessIsRunning() else { return .terminateNow }
+        if meetingTerminationPending { return .terminateLater }
+        meetingTerminationPending = true
+        service.cancelMeetingPreparation()
+        service.stopMeetingRecording()
+        Task {
+            _ = await service.waitForMeetingShutdown(timeout: 180)
+            meetingTerminationPending = false
+            NSApplication.shared.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    private func prepareMeetingAndRecord() {
+        meetingObservationID = nil
+        meetingLastMessage = "Preparing the local meeting model…"
+        meetingState = .preparing(downloaded: 0, total: Self.meetingModelApproximateBytes)
+        let launched = service.prepareMeetingModel(
+            onEvent: { [weak self] event in
+                Task { @MainActor in self?.handleMeetingPreparationEvent(event) }
+            },
+            onExit: { [weak self] status in
+                Task { @MainActor in
+                    guard let self, case .preparing = self.meetingState else { return }
+                    if status != 0 {
+                        self.meetingState = .idle
+                        self.meetingLastMessage = "Model preparation failed or was canceled. Retry when online."
+                    }
+                }
+            }
+        )
+        if !launched {
+            meetingState = .idle
+            meetingLastMessage = "Could not launch meeting model preparation."
+        }
+    }
+
+    private func handleMeetingPreparationEvent(_ event: MeetingCLIEvent) {
+        if event.event == "download_progress" {
+            meetingState = .preparing(
+                downloaded: Int64(event.downloadedBytes ?? 0),
+                total: Int64(event.totalBytes ?? Self.meetingModelApproximateBytes)
+            )
+            return
+        }
+        guard event.event == "result" else { return }
+        guard event.reason == "prepared" else {
+            meetingState = .idle
+            meetingLastMessage = "Model preparation failed. Retry when online."
+            return
+        }
+        meetingLastMessage = "Starting the signed audio helper…"
+        let launched = service.startMeetingRecording(
+            onEvent: { [weak self] next in
+                Task { @MainActor in self?.handleMeetingRecordingEvent(next) }
+            },
+            onExit: { [weak self] status in
+                Task { @MainActor in
+                    guard let self, self.meetingState.isBusy else { return }
+                    self.meetingState = .idle
+                    self.meetingLastMessage = status == 0
+                        ? "Meeting recording stopped."
+                        : "Meeting recording ended unexpectedly; encrypted recovery may be available."
+                }
+            }
+        )
+        if !launched {
+            meetingState = .idle
+            meetingLastMessage = "Could not launch meeting recording."
+        }
+    }
+
+    private func handleMeetingRecordingEvent(_ event: MeetingCLIEvent) {
+        switch event.event {
+        case "preparing":
+            meetingLastMessage = "Loading the prepared local model…"
+        case "recording_started":
+            meetingState = .recording(startedAt: Date())
+            meetingLastMessage = "Recording locally. Stop when the meeting ends."
+        case "finalizing":
+            meetingState = .finalizing(
+                completed: event.completedWindows ?? 0,
+                remaining: event.remainingWindows ?? 0,
+                dropped: event.droppedWindows ?? 0,
+                failed: event.failedWindows ?? 0
+            )
+        case "result":
+            meetingObservationID = event.observationId
+            meetingState = .idle
+            if event.observationId != nil {
+                // The Ask screen gates queries on the cached observation count.
+                // Refresh immediately after a successful meeting commit so the
+                // newly encrypted transcript is queryable without an app restart.
+                Task { await refreshMemoryStats() }
+            }
+            switch event.reason {
+            case "completed": meetingLastMessage = "Meeting saved. Ask OpenBird about it anytime."
+            case "no_speech":
+                let systemFrames = event.systemFrameCount ?? 0
+                let micFrames = event.micFrameCount ?? 0
+                let windows = event.windowCount ?? 0
+                meetingLastMessage = "No speech was transcribed; nothing was saved "
+                    + "(system \(systemFrames), mic \(micFrames), speech windows \(windows))."
+            case "persistence_pending": meetingLastMessage = "Transcript is encrypted and pending recovery."
+            case "model_not_prepared": meetingLastMessage = "The local model is not prepared; download it before recording."
+            default:
+                let reason = event.reason ?? "unknown"
+                meetingLastMessage = event.partial == true
+                    ? "A partial meeting transcript was saved (\(reason))."
+                    : "Meeting recording ended (\(reason))."
+            }
+        default:
+            break
+        }
     }
 
     func stopHelpers() {
@@ -1337,7 +1572,7 @@ final class AppModel: ObservableObject {
         captureHealthCheckTask = nil
         let stopped = service.stopHelperProcesses()
         captureRunning = service.isCaptureRunning()
-        lastActionMessage = stopped ? "Stopped helper processes." : "No helper processes were running."
+        lastActionMessage = stopped ? "Stopped capture helper processes." : "No capture helper processes were running."
         Task { await refreshMemoryStats() }
     }
 

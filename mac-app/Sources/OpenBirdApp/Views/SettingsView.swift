@@ -860,7 +860,10 @@ struct SettingsView: View {
             .padding(.horizontal, 16).padding(.vertical, 11)
             hairline
             HStack(spacing: 10) {
-                trustButton("Stop helpers", system: "stop.fill") { model.stopHelpers() }
+                trustButton("Stop capture helper", system: "stop.fill") { model.stopHelpers() }
+                trustButton("Force stop meeting audio", system: "waveform.slash") {
+                    model.forceStopMeetingAudio()
+                }
                 trustButton("App bundle", system: "app") { model.openBundleFolder() }
                 Spacer()
                 HStack(spacing: 14) {

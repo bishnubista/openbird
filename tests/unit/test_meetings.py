@@ -9,6 +9,10 @@ fixed JSON object.
 from __future__ import annotations
 
 import math
+import plistlib
+import sys
+import types
+from pathlib import Path
 
 import pytest
 
@@ -44,6 +48,18 @@ from openbird.meetings.transcribe import (
 
 SR = 16000
 FRAME_LEN = 0.1  # 100 ms frames
+
+
+def test_packaged_python_entitlements_scope_mlx_jit_exception():
+    entitlements_path = (
+        Path(__file__).resolve().parents[2] / "mac-app" / "Python.entitlements"
+    )
+    with entitlements_path.open("rb") as handle:
+        entitlements = plistlib.load(handle)
+
+    assert entitlements["com.apple.security.cs.allow-jit"] is True
+    assert entitlements["com.apple.security.cs.allow-unsigned-executable-memory"] is True
+    assert entitlements["com.apple.security.cs.disable-library-validation"] is True
 
 
 def _frame(
@@ -682,6 +698,55 @@ def test_resample_is_noop_at_16k():
 
 def test_parakeet_and_backend_availability_are_bools():
     assert isinstance(parakeet_available(), bool)
+
+
+def test_parakeet_uses_in_memory_logmel_never_file_transcribe(monkeypatch):
+    import openbird.meetings.transcribe as tr
+
+    called = {"generate": 0, "file": 0}
+
+    class FakeResult:
+        text = "in memory"
+
+    class FakeModel:
+        preprocessor_config = object()
+
+        def transcribe(self, _path):
+            called["file"] += 1
+            raise AssertionError("raw PCM must never use the file-path API")
+
+        def generate(self, mel):
+            assert mel == "mel"
+            called["generate"] += 1
+            return [FakeResult()]
+
+    mlx_core = types.ModuleType("mlx.core")
+    mlx_core.float32 = "float32"
+    mlx_core.array = lambda samples, dtype=None: (tuple(samples), dtype)
+    mlx = types.ModuleType("mlx")
+    mlx.core = mlx_core
+    parakeet = types.ModuleType("parakeet_mlx")
+    parakeet_module = types.ModuleType("parakeet_mlx.parakeet")
+    parakeet_module.get_logmel = lambda audio, config: "mel"
+    monkeypatch.setitem(sys.modules, "mlx", mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", mlx_core)
+    monkeypatch.setitem(sys.modules, "parakeet_mlx", parakeet)
+    monkeypatch.setitem(sys.modules, "parakeet_mlx.parakeet", parakeet_module)
+
+    backend = tr._ParakeetMLXBackend()
+    backend._model = FakeModel()
+    assert backend.transcribe_pcm([0.1, -0.1]) == "in memory"
+    assert called == {"generate": 1, "file": 0}
+
+
+def test_model_cache_defaults_to_resumable_http(tmp_path, monkeypatch):
+    import openbird.meetings.transcribe as tr
+
+    monkeypatch.setenv("OPENBIRD_MEETINGS_MODEL_CACHE", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
+    cache = tr.configure_model_cache()
+    assert cache == tmp_path / "hub"
+    assert tr.os.environ["HF_HUB_DISABLE_XET"] == "1"
     assert isinstance(meetings_backend_available(), bool)
 
 
