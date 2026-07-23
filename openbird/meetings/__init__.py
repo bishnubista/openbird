@@ -7,7 +7,8 @@ so the controller remains unit-testable without activating real audio.
 Modules:
   * :mod:`openbird.meetings.audio` — audio-source abstraction + clock-sync notes.
   * :mod:`openbird.meetings.pipeline` — VAD / windowing / transcript stitching.
-  * :mod:`openbird.meetings.transcribe` — faster-whisper wrapper + LLM summary.
+  * :mod:`openbird.meetings.transcribe` — pluggable local ASR (Parakeet MLX or
+    faster-whisper) + LLM summary.
   * :mod:`openbird.meetings.record` — supervised recording + encrypted checkpoint.
 """
 

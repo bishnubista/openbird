@@ -71,6 +71,26 @@ def test_add_observation_embeddings_are_batched_at_32(
     assert calls == [32, 32, 1]
 
 
+def test_add_observation_rejects_provider_vector_count_mismatch(store):
+    store.provider.embed = lambda _texts: []
+
+    with pytest.raises(ValueError):
+        store.add_observation("meeting content", source="meeting", session_id="mismatch")
+
+    assert store.conn.execute("SELECT COUNT(*) AS n FROM observations").fetchone()["n"] == 0
+
+
+def test_pending_commit_rejects_provider_vector_count_mismatch(store):
+    store.checkpoint_meeting("mismatch", started_ts=1.0, transcript="meeting content")
+    store.provider.embed = lambda _texts: []
+
+    with pytest.raises(ValueError):
+        store.commit_pending_meeting("mismatch")
+
+    assert len(store.pending_meetings(meeting_id="mismatch")) == 1
+    assert store.conn.execute("SELECT COUNT(*) AS n FROM observations").fetchone()["n"] == 0
+
+
 def test_pending_meetings_follow_purge_boundaries(store):
     store.checkpoint_meeting("old", started_ts=10.0, transcript="old transcript")
     store.checkpoint_meeting("new", started_ts=20.0, transcript="new transcript")

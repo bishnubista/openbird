@@ -183,25 +183,17 @@ final class AudioSink: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Extract mono float32 samples (first channel) from a CMSampleBuffer.
     static func extractMonoFloat(from sampleBuffer: CMSampleBuffer) -> AudioFrame? {
-        guard let description = sampleBuffer.formatDescription?.audioStreamBasicDescription
+        guard var description = sampleBuffer.formatDescription?.audioStreamBasicDescription
         else { return nil }
-
-        // The standard AVAudioFormat below is non-interleaved Float32, so the
-        // ASBD must match that layout before the raw buffer list is handed to
-        // AVAudioPCMBuffer(bufferListNoCopy:) — on a mismatch that init fails
-        // and every frame is silently dropped. Mono is exempt from the
-        // non-interleaved flag: with one channel the planar and interleaved
-        // layouts are byte-identical and CoreAudio often omits the flag.
-        let flags = description.mFormatFlags
+        let requiredFlags = AudioFormatFlags(
+            kAudioFormatFlagIsFloat | kAudioFormatFlagIsNonInterleaved
+        )
         guard description.mFormatID == kAudioFormatLinearPCM,
-              flags & kAudioFormatFlagIsFloat != 0,
+              description.mFormatFlags & requiredFlags == requiredFlags,
               description.mBitsPerChannel == 32,
-              flags & kAudioFormatFlagIsNonInterleaved != 0
-                  || description.mChannelsPerFrame == 1,
-              let format = AVAudioFormat(
-                  standardFormatWithSampleRate: description.mSampleRate,
-                  channels: description.mChannelsPerFrame
-              )
+              let format = AVAudioFormat(streamDescription: &description),
+              format.commonFormat == .pcmFormatFloat32,
+              !format.isInterleaved
         else { return nil }
 
         do {
@@ -230,7 +222,7 @@ final class AudioSink: NSObject, SCStreamOutput, SCStreamDelegate {
                 return AudioFrame(
                     trackId: "system",
                     hostTs: hostTs,
-                    sampleRate: description.mSampleRate,
+                    sampleRate: format.sampleRate,
                     samples: samples
                 )
             }

@@ -424,7 +424,10 @@ class MemoryStore:
                 batch_hashes = new_hashes[offset : offset + _EMBED_BATCH_SIZE]
                 vectors = self.provider.embed([unique_new[h] for h in batch_hashes])
                 embeddings.update(
-                    {h: _serialize_f32(v) for h, v in zip(batch_hashes, vectors)}
+                    {
+                        h: _serialize_f32(v)
+                        for h, v in zip(batch_hashes, vectors, strict=True)
+                    }
                 )
 
         # -- Phase 2: short INSERT-only write transaction -----------------------
@@ -576,7 +579,10 @@ class MemoryStore:
             batch_hashes = new_hashes[offset : offset + _EMBED_BATCH_SIZE]
             vectors = self.provider.embed([unique_new[h] for h in batch_hashes])
             embeddings.update(
-                {h: _serialize_f32(v) for h, v in zip(batch_hashes, vectors)}
+                {
+                    h: _serialize_f32(v)
+                    for h, v in zip(batch_hashes, vectors, strict=True)
+                }
             )
 
         try:
