@@ -797,23 +797,84 @@ routes:
 
   - id: meetings.audio
     class: local
-    status: planned
-    source: ScreenCaptureKit/audio helper
+    status: implemented
+    source: manual signed ScreenCaptureKit/audio-helper recording
     captured_fields:
-      - audio_frames
+      - transient_system_audio_frames
+      - transient_microphone_audio_frames
       - transcript_text
-      - speaker_metadata
+      - relative_segment_timestamps
+      - track_speaker_metadata
+      - meeting_uuid
+    forbidden_fields:
+      - persisted_raw_audio
+      - audio_or_transcript_in_logs
+      - audio_or_transcript_in_argv
+      - transcript_in_cli_jsonl
     storage:
-      - local_transcript_store_when_enabled
+      - sqlite.pending_meetings_encrypted_checkpoint
       - sqlite.observations
       - sqlite.content_blobs
       - sqlite.chunks
+      - sqlite.fts_chunks
+      - sqlite.vec_chunks
     egress:
       default: none
-      remote_stt_requires_future_route: true
+      inherited_by:
+        - embedding.remote
+        - chat.remote
+        - routines.summary
+    enforcement:
+      start: manual_only_after_participant_consent_reminder
+      supervisor: exact app token within five seconds before helper launch; fail closed on timeout, mismatch, EOF, or read error
+      duration_backstop_seconds: 14400
+      raw_audio: private pipe and bounded in-process queues only; never persisted
+      storage: same verified-SQLCipher public-beta gate as observations
+      result_truth: helper exit, queue overflow, failed windows, timeout, truncation, and pending persistence are distinct metadata-only reasons
+      emergency_stop: app-owned process termination plus exact-name audio-helper escape hatch
+    deletion:
+      command: openbird data purge/prune
+      must_remove:
+        - pending_meetings
+        - observations
+        - orphaned_content_blobs
+        - orphaned_chunks
+        - fts_rows
+        - vector_rows
     truth_surface:
-      - preflight.audio
-      - app.meeting_privacy_state
+      - preflight.meetings.transcription
+      - cli.meeting_status
+      - app.meeting_recording_state
+      - app.meeting_model_download_consent
+
+  - id: meetings.model_download
+    class: third-party-cloud
+    status: implemented
+    source: explicit first-use Parakeet model preparation
+    captured_fields:
+      - public_model_id
+      - normal_http_metadata
+    forbidden_fields:
+      - captured_audio
+      - transcript_text
+      - observation_content
+    storage:
+      - local_huggingface_model_cache
+    egress:
+      default: off_device
+      destination: huggingface.co
+      warning: public model id and normal HTTP metadata leave this Mac; meeting content never does
+    enforcement:
+      requires: explicit approximately 2.51 GB consent before network access
+      cancel: SIGTERM leaves resumable incomplete cache
+      record_path: HF_HUB_OFFLINE and shared OpenBird cache; cache miss is model_not_prepared
+    deletion:
+      command: remove ~/.openbird/models/huggingface or uninstall --zap
+      caveat: deletion removes only the downloaded public model files
+    truth_surface:
+      - cli.meeting_prepare_jsonl
+      - app.meeting_model_download_consent
+      - app.meeting_recording_state
 
   - id: model.local_ollama
     class: local

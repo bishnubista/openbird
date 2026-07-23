@@ -1,7 +1,7 @@
 """Audio-source abstraction for the meetings subsystem.
 
-The real audio capture is performed by a separate **Swift `audio-helper`** that
-will be built later. This module deliberately wraps an *injectable* audio source
+The real audio capture is performed by the signed **Swift `audio-helper`**. This
+module deliberately wraps an *injectable* audio source
 so the Python pipeline can be developed and unit-tested with canned PCM frames —
 no microphone, no system-audio tap, no ffmpeg.
 
@@ -217,6 +217,14 @@ def _read_exactly(reader: BinaryIO, n: int) -> bytes | None:
     return bytes(buf)
 
 
+class AudioIPCError(RuntimeError):
+    """Metadata-only strict decoder failure for a corrupt/truncated helper stream."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def encode_frame(frame: AudioFrame) -> bytes:
     """Encode an :class:`AudioFrame` into the helper's binary record format.
 
@@ -275,6 +283,55 @@ def decode_frames(reader: BinaryIO) -> Iterator[AudioFrame]:
         seq += 1
 
 
+def decode_frames_strict(reader: BinaryIO) -> Iterator[AudioFrame]:
+    """Decode helper records while distinguishing clean EOF from corruption.
+
+    Recording uses this strict variant so a helper killed mid-record is reported
+    as partial rather than silently looking like a normal stop. The legacy
+    :func:`decode_frames` behavior stays unchanged for existing callers.
+    """
+    seq = 0
+    while True:
+        first = reader.read(_FRAME_HEADER.size)
+        if not first:
+            return
+        header = bytearray(first)
+        while len(header) < _FRAME_HEADER.size:
+            chunk = reader.read(_FRAME_HEADER.size - len(header))
+            if not chunk:
+                raise AudioIPCError("truncated_header")
+            header.extend(chunk)
+        track_code, host_ts, sample_rate, count = _FRAME_HEADER.unpack(bytes(header))
+        if not math.isfinite(host_ts):
+            raise AudioIPCError("invalid_host_timestamp")
+        if not (
+            math.isfinite(sample_rate)
+            and _MIN_SAMPLE_RATE <= sample_rate <= _MAX_SAMPLE_RATE
+        ):
+            raise AudioIPCError("invalid_sample_rate")
+        track = _TRACK_BY_CODE.get(track_code)
+        if track is None:
+            raise AudioIPCError("invalid_track")
+        if count > _MAX_SAMPLES_PER_FRAME:
+            raise AudioIPCError("frame_too_large")
+        body_size = count * 4
+        body = bytearray()
+        while len(body) < body_size:
+            chunk = reader.read(body_size - len(body))
+            if not chunk:
+                raise AudioIPCError("truncated_body")
+            body.extend(chunk)
+        samples = struct.unpack(f"<{count}f", bytes(body)) if count else ()
+        yield AudioFrame(
+            samples=samples,
+            sample_rate=int(round(sample_rate)),
+            host_ts=host_ts,
+            track=track,
+            seq=seq,
+        )
+        seq += 1
+
+
 class BinaryFrameAudioSource(AudioSource):
     """:class:`AudioSource` reading the Swift audio-helper's binary IPC stream.
 
@@ -283,11 +340,13 @@ class BinaryFrameAudioSource(AudioSource):
     on one stream and are routed by :attr:`AudioFrame.track` downstream.
     """
 
-    def __init__(self, reader: BinaryIO) -> None:
+    def __init__(self, reader: BinaryIO, *, strict: bool = False) -> None:
         self._reader = reader
+        self._strict = strict
 
     def frames(self) -> Iterator[AudioFrame]:
-        yield from decode_frames(self._reader)
+        decoder = decode_frames_strict if self._strict else decode_frames
+        yield from decoder(self._reader)
 
 
 @enum.unique
@@ -430,6 +489,8 @@ __all__ = [
     "BinaryFrameAudioSource",
     "encode_frame",
     "decode_frames",
+    "decode_frames_strict",
+    "AudioIPCError",
     "ClockSync",
     "ClockEvent",
     "ClockEventKind",

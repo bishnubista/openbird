@@ -64,6 +64,7 @@ def test_privacy_route_inventory_has_expected_routes() -> None:
         "embedding.remote",
         "ingest.files",
         "meetings.audio",
+        "meetings.model_download",
         "model.local_ollama",
         "model.remote_ollama",
         "model.third_party_cloud",
@@ -189,6 +190,39 @@ def test_capture_ocr_window_route_is_local_and_pixel_free() -> None:
     ax = _routes()["capture.active_window"]
     assert route["storage"] == ax["storage"]
     assert route["deletion"] == ax["deletion"]
+
+
+def test_meeting_audio_route_pins_encrypted_manual_partial_contract() -> None:
+    route = _routes()["meetings.audio"]
+
+    assert route["class"] == "local"
+    assert route["status"] == "implemented"
+    assert route["egress"]["inherited_by"] == [
+        "embedding.remote",
+        "chat.remote",
+        "routines.summary",
+    ]
+    assert route["enforcement"]["duration_backstop_seconds"] == 14400
+    assert "fail closed" in route["enforcement"]["supervisor"]
+    assert "verified-SQLCipher" in route["enforcement"]["storage"]
+    assert "persisted_raw_audio" in route["forbidden_fields"]
+    assert "transcript_in_cli_jsonl" in route["forbidden_fields"]
+    assert "pending_meetings" in route["deletion"]["must_remove"]
+    assert "app.meeting_recording_state" in route["truth_surface"]
+
+
+def test_meeting_model_download_is_explicit_content_free_egress() -> None:
+    route = _routes()["meetings.model_download"]
+
+    assert route["class"] == "third-party-cloud"
+    assert route["egress"]["destination"] == "huggingface.co"
+    assert "explicit" in route["enforcement"]["requires"]
+    assert "HF_HUB_OFFLINE" in route["enforcement"]["record_path"]
+    assert {
+        "captured_audio",
+        "transcript_text",
+        "observation_content",
+    }.issubset(set(route["forbidden_fields"]))
 
 
 def test_deep_brain_ask_inherits_active_model_route() -> None:

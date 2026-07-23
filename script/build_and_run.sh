@@ -79,7 +79,7 @@ if [[ ! -f "\$REPO_ROOT/pyproject.toml" ]]; then
 fi
 export OPENBIRD_CAPTURE_HELPER="\$BIN_DIR/capture-helper"
 export OPENBIRD_AUDIO_HELPER="\$BIN_DIR/audio-helper"
-exec "\$UV_BIN" --directory "\$REPO_ROOT" run openbird "\$@"
+exec "\$UV_BIN" --directory "\$REPO_ROOT" run --extra meetings-mlx openbird "\$@"
 WRAPPER
 chmod +x "$APP_MACOS/openbird-cli"
 

@@ -183,46 +183,46 @@ final class AudioSink: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Extract mono float32 samples (first channel) from a CMSampleBuffer.
     static func extractMonoFloat(from sampleBuffer: CMSampleBuffer) -> AudioFrame? {
-        var blockBuffer: CMBlockBuffer?
-        var audioBufferList = AudioBufferList()
+        guard let description = sampleBuffer.formatDescription?.audioStreamBasicDescription,
+              let format = AVAudioFormat(
+                  standardFormatWithSampleRate: description.mSampleRate,
+                  channels: description.mChannelsPerFrame
+              )
+        else { return nil }
 
-        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: nil,
-            bufferListOut: &audioBufferList,
-            bufferListSize: MemoryLayout<AudioBufferList>.size,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-            blockBufferOut: &blockBuffer
-        )
-        guard status == noErr else { return nil }
+        do {
+            return try sampleBuffer.withAudioBufferList { audioBufferList, _ in
+                // Follow Apple's ScreenCaptureKit sample path instead of assuming
+                // the first AudioBuffer's bytes are already a mono Float array.
+                // AVAudioPCMBuffer respects the ASBD's channel layout/stride.
+                guard let pcm = AVAudioPCMBuffer(
+                    pcmFormat: format,
+                    bufferListNoCopy: audioBufferList.unsafePointer
+                ),
+                let channels = pcm.floatChannelData,
+                pcm.frameLength > 0
+                else { return nil }
+                let frameCount = Int(pcm.frameLength)
+                let samples = Array(
+                    UnsafeBufferPointer(start: channels[0], count: frameCount)
+                )
 
-        let buffers = UnsafeMutableAudioBufferListPointer(&audioBufferList)
-        guard let first = buffers.first, let data = first.mData else { return nil }
-
-        let frameCount = Int(first.mDataByteSize) / MemoryLayout<Float>.size
-        let pointer = data.bindMemory(to: Float.self, capacity: frameCount)
-        let samples = Array(UnsafeBufferPointer(start: pointer, count: frameCount))
-
-        var sampleRate = 48_000.0
-        if let fmt = CMSampleBufferGetFormatDescription(sampleBuffer),
-           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) {
-            sampleRate = asbd.pointee.mSampleRate
+                // Use the buffer's PRESENTATION timestamp (the actual capture
+                // time of the first sample), not callback wall-clock time.
+                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                let hostTs = pts.flags.contains(.valid)
+                    ? CMTimeGetSeconds(pts)
+                    : hostSeconds()
+                return AudioFrame(
+                    trackId: "system",
+                    hostTs: hostTs,
+                    sampleRate: description.mSampleRate,
+                    samples: samples
+                )
+            }
+        } catch {
+            return nil
         }
-
-        // Use the buffer's PRESENTATION timestamp (the actual capture time of the
-        // first sample), not the callback wall-clock — otherwise mic↔system
-        // alignment is jittered by scheduling/processing latency.
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let hostTs = pts.flags.contains(.valid) ? CMTimeGetSeconds(pts) : hostSeconds()
-
-        return AudioFrame(
-            trackId: "system",
-            hostTs: hostTs,
-            sampleRate: sampleRate,
-            samples: samples
-        )
     }
 }
 

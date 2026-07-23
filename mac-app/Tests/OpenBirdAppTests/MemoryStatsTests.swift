@@ -160,6 +160,21 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(OpenBirdService.childEnvironment(base: [:])["OPENBIRD_DB_KEY"], fakeKey)
     }
 
+    func testDBKeyBootstrapRespectsExplicitEnvironmentKey() {
+        OpenBirdService.resetInjectedDBKeyForTests()
+        let fakeKey = String(repeating: "e", count: 64)
+        setenv("OPENBIRD_DB_KEY", fakeKey, 1)
+        defer { OpenBirdService.resetInjectedDBKeyForTests() }
+
+        let report = OpenBirdService.bootstrapDBKeyReport(timeout: 0.01) { _ in
+            XCTFail("Explicit environment key must bypass Keychain resolution")
+            return (nil, .error)
+        }
+
+        XCTAssertEqual(report, DBKeyBootstrapReport(ok: true, outcome: "environment"))
+        XCTAssertEqual(OpenBirdService.childEnvironment(base: [:])["OPENBIRD_DB_KEY"], fakeKey)
+    }
+
     func testDBKeyBootstrapBoolWrapperMatchesReportInjectionGate() {
         OpenBirdService.resetInjectedDBKeyForTests()
         defer { OpenBirdService.resetInjectedDBKeyForTests() }

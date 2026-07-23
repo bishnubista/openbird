@@ -25,6 +25,7 @@ struct TodayView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: OB.Space.l) {
                 header
+                meetingCard
                 briefingCard
                 productivityCard
                 timelineSection
@@ -69,6 +70,131 @@ struct TodayView: View {
             )
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: Meeting recording
+
+    private var meetingCard: some View {
+        VStack(alignment: .leading, spacing: OB.Space.m) {
+            HStack {
+                Label("MEETING RECORDING", systemImage: meetingIcon)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(meetingAccent)
+                Spacer()
+                meetingStatusBadge
+            }
+            meetingBody
+            if !appModel.meetingLastMessage.isEmpty {
+                Text(appModel.meetingLastMessage)
+                    .font(.caption)
+                    .foregroundStyle(OB.textSecondary(scheme))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(OB.Space.l)
+        .glassSurface(cornerRadius: OB.Radius.card)
+    }
+
+    @ViewBuilder
+    private var meetingBody: some View {
+        switch appModel.meetingState {
+        case .idle:
+            Text("Manually record system audio and your microphone into a local, searchable transcript. Start only after everyone agrees to be recorded.")
+                .font(.callout)
+                .foregroundStyle(OB.textPrimary(scheme))
+            if let reason = appModel.meetingReadinessMessage {
+                Label(reason, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Button("Start Meeting Recording") { appModel.requestStartMeeting() }
+                .buttonStyle(.borderedProminent)
+                .disabled(!appModel.meetingCanStart)
+
+        case .consent:
+            Text("Download the approximately 2.51 GB Parakeet model from Hugging Face to ~/.openbird/models/huggingface?")
+                .font(.callout.weight(.semibold))
+            Text("The request contains only the public model id and normal HTTP metadata—never your audio or transcript. Partial downloads can resume. \(appModel.privacyTransmissionSummary)")
+                .font(.caption)
+                .foregroundStyle(OB.textSecondary(scheme))
+            HStack {
+                Button("Download & Continue") { appModel.confirmMeetingModelDownload() }
+                    .buttonStyle(.borderedProminent)
+                Button("Cancel") { appModel.cancelMeetingAction() }
+            }
+
+        case .preparing(let downloaded, let total):
+            ProgressView(value: Double(downloaded), total: Double(max(total, 1)))
+            Text("Preparing local transcription · \(Self.byteProgress(downloaded, total))")
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(OB.textSecondary(scheme))
+            Button("Cancel") { appModel.cancelMeetingAction() }
+
+        case .recording(let startedAt):
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text("● Recording · \(Self.elapsed(from: startedAt, to: context.date))")
+                    .font(.system(.title3, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(.red)
+            }
+            Text("Audio remains in memory/private pipes; only the encrypted transcript is stored.")
+                .font(.caption)
+                .foregroundStyle(OB.textSecondary(scheme))
+            HStack {
+                Button("Stop & Save") { appModel.stopMeetingRecording() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                Button("Force Stop Audio") { appModel.forceStopMeetingAudio() }
+                    .buttonStyle(.bordered)
+            }
+
+        case .finalizing(let completed, let remaining, let dropped, let failed):
+            ProgressView()
+            Text("Finalizing locally · \(completed) complete · \(remaining) remaining")
+                .font(.callout)
+                .monospacedDigit()
+            if dropped > 0 || failed > 0 {
+                Text("Partial transcript: \(dropped) dropped, \(failed) failed window(s).")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Button("Force Stop Audio") { appModel.forceStopMeetingAudio() }
+                .buttonStyle(.bordered)
+        }
+    }
+
+    private var meetingIcon: String {
+        appModel.meetingState.isRecording ? "waveform.circle.fill" : "waveform.circle"
+    }
+
+    private var meetingAccent: Color {
+        appModel.meetingState.isRecording ? .red : OB.accent
+    }
+
+    @ViewBuilder
+    private var meetingStatusBadge: some View {
+        let label: String = {
+            switch appModel.meetingState {
+            case .idle: return appModel.meetingCanStart ? "Ready" : "Needs setup"
+            case .consent: return "Consent"
+            case .preparing: return "Preparing"
+            case .recording: return "Recording"
+            case .finalizing: return "Finalizing"
+            }
+        }()
+        Text(label)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(appModel.meetingState.isRecording ? .red : OB.textSecondary(scheme))
+    }
+
+    private static func byteProgress(_ downloaded: Int64, _ total: Int64) -> String {
+        String(format: "%.2f / %.2f GB", Double(downloaded) / 1_000_000_000, Double(total) / 1_000_000_000)
+    }
+
+    private static func elapsed(from start: Date, to end: Date) -> String {
+        let seconds = max(0, Int(end.timeIntervalSince(start)))
+        return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
     }
 
     // MARK: Daily briefing card

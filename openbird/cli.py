@@ -8,7 +8,7 @@ Wires the frozen subsystems into a single ``openbird`` entrypoint:
     openbird capture [--once]     # run the capture daemon over the signed helper
     openbird routine list         # list built-in routine templates
     openbird routine run <name>   # run one routine occurrence now
-    openbird meeting              # meetings stub (manual-record, gated subsystem)
+    openbird meeting              # manual-record readiness and controls
     openbird data purge --since   # cascade-delete observations since a timestamp
 
 Design notes
@@ -71,6 +71,10 @@ assistant_app = typer.Typer(
     help="Connect read-only OpenBird capture to desktop assistants.",
     no_args_is_help=True,
 )
+meeting_app = typer.Typer(
+    help="Prepare, record, and recover manual meeting transcripts.",
+    invoke_without_command=True,
+)
 app.add_typer(routine_app, name="routine")
 app.add_typer(summaries_app, name="summaries")
 app.add_typer(entities_app, name="entities")
@@ -78,6 +82,7 @@ app.add_typer(eval_app, name="eval")
 app.add_typer(day_memory_app, name="day-memory")
 app.add_typer(deep_brain_app, name="deep-brain")
 app.add_typer(assistant_app, name="assistant")
+app.add_typer(meeting_app, name="meeting")
 register_capture_command(app)
 
 from openbird.prompts.cli import prompts_app  # noqa: E402 - after app is defined
@@ -2898,27 +2903,23 @@ def entities_show(
 
 
 # --------------------------------------------------------------------------- #
-# meeting (stub)                                                              #
+# meeting                                                                     #
 # --------------------------------------------------------------------------- #
 
 
-@app.command()
-def meeting() -> None:
-    """Meetings stub (manual-record subsystem, gated on a signed audio helper).
-
-    Meeting capture uses the Swift ``audio-helper`` (ScreenCaptureKit system
-    audio + mic as separate synchronized tracks) and is **manual-record** in v1.
-    It requires the packaged signed helper plus Screen-Recording/Microphone TCC,
-    so the full pipeline cannot be driven from this CLI yet. This command reports
-    the meetings readiness (the transcription extra) and exits.
-    """
+@meeting_app.callback(invoke_without_command=True)
+def meeting_status(ctx: typer.Context) -> None:
+    """Show manual meeting-recording readiness."""
+    if ctx.invoked_subcommand is not None:
+        return
     from openbird.meetings.transcribe import (
+        PARAKEET_MODEL_DOWNLOAD_BYTES,
         meetings_backend_available,
         parakeet_available,
         whisper_available,
     )
 
-    _console.print("[bold]OpenBird meetings[/] (manual-record, experimental)")
+    _console.print("[bold]OpenBird meetings[/] (manual recording)")
     _console.print(
         "- Audio capture requires the signed ScreenCaptureKit `audio-helper` "
         "with Screen-Recording + Microphone TCC."
@@ -2928,20 +2929,152 @@ def meeting() -> None:
     # On a host with both, `auto` prefers parakeet-mlx (recommended on Apple Silicon).
     active = "parakeet-mlx" if parakeet else ("faster-whisper" if whisper else "none")
     _console.print(
-        f"- transcription backends: parakeet-mlx "
-        f"[{'installed' if parakeet else 'not installed'}], "
-        f"faster-whisper [{'installed' if whisper else 'not installed'}] "
+        f"- transcription backends: parakeet-mlx: "
+        f"{'installed' if parakeet else 'not installed'}; "
+        f"faster-whisper: {'installed' if whisper else 'not installed'} "
         f"→ active (auto): [bold]{active}[/]."
     )
     _console.print(
         "- Speaker labeling ('me vs others') is experimental; consent indicator "
         "and manual start are required by design."
     )
+    _console.print(
+        f"- Parakeet first-use download: approximately "
+        f"{PARAKEET_MODEL_DOWNLOAD_BYTES / 1_000_000_000:.2f} GB, with consent."
+    )
     if not meetings_backend_available():
         _console.print(
             "[dim]Install a backend: `uv sync --extra meetings-mlx` "
             "(parakeet-mlx, Apple Silicon, recommended) or "
             "`uv sync --extra meetings` (faster-whisper).[/]"
+        )
+
+
+@meeting_app.command("prepare")
+def meeting_prepare(
+    jsonl: bool = typer.Option(False, "--jsonl", help="Emit metadata-only JSONL progress."),
+) -> None:
+    """Download and validate the selected local transcription model."""
+    from openbird.meetings.record import emit_jsonl
+    from openbird.meetings.transcribe import (
+        MeetingsExtraNotInstalled,
+        Transcriber,
+        configure_model_cache,
+    )
+
+    configure_model_cache()
+    last = {"bytes": -1, "time": 0.0}
+
+    def progress(downloaded: int, total: int) -> None:
+        now = time.monotonic()
+        if downloaded != total and downloaded - last["bytes"] < 1_048_576 and now - last["time"] < 0.25:
+            return
+        last["bytes"] = downloaded
+        last["time"] = now
+        payload = {
+            "event": "download_progress",
+            "downloaded_bytes": int(downloaded),
+            "total_bytes": int(total),
+        }
+        if jsonl:
+            emit_jsonl(payload)
+        else:
+            _console.print(
+                f"Model download: {downloaded / 1_000_000_000:.2f}/"
+                f"{total / 1_000_000_000:.2f} GB"
+            )
+
+    try:
+        backend = Transcriber().prepare(progress)
+    except (MeetingsExtraNotInstalled, RuntimeError):
+        payload = {"event": "result", "reason": "model_prepare_failed"}
+        if jsonl:
+            emit_jsonl(payload)
+        else:
+            _err_console.print("[red]Meeting model preparation failed.[/]")
+        raise typer.Exit(code=1)
+    payload = {"event": "result", "reason": "prepared", "backend": backend}
+    if jsonl:
+        emit_jsonl(payload)
+    else:
+        _console.print(f"[green]Prepared[/] local meeting backend: {backend}.")
+
+
+@meeting_app.command("record")
+def meeting_record(
+    jsonl: bool = typer.Option(False, "--jsonl", help="Emit metadata-only JSONL events."),
+    helper: Optional[Path] = typer.Option(None, "--helper", hidden=True),
+) -> None:
+    """Record until stopped by the supervising OpenBird app."""
+    import threading
+
+    from openbird.meetings.record import (
+        SUPERVISOR_TOKEN_ENV,
+        MeetingRecorder,
+        SupervisorNotArmed,
+        arm_supervisor,
+        emit_jsonl,
+        install_signal_stop,
+        resolve_audio_helper,
+    )
+
+    emit = emit_jsonl if jsonl else lambda payload: _console.print(escape(str(payload)))
+    stop = threading.Event()
+    token = os.environ.get(SUPERVISOR_TOKEN_ENV, "")
+    try:
+        arm_supervisor(token, stop=stop)
+    except SupervisorNotArmed:
+        emit({"event": "result", "reason": "supervisor_not_armed", "partial": False})
+        raise typer.Exit(code=2)
+    install_signal_stop(stop)
+    try:
+        helper_path = resolve_audio_helper(str(helper) if helper else None)
+    except FileNotFoundError:
+        emit({"event": "result", "reason": "audio_helper_missing", "partial": False})
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+    if ".app/Contents/MacOS" in str(helper_path):
+        settings.require_encryption = True
+    try:
+        store = _store(settings=settings)
+    except Exception as exc:
+        if isinstance(exc, typer.Exit):
+            raise
+        emit({"event": "result", "reason": "store_not_ready", "partial": False})
+        raise typer.Exit(code=1) from exc
+    try:
+        result = MeetingRecorder(
+            store,
+            helper_path=helper_path,
+            stop=stop,
+            emit=emit,
+        ).run()
+    finally:
+        store.close()
+    if result.reason in {"model_not_prepared", "helper_start_failed", "persistence_pending"}:
+        raise typer.Exit(code=1)
+
+
+@meeting_app.command("recover")
+def meeting_recover(
+    json_out: bool = typer.Option(False, "--json", help="Emit metadata-only JSON."),
+    meeting_id: Optional[str] = typer.Option(None, "--meeting-id"),
+) -> None:
+    """Retry encrypted pending meeting transcripts idempotently."""
+    from openbird.meetings.record import recover_pending
+
+    store = _store()
+    try:
+        result = recover_pending(store, meeting_id)
+    finally:
+        store.close()
+    if json_out:
+        print(json.dumps(result, separators=(",", ":")))
+    else:
+        _console.print(
+            f"Recovered {result['recovered_count']} meeting(s); "
+            f"{result['failed_count']} still pending."
         )
 
 

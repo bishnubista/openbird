@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 @dataclass(frozen=True)
@@ -801,6 +801,41 @@ def _apply_v9_capture_attempts(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _apply_v10_pending_meetings(conn: sqlite3.Connection) -> None:
+    """Add encrypted meeting checkpoints and meeting-session idempotency."""
+    statements = [
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_observations_meeting_session
+            ON observations(session_id)
+            WHERE source = 'meeting' AND session_id IS NOT NULL
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS pending_meetings (
+            meeting_id       TEXT PRIMARY KEY,
+            version          INTEGER NOT NULL DEFAULT 1 CHECK (version = 1),
+            started_ts       REAL NOT NULL,
+            ended_ts         REAL,
+            transcript       TEXT NOT NULL DEFAULT '',
+            segments_json    TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(segments_json)),
+            backend          TEXT,
+            partial_reason   TEXT,
+            dropped_windows  INTEGER NOT NULL DEFAULT 0 CHECK (dropped_windows >= 0),
+            failed_windows   INTEGER NOT NULL DEFAULT 0 CHECK (failed_windows >= 0),
+            truncated_bytes  INTEGER NOT NULL DEFAULT 0 CHECK (truncated_bytes >= 0),
+            observation_id   TEXT REFERENCES observations(id) ON DELETE SET NULL,
+            created_at       REAL NOT NULL,
+            updated_at       REAL NOT NULL
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_pending_meetings_started_ts
+            ON pending_meetings(started_ts)
+        """,
+    ]
+    for statement in statements:
+        conn.execute(statement)
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
 # so migrations here only ever upgrade an existing DB from one version to the
 # next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
@@ -845,6 +880,11 @@ MIGRATIONS: list[Migration] = [
         version=9,
         description="add the content-free capture-attempt ledger",
         apply=_apply_v9_capture_attempts,
+    ),
+    Migration(
+        version=10,
+        description="add SQLCipher-gated pending meeting transcripts",
+        apply=_apply_v10_pending_meetings,
     ),
 ]
 

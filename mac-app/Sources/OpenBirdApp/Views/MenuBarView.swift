@@ -54,6 +54,26 @@ struct MenuBarView: View {
                 .disabled(model.allowlist.isEmpty)
             }
 
+            switch model.meetingState {
+            case .idle:
+                Button("Start Meeting Recording") {
+                    showMainWindow(.today)
+                    model.requestStartMeeting()
+                }
+                .disabled(!model.meetingCanStart)
+            case .consent:
+                Button("Continue Meeting Setup…") { showMainWindow(.today) }
+            case .preparing:
+                Button("Cancel Meeting Preparation") { model.cancelMeetingAction() }
+            case .recording:
+                Button("Stop Meeting Recording") { model.stopMeetingRecording() }
+            case .finalizing:
+                Text("Meeting: finalizing…")
+            }
+            if model.meetingState.isBusy {
+                Button("Force Stop Meeting Audio") { model.forceStopMeetingAudio() }
+            }
+
             Divider()
 
             ForEach(model.helpers) { helper in
@@ -102,6 +122,7 @@ struct MenuBarView: View {
     }
 
     private var statusLine: String {
+        if model.meetingState.isRecording { return "Recording meeting" }
         if model.capturePaused { return "Paused" }
         if model.isFullyConfigured { return "Ready" }
         if model.captureRunning { return "Capturing" }

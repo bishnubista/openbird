@@ -14,7 +14,7 @@
 # Optional:
 #   OPENBIRD_NOTARY_PROFILE    notarytool keychain profile (default: openbird-notary)
 #   OPENBIRD_DMG_PY_VERSION    embedded CPython (default: 3.13)
-#   OPENBIRD_DMG_EXTRAS        pip extras (default: encryption,integrations) — NOT meetings
+#   OPENBIRD_DMG_EXTRAS        pip extras (default: encryption,integrations,meetings-mlx)
 #   OPENBIRD_DMG_SKIP_NOTARIZE=1   stop after building+signing+relocation test (fast iteration)
 set -euo pipefail
 
@@ -28,7 +28,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [ -f "$ROOT_DIR/script/release.env" ] && . "$ROOT_DIR/script/release.env"
 NOTARY_PROFILE="${OPENBIRD_NOTARY_PROFILE:-openbird-notary}"
 PY_VERSION="${OPENBIRD_DMG_PY_VERSION:-3.13}"
-EXTRAS="${OPENBIRD_DMG_EXTRAS:-encryption,integrations}"
+EXTRAS="${OPENBIRD_DMG_EXTRAS:-encryption,integrations,meetings-mlx}"
 
 STAGE_DIR="$ROOT_DIR/dist/dmg-stage"
 APP="$STAGE_DIR/$APP_NAME.app"
@@ -46,6 +46,9 @@ ENT_PYTHON="$ROOT_DIR/mac-app/Python.entitlements"
 log() { echo "package_dmg: $*" >&2; }
 die() { echo "package_dmg: ERROR: $*" >&2; exit 1; }
 
+[[ "$(uname -m)" == "arm64" ]] \
+  || die "the notarized meeting-recording app is Apple-Silicon-only; build natively on arm64"
+
 remove_python_bytecode() {
   local root="$1"
   find "$root" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
@@ -58,9 +61,12 @@ python_bytecode_manifest() {
     cd "$root"
     {
       find . -type d -name '__pycache__' -print | LC_ALL=C sort | sed 's/^/D /'
-      find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -print | LC_ALL=C sort | while IFS= read -r f; do
-        shasum -a 256 "$f" | sed 's/^/F /'
-      done
+      # Hash the sorted set in one shasum process. Spawning Perl once per .pyc
+      # made this integrity guard take many minutes in the MLX-enabled bundle.
+      find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 shasum -a 256 \
+        | sed 's/^/F /'
     }
   )
 }
@@ -156,6 +162,12 @@ rm -f "$RES/python/lib/python"*/EXTERNALLY-MANAGED
 "$BPY" -m ensurepip --upgrade >/dev/null 2>&1 || true
 "$BPY" -m pip install --upgrade pip >/dev/null 2>&1 || true
 "$BPY" -m pip install --no-warn-script-location "${ROOT_DIR}[${EXTRAS}]" >&2
+# A false platform marker (for example an x86_64/Rosetta build) makes pip
+# succeed while silently omitting the ASR backend. Execute the STAGED interpreter
+# now so a DMG can never claim meeting recording without the promised runtime.
+PYTHONDONTWRITEBYTECODE=1 "$BPY" -I -c \
+  'import mlx.core; import parakeet_mlx' \
+  || die "staged meetings-mlx backend is missing or unloadable"
 # Keep ONLY the interpreter + its python/python3 symlinks. Remove every other
 # entry — files AND symlinks (console scripts bake absolute shebangs; idle3/pydoc3
 # and *-config dangle once their script targets are gone, which breaks
@@ -179,6 +191,20 @@ for libpy in "$RES"/python/lib/libpython*.dylib; do
   [ -f "$libpy" ] || continue
   install_name_tool -id "@executable_path/../lib/$(basename "$libpy")" "$libpy"
 done
+
+# Some scipy/scikit-learn wheels carry build-system-only `/DLC/...` LC_ID_DYLIB
+# values. They are self-identities, not load dependencies, but the relocation
+# audit correctly rejects them. Normalize every such nested dylib identity to
+# its own loader-relative basename before signing, then let the full Mach-O
+# audit below verify there are no remaining absolute references.
+while IFS= read -r -d '' dylib; do
+  if file -b "$dylib" 2>/dev/null | grep -q "Mach-O"; then
+    install_id="$(otool -D "$dylib" 2>/dev/null | sed -n '2p' | xargs)"
+    case "$install_id" in
+      /DLC/*) install_name_tool -id "@loader_path/$(basename "$dylib")" "$dylib" ;;
+    esac
+  fi
+done < <(find "$RES/python" -type f -name '*.dylib' -print0)
 
 log "[5/8] Rewrite launcher shim to the embedded interpreter (no uv, no repo)"
 cat >"$MACOS/openbird-cli" <<'WRAPPER'
@@ -327,6 +353,15 @@ sign_one "$APP" "$ENT_APP"
 log "  verifying signature"
 codesign --verify --strict --verbose=2 "$APP" >&2
 codesign -dvv "$APP" 2>&1 | grep -E "Authority=Developer ID|TeamIdentifier|flags" | sed 's/^/  /' >&2
+log "  exercising signed MLX JIT path"
+SIGNED_BYTECODE_MANIFEST="$(mktemp)"
+python_bytecode_manifest "$APP" >"$SIGNED_BYTECODE_MANIFEST"
+PYTHONDONTWRITEBYTECODE=1 "$BPY" -I -c \
+  'import mlx.core as mx; mx.eval(mx.ones((4,), dtype=mx.float32) + 1)' \
+  || { rm -f "$SIGNED_BYTECODE_MANIFEST"; die "signed embedded Python cannot execute MLX kernels"; }
+assert_python_bytecode_unchanged "$APP" "$SIGNED_BYTECODE_MANIFEST" "signed MLX smoke test" \
+  || { rm -f "$SIGNED_BYTECODE_MANIFEST"; die "signed MLX smoke test mutated Python bytecode"; }
+rm -f "$SIGNED_BYTECODE_MANIFEST"
 
 if [[ "${OPENBIRD_DMG_SKIP_NOTARIZE:-0}" == "1" ]]; then
   log "[8/8] SKIP_NOTARIZE set — stopping after sign. Signed app: $APP"

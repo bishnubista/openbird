@@ -58,10 +58,12 @@ cask "openbird" do
     Guided Setup walks you through granting Accessibility / Screen Recording
     permissions and provisioning a local Ollama model.
 
-    Meeting audio transcription is NOT included in this notarized beta — that
-    backend ships only when OpenBird is built from source with the `meetings`
-    extra (see the project README). The download you install here does not
-    capture meeting audio.
+    On Apple Silicon, the notarized app supports manual meeting recording with
+    ScreenCaptureKit system audio plus microphone audio. Recording starts only
+    after you click Start and acknowledge participant consent. First use asks
+    before downloading the approximately 2.51 GB local Parakeet model; raw audio
+    is not persisted. The Homebrew formula remains a portable CLI and does not
+    include this meeting backend.
 
     `brew uninstall --cask openbird` removes the app; add `--zap` to also boot out
     the routines LaunchAgent and delete on-device memory (~/.openbird). The

@@ -120,6 +120,8 @@ _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # Wait up to this long on a busy lock for the :memory: branch too; on-disk
 # connections get this from storage.crypto.
 _BUSY_TIMEOUT_MS = 5000
+_EMBED_BATCH_SIZE = 32
+_MAX_MEETING_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 
 # The five-level activity taxonomy (v5). Mirrors the CHECK constraints on
 # block_summaries.level / category_assignments.level and taxonomy.LEVELS —
@@ -418,8 +420,12 @@ class MemoryStore:
         embeddings: dict[str, bytes] = {}
         if unique_new:
             new_hashes = list(unique_new)
-            vectors = self.provider.embed([unique_new[h] for h in new_hashes])
-            embeddings = {h: _serialize_f32(v) for h, v in zip(new_hashes, vectors)}
+            for offset in range(0, len(new_hashes), _EMBED_BATCH_SIZE):
+                batch_hashes = new_hashes[offset : offset + _EMBED_BATCH_SIZE]
+                vectors = self.provider.embed([unique_new[h] for h in batch_hashes])
+                embeddings.update(
+                    {h: _serialize_f32(v) for h, v in zip(batch_hashes, vectors)}
+                )
 
         # -- Phase 2: short INSERT-only write transaction -----------------------
         try:
@@ -434,6 +440,174 @@ class MemoryStore:
         except Exception:
             # Roll back so we never leave blobs/observations/chunks/FTS rows
             # without their vectors (or a dangling open transaction).
+            self.conn.rollback()
+            raise
+
+    # -- encrypted meeting checkpoints --------------------------------------
+
+    def checkpoint_meeting(
+        self,
+        meeting_id: str,
+        *,
+        started_ts: float,
+        transcript: str = "",
+        segments: list[dict] | None = None,
+        ended_ts: float | None = None,
+        backend: str | None = None,
+        partial_reason: str | None = None,
+        dropped_windows: int = 0,
+        failed_windows: int = 0,
+        truncated_bytes: int = 0,
+    ) -> None:
+        """Upsert one SQLCipher-gated meeting transcript checkpoint.
+
+        The table is in the same database/release boundary as observations.
+        This method never logs or returns transcript content.
+        """
+        if not meeting_id:
+            raise ValueError("meeting_id is required")
+        if len(transcript.encode("utf-8")) > _MAX_MEETING_TRANSCRIPT_BYTES:
+            raise ValueError("meeting transcript exceeds the 8 MiB checkpoint cap")
+        if min(dropped_windows, failed_windows, truncated_bytes) < 0:
+            raise ValueError("meeting checkpoint counters must be non-negative")
+        segments_json = json.dumps(segments or [], separators=(",", ":"))
+        now = time.time()
+        try:
+            self._begin()
+            self.conn.execute(
+                """
+                INSERT INTO pending_meetings(
+                    meeting_id, version, started_ts, ended_ts, transcript,
+                    segments_json, backend, partial_reason, dropped_windows,
+                    failed_windows, truncated_bytes, created_at, updated_at
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(meeting_id) DO UPDATE SET
+                    ended_ts = excluded.ended_ts,
+                    transcript = excluded.transcript,
+                    segments_json = excluded.segments_json,
+                    backend = excluded.backend,
+                    partial_reason = excluded.partial_reason,
+                    dropped_windows = excluded.dropped_windows,
+                    failed_windows = excluded.failed_windows,
+                    truncated_bytes = excluded.truncated_bytes,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    meeting_id,
+                    float(started_ts),
+                    ended_ts,
+                    transcript,
+                    segments_json,
+                    backend,
+                    partial_reason,
+                    int(dropped_windows),
+                    int(failed_windows),
+                    int(truncated_bytes),
+                    now,
+                    now,
+                ),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def pending_meetings(self, *, meeting_id: str | None = None) -> list[dict]:
+        """Return encrypted checkpoint rows for recovery (content-bearing)."""
+        if meeting_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM pending_meetings ORDER BY started_ts, meeting_id"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM pending_meetings WHERE meeting_id = ?",
+                (meeting_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def commit_pending_meeting(self, meeting_id: str) -> Observation | None:
+        """Index one pending transcript and atomically remove its checkpoint.
+
+        Embeddings are produced in bounded batches before the write transaction.
+        A pre-existing ``source='meeting'`` observation with this session id is
+        treated as the committed result, making crash recovery idempotent.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM pending_meetings WHERE meeting_id = ?", (meeting_id,)
+        ).fetchone()
+        if row is None:
+            existing = self.conn.execute(
+                "SELECT * FROM observations WHERE source = 'meeting' "
+                "AND session_id = ? LIMIT 1",
+                (meeting_id,),
+            ).fetchone()
+            return self._row_to_observation(existing) if existing is not None else None
+
+        transcript = str(row["transcript"] or "").strip()
+        if not transcript:
+            try:
+                self._begin()
+                self.conn.execute(
+                    "DELETE FROM pending_meetings WHERE meeting_id = ?", (meeting_id,)
+                )
+                self.conn.commit()
+                return None
+            except Exception:
+                self.conn.rollback()
+                raise
+
+        blob_hash = ingest.content_hash(transcript)
+        norm = ingest.normalize(transcript)
+        chunks = ingest.chunk(transcript)
+        chunk_hashes = [ingest.content_hash(text) for _span, text in chunks]
+        unique_new: dict[str, str] = {}
+        for (_span, text), chunk_hash in zip(chunks, chunk_hashes):
+            if chunk_hash in unique_new:
+                continue
+            present = self.conn.execute(
+                "SELECT 1 FROM chunks WHERE chunk_hash = ? LIMIT 1", (chunk_hash,)
+            ).fetchone()
+            if present is None:
+                unique_new[chunk_hash] = text
+
+        embeddings: dict[str, bytes] = {}
+        new_hashes = list(unique_new)
+        for offset in range(0, len(new_hashes), _EMBED_BATCH_SIZE):
+            batch_hashes = new_hashes[offset : offset + _EMBED_BATCH_SIZE]
+            vectors = self.provider.embed([unique_new[h] for h in batch_hashes])
+            embeddings.update(
+                {h: _serialize_f32(v) for h, v in zip(batch_hashes, vectors)}
+            )
+
+        try:
+            self._begin()
+            existing = self.conn.execute(
+                "SELECT * FROM observations WHERE source = 'meeting' "
+                "AND session_id = ? LIMIT 1",
+                (meeting_id,),
+            ).fetchone()
+            if existing is None:
+                obs = self._write_observation(
+                    blob_hash,
+                    norm,
+                    chunks,
+                    chunk_hashes,
+                    embeddings,
+                    float(row["started_ts"]),
+                    app="OpenBird Meetings",
+                    window="Recorded meeting",
+                    url=None,
+                    session_id=meeting_id,
+                    source="meeting",
+                )
+            else:
+                obs = self._row_to_observation(existing)
+            self.conn.execute(
+                "DELETE FROM pending_meetings WHERE meeting_id = ?", (meeting_id,)
+            )
+            self.conn.commit()
+            return obs
+        except Exception:
             self.conn.rollback()
             raise
 
@@ -2750,6 +2924,9 @@ class MemoryStore:
                     (ENTITY_AGGREGATION_KV_PREFIX + "%",),
                 )
                 cur.execute("DELETE FROM reasoning_send_ledger")
+                # Meeting transcript checkpoints are content-bearing and share
+                # this database's privacy boundary; a full purge removes them.
+                cur.execute("DELETE FROM pending_meetings")
                 # Capture attempts contain no content, but bundle ids and
                 # timestamps are still private activity metadata. A full purge
                 # removes them; selective/retention purges keep accountability
@@ -2776,6 +2953,7 @@ class MemoryStore:
                 # Purge-of-recent: any span TOUCHING the purged window goes —
                 # a purge must not leave partial evidence of the erased time.
                 span_where = "end_ts >= ?"
+                pending_where = "started_ts >= ?"
             else:
                 where, param = "ts < ?", before_ts
                 # Retention: a span that BEGAN before the cutoff is deleted
@@ -2783,6 +2961,7 @@ class MemoryStore:
                 # pruned window may survive, and truncation would bypass the
                 # span-delete invalidation trigger.
                 span_where = "start_ts < ?"
+                pending_where = "started_ts < ?"
 
             victims = cur.execute(
                 f"SELECT id, content_hash FROM observations WHERE {where}", (param,)
@@ -2815,6 +2994,9 @@ class MemoryStore:
             # (recursive_triggers ON) each deleted summary in turn fires
             # trg_day_memory_source_summary_delete for day memories citing it.
             cur.execute(f"DELETE FROM activity_spans WHERE {span_where}", (param,))
+            cur.execute(
+                f"DELETE FROM pending_meetings WHERE {pending_where}", (param,)
+            )
 
             # Drop blobs now orphaned (no remaining observations). FK ON DELETE
             # CASCADE removes their blob_chunks mappings.

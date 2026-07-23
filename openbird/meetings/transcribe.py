@@ -24,7 +24,7 @@ import logging
 import os
 import re
 from array import array
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,6 +45,27 @@ _INSTALL_HINT = (
     "or install the project's meetings extra:\n"
     "    uv sync --extra meetings"
 )
+
+PARAKEET_MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
+# Public Hugging Face manifest size for model.safetensors. Ancillary JSON is tiny;
+# product copy says "approximately" and switches to resolved transfer totals.
+PARAKEET_MODEL_DOWNLOAD_BYTES = 2_508_288_736
+
+
+def configure_model_cache(*, offline: bool = False) -> Path:
+    """Pin every meeting backend process/thread to OpenBird's model cache."""
+    configured = os.environ.get("OPENBIRD_MEETINGS_MODEL_CACHE", "").strip()
+    hf_home = Path(configured).expanduser() if configured else Path.home() / ".openbird" / "models" / "huggingface"
+    hf_home.mkdir(parents=True, exist_ok=True)
+    os.environ["HF_HOME"] = str(hf_home)
+    os.environ["HUGGINGFACE_HUB_CACHE"] = str(hf_home / "hub")
+    # Hugging Face's optional Xet transport can remain at a zero-byte sparse
+    # file indefinitely on otherwise healthy Macs. Standard HTTP is resumable,
+    # reports byte progress through tqdm, and needs no extra worker service.
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    if offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+    return hf_home / "hub"
 
 
 class MeetingsExtraNotInstalled(RuntimeError):
@@ -200,7 +221,7 @@ class _ParakeetMLXBackend:
 
     name = "parakeet"
 
-    def __init__(self, model: str = "mlx-community/parakeet-tdt-0.6b-v3") -> None:
+    def __init__(self, model: str = PARAKEET_MODEL_ID) -> None:
         self.model_name = model
         self._model = None
 
@@ -215,18 +236,67 @@ class _ParakeetMLXBackend:
         try:
             from parakeet_mlx import from_pretrained  # type: ignore[import-not-found]
 
-            self._model = from_pretrained(self.model_name)
+            self._model = from_pretrained(
+                self.model_name, cache_dir=str(configure_model_cache())
+            )
         except Exception as exc:  # noqa: BLE001 - unloadable -> typed, content-free
             raise _BackendUnavailable(type(exc).__name__) from exc
         return self._model
 
+    def prepare(
+        self, progress: Callable[[int, int], None] | None = None
+    ) -> None:
+        """Download the two public model files with metadata-only progress."""
+        if not parakeet_available():
+            raise _BackendUnavailable("parakeet_mlx")
+        cache_dir = configure_model_cache()
+        try:
+            from huggingface_hub import hf_hub_download  # type: ignore[import-not-found]
+            from tqdm.auto import tqdm  # type: ignore[import-not-found]
+
+            callback = progress or (lambda _downloaded, _total: None)
+
+            class _Progress(tqdm):
+                def update(self, n=1):  # type: ignore[no-untyped-def]
+                    changed = super().update(n)
+                    callback(
+                        min(int(self.n), PARAKEET_MODEL_DOWNLOAD_BYTES),
+                        PARAKEET_MODEL_DOWNLOAD_BYTES,
+                    )
+                    return changed
+
+            callback(0, PARAKEET_MODEL_DOWNLOAD_BYTES)
+            hf_hub_download(
+                self.model_name,
+                "config.json",
+                cache_dir=str(cache_dir),
+                tqdm_class=_Progress,
+            )
+            hf_hub_download(
+                self.model_name,
+                "model.safetensors",
+                cache_dir=str(cache_dir),
+                tqdm_class=_Progress,
+            )
+            callback(PARAKEET_MODEL_DOWNLOAD_BYTES, PARAKEET_MODEL_DOWNLOAD_BYTES)
+            self._load()
+        except _BackendUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 - content-free typed boundary
+            raise _BackendUnavailable(type(exc).__name__) from exc
+
     def transcribe_pcm(self, samples, *, language: str | None = None) -> str:
         model = self._load()
         try:
-            # parakeet-mlx accepts a float PCM array; result exposes `.text`. The
-            # exact API is exercised best-effort — any mismatch raises below and the
-            # Transcriber falls back to whisper.
-            result = model.transcribe(samples)
+            # The public ``model.transcribe`` API accepts a FILE PATH and would
+            # force raw meeting PCM onto disk. Stay inside the privacy boundary by
+            # calling the library's in-memory log-mel + generate path instead.
+            import mlx.core as mx  # type: ignore[import-not-found]
+            from parakeet_mlx.parakeet import get_logmel  # type: ignore[import-not-found]
+
+            audio = mx.array(samples, dtype=mx.float32)
+            mel = get_logmel(audio, model.preprocessor_config)
+            result = model.generate(mel)[0]
             text = getattr(result, "text", None)
             if text is None and isinstance(result, str):
                 text = result
@@ -275,6 +345,12 @@ class Transcriber:
             model_size, device=device, compute_type=compute_type
         )
         self._parakeet = _ParakeetMLXBackend()
+        self._active_backend: str | None = None
+
+    @property
+    def active_backend(self) -> str | None:
+        """Safe backend identifier selected by the last successful operation."""
+        return self._active_backend
 
     def _backend_order(self) -> list:
         """The backends to try, in order. ``auto`` prefers parakeet, then whisper."""
@@ -298,7 +374,9 @@ class Transcriber:
         errors: list[Exception] = []
         for backend in self._backend_order():
             try:
-                return backend.transcribe_pcm(samples, language=None)
+                text = backend.transcribe_pcm(samples, language=None)
+                self._active_backend = backend.name
+                return text
             except (_BackendUnavailable, _BackendInferenceError) as exc:
                 errors.append(exc)
                 continue
@@ -309,6 +387,28 @@ class Transcriber:
         inference_errors = [e for e in errors if isinstance(e, _BackendInferenceError)]
         if inference_errors:
             raise inference_errors[-1]
+        raise MeetingsExtraNotInstalled(_INSTALL_HINT_BOTH)
+
+    def prepare(
+        self, progress: Callable[[int, int], None] | None = None
+    ) -> str:
+        """Download/load the selected backend and return its safe identifier."""
+        errors: list[Exception] = []
+        for backend in self._backend_order():
+            try:
+                prepare = getattr(backend, "prepare", None)
+                if prepare is not None:
+                    prepare(progress)
+                else:
+                    backend._load()
+                self._active_backend = backend.name
+                return backend.name
+            except (_BackendUnavailable, _BackendInferenceError) as exc:
+                errors.append(exc)
+        if any(isinstance(exc, _BackendInferenceError) for exc in errors):
+            raise next(
+                exc for exc in reversed(errors) if isinstance(exc, _BackendInferenceError)
+            )
         raise MeetingsExtraNotInstalled(_INSTALL_HINT_BOTH)
 
     def transcribe_segment(self, segment: SpeechSegment) -> TranscriptSegment:

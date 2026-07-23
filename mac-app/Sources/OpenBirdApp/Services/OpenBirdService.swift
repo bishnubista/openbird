@@ -715,6 +715,64 @@ struct DayTimeline: Codable, Equatable {
     }
 }
 
+/// One metadata-only JSONL event from `openbird meeting prepare|record`.
+/// Transcript text is deliberately absent from the CLI contract and this type.
+struct MeetingCLIEvent: Codable, Equatable, Sendable {
+    let event: String
+    let meetingId: String?
+    let reason: String?
+    let backend: String?
+    let downloadedBytes: Int64?
+    let totalBytes: Int64?
+    let completedWindows: Int?
+    let remainingWindows: Int?
+    let droppedWindows: Int?
+    let failedWindows: Int?
+    let windowCount: Int?
+    let systemFrameCount: Int?
+    let micFrameCount: Int?
+    let observationId: String?
+    let partial: Bool?
+    let helperPid: Int32?
+
+    enum CodingKeys: String, CodingKey {
+        case event, reason, backend, partial
+        case meetingId = "meeting_id"
+        case downloadedBytes = "downloaded_bytes"
+        case totalBytes = "total_bytes"
+        case completedWindows = "completed_windows"
+        case remainingWindows = "remaining_windows"
+        case droppedWindows = "dropped_windows"
+        case failedWindows = "failed_windows"
+        case windowCount = "window_count"
+        case systemFrameCount = "system_frame_count"
+        case micFrameCount = "mic_frame_count"
+        case observationId = "observation_id"
+        case helperPid = "helper_pid"
+    }
+}
+
+/// Lock-protected incremental decoder for a Process stdout readability handler.
+private final class MeetingJSONLBuffer: @unchecked Sendable {
+    private var data = Data()
+    private let lock = NSLock()
+
+    func append(_ chunk: Data) -> [MeetingCLIEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        data.append(chunk)
+        var events: [MeetingCLIEvent] = []
+        while let newline = data.firstIndex(of: 0x0A) {
+            let line = data.prefix(upTo: newline)
+            data.removeSubrange(...newline)
+            if let event = try? JSONDecoder().decode(MeetingCLIEvent.self, from: line) {
+                events.append(event)
+            }
+        }
+        return events
+    }
+}
+
 
 final class OpenBirdService: @unchecked Sendable {
     private let fileManager = FileManager.default
@@ -761,6 +819,12 @@ final class OpenBirdService: @unchecked Sendable {
     /// Guards tunnel ownership against async setup/status and synchronous app termination.
     private let chatGPTTunnelProcessLock = NSLock()
     private var chatGPTTunnelLifecycle = ChatGPTTunnelLifecycleState()
+    /// At most one model preparation and one recording process are app-owned.
+    private var meetingPreparationProcess: Process?
+    private var meetingProcess: Process?
+    private var meetingSupervisorPipe: FileHandle?
+    private var meetingHelperPID: Int32?
+    private let meetingProcessLock = NSLock()
 
     /// Write end of the "death pipe" handed to the launched capture daemon as its
     /// stdin. We hold it open for this app's lifetime and never write to it after
@@ -931,6 +995,14 @@ final class OpenBirdService: @unchecked Sendable {
         allowInteraction: Bool = true,
         resolver: DBKeyResolver? = nil
     ) -> DBKeyBootstrapReport {
+        // Explicit process configuration wins, matching Python's OPENBIRD_DB_KEY
+        // precedence. This enables isolated signed-app validation/managed launches
+        // without creating a second Keychain item. Never log or otherwise expose it.
+        if let configured = ProcessInfo.processInfo.environment["OPENBIRD_DB_KEY"],
+           !configured.isEmpty {
+            injectedDBKey = configured
+            return DBKeyBootstrapReport(ok: true, outcome: "environment")
+        }
         let dbPath = databaseURL().path
         let resolve: DBKeyResolver = resolver ?? { path in
             KeychainKeyProvider.resolveKey(dbPath: path, allowInteraction: allowInteraction)
@@ -1553,6 +1625,229 @@ final class OpenBirdService: @unchecked Sendable {
         if let process, process.isRunning { process.terminate() }
     }
 
+    // MARK: - Meeting recording
+
+    @discardableResult
+    func prepareMeetingModel(
+        onEvent: @escaping @Sendable (MeetingCLIEvent) -> Void,
+        onExit: @escaping @Sendable (Int32) -> Void
+    ) -> Bool {
+        meetingProcessLock.lock()
+        if meetingPreparationProcess?.isRunning == true {
+            meetingProcessLock.unlock()
+            return true
+        }
+        meetingPreparationProcess = nil
+        meetingProcessLock.unlock()
+        return launchMeetingCLI(
+            arguments: ["meeting", "prepare", "--jsonl"],
+            supervised: false,
+            onEvent: onEvent,
+            onExit: onExit
+        )
+    }
+
+    func cancelMeetingPreparation() {
+        meetingProcessLock.lock()
+        let process = meetingPreparationProcess
+        meetingPreparationProcess = nil
+        meetingProcessLock.unlock()
+        if process?.isRunning == true { process?.terminate() }
+    }
+
+    @discardableResult
+    func startMeetingRecording(
+        onEvent: @escaping @Sendable (MeetingCLIEvent) -> Void,
+        onExit: @escaping @Sendable (Int32) -> Void
+    ) -> Bool {
+        meetingProcessLock.lock()
+        if meetingProcess?.isRunning == true {
+            meetingProcessLock.unlock()
+            return false
+        }
+        meetingProcess = nil
+        meetingHelperPID = nil
+        meetingProcessLock.unlock()
+        return launchMeetingCLI(
+            arguments: ["meeting", "record", "--jsonl"],
+            supervised: true,
+            onEvent: onEvent,
+            onExit: onExit
+        )
+    }
+
+    func stopMeetingRecording() {
+        meetingProcessLock.lock()
+        let process = meetingProcess
+        meetingProcessLock.unlock()
+        if process?.isRunning == true { process?.terminate() }
+    }
+
+    func meetingProcessIsRunning() -> Bool {
+        meetingProcessLock.lock()
+        defer { meetingProcessLock.unlock() }
+        return meetingPreparationProcess?.isRunning == true || meetingProcess?.isRunning == true
+    }
+
+    /// Bounded quit wait. Normal SIGTERM lets Python checkpoint/finalize; timeout
+    /// escalates only the app-owned process/helper before AppKit completes quit.
+    func waitForMeetingShutdown(timeout: TimeInterval = 180) async -> Bool {
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        while meetingProcessIsRunning() && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if meetingProcessIsRunning() {
+            forceStopMeetingAudio()
+            return false
+        }
+        return true
+    }
+
+    /// User-reachable hot-mic escape hatch. Prefer the owned PIDs, then exact-name
+    /// kill only OpenBird's audio helper if ownership IPC has already failed.
+    @discardableResult
+    func forceStopMeetingAudio() -> Bool {
+        meetingProcessLock.lock()
+        let process = meetingProcess
+        let helperPID = meetingHelperPID
+        meetingProcess = nil
+        meetingHelperPID = nil
+        let pipe = meetingSupervisorPipe
+        meetingSupervisorPipe = nil
+        meetingProcessLock.unlock()
+        try? pipe?.close()
+        var stopped = false
+        if let process, process.isRunning {
+            process.terminate()
+            kill(process.processIdentifier, SIGKILL)
+            stopped = true
+        }
+        if let helperPID, helperPID > 1 {
+            kill(helperPID, SIGKILL)
+            stopped = true
+        }
+        let exactNames = ["audio-helper", "AudioHelper"]
+        for name in exactNames {
+            if Self.run("/usr/bin/pkill", arguments: ["-x", name]).exitCode == 0 {
+                stopped = true
+            }
+        }
+        return stopped
+    }
+
+    private func launchMeetingCLI(
+        arguments: [String],
+        supervised: Bool,
+        onEvent: @escaping @Sendable (MeetingCLIEvent) -> Void,
+        onExit: @escaping @Sendable (Int32) -> Void
+    ) -> Bool {
+        guard let cli = resolveOpenBirdCLI() else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cli)
+        process.arguments = arguments
+        var environment = Self.childEnvironment()
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        let lineBuffer = MeetingJSONLBuffer()
+        output.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            for event in lineBuffer.append(chunk) {
+                if let helperPID = event.helperPid {
+                    self.meetingProcessLock.lock()
+                    self.meetingHelperPID = helperPID
+                    self.meetingProcessLock.unlock()
+                }
+                DispatchQueue.main.async { onEvent(event) }
+            }
+        }
+
+        var supervisorWrite: FileHandle?
+        var token: String?
+        if supervised {
+            let deathPipe = Pipe()
+            let write = deathPipe.fileHandleForWriting
+            guard fcntl(write.fileDescriptor, F_SETFD, FD_CLOEXEC) != -1 else {
+                try? write.close()
+                output.fileHandleForReading.readabilityHandler = nil
+                return false
+            }
+            let generated = UUID().uuidString
+            environment["OPENBIRD_SUPERVISOR_TOKEN"] = generated
+            process.standardInput = deathPipe
+            supervisorWrite = write
+            token = generated
+        } else {
+            process.standardInput = FileHandle.nullDevice
+        }
+        process.environment = environment
+        // Publish ownership before run(): a very fast cached prepare can exit
+        // before run() returns, and its termination handler must still be able
+        // to clear the exact process instead of leaving a stale non-running slot.
+        meetingProcessLock.lock()
+        if supervised {
+            meetingProcess = process
+            meetingSupervisorPipe = supervisorWrite
+        } else {
+            meetingPreparationProcess = process
+        }
+        meetingProcessLock.unlock()
+        process.terminationHandler = { [weak self, weak process] proc in
+            output.fileHandleForReading.readabilityHandler = nil
+            guard let self else { return }
+            self.meetingProcessLock.lock()
+            if supervised {
+                if self.meetingProcess === process {
+                    self.meetingProcess = nil
+                    self.meetingHelperPID = nil
+                    try? self.meetingSupervisorPipe?.close()
+                    self.meetingSupervisorPipe = nil
+                }
+            } else if self.meetingPreparationProcess === process {
+                self.meetingPreparationProcess = nil
+            }
+            self.meetingProcessLock.unlock()
+            DispatchQueue.main.async { onExit(proc.terminationStatus) }
+        }
+        do {
+            try process.run()
+            if let supervisorWrite, let token {
+                do {
+                    try supervisorWrite.write(contentsOf: Data((token + "\n").utf8))
+                } catch {
+                    process.terminationHandler = nil
+                    process.terminate()
+                    try? supervisorWrite.close()
+                    output.fileHandleForReading.readabilityHandler = nil
+                    meetingProcessLock.lock()
+                    if meetingProcess === process {
+                        meetingProcess = nil
+                        meetingSupervisorPipe = nil
+                    }
+                    meetingProcessLock.unlock()
+                    return false
+                }
+            }
+            return true
+        } catch {
+            try? supervisorWrite?.close()
+            output.fileHandleForReading.readabilityHandler = nil
+            meetingProcessLock.lock()
+            if supervised, meetingProcess === process {
+                meetingProcess = nil
+                meetingSupervisorPipe = nil
+            } else if !supervised, meetingPreparationProcess === process {
+                meetingPreparationProcess = nil
+            }
+            meetingProcessLock.unlock()
+            return false
+        }
+    }
+
     // MARK: - Helpers
 
     func helperStatuses() -> [HelperStatus] {
@@ -1563,7 +1858,7 @@ final class OpenBirdService: @unchecked Sendable {
     }
 
     func stopHelperProcesses() -> Bool {
-        let processNames = ["capture-helper", "audio-helper", "CaptureHelper", "AudioHelper"]
+        let processNames = ["capture-helper", "CaptureHelper"]
         return processNames
             .map { Self.run("/usr/bin/pkill", arguments: ["-x", $0]).exitCode == 0 }
             .contains(true)

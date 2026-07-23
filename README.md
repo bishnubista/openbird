@@ -4,10 +4,10 @@
 
 OpenBird is an always-on macOS work assistant that stores **text** from your active window by
 default. For apps you explicitly enable, it can use transient window stills for on-device OCR when
-Accessibility text is unavailable; screenshots/images are never stored. It can also optionally
-transcribe meetings from system audio (an opt-in extra — see
-[Meeting transcription backends](#meeting-transcription-backends); not bundled in the notarized
-beta). Everything is unified into a **searchable personal memory that stays on your machine**, lets
+Accessibility text is unavailable; screenshots/images are never stored. The notarized Apple
+Silicon app can also manually transcribe meetings from system + microphone audio (see
+[Meeting transcription backends](#meeting-transcription-backends)). Everything is unified into a
+**searchable personal memory that stays on your machine**, lets
 you chat and draft grounded in that memory (with citations), and runs scheduled "Routines."
 OpenBird is **local-first**: your data never leaves your device by default, the model layer is
 **BYO-model** (Ollama out of the box, cloud opt-in), and the system is fully auditable.
@@ -57,7 +57,7 @@ Requirements: macOS, [`uv`](https://docs.astral.sh/uv/), Swift 6+ (Xcode CLT), a
 
 ```bash
 # 1. Install deps
-uv sync --extra encryption   # core + SQLCipher gate; add --extra meetings or integrations as needed
+uv sync --extra encryption --extra meetings-mlx  # Apple Silicon app + local meeting ASR
 
 # 2. Local models — generation default is RAM-tiered (see Configuration):
 ollama pull qwen3:4b    # ~16 GB Macs   (use qwen3:8b on 24/32 GB)
@@ -207,7 +207,10 @@ openbird capture [--loop]       # run the capture daemon over the helper
 openbird briefing --signals     # experimental high-signal local briefing
 openbird eval signals <fixture.jsonl>  # deterministic local signal eval harness
 openbird routine list|run <name>  # scheduled routines (daily-briefing, yesterday's-work, weekly-summary)
-openbird meeting                # meeting capture (gated on signed audio helper)
+openbird meeting                # meeting readiness
+openbird meeting prepare        # consented local-model preparation
+openbird meeting record         # app-supervised manual recording
+openbird meeting recover --json # retry encrypted pending transcripts
 openbird data stats             # row counts + active embedding cohort
 openbird data purge --since <when> | --all   # cascade-delete stored memory
 openbird data prune --older-than <span>      # retention prune (e.g. 90d, 24h)
@@ -297,18 +300,23 @@ To bound growth:
 
 ## Meeting transcription backends
 
-Meeting speech-to-text runs **on-device** behind an optional extra. It is **not bundled in the
-notarized beta .dmg / Homebrew cask** — install it by building from source with one of the extras
-below. OpenBird picks a backend automatically (`OPENBIRD_MEETINGS_BACKEND=auto|parakeet|whisper`):
+Meeting speech-to-text runs **on-device**. The notarized Apple Silicon `.dmg` /
+Homebrew cask includes the Parakeet MLX runtime; the approximately 2.51 GB model
+weights are downloaded only after explicit first-use consent. The portable
+Homebrew formula remains CLI-only and does not include an ASR backend. Source
+installs can select an extra (`OPENBIRD_MEETINGS_BACKEND=auto|parakeet|whisper`):
 
 - **parakeet-mlx (recommended on Apple Silicon)** — NVIDIA Parakeet (TDT) via the MLX port:
-  lower WER, ~10× real-time, <1 GB, robust on long meetings. Apple-Silicon-only.
+  lower WER, ~10× real-time, approximately 2.51 GB model download, robust on long meetings.
+  Apple-Silicon-only.
   `uv sync --extra meetings-mlx`.
 - **faster-whisper (portable fallback)** — CPU, multilingual, runs anywhere.
   `uv sync --extra meetings`.
 
-`auto` prefers parakeet-mlx when installed and **falls back to faster-whisper** on any
-parakeet load/inference failure, so the default path never breaks. The mic track is "me" and the
+`auto` prefers parakeet-mlx when installed and can fall back to faster-whisper
+when that separate source extra is installed. The notarized app includes only
+Parakeet, so failed windows are labeled as a partial transcript instead of
+silently switching or disappearing. The mic track is "me" and the
 system-audio track is "others", so speaker attribution comes from the two-track capture itself (no
 diarization model). Live capture still requires the signed audio helper + TCC (see Release gates).
 

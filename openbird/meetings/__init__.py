@@ -1,14 +1,14 @@
 """OpenBird meetings subsystem: audio capture, VAD/stitch pipeline, transcription.
 
-The Swift ``audio-helper`` (ScreenCaptureKit system audio + mic kept as separate
-synchronized tracks) is built later; the Python side here is designed around an
-*injectable* audio source so it can be unit-tested without real audio or a
-faster-whisper install.
+The signed Swift ``audio-helper`` captures ScreenCaptureKit system audio and mic
+as separate synchronized tracks. The Python side keeps an injectable audio source
+so the controller remains unit-testable without activating real audio.
 
 Modules:
   * :mod:`openbird.meetings.audio` — audio-source abstraction + clock-sync notes.
   * :mod:`openbird.meetings.pipeline` — VAD / windowing / transcript stitching.
   * :mod:`openbird.meetings.transcribe` — faster-whisper wrapper + LLM summary.
+  * :mod:`openbird.meetings.record` — supervised recording + encrypted checkpoint.
 """
 
 from __future__ import annotations
