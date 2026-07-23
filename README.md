@@ -57,7 +57,10 @@ Requirements: macOS, [`uv`](https://docs.astral.sh/uv/), Swift 6+ (Xcode CLT), a
 
 ```bash
 # 1. Install deps
-uv sync --extra encryption --extra meetings-mlx  # Apple Silicon app + local meeting ASR
+uv sync --extra encryption
+
+# Optional, Apple Silicon only: local meeting ASR (parakeet-mlx has no Intel wheels)
+uv sync --extra encryption --extra meetings-mlx
 
 # 2. Local models — generation default is RAM-tiered (see Configuration):
 ollama pull qwen3:4b    # ~16 GB Macs   (use qwen3:8b on 24/32 GB)
@@ -304,7 +307,8 @@ Meeting speech-to-text runs **on-device**. The notarized Apple Silicon `.dmg` /
 Homebrew cask includes the Parakeet MLX runtime; the approximately 2.51 GB model
 weights are downloaded only after explicit first-use consent. The portable
 Homebrew formula remains CLI-only and does not include an ASR backend. Source
-installs can select an extra (`OPENBIRD_MEETINGS_BACKEND=auto|parakeet|whisper`):
+installs pick a backend in two steps: install one via a `uv sync` extra (below),
+then select it at runtime with `OPENBIRD_MEETINGS_BACKEND=auto|parakeet|whisper`:
 
 - **parakeet-mlx (recommended on Apple Silicon)** — NVIDIA Parakeet (TDT) via the MLX port:
   lower WER, ~10× real-time, approximately 2.51 GB model download, robust on long meetings.
