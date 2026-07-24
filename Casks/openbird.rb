@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 cask "openbird" do
-  version "0.13.0"
-  sha256 "c59287ca2be466995fbb68ad9a4e68ec5ed1ffcb26ca1215ba8c127e761dcff4"
+  version "0.14.0"
+  sha256 "d7e40f12d423d83b7451f47e625f0ac0d3f89d5ea8a8cabc7d27aec6e1166f18"
 
   url "https://github.com/bishnubista/openbird/releases/download/beta-dmg-#{version}/OpenBird.dmg"
   name "OpenBird"
@@ -13,6 +13,7 @@ cask "openbird" do
   # with a stable identity is what lets macOS grant (and persist) Screen Recording
   # and Accessibility (TCC). This is distinct from the `openbird` *formula*, which
   # installs the CLI only.
+  depends_on arch:  :arm64
   depends_on macos: :ventura # minimum macOS 13 (app deployment target)
 
   app "OpenBird.app"
@@ -58,7 +59,7 @@ cask "openbird" do
     Guided Setup walks you through granting Accessibility / Screen Recording
     permissions and provisioning a local Ollama model.
 
-    On Apple Silicon, the notarized app supports manual meeting recording with
+    This notarized app requires Apple Silicon and supports manual meeting recording with
     ScreenCaptureKit system audio plus microphone audio. Recording starts only
     after you click Start and acknowledge participant consent. First use asks
     before downloading the approximately 2.51 GB local Parakeet model; raw audio
