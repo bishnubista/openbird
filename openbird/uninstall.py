@@ -26,6 +26,7 @@ BUNDLE_ID = "ai.openbird.OpenBird"
 
 # launchd label for the routines agent (mirrors routines.launchd.AGENT_LABEL).
 ROUTINES_LABEL = "ai.openbird.routines"
+FOUNDER_CONTEXT_EVAL_LABEL = "ai.openbird.founder-context-eval"
 
 # The Launch Services registration tool (fixed system path).
 _LSREGISTER = (
@@ -76,42 +77,56 @@ def _bundle_id_of(app_path: Path) -> str | None:
 
 
 def remove_routines_job(*, dry_run: bool) -> list[StepResult]:
-    """Clear the routines launchd job AND its LaunchAgent plist.
+    """Clear every OpenBird launchd job and LaunchAgent plist.
 
-    Boots out / removes the job by LABEL first so an orphaned, still-loaded job
-    (plist already gone — the observed zombie) is cleared too, then unlinks the
-    plist if present. macOS-only; a no-op elsewhere.
+    Boots out / removes jobs by LABEL first so an orphaned, still-loaded job
+    (plist already gone) is cleared too, then unlinks each plist. macOS-only.
+    The historical function name is retained for API/test compatibility.
     """
     if not _is_macos():
-        return [StepResult("routines launchd job", "skip", "not macOS")]
+        return [StepResult("OpenBird launchd jobs", "skip", "not macOS")]
 
-    from openbird.routines.launchd import agent_plist_path
+    from openbird.routines.launchd import (
+        agent_plist_path,
+        founder_context_eval_plist_path,
+    )
 
     results: list[StepResult] = []
     uid = _current_uid()
-    label_target = f"gui/{uid}/{ROUTINES_LABEL}" if uid is not None else ROUTINES_LABEL
-
-    if dry_run:
-        results.append(
-            StepResult("routines launchd job", "would", f"bootout {label_target}")
-        )
-    else:
-        results.append(_boot_out_routines(label_target))
-
-    plist = agent_plist_path()
-    if plist.exists():
+    jobs = (
+        ("routines", ROUTINES_LABEL, agent_plist_path()),
+        (
+            "founder-context eval",
+            FOUNDER_CONTEXT_EVAL_LABEL,
+            founder_context_eval_plist_path(),
+        ),
+    )
+    for name, label, plist in jobs:
+        label_target = f"gui/{uid}/{label}" if uid is not None else label
         if dry_run:
-            results.append(StepResult("routines LaunchAgent", "would", str(plist)))
+            results.append(
+                StepResult(f"{name} launchd job", "would", f"bootout {label_target}")
+            )
         else:
-            try:
-                plist.unlink()
-                results.append(StepResult("routines LaunchAgent", "done", str(plist)))
-            except OSError as exc:
-                results.append(
-                    StepResult("routines LaunchAgent", "error", type(exc).__name__)
-                )
-    else:
-        results.append(StepResult("routines LaunchAgent", "skip", "no plist"))
+            results.append(_boot_out_job(label_target, label=label, action=name))
+
+        if plist.exists():
+            if dry_run:
+                results.append(StepResult(f"{name} LaunchAgent", "would", str(plist)))
+            else:
+                try:
+                    plist.unlink()
+                    results.append(
+                        StepResult(f"{name} LaunchAgent", "done", str(plist))
+                    )
+                except OSError as exc:
+                    results.append(
+                        StepResult(
+                            f"{name} LaunchAgent", "error", type(exc).__name__
+                        )
+                    )
+        else:
+            results.append(StepResult(f"{name} LaunchAgent", "skip", "no plist"))
     return results
 
 
@@ -139,21 +154,28 @@ def _boot_out_routines(label_target: str) -> StepResult:
     loaded). Any other failure of BOTH attempts is surfaced as an error so the
     caller exits nonzero rather than reporting a clean uninstall over a live job.
     """
+    return _boot_out_job(
+        label_target, label=ROUTINES_LABEL, action="routines"
+    )
+
+
+def _boot_out_job(label_target: str, *, label: str, action: str) -> StepResult:
+    """Boot out one named OpenBird job, with legacy remove fallback."""
     rc, out = _run(["launchctl", "bootout", label_target])
     if rc == 0:
-        return StepResult("routines launchd job", "done", f"booted out {ROUTINES_LABEL}")
+        return StepResult(f"{action} launchd job", "done", f"booted out {label}")
     if _is_not_loaded(out):
-        return StepResult("routines launchd job", "skip", "not loaded")
+        return StepResult(f"{action} launchd job", "skip", "not loaded")
     # bootout failed for some other reason — try the legacy API before giving up.
-    rc2, out2 = _run(["launchctl", "remove", ROUTINES_LABEL])
+    rc2, out2 = _run(["launchctl", "remove", label])
     if rc2 == 0:
-        return StepResult("routines launchd job", "done", f"removed {ROUTINES_LABEL}")
+        return StepResult(f"{action} launchd job", "done", f"removed {label}")
     if _is_not_loaded(out2):
-        return StepResult("routines launchd job", "skip", "not loaded")
+        return StepResult(f"{action} launchd job", "skip", "not loaded")
     return StepResult(
-        "routines launchd job",
+        f"{action} launchd job",
         "error",
-        f"could not bootout/remove {ROUTINES_LABEL} (job may still be loaded)",
+        f"could not bootout/remove {label} (job may still be loaded)",
     )
 
 
@@ -250,7 +272,13 @@ def remove_sidecars(data_dir: Path, *, dry_run: bool) -> list[StepResult]:
 # mis-set OPENBIRD_DATA_DIR pointing at an unrelated folder is refused even when
 # it is deep enough (CodeRabbit). A real custom data dir still holds openbird.db
 # (default db_path = <data_dir>/openbird.db).
-_OWNERSHIP_MARKERS = ("openbird.db", "openbird.db-wal", "openbird.db-shm", "capture.paused")
+_OWNERSHIP_MARKERS = (
+    "openbird.db",
+    "openbird.db-wal",
+    "openbird.db-shm",
+    "capture.paused",
+    "logs/founder-context-eval.json",
+)
 
 
 def _is_safe_purge_target(path: Path) -> bool:

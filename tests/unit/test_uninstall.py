@@ -148,6 +148,11 @@ def _no_system_side_effects(monkeypatch, tmp_path):
     monkeypatch.setattr(
         launchd, "agent_plist_path", lambda **_: tmp_path / "no-such.plist"
     )
+    monkeypatch.setattr(
+        launchd,
+        "founder_context_eval_plist_path",
+        lambda **_: tmp_path / "no-such-founder.plist",
+    )
 
 
 def _patch_delete_key(monkeypatch):

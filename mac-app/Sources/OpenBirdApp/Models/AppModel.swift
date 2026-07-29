@@ -311,6 +311,7 @@ final class AppModel: ObservableObject {
     /// Only shown when memory has content (`askUnavailableReason == nil`); when there's no
     /// data the views show that reason instead, so we never offer a prompt that can't answer.
     let askSuggestions = [
+        "Bring me back up to speed on what I was working on.",
         "Summarize my day",
         "What did I work on yesterday?",
         "What should I follow up on?",

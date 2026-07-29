@@ -98,6 +98,44 @@ def test_complete_json_schema_parses_object(monkeypatch):
     assert out == {"answer": 42}
 
 
+def test_complete_honors_per_call_attempt_and_timeout_budget(monkeypatch):
+    class CountingLiteLLM(_FakeLiteLLM):
+        def __init__(self):
+            super().__init__(completion_text="not-json")
+            self.calls = 0
+
+        def completion(self, *, model, messages, **kwargs):
+            self.calls += 1
+            return super().completion(model=model, messages=messages, **kwargs)
+
+    fake = CountingLiteLLM()
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    out = _provider().complete(
+        [{"role": "user", "content": "q"}],
+        json_schema={"type": "object", "required": ["answer"]},
+        max_attempts=2,
+        timeout=20.0,
+    )
+    assert out == "not-json"
+    assert fake.calls == 2
+    assert fake.completion_kwargs["timeout"] == 20.0
+
+
+def test_complete_rejects_invalid_per_call_bounds(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "litellm", _FakeLiteLLM())
+    with pytest.raises(ValueError, match="max_attempts"):
+        _provider().complete(
+            [{"role": "user", "content": "q"}],
+            json_schema={"type": "object"},
+            max_attempts=0,
+        )
+    with pytest.raises(ValueError, match="timeout"):
+        _provider().complete(
+            [{"role": "user", "content": "q"}],
+            timeout=float("inf"),
+        )
+
+
 def test_cohort_key_stable_and_dim_sensitive():
     a = _provider(768).cohort_key()
     b = _provider(768).cohort_key()

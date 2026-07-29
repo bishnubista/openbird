@@ -22,12 +22,19 @@ from pathlib import Path
 
 # Reverse-DNS LaunchAgent label; also the plist filename stem.
 AGENT_LABEL = "ai.openbird.routines"
+FOUNDER_CONTEXT_EVAL_LABEL = "ai.openbird.founder-context-eval"
 
 
 def agent_plist_path(*, home: Path | None = None) -> Path:
     """Return the per-user LaunchAgent plist path for the routine daemon."""
     base = (home or Path.home()) / "Library" / "LaunchAgents"
     return base / f"{AGENT_LABEL}.plist"
+
+
+def founder_context_eval_plist_path(*, home: Path | None = None) -> Path:
+    """Return the per-user periodic founder-context evaluator plist path."""
+    base = (home or Path.home()) / "Library" / "LaunchAgents"
+    return base / f"{FOUNDER_CONTEXT_EVAL_LABEL}.plist"
 
 
 def build_agent_plist(
@@ -72,3 +79,42 @@ def build_agent_plist(
         "StandardErrorPath": stderr_path,
     }
     return plistlib.dumps(plist)
+
+
+def build_founder_context_eval_plist(
+    *,
+    program_args: list[str],
+    interval_seconds: int = 21_600,
+    label: str = FOUNDER_CONTEXT_EVAL_LABEL,
+) -> bytes:
+    """Build a short-lived, low-priority, privacy-silent evaluator agent."""
+    if not program_args:
+        raise ValueError("program_args must be non-empty")
+    if int(interval_seconds) < 60:
+        raise ValueError("interval_seconds must be >= 60")
+    plist: dict[str, object] = {
+        "Label": label,
+        "ProgramArguments": list(program_args),
+        "RunAtLoad": True,
+        "StartInterval": int(interval_seconds),
+        # Deliberately no KeepAlive: one bounded aggregate pass exits.
+        "ProcessType": "Background",
+        "LowPriorityIO": True,
+        "Nice": 10,
+        # plist integer is decimal; 63 == 0o077.
+        "Umask": 63,
+        # The atomic metadata snapshot is the only routine diagnostic surface.
+        "StandardOutPath": "/dev/null",
+        "StandardErrorPath": "/dev/null",
+    }
+    return plistlib.dumps(plist)
+
+
+__all__ = [
+    "AGENT_LABEL",
+    "FOUNDER_CONTEXT_EVAL_LABEL",
+    "agent_plist_path",
+    "build_agent_plist",
+    "build_founder_context_eval_plist",
+    "founder_context_eval_plist_path",
+]

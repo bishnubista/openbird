@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import threading
 from typing import Any, Callable
 
@@ -314,6 +315,8 @@ class LiteLLMProvider:
         messages: list[dict],
         *,
         json_schema: dict | None = None,
+        max_attempts: int | None = None,
+        timeout: float | None = None,
     ) -> str | dict:
         """Generate a completion for ``messages``.
 
@@ -321,20 +324,29 @@ class LiteLLMProvider:
         best-effort structured generation (validate + retry; NOT constrained
         decoding). On repeated failure the last raw text is returned so callers
         can decide how to handle it. Otherwise returns the raw string content.
+        ``max_attempts`` and ``timeout`` are per-call bounds used by latency-
+        sensitive surfaces; omitted values preserve the historical three
+        structured attempts and configured provider timeout.
         """
         import litellm
 
+        call_timeout = self.llm_timeout if timeout is None else float(timeout)
+        if not math.isfinite(call_timeout) or call_timeout <= 0:
+            raise ValueError("timeout must be a positive finite number")
+
         if json_schema is None:
-            kwargs = self._model_kwargs(self.llm_model, timeout=self.llm_timeout)
+            kwargs = self._model_kwargs(self.llm_model, timeout=call_timeout)
             resp = self._call_with_timeout(
                 lambda: litellm.completion(
                     model=self.llm_model, messages=messages, **kwargs
                 ),
-                timeout=self.llm_timeout,
+                timeout=call_timeout,
             )
             return self._content(resp)
 
-        attempts = 3
+        attempts = 3 if max_attempts is None else int(max_attempts)
+        if attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         schema_msg = {
             "role": "system",
             "content": (
@@ -345,7 +357,7 @@ class LiteLLMProvider:
         convo = [schema_msg, *messages]
         last_text = ""
         for _ in range(attempts):
-            kwargs = self._model_kwargs(self.llm_model, timeout=self.llm_timeout)
+            kwargs = self._model_kwargs(self.llm_model, timeout=call_timeout)
             resp = self._call_with_timeout(
                 lambda convo=convo, kwargs=kwargs: litellm.completion(
                     model=self.llm_model,
@@ -353,7 +365,7 @@ class LiteLLMProvider:
                     response_format={"type": "json_object"},
                     **kwargs,
                 ),
-                timeout=self.llm_timeout,
+                timeout=call_timeout,
             )
             last_text = self._content(resp)
             parsed = self._try_parse_json(last_text)

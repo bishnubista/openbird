@@ -190,12 +190,12 @@ def test_signal_prompt_preserves_rules_and_epilogue():
 
 def test_all_prompts_registered():
     registry.ensure_loaded()
-    # ``rag_synthesis`` is the synthesis-intent answering persona (separate,
-    # independently-overridable prompt) used by the time-range scan.
+    # ``rag_synthesis`` and ``rag_founder_context`` are separate,
+    # independently-overridable personas for their bounded Ask routes.
     # ``taxonomy`` (identity classifier) and ``block_summary`` (idle-time block
     # summarizer) are the Phase D prompts; ``week_summary`` is the Phase E1
     # week-digest reduce.
     assert set(registry.keys()) == {
-        "rag", "rag_synthesis", "routine", "meeting", "signal",
+        "rag", "rag_synthesis", "rag_founder_context", "routine", "meeting", "signal",
         "taxonomy", "block_summary", "week_summary",
     }

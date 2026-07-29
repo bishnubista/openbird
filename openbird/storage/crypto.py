@@ -173,7 +173,9 @@ def _get_or_create_key() -> str | None:
       1. ``OPENBIRD_DB_KEY`` env — use it directly, bypassing the Keychain.
       2. ``OPENBIRD_DISABLE_KEYRING`` truthy — skip the Keychain (returns ``None``,
          so encryption degrades per the usual fallback / ``OPENBIRD_REQUIRE_ENCRYPTION``).
-      3. otherwise the macOS Keychain via ``keyring``.
+      3. otherwise the macOS Keychain via ``keyring``. When
+         ``OPENBIRD_KEYRING_READ_ONLY`` is truthy, an absent item returns
+         ``None`` rather than creating one.
 
     (1) and (2) exist because in development each ``uv run python`` is a different,
     unsigned interpreter, so the key's Keychain ACL never matches and macOS
@@ -198,6 +200,16 @@ def _get_or_create_key() -> str | None:
         if key is _KEYRING_TIMEOUT:
             return None
         if key is None:
+            if os.environ.get("OPENBIRD_KEYRING_READ_ONLY", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                logger.info(
+                    "OPENBIRD_KEYRING_READ_ONLY set; existing DB key not available"
+                )
+                return None
             key = secrets.token_hex(32)
             stored = _call_keyring(
                 "set_password",

@@ -138,18 +138,20 @@ struct AskContentView: View {
                 .font(.system(size: 14))
                 .foregroundStyle(OB.textSecondary(scheme))
             if appModel.askUnavailableReason == nil {
-                HStack(spacing: OB.Space.sm) {
-                    ForEach(appModel.askSuggestions, id: \.self) { suggestion in
-                        Button { askModel.ask(suggestion) } label: {
-                            Text(suggestion)
-                                .font(.system(size: 12.5))
-                                .padding(.horizontal, OB.Space.m)
-                                .padding(.vertical, OB.Space.sm)
-                                .background(OB.fieldFill(scheme), in: Capsule())
-                                .overlay(Capsule().strokeBorder(OB.separator(scheme), lineWidth: 0.5))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: OB.Space.sm) {
+                        ForEach(appModel.askSuggestions, id: \.self) { suggestion in
+                            Button { askModel.ask(suggestion) } label: {
+                                Text(suggestion)
+                                    .font(.system(size: 12.5))
+                                    .padding(.horizontal, OB.Space.m)
+                                    .padding(.vertical, OB.Space.sm)
+                                    .background(OB.fieldFill(scheme), in: Capsule())
+                                    .overlay(Capsule().strokeBorder(OB.separator(scheme), lineWidth: 0.5))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(OB.textSecondary(scheme))
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(OB.textSecondary(scheme))
                     }
                 }
             }

@@ -46,6 +46,10 @@ CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
 -- per page. Safe here (all three columns exist in every released shape) AND in
 -- the v8 migration (IF NOT EXISTS keeps the two in lockstep).
 CREATE INDEX IF NOT EXISTS idx_observations_source_ts_id ON observations(source, ts, id);
+-- v11: covers the all-supported-source founder recap keyset walk. The source
+-- filter is intentionally an IN-list, so a leading source column would group
+-- rather than globally order rows; this index serves ORDER BY ts DESC, id DESC.
+CREATE INDEX IF NOT EXISTS idx_observations_ts_id ON observations(ts DESC, id DESC);
 -- v10: meeting UUIDs are idempotency keys. Only meeting observations participate,
 -- so existing capture/import session ids retain their occurrence semantics.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_observations_meeting_session

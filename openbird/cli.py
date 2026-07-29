@@ -55,6 +55,10 @@ summaries_app = typer.Typer(
     help="Build and inspect idle-time block summaries.", no_args_is_help=True
 )
 eval_app = typer.Typer(help="Run local eval harnesses.", no_args_is_help=True)
+founder_context_eval_app = typer.Typer(
+    help="Measure readiness for the on-demand founder-context recap.",
+    no_args_is_help=True,
+)
 day_memory_app = typer.Typer(
     help="Build and inspect deterministic daily memory artifacts.",
     no_args_is_help=True,
@@ -79,6 +83,7 @@ app.add_typer(routine_app, name="routine")
 app.add_typer(summaries_app, name="summaries")
 app.add_typer(entities_app, name="entities")
 app.add_typer(eval_app, name="eval")
+eval_app.add_typer(founder_context_eval_app, name="founder-context")
 app.add_typer(day_memory_app, name="day-memory")
 app.add_typer(deep_brain_app, name="deep-brain")
 app.add_typer(assistant_app, name="assistant")
@@ -3081,6 +3086,349 @@ def meeting_recover(
 # --------------------------------------------------------------------------- #
 # eval                                                                        #
 # --------------------------------------------------------------------------- #
+
+
+def _founder_eval_executable(executable: Path | None = None) -> Path:
+    """Resolve the exact absolute CLI executable persisted in the LaunchAgent."""
+    import shutil
+
+    candidate = executable or Path(shutil.which("openbird") or sys.argv[0])
+    candidate = candidate.expanduser()
+    if not candidate.is_absolute():
+        raise ValueError(
+            "could not resolve an absolute openbird executable; install the CLI "
+            "on PATH and retry"
+        )
+    return candidate
+
+
+def _set_eval_keyring_guard(
+    *,
+    timeout_seconds: float,
+    honor_existing_timeout: bool = False,
+) -> dict[str, str | None]:
+    """Set the no-mint Keychain guard and return values needed for restoration."""
+    names = ("OPENBIRD_KEYRING_READ_ONLY", "OPENBIRD_KEYRING_TIMEOUT_SECONDS")
+    previous = {name: os.environ.get(name) for name in names}
+    selected_timeout = float(timeout_seconds)
+    if honor_existing_timeout and previous["OPENBIRD_KEYRING_TIMEOUT_SECONDS"]:
+        try:
+            requested = float(previous["OPENBIRD_KEYRING_TIMEOUT_SECONDS"])
+        except (TypeError, ValueError):
+            requested = 0.0
+        if requested > 0.0:
+            # The interactive install preflight may intentionally allow longer
+            # for a user to grant Keychain access, but remains globally bounded.
+            selected_timeout = min(requested, 30.0)
+    os.environ["OPENBIRD_KEYRING_READ_ONLY"] = "1"
+    os.environ["OPENBIRD_KEYRING_TIMEOUT_SECONDS"] = str(selected_timeout)
+    return previous
+
+
+def _restore_eval_keyring_guard(previous: dict[str, str | None]) -> None:
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def _founder_answer_probe(store) -> dict[str, Any]:
+    """Run the optional answer probe and return metadata only."""
+    from openbird.chat.founder_context import FOUNDER_CONTEXT_QUERY
+    from openbird.chat.rag import RAG
+
+    started = time.perf_counter()
+    try:
+        provider = _completion_provider(packet_label="founder-context recap")
+        result = RAG(store, provider, max_context=8).answer(FOUNDER_CONTEXT_QUERY)
+        return {
+            "ok": bool(result.grounded and result.citations),
+            "grounding": result.grounding,
+            "occurrence_citation_count": len(result.citations),
+            "derived_citation_count": len(result.derived_citations),
+            "citation_app_ids": sorted(
+                {citation.app for citation in result.citations if citation.app}
+            ),
+            "citation_timestamps": [citation.ts for citation in result.citations],
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    except Exception:  # noqa: BLE001 - probe output is intentionally class-free
+        return {
+            "ok": False,
+            "grounding": "error",
+            "occurrence_citation_count": 0,
+            "derived_citation_count": 0,
+            "citation_app_ids": [],
+            "citation_timestamps": [],
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+
+@founder_context_eval_app.command("run")
+def founder_context_eval_run(
+    record: bool = typer.Option(
+        False, "--record", help="Atomically replace the local metadata snapshot."
+    ),
+    probe_answer: bool = typer.Option(
+        False,
+        "--probe-answer",
+        help="Also run one manual answer probe (never used by the scheduler).",
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit machine-readable metadata."
+    ),
+    scheduled: bool = typer.Option(False, "--scheduled", hidden=True),
+    quiet: bool = typer.Option(False, "--quiet", hidden=True),
+) -> None:
+    """Measure whether recent capture can support the founder-context recap.
+
+    The normal evaluator performs aggregate SQL/filesystem reads only: no
+    embedding, reranker, or completion. ``--probe-answer`` is an explicit
+    manual exception and never appears in the LaunchAgent command.
+    """
+    from openbird.capture.founder_eval import (
+        evaluate_and_record_snapshot,
+        evaluate_store,
+        read_snapshot,
+        snapshot_path,
+        unavailable_report,
+        write_snapshot,
+    )
+    from openbird.storage.crypto import db_is_plaintext_or_absent
+
+    if scheduled and probe_answer:
+        if not quiet:
+            _err_console.print("[red]Scheduled evaluation cannot probe an answer.[/]")
+        raise typer.Exit(code=2)
+    if scheduled:
+        record = True
+
+    settings = get_settings()
+    target = snapshot_path(settings)
+    previous_snapshot = read_snapshot(target)
+    db_path = Path(str(settings.db_path))
+    store = None
+    encrypted = False
+    snapshot_written = False
+    previous_require_encryption = settings.require_encryption
+    guard = _set_eval_keyring_guard(
+        timeout_seconds=2.0 if scheduled else 10.0,
+        honor_existing_timeout=not scheduled,
+    )
+    try:
+        try:
+            missing = not db_path.exists() or db_path.stat().st_size == 0
+        except OSError:
+            missing = True
+        if missing:
+            report = unavailable_report(
+                settings=settings,
+                reason="store_absent",
+                previous=previous_snapshot,
+            )
+        else:
+            encrypted = not db_is_plaintext_or_absent(db_path)
+            if encrypted:
+                # Close a header/key TOCTOU: an encrypted-looking file may never
+                # fall through to the plaintext opener in scheduled mode.
+                settings.require_encryption = True
+            try:
+                store = _store_maintenance()
+            except Exception:  # noqa: BLE001 - closed metadata-only reason
+                report = unavailable_report(
+                    settings=settings,
+                    reason=(
+                        "encrypted_store_unavailable"
+                        if encrypted
+                        else "store_open_failed"
+                    ),
+                    previous=previous_snapshot,
+                )
+            else:
+                try:
+                    if record:
+                        report = evaluate_and_record_snapshot(
+                            store,
+                            settings=settings,
+                            path=target,
+                        )
+                        snapshot_written = True
+                    else:
+                        report = evaluate_store(
+                            store,
+                            settings=settings,
+                            previous=previous_snapshot,
+                        )
+                except Exception:  # noqa: BLE001 - closed metadata-only reason
+                    report = unavailable_report(
+                        settings=settings,
+                        reason="evaluation_failed",
+                    )
+                else:
+                    # A manual answer probe is explicit, transient output. Never
+                    # persist it and never hold the SQLite writer lock over a
+                    # model call.
+                    if probe_answer:
+                        report["answer_probe"] = _founder_answer_probe(store)
+        if record and not snapshot_written:
+            write_snapshot(report, target)
+    finally:
+        if store is not None:
+            store.close()
+        settings.require_encryption = previous_require_encryption
+        _restore_eval_keyring_guard(guard)
+
+    if quiet:
+        return
+    if as_json:
+        _console.print_json(json.dumps(report))
+        return
+    _console.print(
+        f"Founder-context capture: {report['state']} · "
+        f"reasons={','.join(report['reason_codes']) or 'none'} · "
+        f"observations={report['corpus']['observations']} · "
+        f"distinct={report['corpus']['distinct_contexts']} · "
+        f"elapsed_ms={report['resources']['elapsed_ms']}"
+    )
+    if record:
+        _console.print(f"Snapshot: {target}")
+
+
+@founder_context_eval_app.command("install")
+def founder_context_eval_install(
+    load: bool = typer.Option(
+        False, "--load", help="Also load and run the LaunchAgent now."
+    ),
+    executable: Optional[Path] = typer.Option(None, "--executable", hidden=True),
+) -> None:
+    """Install the six-hour, no-model founder-context evaluator LaunchAgent."""
+    import subprocess
+
+    from openbird.routines.launchd import (
+        build_founder_context_eval_plist,
+        founder_context_eval_plist_path,
+    )
+    from openbird.storage.crypto import db_is_plaintext_or_absent
+
+    try:
+        openbird_exe = _founder_eval_executable(executable)
+    except ValueError as exc:
+        _err_console.print(f"[red]{escape(str(exc))}[/]")
+        raise typer.Exit(code=1) from exc
+
+    settings = get_settings()
+    db_path = Path(str(settings.db_path))
+    try:
+        encrypted = (
+            db_path.exists()
+            and db_path.stat().st_size > 0
+            and not db_is_plaintext_or_absent(db_path)
+        )
+    except OSError:
+        encrypted = True
+    if encrypted:
+        child_env = os.environ.copy()
+        child_env["OPENBIRD_KEYRING_READ_ONLY"] = "1"
+        child_env["OPENBIRD_KEYRING_TIMEOUT_SECONDS"] = "30"
+        try:
+            preflight = subprocess.run(
+                [
+                    str(openbird_exe),
+                    "eval",
+                    "founder-context",
+                    "run",
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=45,
+                env=child_env,
+            )
+            payload = json.loads(preflight.stdout) if preflight.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+            payload = None
+        reasons = payload.get("reason_codes", []) if isinstance(payload, dict) else []
+        if not isinstance(payload, dict):
+            _err_console.print(
+                "[red]Could not install:[/] the exact scheduled executable "
+                "did not return a valid metadata evaluation."
+            )
+            raise typer.Exit(code=1)
+        if any(
+            reason in reasons
+            for reason in (
+                "encrypted_store_unavailable",
+                "store_open_failed",
+                "store_absent",
+            )
+        ):
+            _err_console.print(
+                "[red]Could not install:[/] the exact scheduled executable "
+                "could not open and verify the encrypted store."
+            )
+            raise typer.Exit(code=1)
+        if "evaluation_failed" in reasons:
+            _err_console.print(
+                "[red]Could not install:[/] the exact scheduled executable "
+                "could not complete the metadata evaluation."
+            )
+            raise typer.Exit(code=1)
+
+    plist = build_founder_context_eval_plist(
+        program_args=[
+            str(openbird_exe),
+            "eval",
+            "founder-context",
+            "run",
+            "--record",
+            "--scheduled",
+            "--quiet",
+        ]
+    )
+    path = founder_context_eval_plist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(plist)
+    os.chmod(path, 0o600)
+    _console.print(f"[green]Wrote LaunchAgent:[/] {path}")
+    if load:
+        try:
+            subprocess.run(["launchctl", "load", str(path)], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            _err_console.print(f"[red]launchctl load failed:[/] {type(exc).__name__}")
+            raise typer.Exit(code=1) from exc
+        _console.print("[green]Loaded into launchd.[/]")
+    else:
+        _console.print(f"To start it now:  launchctl load {path}")
+
+
+@founder_context_eval_app.command("uninstall")
+def founder_context_eval_uninstall(
+    unload: bool = typer.Option(
+        False, "--unload", help="Unload the job before removing its plist."
+    ),
+) -> None:
+    """Remove the founder-context evaluation LaunchAgent."""
+    import subprocess
+
+    from openbird.routines.launchd import founder_context_eval_plist_path
+
+    path = founder_context_eval_plist_path()
+    failed = False
+    if unload and path.exists():
+        try:
+            subprocess.run(["launchctl", "unload", str(path)], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            _err_console.print(f"[red]launchctl unload failed:[/] {type(exc).__name__}")
+            failed = True
+    if path.exists():
+        path.unlink()
+        _console.print(f"[green]Removed LaunchAgent:[/] {path}")
+    else:
+        _console.print("[yellow]No founder-context LaunchAgent installed.[/]")
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @eval_app.command("capture")

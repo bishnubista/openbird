@@ -30,6 +30,8 @@ class LLMProviderProtocol(Protocol):
         messages: list[dict],
         *,
         json_schema: dict | None = None,
+        max_attempts: int | None = None,
+        timeout: float | None = None,
     ) -> str | dict:
         """Return raw text, or a parsed object when structured output is requested."""
 

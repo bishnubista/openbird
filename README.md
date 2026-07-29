@@ -98,6 +98,28 @@ openbird --help
 brew install --cask bishnubista/openbird/openbird
 ```
 
+### Bring me back up to speed
+
+Open Ask and choose **“Bring me back up to speed on what I was working on.”**
+OpenBird reconstructs the likely recent thread, progress/decisions, and open
+loops from at most eight occurrence sources. It runs only when asked, keeps
+explicit day phrases scoped to that day, and shows the same verifiable source
+chips as other grounded answers.
+
+Capture readiness can be checked locally without running a model:
+
+```bash
+openbird eval founder-context run --json
+openbird eval founder-context install --load
+```
+
+The optional LaunchAgent runs a short metadata-only check at login and every six
+hours. It replaces one owner-only snapshot under
+`~/.openbird/logs/founder-context-eval.json`; routine output never includes
+captured text, window titles, URLs, or excerpts. Remove it with
+`openbird eval founder-context uninstall --unload` (general `openbird uninstall`
+also removes it).
+
 ### Claude Desktop or ChatGPT
 
 The notarized app includes a local, read-only MCP server. Connect it with one command:
