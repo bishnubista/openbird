@@ -264,6 +264,37 @@ class LiteLLMProvider:
             kwargs["api_base"] = self._ollama_host
         return kwargs
 
+    def _call_completion_with_timeout(
+        self,
+        litellm_module: Any,
+        fn: Callable[[], Any],
+        *,
+        timeout: float,
+    ) -> Any:
+        """Call a completion and normalize provider-native timeout errors."""
+        try:
+            return self._call_with_timeout(fn, timeout=timeout)
+        except LLMTimeoutError:
+            raise
+        except Exception as exc:
+            timeout_types: list[type[BaseException]] = [TimeoutError]
+            for owner in (
+                litellm_module,
+                getattr(litellm_module, "exceptions", None),
+            ):
+                timeout_type = getattr(owner, "Timeout", None)
+                if (
+                    isinstance(timeout_type, type)
+                    and issubclass(timeout_type, BaseException)
+                    and timeout_type not in timeout_types
+                ):
+                    timeout_types.append(timeout_type)
+            if isinstance(exc, tuple(timeout_types)):
+                raise LLMTimeoutError(
+                    f"LLM provider timed out (configured timeout {timeout:.0f}s)."
+                ) from exc
+            raise
+
     # -- embeddings -----------------------------------------------------------
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -336,7 +367,8 @@ class LiteLLMProvider:
 
         if json_schema is None:
             kwargs = self._model_kwargs(self.llm_model, timeout=call_timeout)
-            resp = self._call_with_timeout(
+            resp = self._call_completion_with_timeout(
+                litellm,
                 lambda: litellm.completion(
                     model=self.llm_model, messages=messages, **kwargs
                 ),
@@ -358,7 +390,8 @@ class LiteLLMProvider:
         last_text = ""
         for _ in range(attempts):
             kwargs = self._model_kwargs(self.llm_model, timeout=call_timeout)
-            resp = self._call_with_timeout(
+            resp = self._call_completion_with_timeout(
+                litellm,
                 lambda convo=convo, kwargs=kwargs: litellm.completion(
                     model=self.llm_model,
                     messages=convo,

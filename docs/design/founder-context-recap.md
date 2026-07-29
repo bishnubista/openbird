@@ -117,7 +117,10 @@ of cron or the long-running model-backed routines daemon.
   is mapped to a closed reason code and still writes a file/storage-only
   `not_ready` snapshot. Failures after a successful open are reported separately
   as `evaluation_failed`, so a SQL/schema problem is never mislabeled as a
-  Keychain problem; the job never dies without a snapshot.
+  Keychain problem. If the snapshot filesystem itself is unavailable, the
+  command instead returns a content-free `snapshot_write_failed` reason without
+  leaking a path or operating-system error; no process can guarantee a file on
+  an unwritable filesystem.
 - launchd runs it with background process type, low-priority I/O, a positive
   nice value, decimal umask `63` (`0o077`), no `KeepAlive`, and stderr directed
   to `/dev/null`; the bounded snapshot is the diagnostic surface.

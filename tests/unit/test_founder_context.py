@@ -362,16 +362,19 @@ def test_store_founder_page_is_keyset_bounded_and_source_filtered(
             store.add_observation(
                 f"work-{source}",
                 source=source,
-                ts=100.0,
+                ts=100.0 + index,
                 app=f"com.example.{source}",
             )
-            for source in ("capture", "meeting", "ingest", "mcp", "other")
+            for index, source in enumerate(
+                ("capture", "meeting", "ingest", "mcp", "other")
+            )
         ]
         page = store.founder_context_page(0, 200, limit=2)
         assert len(page) == 2
         assert all(item[0].source in {"capture", "meeting", "ingest", "mcp"} for item in page)
         boundary = (page[-1][0].ts, page[-1][0].id)
         second = store.founder_context_page(0, 200, limit=10, before=boundary)
+        assert [item[0].source for item in second] == ["meeting", "capture"]
         assert not {item[0].id for item in page} & {item[0].id for item in second}
         assert rows[-1].id not in {item[0].id for item in page + second}
     finally:

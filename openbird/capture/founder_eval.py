@@ -74,7 +74,12 @@ def write_snapshot(report: dict[str, Any], path: Path) -> None:
 
 
 def invalidate_snapshot(*, settings: Any | None = None, data_dir: Path | None = None) -> None:
-    """Remove the metadata snapshot after source deletion/retention."""
+    """Remove derived metadata before source deletion/retention commits.
+
+    A missing snapshot is already the desired state. Every other filesystem
+    error intentionally propagates so the caller can roll back its source
+    deletion instead of leaving stale app/source metadata behind.
+    """
     if data_dir is None:
         if settings is None:
             from openbird.config import get_settings
@@ -82,10 +87,7 @@ def invalidate_snapshot(*, settings: Any | None = None, data_dir: Path | None = 
             settings = get_settings()
         data_dir = Path(settings.data_dir)
     target = data_dir / "logs" / SNAPSHOT_NAME
-    try:
-        target.unlink()
-    except FileNotFoundError:
-        return
+    target.unlink(missing_ok=True)
 
 
 def _one_value(row: Any) -> int:

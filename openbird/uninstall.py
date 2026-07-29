@@ -26,7 +26,6 @@ BUNDLE_ID = "ai.openbird.OpenBird"
 
 # launchd label for the routines agent (mirrors routines.launchd.AGENT_LABEL).
 ROUTINES_LABEL = "ai.openbird.routines"
-FOUNDER_CONTEXT_EVAL_LABEL = "ai.openbird.founder-context-eval"
 
 # The Launch Services registration tool (fixed system path).
 _LSREGISTER = (
@@ -87,6 +86,7 @@ def remove_routines_job(*, dry_run: bool) -> list[StepResult]:
         return [StepResult("OpenBird launchd jobs", "skip", "not macOS")]
 
     from openbird.routines.launchd import (
+        FOUNDER_CONTEXT_EVAL_LABEL,
         agent_plist_path,
         founder_context_eval_plist_path,
     )

@@ -15,6 +15,7 @@ import types
 import uuid
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from openbird.capture.founder_eval import (
@@ -195,7 +196,7 @@ def test_snapshot_unlink_failure_rolls_back_delete_and_logs_metadata_only(
 ):
     from openbird.capture import founder_eval
 
-    settings, store = _store(tmp_path)
+    _settings, store = _store(tmp_path)
     try:
         obs = store.add_observation(
             "PRIVATE CONTENT THAT MUST REMAIN ON FAILED DELETE",
@@ -255,7 +256,6 @@ def test_recorded_eval_and_delete_have_a_strict_privacy_safe_order(
     delete_ready = threading.Event()
     start_delete = threading.Event()
     delete_attempted = threading.Event()
-    delete_done = threading.Event()
     errors: list[BaseException] = []
     deleted: list[int] = []
 
@@ -288,7 +288,6 @@ def test_recorded_eval_and_delete_have_a_strict_privacy_safe_order(
             errors.append(exc)
         finally:
             delete_store.close()
-            delete_done.set()
 
     def eval_worker():
         eval_store = MemoryStore(
@@ -314,12 +313,14 @@ def test_recorded_eval_and_delete_have_a_strict_privacy_safe_order(
     eval_thread.start()
     try:
         assert write_entered.wait(5)
+        lock_probe = sqlite3.connect(str(settings.db_path), timeout=0.0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                lock_probe.execute("BEGIN IMMEDIATE")
+        finally:
+            lock_probe.close()
         start_delete.set()
         assert delete_attempted.wait(5)
-        # The evaluator has already aggregated the soon-to-be-deleted row and
-        # is paused inside atomic replacement. Deletion must still be blocked
-        # on BEGIN IMMEDIATE until replacement + evaluator commit finish.
-        assert not delete_done.wait(0.2)
     finally:
         release_write.set()
         start_delete.set()
@@ -496,6 +497,14 @@ def test_evaluation_failure_is_not_mislabeled_as_store_or_keychain_failure(
     conn.execute("CREATE TABLE marker(value INTEGER)")
     conn.commit()
     conn.close()
+    settings = Settings(data_dir=data_dir)
+    previous = unavailable_report(
+        settings=settings,
+        reason="store_absent",
+        now=1.0,
+    )
+    previous["corpus"]["recent_text_bytes"] = 50
+    write_snapshot(previous, snapshot_path(settings))
 
     fake_store = types.SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(cli_module, "_store_maintenance", lambda: fake_store)
@@ -515,9 +524,38 @@ def test_evaluation_failure_is_not_mislabeled_as_store_or_keychain_failure(
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["reason_codes"] == ["evaluation_failed"]
+        assert payload["storage"]["recent_text_bytes_delta"] == -50
         assert "PRIVATE DATABASE ERROR DETAIL" not in result.output
         assert "store_open_failed" not in result.output
         assert "encrypted_store_unavailable" not in result.output
+    finally:
+        reset_settings_cache()
+
+
+def test_snapshot_write_failure_returns_closed_metadata_only_reason(
+    monkeypatch, tmp_path
+):
+    from openbird.capture import founder_eval
+
+    data_dir = tmp_path / "data"
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("PRIVATE FILESYSTEM DETAIL")
+
+    monkeypatch.setattr(founder_eval, "write_snapshot", fail_write)
+    monkeypatch.setenv("OPENBIRD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("OPENBIRD_DISABLE_KEYRING", "1")
+    reset_settings_cache()
+    result = CliRunner().invoke(
+        app,
+        ["eval", "founder-context", "run", "--record", "--json"],
+    )
+    try:
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["reason_codes"] == ["snapshot_write_failed"]
+        assert "PRIVATE FILESYSTEM DETAIL" not in result.output
+        assert not snapshot_path(Settings(data_dir=data_dir)).exists()
     finally:
         reset_settings_cache()
 
@@ -597,7 +635,7 @@ def test_cli_install_and_uninstall_write_only_test_plist(monkeypatch, tmp_path):
             "founder-context",
             "install",
             "--executable",
-            "/tmp/openbird",
+            str(tmp_path / "openbird"),
         ],
     )
     assert installed.exit_code == 0, installed.output

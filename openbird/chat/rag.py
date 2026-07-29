@@ -992,6 +992,8 @@ class RAG:
                 "claim's own 'citations' array; do not add a global citations field."
             ),
         )
+        from openbird.llm.provider import LLMTimeoutError
+
         t0 = time.perf_counter()
         try:
             raw = self.provider.complete(
@@ -1000,11 +1002,7 @@ class RAG:
                 max_attempts=FOUNDER_CONTEXT_COMPLETION_ATTEMPTS,
                 timeout=FOUNDER_CONTEXT_COMPLETION_TIMEOUT_SECONDS,
             )
-        except Exception as exc:
-            from openbird.llm.provider import LLMTimeoutError
-
-            if not isinstance(exc, LLMTimeoutError):
-                raise
+        except LLMTimeoutError:
             scan["model_elapsed_ms"] = round((time.perf_counter() - t0) * 1000)
             return AnswerResult(
                 answer=(

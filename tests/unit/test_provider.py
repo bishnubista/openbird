@@ -228,6 +228,33 @@ def test_structured_complete_passes_timeout_and_num_retries(monkeypatch):
     assert fake.completion_kwargs["num_retries"] == 2
 
 
+class _NativeTimeoutLiteLLM(_FakeLiteLLM):
+    """Raise the timeout type LiteLLM uses for provider-native timeouts."""
+
+    class Timeout(Exception):
+        pass
+
+    def completion(self, *, model, messages, **kwargs):
+        raise self.Timeout("PRIVATE PROVIDER DETAIL")
+
+
+def test_structured_complete_maps_native_timeout_to_openbird_timeout(monkeypatch):
+    fake = _NativeTimeoutLiteLLM()
+    monkeypatch.setitem(__import__("sys").modules, "litellm", fake)
+    provider = LLMProvider(Settings(embed_dim=768))
+
+    with pytest.raises(LLMTimeoutError) as exc_info:
+        provider.complete(
+            [{"role": "user", "content": "q"}],
+            json_schema={"type": "object", "required": ["answer"]},
+            max_attempts=2,
+            timeout=20.0,
+        )
+
+    assert isinstance(exc_info.value.__cause__, fake.Timeout)
+    assert "PRIVATE PROVIDER DETAIL" not in str(exc_info.value)
+
+
 class _HangingLiteLLM(_FakeLiteLLM):
     """An embedding call that sleeps far past the deadline (a wedged backend)."""
 

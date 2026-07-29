@@ -3264,6 +3264,7 @@ def founder_context_eval_run(
                     report = unavailable_report(
                         settings=settings,
                         reason="evaluation_failed",
+                        previous=previous_snapshot,
                     )
                 else:
                     # A manual answer probe is explicit, transient output. Never
@@ -3272,7 +3273,20 @@ def founder_context_eval_run(
                     if probe_answer:
                         report["answer_probe"] = _founder_answer_probe(store)
         if record and not snapshot_written:
-            write_snapshot(report, target)
+            try:
+                write_snapshot(report, target)
+                snapshot_written = True
+            except (OSError, ValueError):
+                # The scheduled surface is deliberately silent, but it must
+                # still finish with a closed, content-free result rather than an
+                # unhandled traceback. A prior rich snapshot cannot contain
+                # deleted metadata: deletion itself requires invalidation to
+                # succeed before its DB commit.
+                report = unavailable_report(
+                    settings=settings,
+                    reason="snapshot_write_failed",
+                    previous=previous_snapshot,
+                )
     finally:
         if store is not None:
             store.close()
@@ -3291,8 +3305,10 @@ def founder_context_eval_run(
         f"distinct={report['corpus']['distinct_contexts']} · "
         f"elapsed_ms={report['resources']['elapsed_ms']}"
     )
-    if record:
+    if record and snapshot_written:
         _console.print(f"Snapshot: {target}")
+    elif record:
+        _console.print("[yellow]Snapshot not recorded: snapshot_write_failed[/]")
 
 
 @founder_context_eval_app.command("install")
