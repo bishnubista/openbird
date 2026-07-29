@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 # The schema version this build of OpenBird understands. Bump this and append a
 # Migration to MIGRATIONS whenever schema.sql changes shape.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 @dataclass(frozen=True)
@@ -836,6 +836,14 @@ def _apply_v10_pending_meetings(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _apply_v11_founder_context_keyset_index(conn: sqlite3.Connection) -> None:
+    """Add the all-source founder-context keyset pagination index."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_observations_ts_id "
+        "ON observations(ts DESC, id DESC)"
+    )
+
+
 # Forward-only ladder. Version 1 IS the baseline schema (applied by schema.sql),
 # so migrations here only ever upgrade an existing DB from one version to the
 # next. Append future steps (version 3, 4, ...) in order; never edit or reorder a
@@ -885,6 +893,11 @@ MIGRATIONS: list[Migration] = [
         version=10,
         description="add SQLCipher-gated pending meeting transcripts",
         apply=_apply_v10_pending_meetings,
+    ),
+    Migration(
+        version=11,
+        description="add founder-context all-source keyset index",
+        apply=_apply_v11_founder_context_keyset_index,
     ),
 ]
 

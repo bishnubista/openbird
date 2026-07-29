@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import threading
 from typing import Any, Callable
 
@@ -263,6 +264,37 @@ class LiteLLMProvider:
             kwargs["api_base"] = self._ollama_host
         return kwargs
 
+    def _call_completion_with_timeout(
+        self,
+        litellm_module: Any,
+        fn: Callable[[], Any],
+        *,
+        timeout: float,
+    ) -> Any:
+        """Call a completion and normalize provider-native timeout errors."""
+        try:
+            return self._call_with_timeout(fn, timeout=timeout)
+        except LLMTimeoutError:
+            raise
+        except Exception as exc:
+            timeout_types: list[type[BaseException]] = [TimeoutError]
+            for owner in (
+                litellm_module,
+                getattr(litellm_module, "exceptions", None),
+            ):
+                timeout_type = getattr(owner, "Timeout", None)
+                if (
+                    isinstance(timeout_type, type)
+                    and issubclass(timeout_type, BaseException)
+                    and timeout_type not in timeout_types
+                ):
+                    timeout_types.append(timeout_type)
+            if isinstance(exc, tuple(timeout_types)):
+                raise LLMTimeoutError(
+                    f"LLM provider timed out (configured timeout {timeout:.0f}s)."
+                ) from exc
+            raise
+
     # -- embeddings -----------------------------------------------------------
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -314,6 +346,8 @@ class LiteLLMProvider:
         messages: list[dict],
         *,
         json_schema: dict | None = None,
+        max_attempts: int | None = None,
+        timeout: float | None = None,
     ) -> str | dict:
         """Generate a completion for ``messages``.
 
@@ -321,20 +355,30 @@ class LiteLLMProvider:
         best-effort structured generation (validate + retry; NOT constrained
         decoding). On repeated failure the last raw text is returned so callers
         can decide how to handle it. Otherwise returns the raw string content.
+        ``max_attempts`` and ``timeout`` are per-call bounds used by latency-
+        sensitive surfaces; omitted values preserve the historical three
+        structured attempts and configured provider timeout.
         """
         import litellm
 
+        call_timeout = self.llm_timeout if timeout is None else float(timeout)
+        if not math.isfinite(call_timeout) or call_timeout <= 0:
+            raise ValueError("timeout must be a positive finite number")
+
         if json_schema is None:
-            kwargs = self._model_kwargs(self.llm_model, timeout=self.llm_timeout)
-            resp = self._call_with_timeout(
+            kwargs = self._model_kwargs(self.llm_model, timeout=call_timeout)
+            resp = self._call_completion_with_timeout(
+                litellm,
                 lambda: litellm.completion(
                     model=self.llm_model, messages=messages, **kwargs
                 ),
-                timeout=self.llm_timeout,
+                timeout=call_timeout,
             )
             return self._content(resp)
 
-        attempts = 3
+        attempts = 3 if max_attempts is None else int(max_attempts)
+        if attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         schema_msg = {
             "role": "system",
             "content": (
@@ -345,15 +389,16 @@ class LiteLLMProvider:
         convo = [schema_msg, *messages]
         last_text = ""
         for _ in range(attempts):
-            kwargs = self._model_kwargs(self.llm_model, timeout=self.llm_timeout)
-            resp = self._call_with_timeout(
+            kwargs = self._model_kwargs(self.llm_model, timeout=call_timeout)
+            resp = self._call_completion_with_timeout(
+                litellm,
                 lambda convo=convo, kwargs=kwargs: litellm.completion(
                     model=self.llm_model,
                     messages=convo,
                     response_format={"type": "json_object"},
                     **kwargs,
                 ),
-                timeout=self.llm_timeout,
+                timeout=call_timeout,
             )
             last_text = self._content(resp)
             parsed = self._try_parse_json(last_text)

@@ -1832,11 +1832,15 @@ _V10_OBJECTS = [
     ("index", "idx_pending_meetings_started_ts"),
 ]
 
+_V11_OBJECTS = [
+    ("index", "idx_observations_ts_id"),
+]
+
 
 def _make_v6_shaped_db(path) -> sqlite3.Connection:
     """Build a realistic v6-stamped DB (pre-E2 shape) from current schema.sql."""
     conn = _make_v1_shaped_db(path)
-    for kind, name in _V8_OBJECTS + _V9_OBJECTS + _V10_OBJECTS:
+    for kind, name in _V8_OBJECTS + _V9_OBJECTS + _V10_OBJECTS + _V11_OBJECTS:
         conn.execute(f"DROP {kind.upper()} IF EXISTS {name}")
     for _kind, name in _V7_OBJECTS:
         if _kind == "trigger":
@@ -1901,13 +1905,15 @@ def _seed_entity_with_sources(store, *, ts=1000.0):
     return entity, obs, span_id, summary
 
 
-def test_empty_db_ladder_reaches_v10_cleanly(tmp_path):
-    """Fresh DB: every v7-v10 object exists exactly once and the stamp is current."""
+def test_empty_db_ladder_reaches_v11_cleanly(tmp_path):
+    """Fresh DB: every v7-v11 object exists exactly once and the stamp is current."""
     s = _open_store(tmp_path, "fresh-v10.db")
     try:
         ver = s.conn.execute("PRAGMA user_version").fetchone()
-        assert int(next(iter(ver.values()))) == SCHEMA_VERSION == 10
-        for kind, name in _V7_OBJECTS + _V8_OBJECTS + _V9_OBJECTS + _V10_OBJECTS:
+        assert int(next(iter(ver.values()))) == SCHEMA_VERSION == 11
+        for kind, name in (
+            _V7_OBJECTS + _V8_OBJECTS + _V9_OBJECTS + _V10_OBJECTS + _V11_OBJECTS
+        ):
             count = s.conn.execute(
                 "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
                 (kind, name),
@@ -1923,8 +1929,15 @@ def test_v6_db_upgrades_to_current(tmp_path):
     conn = _make_v6_shaped_db(db)
     try:
         assert ensure_schema_version(conn) == SCHEMA_VERSION
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
-        for kind, name in _V10_OBJECTS + _V9_OBJECTS + _V8_OBJECTS + _V7_OBJECTS + _V6_OBJECTS:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        for kind, name in (
+            _V11_OBJECTS
+            + _V10_OBJECTS
+            + _V9_OBJECTS
+            + _V8_OBJECTS
+            + _V7_OBJECTS
+            + _V6_OBJECTS
+        ):
             row = conn.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
                 (kind, name),
@@ -2006,7 +2019,7 @@ def test_fresh_db_contains_v9_capture_attempt_objects(tmp_path):
     """A genuinely empty DB gets v9 directly from schema.sql."""
     s = _open_store(tmp_path, "fresh-v9-capture.db")
     try:
-        assert s.conn.execute("PRAGMA user_version").fetchone()["user_version"] == 10
+        assert s.conn.execute("PRAGMA user_version").fetchone()["user_version"] == 11
         for kind, name in _V9_OBJECTS:
             count = s.conn.execute(
                 "SELECT COUNT(*) c FROM sqlite_master WHERE type=? AND name=?",
@@ -2021,8 +2034,8 @@ def test_v7_db_upgrades_to_current_capture_attempts(tmp_path):
     db = tmp_path / "v7-to-current.db"
     conn = _make_v7_shaped_db(db)
     try:
-        assert ensure_schema_version(conn) == SCHEMA_VERSION == 10
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert ensure_schema_version(conn) == SCHEMA_VERSION == 11
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
         for kind, name in _V9_OBJECTS:
             row = conn.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?",
@@ -2058,6 +2071,29 @@ def test_v10_migration_is_idempotent_and_matches_schema(tmp_path):
             ).fetchone()
             assert a is not None and b is not None, f"{name} missing"
             assert norm(a) == norm(b), f"{name}: schema.sql and migration drifted"
+    finally:
+        fresh.close()
+        upgraded.close()
+
+
+def test_v11_migration_is_idempotent_and_matches_schema(tmp_path):
+    from openbird.memory.migrations import _apply_v11_founder_context_keyset_index
+
+    fresh = _make_v1_shaped_db(tmp_path / "v11-lockstep-fresh.db")
+    upgraded = _make_v7_shaped_db(tmp_path / "v11-lockstep-upgraded.db")
+    try:
+        _apply_v11_founder_context_keyset_index(upgraded)
+        _apply_v11_founder_context_keyset_index(upgraded)
+        upgraded.commit()
+        for kind, name in _V11_OBJECTS:
+            a = fresh.execute(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?", (kind, name)
+            ).fetchone()
+            b = upgraded.execute(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?", (kind, name)
+            ).fetchone()
+            assert a is not None and b is not None
+            assert " ".join(str(a[0]).split()) == " ".join(str(b[0]).split())
     finally:
         fresh.close()
         upgraded.close()

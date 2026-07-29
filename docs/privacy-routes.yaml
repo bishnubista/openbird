@@ -149,6 +149,48 @@ routes:
       - cli.cloud_banner
       - app.privacyTransmissionSummary
 
+  - id: chat.founder_context
+    class: unknown
+    source: explicit founder recap question plus bounded exclusion-filtered recent occurrences
+    derives_from:
+      - capture.active_window
+      - capture.ocr_window
+      - ingest.files
+      - meetings.audio
+    source_note: source=mcp rows are explicitly imported by the local read-only filesystem MCP connector; they are stored observations, not assistant.mcp_read egress
+    captured_fields:
+      - user_question
+      - occurrence_chunks_max_8
+      - occurrence_citations
+      - retrieval_count_metadata
+    forbidden_fields:
+      - cached_summary_prose
+      - uncited_claims
+      - excluded_app_content
+      - self_capture
+      - captured_text_in_logs
+    storage:
+      - local_db_for_retrieval_only
+    egress:
+      default: inherits_active_model_route
+      inherited_from:
+        - chat.local
+        - chat.remote
+      warning: captured memory leaves this machine when the active model route is remote
+    enforcement:
+      requires_for_remote: OPENBIRD_ALLOW_CLOUD
+      occurrence_source_cap: 8
+      structured_attempt_cap: 2
+      per_attempt_timeout_seconds: 20
+    deletion:
+      command: openbird data purge/prune
+      invalidates:
+        - founder_context_eval_snapshot
+    truth_surface:
+      - app.askSuggestions
+      - cli.chat_json.citations
+      - app.ChatResult.routeLabel
+
   - id: chat.day_facts
     class: local
     source: deterministic RAG day-fact answer branch over persisted day-memory productivity facts; not every metric-looking question
@@ -973,6 +1015,45 @@ routes:
     tests_required:
       - no_captured_text_in_capture_logs
       - no_raw_url_or_window_in_diagnostics
+
+  - id: eval.founder_context_capture
+    class: local
+    source: bounded aggregate SQL plus capture liveness and database file metadata
+    captured_fields:
+      - observed_app_bundle_ids
+      - closed_source_counts
+      - closed_capture_mode_counts
+      - observation_and_distinct_context_counts
+      - timestamps_and_freshness
+      - storage_and_resource_counts
+      - readiness_reason_codes
+    forbidden_fields:
+      - captured_text
+      - captured_excerpt
+      - raw_window_title
+      - raw_url
+      - prompt
+      - answer
+      - capture_attempt_bundle_id
+    storage:
+      - data_dir.logs.founder_context_eval_json_0600
+    concurrency:
+      recorded_snapshot: begin_immediate_aggregate_replace_commit
+      deletion_ordering: shared_sqlite_writer_lock
+      manual_answer_probe: transient_after_commit_never_persisted
+    egress:
+      default: none
+    scheduling:
+      surface: per_user_launchagent
+      interval_seconds: 21600
+      model_calls: none
+      keep_alive: false
+    deletion:
+      selective_observation_delete: invalidate_snapshot_before_commit_or_rollback
+      retention_prune: invalidate_snapshot_before_commit_or_rollback
+      data_dir_purge: removes_snapshot
+    truth_surface:
+      - cli.eval_founder_context
 
   - id: data.export
     class: unknown

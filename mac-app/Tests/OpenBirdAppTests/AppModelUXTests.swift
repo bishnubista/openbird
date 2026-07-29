@@ -106,6 +106,18 @@ final class AppModelUXTests: XCTestCase {
         XCTAssertEqual(model.askUnavailableReason, "Ollama is not reachable. Launch Ollama, then re-check.")
     }
 
+    func testFounderContextRecapIsTheLeadAskSuggestion() {
+        let model = AppModel(
+            service: serviceWithoutExternalCapture(),
+            initialReport: readyReport()
+        )
+
+        XCTAssertEqual(
+            model.askSuggestions.first,
+            "Bring me back up to speed on what I was working on."
+        )
+    }
+
     func testAskUnavailableReasonKeepsMemoryReadFailureDistinct() async {
         let service = OpenBirdService(openBirdCLIResolver: { nil })
         let model = AppModel(service: service, initialReport: readyReport())

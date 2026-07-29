@@ -1176,6 +1176,42 @@ class MemoryStore:
             for row in rows
         ]
 
+    def founder_context_page(
+        self,
+        start_ts: float,
+        end_ts: float,
+        *,
+        limit: int,
+        max_chars: int = 2000,
+        before: tuple[float, str] | None = None,
+    ) -> list[tuple[Observation, str]]:
+        """Return one bounded newest-first page for the founder recap.
+
+        Only content-bearing sources that can legitimately represent the user's
+        work are included. The exclusive ``before=(ts, id)`` boundary makes a
+        multi-page walk stable under concurrent newer inserts. This local read
+        performs no embedding, reranking, or completion; caller policy still
+        owns app/source/id exclusions.
+        """
+        sql = (
+            "SELECT o.*, b.text AS blob_text FROM observations o "
+            "JOIN content_blobs b ON b.content_hash = o.content_hash "
+            "WHERE o.ts >= ? AND o.ts <= ? "
+            "AND o.source IN ('capture','meeting','ingest','mcp') "
+        )
+        params: list[object] = [float(start_ts), float(end_ts)]
+        if before is not None:
+            before_ts, before_id = before
+            sql += "AND (o.ts < ? OR (o.ts = ? AND o.id < ?)) "
+            params.extend([float(before_ts), float(before_ts), str(before_id)])
+        sql += "ORDER BY o.ts DESC, o.id DESC LIMIT ?"
+        params.append(max(0, int(limit)))
+        rows = self.conn.execute(sql, params).fetchall()
+        return [
+            (self._row_to_observation(row), str(row["blob_text"] or "")[:max_chars])
+            for row in rows
+        ]
+
     def capture_spans_overlapping(
         self, start_ts: float, end_ts: float, *, limit: int
     ) -> list[dict]:
@@ -2867,6 +2903,23 @@ class MemoryStore:
 
     # -- delete ---------------------------------------------------------------
 
+    def _invalidate_founder_context_snapshot(self) -> None:
+        """Evict derived metadata before committing a source deletion.
+
+        An unlink failure aborts the transaction so the caller never receives a
+        false success while stale app/source metadata survives. If the later DB
+        commit fails, an absent derived snapshot is the privacy-safe direction.
+        """
+        try:
+            from openbird.capture.founder_eval import invalidate_snapshot
+
+            invalidate_snapshot(settings=self.settings)
+        except Exception:
+            _log.warning(
+                "founder_context_snapshot_invalidation_failed reason=unlink_error"
+            )
+            raise
+
     def delete(
         self,
         *,
@@ -2951,6 +3004,7 @@ class MemoryStore:
                 # by rebuilding the vector table at the new dimension and adopting
                 # the new cohort. Clearing it here would look like a fresh store
                 # and skip that rebuild.
+                self._invalidate_founder_context_snapshot()
                 cur.commit()
                 return int(count)
 
@@ -3036,6 +3090,7 @@ class MemoryStore:
             # next aggregation run.
             self._mark_evidence_less_entities_dormant()
 
+            self._invalidate_founder_context_snapshot()
             cur.commit()
             return count
         except Exception:
