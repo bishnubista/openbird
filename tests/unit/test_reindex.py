@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from openbird import cli
 from openbird.config import Settings, reset_settings_cache
+from openbird.exit_codes import EXIT_REINDEX_REQUIRED
 from openbird.memory.store import EmbeddingCohortMismatch, MemoryStore
 
 
@@ -232,7 +233,7 @@ def test_chat_cli_renders_reindex_hint_on_cohort_mismatch(env, monkeypatch):
     monkeypatch.setattr(cli, "_provider", lambda: _FakeProvider(embed_dim=768, tag="new"))
 
     result = CliRunner().invoke(cli.app, ["chat", "what did I work on?"])
-    assert result.exit_code == 1
+    assert result.exit_code == EXIT_REINDEX_REQUIRED
     assert "openbird reindex" in result.output
     assert "Embedding model changed" in result.output
     # The exception must be HANDLED, not surfaced as an unhandled traceback.
@@ -249,7 +250,7 @@ def test_routine_run_cli_renders_reindex_hint_on_cohort_mismatch(env, monkeypatc
     monkeypatch.setattr(cli, "_provider", lambda: _FakeProvider(embed_dim=768, tag="new"))
 
     result = CliRunner().invoke(cli.app, ["routine", "run", "yesterday"])
-    assert result.exit_code == 1
+    assert result.exit_code == EXIT_REINDEX_REQUIRED
     assert "openbird reindex" in result.output
     assert "Embedding model changed" in result.output
     assert not isinstance(result.exception, EmbeddingCohortMismatch)

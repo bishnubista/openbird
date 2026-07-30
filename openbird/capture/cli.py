@@ -8,15 +8,17 @@ import typer
 from rich.console import Console
 
 from openbird.config import get_settings
+from openbird.exit_codes import EXIT_REINDEX_REQUIRED
 
 _console = Console()
 _err_console = Console(stderr=True)
 
 # Capture-daemon exit codes. 0 = clean. 3/4 are raised below for helper/supervisor
-# failures. 5 means the on-disk index was built under a different embedding model
-# (cohort mismatch): recoverable by `openbird reindex`. The mac app maps this code
-# to an actionable "Reindex" affordance instead of the generic "stopped (exit 1)".
-CAPTURE_EXIT_REINDEX_REQUIRED = 5
+# failures. The shared reindex code means the on-disk index was built under a
+# different embedding model (cohort mismatch): recoverable by `openbird reindex`.
+# The mac app maps this code to an actionable "Reindex" affordance instead of the
+# generic "stopped (exit 1)".
+CAPTURE_EXIT_REINDEX_REQUIRED = EXIT_REINDEX_REQUIRED
 
 # Another `capture --loop` daemon already holds the single-instance lock. This is
 # a BENIGN outcome, not a crash: the app may optimistically spawn a daemon that

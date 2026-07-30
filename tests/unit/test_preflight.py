@@ -21,6 +21,7 @@ from openbird.preflight import (
     run_preflight,
 )
 from openbird.config import Settings
+from openbird.memory.store import MemoryStore
 
 
 # --------------------------------------------------------------------------- #
@@ -68,6 +69,15 @@ class FakeEmbedProvider:
     def complete(self, messages, *, json_schema=None):
         # Successful completion probe (the chat endpoint "works").
         return "pong"
+
+
+class FakeCohortProvider(FakeEmbedProvider):
+    def __init__(self, settings, *, dim=768, tag="old"):
+        super().__init__(settings, dim=dim)
+        self._tag = tag
+
+    def cohort_key(self) -> str:
+        return f"fake:{self._tag}:{self.embed_dim}:deadbeef"
 
 
 class _CipherConn:
@@ -287,6 +297,34 @@ def test_embedding_probe_failure_captured(settings):
     res = check_embedding(settings, probe=True, provider_factory=boom)
     assert res["probed"] is False
     assert res["error"] == "RuntimeError"
+
+
+def test_run_preflight_reports_reindex_needed_on_embedding_cohort_mismatch(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENBIRD_DISABLE_KEYRING", "1")
+    settings = Settings(data_dir=tmp_path, embed_dim=768)
+    store = MemoryStore(settings=settings, provider=FakeCohortProvider(settings, tag="old"))
+    try:
+        store.add_observation(
+            "cohort mismatch setup signal fixture",
+            source="test",
+            window="unit",
+        )
+    finally:
+        store.close()
+
+    report = run_preflight(
+        settings,
+        http_get=make_http_get(),
+        provider_factory=lambda s: FakeCohortProvider(s, tag="new"),
+        system="Linux",
+    )
+
+    assert report["embedding"]["stored_cohort"] == "fake:old:768:deadbeef"
+    assert report["embedding"]["current_cohort"] == "fake:new:768:deadbeef"
+    assert report["embedding"]["vector_count"] == 1
+    assert report["embedding"]["reindex_needed"] is True
 
 
 # --------------------------------------------------------------------------- #

@@ -53,6 +53,7 @@ struct PreflightReport: Equatable {
     var usesLocalOllama: Bool = true
     var autoPullAllowed: Bool = false
     var cloudBlocked: Bool = false
+    var embeddingReindexNeeded: Bool = false
     var encryptionStatus: String = "unknown"
     var encryptionEnabled: Bool = false
     /// capability -> "passed" | "failed" | "unknown"
@@ -2450,6 +2451,12 @@ final class OpenBirdService: @unchecked Sendable {
     }
 
     static func chatFailureSummary(exitCode: Int32, stderr: String) -> String {
+        if exitCode == reindexRequiredExitCode {
+            return reindexRecoveryMessage
+        }
+        if let recovery = reindexRecoveryMessageIfNeeded(stderr) {
+            return recovery
+        }
         let lower = stderr.lowercased()
         if lower.contains("openbird_allow_cloud") || lower.contains("cloud model configured") {
             return "Chat blocked because a cloud model is configured without opt-in."
@@ -2461,6 +2468,23 @@ final class OpenBirdService: @unchecked Sendable {
             return "Chat failed because the local Ollama model request did not complete."
         }
         return "Chat failed (exit \(exitCode)). Run openbird doctor for details."
+    }
+
+    /// Mirrors `openbird.exit_codes.EXIT_REINDEX_REQUIRED`.
+    static let reindexRequiredExitCode: Int32 = 5
+    static let reindexRecoveryMessage = "Embedding model changed. Run openbird reindex in Terminal, then retry."
+
+    static func reindexRecoveryMessageIfNeeded(_ text: String) -> String? {
+        let normalized = text
+            .lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard normalized.contains("openbird reindex") else { return nil }
+        if normalized.contains("embedding") || normalized.contains("cohort") || normalized.contains("model changed") {
+            return reindexRecoveryMessage
+        }
+        return nil
     }
 
     static func parsePreflight(_ output: String) -> PreflightReport {
@@ -2494,6 +2518,9 @@ final class OpenBirdService: @unchecked Sendable {
             }
             report.usesLocalOllama = cloud["uses_local_ollama"] as? Bool ?? true
             report.cloudBlocked = cloud["blocked"] as? Bool ?? false
+        }
+        if let embedding = payload["embedding"] as? [String: Any] {
+            report.embeddingReindexNeeded = embedding["reindex_needed"] as? Bool ?? false
         }
         if let enc = payload["encryption"] as? [String: Any] {
             report.encryptionStatus = enc["status"] as? String ?? "unknown"

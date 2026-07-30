@@ -661,6 +661,9 @@ final class MemoryStatsTests: XCTestCase {
             "remote_models": {},
             "uses_local_ollama": true,
             "blocked": false
+          },
+          "embedding": {
+            "reindex_needed": false
           }
         }
         """)
@@ -677,6 +680,47 @@ final class MemoryStatsTests: XCTestCase {
         XCTAssertEqual(report.remoteModels, [])
         XCTAssertTrue(report.usesLocalOllama)
         XCTAssertFalse(report.cloudBlocked)
+        XCTAssertFalse(report.embeddingReindexNeeded)
+    }
+
+    func testParsePreflightDecodesEmbeddingReindexNeeded() {
+        let report = OpenBirdService.parsePreflight("""
+        {
+          "runtime_ok": true,
+          "release_gate_ok": false,
+          "ollama": {
+            "reachable": true,
+            "host": "http://localhost:11434",
+            "required_models": ["qwen3:4b", "embeddinggemma"],
+            "missing_models": [],
+            "auto_pull_allowed": true
+          },
+          "cloud": {
+            "llm_model": "ollama/qwen3:4b",
+            "embed_model": "ollama/embeddinggemma",
+            "remote_models": {},
+            "uses_local_ollama": true,
+            "blocked": false
+          },
+          "embedding": {
+            "stored_cohort": "ollama:old:768:aaaaaaaa",
+            "current_cohort": "ollama:new:768:bbbbbbbb",
+            "vector_count": 42,
+            "reindex_needed": true
+          }
+        }
+        """)
+
+        XCTAssertTrue(report.embeddingReindexNeeded)
+    }
+
+    func testSetupModelStatusSurfacesEmbeddingReindexRecovery() {
+        var report = localRuntimeOKReport()
+        report.embeddingReindexNeeded = true
+        let model = AppModel(service: OpenBirdService(), initialReport: report)
+
+        XCTAssertEqual(model.localModelStatusState, .attention)
+        XCTAssertEqual(model.localModelStatusSummary, OpenBirdService.reindexRecoveryMessage)
     }
 
     func testParsePreflightDecodesTooOldOllamaVersionGate() {
@@ -1152,7 +1196,7 @@ final class MemoryStatsTests: XCTestCase {
 
     func testChatFailureSummaryPrefersMissingModelOverGenericOllama() {
         XCTAssertEqual(
-            OpenBirdService.chatFailureSummary(exitCode: 5, stderr: "ollama error: model not found"),
+            OpenBirdService.chatFailureSummary(exitCode: 6, stderr: "ollama error: model not found"),
             "Chat failed because a required local model is missing."
         )
     }
